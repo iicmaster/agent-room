@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    >
+    <title>Agent Room</title>
+    <link rel="stylesheet" href="/styles.css">
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#conversation">Skip to conversation</a>
+
+    <header class="app-header">
+      <div class="brand" aria-label="Agent Room viewer">
+        <span class="brand-mark" aria-hidden="true">AR</span>
+        <div>
+          <p class="eyebrow">Read-only viewer</p>
+          <h1>Agent Room</h1>
+        </div>
+      </div>
+
+      <div class="connection-controls">
+        <div id="connection-status" class="connection-status" data-state="reconnecting" role="status" aria-live="polite">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span id="connection-label">Connecting…</span>
+        </div>
+        <button id="retry-button" class="secondary-button" type="button">Retry now</button>
+      </div>
+    </header>
+
+    <main class="app-layout">
+      <aside class="room-sidebar" aria-labelledby="rooms-heading">
+        <div class="sidebar-heading">
+          <h2 id="rooms-heading">Rooms</h2>
+          <span id="room-count" class="count-badge" aria-live="polite">0</span>
+        </div>
+        <p class="keyboard-hint">Use ↑ and ↓ to move between rooms.</p>
+        <ul id="room-list" class="room-list" aria-label="Available chat rooms"></ul>
+      </aside>
+
+      <section id="conversation" class="conversation" aria-labelledby="conversation-heading" tabindex="-1">
+        <header class="conversation-heading">
+          <div>
+            <p class="eyebrow">Conversation</p>
+            <h2 id="conversation-heading">No room selected</h2>
+          </div>
+          <p id="conversation-cursor" class="cursor-label">Waiting for a room</p>
+        </header>
+
+        <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+        <ol id="message-list" class="message-list" aria-label="Room messages" aria-busy="true"></ol>
+      </section>
+    </main>
+
+    <noscript>
+      <p class="noscript-notice">JavaScript is required to follow this local room.</p>
+    </noscript>
+  </body>
+</html>
