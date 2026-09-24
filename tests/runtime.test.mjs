@@ -21,6 +21,7 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const ENTRYPOINTS = [
   join(ROOT, 'server', 'mcp-stdio.mjs'),
   join(ROOT, 'server', 'roomd.mjs'),
+  join(ROOT, 'server', 'api', 'server.mjs'),
 ]
 
 test('version comparison and runtime gates reject unsafe SQLite builds', () => {

@@ -45,6 +45,7 @@ import {
   STORAGE_WARN_FREE_BYTES,
   STORE_OPEN_BUSY_BACKOFF_MS,
   STORE_OPEN_BUSY_RETRY_LIMIT,
+  SUPPORTED_PROTOCOL_VERSIONS,
   TITLE_MAX,
   VIEWER_FRESHNESS_SECONDS,
   WEB_ASSET_MAX_BYTES,
@@ -163,18 +164,25 @@ test('every v0.1 public error code has an HTTP status declared once', () => {
     'invalid_cursor',
     'invalid_display_name',
     'invalid_limit',
+    'invalid_protocol',
     'invalid_reply_to_seq',
+    'invalid_request',
     'invalid_room_id',
     'invalid_text',
     'invalid_title',
     'message_frame_too_large',
     'message_not_found',
     'node_version_unsupported',
+    'protocol_required',
     'reply_room_mismatch',
     'request_cancelled',
+    'request_failed',
     'request_too_large',
     'room_not_found',
+    'route_not_found',
     'sqlite_version_unsupported',
+    'unauthorized',
+    'unknown_field',
   ])
   assert.deepEqual(Object.keys(PUBLIC_ERROR_STATUS).sort(), codes)
   const expectedStatus = {
@@ -204,6 +212,14 @@ test('every v0.1 public error code has an HTTP status declared once', () => {
     node_version_unsupported: 500,
     identity_key_invalid: 500,
     invalid_chat_id: 400,
+    // Story 1.3: protocol gate, field shape, unknown-route fallback, session.
+    invalid_protocol: 400,
+    invalid_request: 400,
+    protocol_required: 400,
+    request_failed: 500,
+    route_not_found: 404,
+    unauthorized: 401,
+    unknown_field: 400,
   }
   for (const [code, status] of Object.entries(expectedStatus)) {
     assert.equal(PUBLIC_ERROR_STATUS[code], status, code)
@@ -220,6 +236,8 @@ test('send-status enum and protocol header are the frozen wire contract', () => 
   assert.ok(Object.isFrozen(SEND_STATUSES))
   assert.equal(PROTOCOL_HEADER, 'Agent-Room-Protocol')
   assert.equal(PROTOCOL_VERSION, '1')
+  assert.deepEqual([...SUPPORTED_PROTOCOL_VERSIONS], ['1'])
+  assert.ok(Object.isFrozen(SUPPORTED_PROTOCOL_VERSIONS))
 })
 
 test('internal error codes are declared once and disjoint from the public table', () => {
@@ -228,6 +246,7 @@ test('internal error codes are declared once and disjoint from the public table'
     'database_configuration_failed',
     'database_schema_invalid',
     'invalid_argument',
+    'realm_already_minted',
     'store_connection_closed',
     'wal_unavailable',
   ])

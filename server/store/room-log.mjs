@@ -59,6 +59,9 @@ const FINGERPRINT_PATTERN = new RegExp(
 )
 // Chat id grammar: 1-CHAT_ID_MAX characters of [A-Za-z0-9_.-].
 const CHAT_ID_PATTERN = new RegExp(`^[A-Za-z0-9_.-]{1,${CHAT_ID_MAX}}$`)
+// Realm ids are UUIDs minted at first boot (AD-14); the store validates the
+// shape so the minted key is always a well-formed UUID string.
+const REALM_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 // client_message_id grammar mirrors the v0.1 identifier grammar, bounded by
 // the constants module.
 const CLIENT_MESSAGE_ID_PATTERN = new RegExp(
@@ -76,6 +79,7 @@ const DEFAULT_BROADCAST_TITLE = 'Broadcast Room'
 const SQLITE_BUSY = 5
 const SQLITE_CORRUPT = 11
 const SQLITE_NOTADB = 26
+const SQLITE_CONSTRAINT = 19
 
 const MESSAGE_PROJECTION = `
   SELECT
@@ -296,11 +300,37 @@ function withImmediateTransaction(database, operation) {
 // A CHECK clause enforcing the exact fingerprint shape at the schema level:
 // fixed total length, the sha256: prefix, and a 64-character tail drawn only
 // from [0-9a-f] (the NOT GLOB guarantees no character outside the class).
+// SQLite CHECKs pass on NULL results, so this also admits the NULL creator of
+// the implicit Broadcast Room.
 function fingerprintCheck(column) {
   const tailStart = FINGERPRINT_PREFIX.length + 1
   return `CHECK (length(${column}) = ${FINGERPRINT_PREFIX.length + FINGERPRINT_HEX_LENGTH}
           AND substr(${column}, 1, ${FINGERPRINT_PREFIX.length}) = '${FINGERPRINT_PREFIX}'
           AND substr(${column}, ${tailStart}) NOT GLOB '*[^0-9a-f]*')`
+}
+
+// The rooms table DDL, parameterized by table name so the nullable-creator
+// convergence rebuild (ensureNullableRoomCreator) shares one definition with
+// createSchema. created_by_fingerprint is NULLABLE: the implicit Broadcast
+// Room exists before any Actor enrolls and must never carry a fabricated
+// creator identity.
+function roomsTableDdl(tableName) {
+  return `
+    CREATE TABLE ${tableName} (
+      id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL,
+      title TEXT,
+      pair_key TEXT UNIQUE,
+      created_by_fingerprint TEXT,
+      created_at TEXT NOT NULL,
+      CHECK (kind IN ('broadcast', 'direct')),
+      CHECK ((kind = 'direct') = (pair_key IS NOT NULL)),
+      CHECK (kind = 'direct' OR title IS NOT NULL),
+      CHECK (kind = 'direct' OR length(title) BETWEEN 1 AND ${TITLE_MAX}),
+      CHECK (length(id) BETWEEN 1 AND ${IDENTIFIER_MAX}),
+      ${fingerprintCheck('created_by_fingerprint')}
+    ) STRICT;
+  `
 }
 
 function createSchema(database) {
@@ -318,20 +348,7 @@ function createSchema(database) {
     }
 
     database.exec(`
-      CREATE TABLE rooms (
-        id TEXT PRIMARY KEY,
-        kind TEXT NOT NULL,
-        title TEXT,
-        pair_key TEXT UNIQUE,
-        created_by_fingerprint TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        CHECK (kind IN ('broadcast', 'direct')),
-        CHECK ((kind = 'direct') = (pair_key IS NOT NULL)),
-        CHECK (kind = 'direct' OR title IS NOT NULL),
-        CHECK (kind = 'direct' OR length(title) BETWEEN 1 AND ${TITLE_MAX}),
-        CHECK (length(id) BETWEEN 1 AND ${IDENTIFIER_MAX}),
-        ${fingerprintCheck('created_by_fingerprint')}
-      ) STRICT;
+      ${roomsTableDdl('rooms')}
 
       -- Membership rows exist ONLY for direct rooms; broadcast membership is
       -- implicit (AD-14), so broadcast append/read needs no membership row.
@@ -469,13 +486,65 @@ function verifyStrictTables(database) {
     SELECT name, strict
     FROM pragma_table_list
     WHERE schema = 'main'
-      AND name IN ('rooms', 'direct_members', 'messages')
+      AND name IN ('rooms', 'direct_members', 'messages', 'realms')
   `).all()
   const strictByName = new Map(strictTables.map(row => [row.name, Number(row.strict)]))
-  for (const name of ['rooms', 'direct_members', 'messages']) {
+  for (const name of ['rooms', 'direct_members', 'messages', 'realms']) {
     if (strictByName.get(name) !== 1) {
       fail('database_schema_invalid', `database table ${name} is missing or is not STRICT`)
     }
+  }
+}
+
+// Story 1.3 (additive, no schema-version bump): the realms table joins the
+// schema additively. CREATE TABLE IF NOT EXISTS keeps fresh v2 files and files
+// created by earlier Epic-1 builds converging on the same shape on every
+// open, and the singleton PRIMARY KEY enforces the at-most-one-realm
+// invariant at the schema level (AD-14: one process = one realm).
+function ensureRealmTable(database) {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS realms (
+      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+      realm_id TEXT NOT NULL UNIQUE,
+      created_at TEXT NOT NULL
+    ) STRICT;
+  `)
+}
+
+// Story 1.3 review fix (additive, no schema-version bump): the implicit
+// Broadcast Room has no Actor creator, so rooms.created_by_fingerprint must be
+// nullable. Fresh files build the nullable shape directly; v2 files created
+// before this fix carry NOT NULL and converge on open via the standard SQLite
+// table-rebuild recipe (foreign keys off, create-copy-drop-rename inside one
+// write transaction, foreign keys restored), preserving every row.
+function ensureNullableRoomCreator(database) {
+  // "notnull" is quoted: bare, it parses as SQLite's postfix NOTNULL operator.
+  const column = database
+    .prepare(`SELECT "notnull" AS "notnull" FROM pragma_table_info('rooms') WHERE name = 'created_by_fingerprint'`)
+    .get()
+  if (!column || Number(column.notnull) === 0) return
+
+  database.exec('PRAGMA foreign_keys = OFF;')
+  try {
+    withImmediateTransaction(database, () => {
+      database.exec(roomsTableDdl('rooms_new'))
+      database.exec(`
+        INSERT INTO rooms_new (id, kind, title, pair_key, created_by_fingerprint, created_at)
+        SELECT id, kind, title, pair_key, created_by_fingerprint, created_at
+        FROM rooms;
+      `)
+      database.exec('DROP TABLE rooms;')
+      database.exec('ALTER TABLE rooms_new RENAME TO rooms;')
+    })
+  } finally {
+    database.exec('PRAGMA foreign_keys = ON;')
+  }
+
+  const restored = database
+    .prepare(`SELECT "notnull" AS "notnull" FROM pragma_table_info('rooms') WHERE name = 'created_by_fingerprint'`)
+    .get()
+  if (!restored || Number(restored.notnull) !== 0) {
+    fail('database_schema_invalid', 'rooms.created_by_fingerprint did not converge to nullable')
   }
 }
 
@@ -573,6 +642,8 @@ export function openRoomLog({ dataDir } = {}) {
       const connection = configureConnection(database)
 
       if (probedVersion === 0) createSchema(database)
+      ensureRealmTable(database)
+      ensureNullableRoomCreator(database)
       verifyStrictTables(database)
 
       // Report the file's actual version, never the compiled constant.
@@ -638,11 +709,14 @@ export function openRoomLog({ dataDir } = {}) {
       },
 
       // Broadcast rooms are open by design: created with an optional title
-      // (defaults when omitted) and no membership rows.
+      // (defaults when omitted) and no membership rows. The creator is
+      // optional too: the implicit Broadcast Room is bootstrapped before any
+      // Actor exists and carries a NULL created_by_fingerprint — the store
+      // never fabricates an identity for it.
       createBroadcastRoom(options) {
         assertOpen()
-        const { actorFingerprint, title } = requireObject(options)
-        const validFingerprint = requireFingerprint(actorFingerprint)
+        const { actorFingerprint = null, title } = requireObject(options)
+        const validFingerprint = actorFingerprint === null ? null : requireFingerprint(actorFingerprint)
         const validTitle = requireTitle(title, DEFAULT_BROADCAST_TITLE)
         const id = randomBytes(ROOM_ID_ENTROPY_BYTES).toString('base64url')
         const createdAt = new Date().toISOString()
@@ -658,6 +732,42 @@ export function openRoomLog({ dataDir } = {}) {
             title: validTitle,
             pair_key: null,
             created_by_fingerprint: validFingerprint,
+            created_at: createdAt,
+          }
+        })
+      },
+
+      // Atomic bootstrap ensure: re-checks for an existing Broadcast Room
+      // INSIDE the write transaction, so concurrent or retried bootstraps
+      // converge on exactly one commons room instead of racing two inserts.
+      // Creates the room with a NULL creator (never a fabricated identity).
+      ensureBroadcastRoom(options = {}) {
+        assertOpen()
+        const { title } = requireObject(options)
+        const validTitle = requireTitle(title, DEFAULT_BROADCAST_TITLE)
+
+        return withImmediateTransaction(database, () => {
+          const existingRow = database.prepare(`
+            SELECT id, kind, title, pair_key, created_by_fingerprint, created_at
+            FROM rooms
+            WHERE kind = 'broadcast'
+            ORDER BY created_at ASC, id ASC
+            LIMIT 1
+          `).get()
+          if (existingRow) return plainRoom(existingRow)
+
+          const id = randomBytes(ROOM_ID_ENTROPY_BYTES).toString('base64url')
+          const createdAt = new Date().toISOString()
+          database.prepare(`
+            INSERT INTO rooms (id, kind, title, pair_key, created_by_fingerprint, created_at)
+            VALUES (?, ?, ?, NULL, NULL, ?)
+          `).run(id, BROADCAST_KIND, validTitle, createdAt)
+          return {
+            id,
+            kind: BROADCAST_KIND,
+            title: validTitle,
+            pair_key: null,
+            created_by_fingerprint: null,
             created_at: createdAt,
           }
         })
@@ -851,6 +961,66 @@ export function openRoomLog({ dataDir } = {}) {
           requireFingerprint(actorFingerprint)
         }
         return plainRoom(row)
+      },
+
+      // Realm bootstrap primitives (Story 1.3, AD-14): getRealmId returns the
+      // minted realm id or null before first boot; insertRealm mints exactly
+      // one realm row (the singleton PRIMARY KEY plus an in-transaction
+      // re-read make double-minting a coded internal failure, never a silent
+      // second row); findBroadcastRoom returns the implicit Broadcast Room or
+      // null. Pure store operations — orchestration lives in core/realm.mjs.
+      getRealmId() {
+        assertOpen()
+        const row = database
+          .prepare('SELECT realm_id FROM realms WHERE singleton = 1')
+          .get()
+        return row ? String(row.realm_id) : null
+      },
+
+      insertRealm(realmId) {
+        assertOpen()
+        if (typeof realmId !== 'string' || !REALM_ID_PATTERN.test(realmId)) {
+          fail('invalid_argument', 'realmId must be a UUID string')
+        }
+        const createdAt = new Date().toISOString()
+        try {
+          return withImmediateTransaction(database, () => {
+            const existing = database
+              .prepare('SELECT realm_id FROM realms WHERE singleton = 1')
+              .get()
+            if (existing) {
+              fail('realm_already_minted', 'a realm is already minted for this data directory')
+            }
+            database
+              .prepare('INSERT INTO realms (singleton, realm_id, created_at) VALUES (1, ?, ?)')
+              .run(realmId, createdAt)
+            return realmId
+          })
+        } catch (error) {
+          // Concurrent-bootstrap convergence: a racing minter wins the
+          // singleton row; the loser re-reads the minted id and returns it
+          // instead of failing, so every bootstrapper agrees on one realm.
+          const raced = error instanceof AgentRoomRuntimeError && error.code === 'realm_already_minted'
+          if (raced || error?.errcode === SQLITE_CONSTRAINT) {
+            const existing = database
+              .prepare('SELECT realm_id FROM realms WHERE singleton = 1')
+              .get()
+            if (existing) return String(existing.realm_id)
+          }
+          throw error
+        }
+      },
+
+      findBroadcastRoom() {
+        assertOpen()
+        const row = database.prepare(`
+          SELECT id, kind, title, pair_key, created_by_fingerprint, created_at
+          FROM rooms
+          WHERE kind = 'broadcast'
+          ORDER BY created_at ASC, id ASC
+          LIMIT 1
+        `).get()
+        return row ? plainRoom(row) : null
       },
     }
     return Object.freeze(api)

@@ -77,6 +77,10 @@ export const WEB_ASSET_MAX_BYTES = 1024 * 1024
 export const PROTOCOL_HEADER = 'Agent-Room-Protocol'
 export const PROTOCOL_VERSION = '1'
 
+// Versions the protocol stage accepts on /api/* requests; additive-only per
+// NFR-8 (a mangled or unsupported header names this list in the error).
+export const SUPPORTED_PROTOCOL_VERSIONS = Object.freeze([PROTOCOL_VERSION])
+
 // Send-status enum: basic statuses only; the full set completes in Epic 4 and
 // extends this list additively.
 export const SEND_STATUSES = Object.freeze([
@@ -102,24 +106,35 @@ export const PUBLIC_ERRORS = Object.freeze({
   invalid_cursor: 'message cursor is invalid',
   invalid_display_name: 'display name is invalid',
   invalid_limit: 'message limit is invalid',
+  invalid_protocol: 'Agent-Room-Protocol header version is not supported',
   invalid_reply_to_seq: 'reply target is invalid',
+  invalid_request: 'request shape is invalid',
   invalid_room_id: 'room id is invalid',
   invalid_text: 'message text is invalid',
   invalid_title: 'room title is invalid',
   message_frame_too_large: 'message cannot fit the daemon frame',
   message_not_found: 'message was not found',
   node_version_unsupported: 'Node runtime is unsupported',
+  protocol_required: 'Agent-Room-Protocol header is required',
   reply_room_mismatch: 'reply target belongs to another room',
   request_cancelled: 'request was cancelled',
+  request_failed: 'agent-room request failed',
   request_too_large: 'request is too large',
   room_not_found: 'room was not found',
+  route_not_found: 'route was not found',
   sqlite_version_unsupported: 'SQLite runtime is unsupported',
+  unauthorized: 'session authentication is required',
+  unknown_field: 'request contains an unknown field',
 })
 
 // HTTP status for every public error code: invalid_* 400, not_found 404,
 // forbidden/not-member 403, conflict 409, oversized/cancelled request 400
 // (chosen over nginx's non-standard 499), busy start 503, runtime/data-dir/
-// identity-key failures 500. Declared once here — never per-route.
+// identity-key failures 500. Story 1.3 additions: protocol/field-shape
+// rejections 400, unknown routes and routes without a registered handler 404
+// (route_not_found), and request_failed 500 — request_failed keeps only the
+// AD-8 "unknown error code" fallback role, and an internal fault must not
+// masquerade as a missing route. Declared once here — never per-route.
 export const PUBLIC_ERROR_STATUS = Object.freeze({
   actor_not_member: 403,
   client_message_id_conflict: 409,
@@ -135,18 +150,25 @@ export const PUBLIC_ERROR_STATUS = Object.freeze({
   invalid_cursor: 400,
   invalid_display_name: 400,
   invalid_limit: 400,
+  invalid_protocol: 400,
   invalid_reply_to_seq: 400,
+  invalid_request: 400,
   invalid_room_id: 400,
   invalid_text: 400,
   invalid_title: 400,
   message_frame_too_large: 400,
   message_not_found: 404,
   node_version_unsupported: 500,
+  protocol_required: 400,
   reply_room_mismatch: 400,
   request_cancelled: 400,
+  request_failed: 500,
   request_too_large: 400,
   room_not_found: 404,
+  route_not_found: 404,
   sqlite_version_unsupported: 500,
+  unauthorized: 401,
+  unknown_field: 400,
 })
 
 // Internal (never wire-visible) error codes: store and runtime invariants.
@@ -158,6 +180,7 @@ export const INTERNAL_ERROR_CODES = Object.freeze([
   'database_configuration_failed',
   'database_schema_invalid',
   'invalid_argument',
+  'realm_already_minted',
   'store_connection_closed',
   'wal_unavailable',
 ])
