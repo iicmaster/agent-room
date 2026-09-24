@@ -121,6 +121,13 @@ export function startupLockPath(dataDir) {
   return join(resolve(dataDir), 'roomd.start.lock')
 }
 
+// Story 1.4: the HTTP API host's hardlink startup lock. Deliberately distinct
+// from the v0.1 daemon's roomd.start.lock — the retired socket daemon and the
+// loopback server never contend on one file, and the v0.1 module is frozen.
+export function serverStartupLockPath(dataDir) {
+  return join(resolve(dataDir), 'server.start.lock')
+}
+
 export function regularPrivateFile(path, maxBytes = 64 * 1024) {
   const info = lstatSync(path)
   if (info.isSymbolicLink() || !info.isFile() || info.size > maxBytes) {

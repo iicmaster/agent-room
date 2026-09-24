@@ -591,13 +591,26 @@ test('unregistered routes 404 behind the gates; unknown paths 404; echoes follow
   const record = await waitReady()
   const before = hashStore(dataDir)
 
-  // Pre-auth route with a valid header: gates pass, no handler exists.
+  // Pre-auth route with a valid header: gates pass and the Story 1.4 local
+  // credential handler is registered — with no Bearer credential it answers
+  // the canonical unauthorized (Story 1.3's unregistered 404 became live).
   const fallthrough = await request(record.port, 'POST', '/api/auth/local', {
     headers: { [PROTOCOL_KEY]: '1' },
   })
-  assert.equal(fallthrough.status, 404)
-  assert.equal(fallthrough.json().error.code, 'route_not_found')
+  assert.equal(fallthrough.status, 401)
+  assert.equal(fallthrough.json().error.code, 'unauthorized')
   assert.equal(fallthrough.headers[PROTOCOL_KEY], '1')
+
+  // The other pre-auth routes stay unregistered until their stories: they
+  // answer 404 route_not_found behind the gates.
+  for (const path of ['/api/auth/enroll', '/api/auth/challenge', '/api/auth/answer']) {
+    const unregistered = await request(record.port, 'POST', path, {
+      headers: { [PROTOCOL_KEY]: '1' },
+    })
+    assert.equal(unregistered.status, 404, path)
+    assert.equal(unregistered.json().error.code, 'route_not_found', path)
+    assert.equal(unregistered.headers[PROTOCOL_KEY], '1', path)
+  }
 
   // An unknown field on that route is rejected before the handler position.
   const unknownField = await request(record.port, 'POST', '/api/auth/local', {
@@ -788,14 +801,14 @@ test('malformed verifier wiring fails at startup, never per-request', async t =>
 
 test('handler crashes answer request_failed (500) with one redacted stderr line', async t => {
   const dataDir = makeDataDir(t)
-  const remove = registerHandler('GET /api/status', () => {
+  // The implemented-flag contract requires the override to stay registered,
+  // so the crash handler takes over the (marked) health route.
+  const remove = registerHandler('GET /health', () => {
     throw new Error('boom: password=hunter2 token=abc123')
   })
-  const server = await startServer({ dataDir, sessionVerifier: () => ({ session: 'test' }) })
+  const server = await startServer({ dataDir })
   try {
-    const { result: outcome, chunks } = await captureStderr(() => request(server.port, 'GET', '/api/status', {
-      headers: { [PROTOCOL_KEY]: '1' },
-    }))
+    const { result: outcome, chunks } = await captureStderr(() => request(server.port, 'GET', '/health'))
     assert.equal(outcome.status, 500)
     const payload = outcome.json()
     assert.equal(payload.error.code, 'request_failed')
@@ -978,4 +991,47 @@ test('a pre-1.3 v2 store (no realms table, NOT NULL creator) converges on open a
   assert.equal(broadcastRoom.id, 'legacy-room')
   assert.equal(store.findBroadcastRoom().id, 'legacy-room')
   assert.equal(inspectRealm(dataDir).broadcastRooms.length, 1)
+})
+
+// Kept last: it temporarily unregisters the module's live auth/local handler
+// and restores it with a behavior-compatible stand-in.
+test('startup enforces the implemented-flag contract in both directions', async t => {
+  const dataDir = makeDataDir(t)
+
+  // A registered handler on a route without the implemented mark fails
+  // startup — a live handler the wire contract does not promise.
+  const removeStatus = registerHandler('GET /api/status', () => ({}))
+  try {
+    await assert.rejects(
+      () => startServer({ dataDir }),
+      error => error?.code === 'invalid_argument' && /not marked implemented/.test(error.message),
+    )
+  } finally {
+    removeStatus()
+  }
+
+  // A marked route without a registered handler fails startup the other way.
+  // Re-registering with a stand-in and dropping it unregisters the module's
+  // live handler (the remover only removes its own registration).
+  const removeLocal = registerHandler('POST /api/auth/local', () => ({}), 'pre-auth')
+  removeLocal()
+  try {
+    await assert.rejects(
+      () => startServer({ dataDir }),
+      error => error?.code === 'invalid_argument' && /marked implemented but has no registered handler/.test(error.message),
+    )
+  } finally {
+    // Restore a behavior-compatible local credential handler: identical to
+    // the original for unauthenticated requests (the canonical unauthorized).
+    registerHandler('POST /api/auth/local', () => reject('unauthorized'), 'pre-auth')
+  }
+
+  // With the contract satisfied again, startup succeeds.
+  const server = await startServer({ dataDir })
+  try {
+    const health = await request(server.port, 'GET', '/health')
+    assert.equal(health.status, 200)
+  } finally {
+    await server.close()
+  }
 })

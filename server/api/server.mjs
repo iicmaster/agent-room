@@ -11,11 +11,18 @@
 // internal-fallback errors — echoes Agent-Room-Protocol: 1; viewer and health
 // responses carry no echo (protocol-exempt classes). Unknown paths answer 404
 // route_not_found. Statuses are never hard-coded: every error status derives
-// from reject()/PUBLIC_ERROR_STATUS. Handlers live this story: GET /health
-// only; every other frozen AD-8 route stays unregistered (404 route_not_found
-// behind the gates).
+// from reject()/PUBLIC_ERROR_STATUS. Handlers live here: GET /health plus the
+// Story 1.4 local credential path — POST /api/auth/local exchanges the
+// shared-data-dir local token (Bearer) plus the installation's public key
+// (Local Mode auto-enrollment, additive AD-8 amendment) for a session bound
+// to that key's fingerprint; the sliding 12 h session TTL is provisional per
+// DR-2 (ratified at Story 4.1). The actor-class auth stage runs the real
+// session verifier from session.mjs (the 1.3 reject-all default remains only
+// as the pipeline's structural fallback). Every other frozen AD-8 route stays
+// unregistered (404 route_not_found behind the gates).
 
 import { createServer } from 'node:http'
+import { timingSafeEqual } from 'node:crypto'
 import { readFileSync, realpathSync, unlinkSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
@@ -30,6 +37,7 @@ import {
 import { PROTOCOL_HEADER, PROTOCOL_VERSION, PUBLIC_ERROR_STATUS } from '../constants.mjs'
 import { openRoomLog } from '../store/room-log.mjs'
 import { bootstrapRealm } from '../core/realm.mjs'
+import { fingerprintFromPublicKey } from '../keys.mjs'
 import { ROUTE_TABLE, matchRoute, routeKey as routeKeyOf } from './routes.mjs'
 import {
   ProtocolStage,
@@ -39,12 +47,46 @@ import {
   reject,
   runPipeline,
 } from './pipeline.mjs'
+import { bearerTokenFromHeaders, createSessionRegistry, createSessionVerifier } from './session.mjs'
+import { readLocalToken } from './local-token.mjs'
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1'])
 const API_PREFIX = '/api/'
 const SUCCESS_STATUS = 200
 
 const REGISTERED_HANDLERS = new Map()
+
+// Story 1.4: one session registry per server process. The local credential
+// path (auth/local) is the issuer; the actor-class auth stage is the
+// verifier. In-memory by design — a restart clears sessions (Epic 2 owns
+// continuity) — and the default for every startServer instance in this
+// process, which is exactly the local-mode topology: one host process, one
+// OS user. startServer({sessionRegistry}) overrides it so an injected
+// verifier and its registry stay one coherent pair.
+const SESSION_REGISTRY = createSessionRegistry()
+
+// Constant-time credential comparison; an equal-length dummy compare keeps
+// the timing profile uniform across mismatched lengths.
+function credentialsMatch(presented, expected) {
+  const left = Buffer.from(presented, 'utf8')
+  const right = Buffer.from(expected, 'utf8')
+  if (left.length !== right.length) {
+    timingSafeEqual(right, right)
+    return false
+  }
+  return timingSafeEqual(left, right)
+}
+
+// The installation's public key arrives as 32 raw bytes base64url-encoded —
+// exactly the 43-character unpadded form. Shape only: presentation is NOT
+// possession proof on the local path (no signature check under the OS-user
+// boundary; challenge-response is Epic 4's remote path). Anything else is a
+// request-shape rejection.
+function rawInstallationPublicKey(value) {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(value)) return null
+  const raw = Buffer.from(value, 'base64url')
+  return raw.length === 32 ? raw : null
+}
 
 // Register a handler for a frozen route. The key must exist in the route
 // table exactly (method + path); the optional expectedClass must match the
@@ -77,6 +119,35 @@ export function registerHandler(key, handler, expectedClass) {
 // a handler only computes its result.
 registerHandler('GET /health', function health() {
   return { version: APP_VERSION }
+})
+
+// Story 1.4 local credential path (pre-auth class): the 0600 shared-data-dir
+// local token, presented as a Bearer credential, plus the installation's
+// public key are exchanged for a session bound to that key's fingerprint —
+// Local Mode auto-enrollment under the OS-user boundary (AD-5: one session
+// mechanism; the local token remains the bootstrap credential and is never a
+// credential on any other route — it is not a session registry entry, and no
+// other handler reads it).
+//
+// Zero state change on rejection, in both directions: the credential file is
+// NEVER created or rewritten here (ensureServer guarantees it on the client
+// side) — a missing or unusable file is a 401 local_token_invalid with the
+// filesystem untouched — and issuance happens only after both the key shape
+// and the constant-time token compare succeed. The auth stage passes pre-auth
+// requests through, so this handler performs the one credential check it
+// exists for.
+registerHandler('POST /api/auth/local', function localAuth(context) {
+  const presented = bearerTokenFromHeaders(context.headers)
+  if (presented === null) return reject('unauthorized')
+  const publicKey = rawInstallationPublicKey(context.body?.public_key)
+  if (publicKey === null) {
+    return reject('invalid_request', 'public_key is required: the raw 32-byte Ed25519 public key as base64url')
+  }
+  const localToken = readLocalToken(context.dataDir)
+  if (!credentialsMatch(presented, localToken)) return reject('unauthorized')
+  const registry = context.sessionRegistry ?? SESSION_REGISTRY
+  const sessionToken = registry.issue(fingerprintFromPublicKey(publicKey))
+  return { session_token: sessionToken }
 })
 
 const UNREGISTERED_ROUTE_HANDLER = () => reject('route_not_found')
@@ -133,6 +204,8 @@ async function handleRequest(request, response, options) {
     remoteAddress: request.socket.remoteAddress,
     encrypted: Boolean(request.socket.encrypted),
     bodyStream: request,
+    dataDir: options.dataDir,
+    sessionRegistry: options.sessionRegistry,
   }
 
   try {
@@ -192,7 +265,7 @@ async function handleRequest(request, response, options) {
   }
 }
 
-export async function startServer({ dataDir, host = '127.0.0.1', port = 0, sessionVerifier, viewerVerifier } = {}) {
+export async function startServer({ dataDir, host = '127.0.0.1', port = 0, sessionVerifier, viewerVerifier, sessionRegistry } = {}) {
   // Runtime gate first: Node >= 24.15 / SQLite >= 3.51.3, diagnosable error.
   assertSupportedRuntime()
   if (typeof dataDir !== 'string' || dataDir.trim().length === 0) {
@@ -204,13 +277,38 @@ export async function startServer({ dataDir, host = '127.0.0.1', port = 0, sessi
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
     throw new AgentRoomRuntimeError('invalid_argument', 'port must be an integer from 0-65535')
   }
-  // Malformed verifier wiring fails at startup, never per-request.
+  // Malformed verifier or registry wiring fails at startup, never
+  // per-request. When no session verifier is injected, the real Story 1.4
+  // bearer-token check runs against the effective registry (the process
+  // default, or the caller's sessionRegistry) so an injected verifier and
+  // its registry stay one coherent pair (Story 1.3's reject-all default
+  // remains the pipeline's structural fallback).
   if (sessionVerifier !== undefined && typeof sessionVerifier !== 'function') {
     throw new AgentRoomRuntimeError('invalid_argument', 'sessionVerifier must be a function when provided')
   }
   if (viewerVerifier !== undefined && typeof viewerVerifier !== 'function') {
     throw new AgentRoomRuntimeError('invalid_argument', 'viewerVerifier must be a function when provided')
   }
+  if (sessionRegistry !== undefined
+    && (typeof sessionRegistry !== 'object' || sessionRegistry === null
+      || typeof sessionRegistry.issue !== 'function' || typeof sessionRegistry.verify !== 'function')) {
+    throw new AgentRoomRuntimeError('invalid_argument', 'sessionRegistry must be a session registry (issue/verify) when provided')
+  }
+  // implemented-flag enforcement: every frozen route marked implemented must
+  // have a registered handler, and every registered handler must belong to a
+  // marked route — a mismatch fails startup instead of silently 404ing a
+  // route the wire contract promises.
+  for (const route of ROUTE_TABLE) {
+    const key = routeKeyOf(route)
+    if (route.implemented === true && !REGISTERED_HANDLERS.has(key)) {
+      throw new AgentRoomRuntimeError('invalid_argument', `route ${key} is marked implemented but has no registered handler`)
+    }
+    if (route.implemented !== true && REGISTERED_HANDLERS.has(key)) {
+      throw new AgentRoomRuntimeError('invalid_argument', `route ${key} has a registered handler but is not marked implemented`)
+    }
+  }
+  const effectiveRegistry = sessionRegistry ?? SESSION_REGISTRY
+  const effectiveSessionVerifier = sessionVerifier ?? createSessionVerifier({ registry: effectiveRegistry })
 
   const store = openRoomLog({ dataDir })
   let httpServer = null
@@ -222,7 +320,12 @@ export async function startServer({ dataDir, host = '127.0.0.1', port = 0, sessi
     httpServer = createServer((request, response) => {
       // handleRequest maps its own failures; this guard only contains a
       // failure of the failure path itself.
-      handleRequest(request, response, { sessionVerifier, viewerVerifier }).catch(() => {
+      handleRequest(request, response, {
+        sessionVerifier: effectiveSessionVerifier,
+        viewerVerifier,
+        dataDir,
+        sessionRegistry: effectiveRegistry,
+      }).catch(() => {
         response.destroy()
       })
     })

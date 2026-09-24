@@ -39,7 +39,15 @@ export const ROUTE_TABLE = Object.freeze([
   Object.freeze({ method: 'POST', path: '/api/auth/enroll', class: 'pre-auth', requestFields: Object.freeze(['invite_token']) }),
   Object.freeze({ method: 'POST', path: '/api/auth/challenge', class: 'pre-auth', requestFields: Object.freeze(['public_key']) }),
   Object.freeze({ method: 'POST', path: '/api/auth/answer', class: 'pre-auth', requestFields: Object.freeze(['nonce', 'signature']) }),
-  Object.freeze({ method: 'POST', path: '/api/auth/local', class: 'pre-auth', requestFields: Object.freeze([]) }),
+  // Story 1.4: the local credential path is live (issuer/verifier wiring in
+  // server.mjs). `implemented` marks registration status for the frozen
+  // table's readers; unmarked routes stay unregistered until their stories.
+  // The route accepts the frozen-vocabulary field public_key (additive AD-8
+  // amendment): Local Mode auto-enrollment under the OS-user boundary — the
+  // local token remains the bootstrap credential; presentation is not
+  // possession proof (no signature check locally; challenge-response is
+  // Epic 4's remote path).
+  Object.freeze({ method: 'POST', path: '/api/auth/local', class: 'pre-auth', implemented: true, requestFields: Object.freeze(['public_key']) }),
 
   // viewer (AD-8): GET /viewer/auth · GET /viewer/ + static assets ·
   // GET /viewer/api/rooms/:id/messages · GET /viewer/api/rooms/:id/events (SSE)
@@ -48,15 +56,16 @@ export const ROUTE_TABLE = Object.freeze([
   Object.freeze({ method: 'GET', path: '/viewer/api/rooms/:id/messages', class: 'viewer', requestFields: Object.freeze(['after_seq', 'limit']) }),
   Object.freeze({ method: 'GET', path: '/viewer/api/rooms/:id/events', class: 'viewer', requestFields: Object.freeze([]) }),
 
-  // health (AD-8): GET /health
-  Object.freeze({ method: 'GET', path: '/health', class: 'health', requestFields: Object.freeze([]) }),
+  // health (AD-8): GET /health — live since Story 1.3.
+  Object.freeze({ method: 'GET', path: '/health', class: 'health', implemented: true, requestFields: Object.freeze([]) }),
 ])
 
 // Frozen field vocabulary (AD-8, verbatim names — "additive fields may join,
 // names never rename"). The contract test parses the live spine document and
 // pins these arrays against it; version and realm_id joined the response
 // vocabulary by the spine's 2026-09-25 amendment (AD-14's GET /api/status
-// requirement plus health/status self-description).
+// requirement plus health/status self-description), and session_token joined
+// by the Story 1.4 amendment (the local credential exchange's response).
 export const REQUEST_FIELD_VOCABULARY = Object.freeze([
   'chat_id',
   'client_message_id',
@@ -87,6 +96,7 @@ export const RESPONSE_FIELD_VOCABULARY = Object.freeze([
   'status',
   'version',
   'realm_id',
+  'session_token',
 ])
 
 // Matching: specific patterns first, wildcard (`/viewer/` + static assets)

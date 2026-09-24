@@ -18,6 +18,7 @@ import {
   INVITE_MAX_USES,
   INVITE_TTL_SECONDS,
   KEYPAIR_FILE_MAX_BYTES,
+  LOCAL_TOKEN_MAX_BYTES,
   MESSAGE_TEXT_MAX,
   OFFLINE_RECENT_SECONDS,
   PRESENCE_HEARTBEAT_JITTER,
@@ -37,6 +38,17 @@ import {
   SEND_STATUSES,
   SEND_TOKEN_CAPACITY,
   SEND_TOKEN_REFILL_PER_SECOND,
+  SERVER_ATTACH_POLL_MS,
+  SERVER_CHILD_REAP_TIMEOUT_MS,
+  SERVER_HEALTH_PROBE_MAX_BYTES,
+  SERVER_HEALTH_PROBE_TIMEOUT_MS,
+  SERVER_STARTUP_LOCK_MAX_BYTES,
+  SERVER_STARTUP_LOCK_STALE_MS,
+  SERVER_STARTUP_WAIT_MS,
+  SESSIONS_MAX,
+  SESSION_TOKEN_BYTES,
+  SESSION_TOKEN_MAX_CHARS,
+  SESSION_TTL_MS,
   SSE_BACKLOG_MAX_BYTES,
   SSE_BACKLOG_MAX_MESSAGES,
   SSE_KEEP_ALIVE_SECONDS,
@@ -135,6 +147,33 @@ test('identifier bounds cover client_message_id, display name, title, and chat i
   assert.equal(KEYPAIR_FILE_MAX_BYTES, 4096)
 })
 
+test('story 1.4 session and local-token limits derive from the declared values', () => {
+  // The 12 h sliding session TTL is provisional per DR-2 (spine Open Question
+  // 1 stays open until Story 4.1's data); the ms form derives from the
+  // declared seconds value. Tokens are 256-bit; the local token file is a
+  // bounded regular file like every other private state file.
+  assert.equal(SESSION_TTL_MS, SESSION_TTL_SECONDS * 1000)
+  assert.equal(SESSION_TTL_MS, 12 * 60 * 60 * 1000)
+  assert.equal(SESSION_TOKEN_BYTES, 32)
+  assert.equal(SESSION_TOKEN_MAX_CHARS, 256)
+  assert.equal(SESSIONS_MAX, 1000)
+  assert.equal(LOCAL_TOKEN_MAX_BYTES, 4096)
+})
+
+test('story 1.4 bootstrap limits are pinned with their ratified values', () => {
+  // The startup wait deliberately exceeds the staleness window so a stale
+  // lock is reclaimable within one invocation; the probe/reap/rename values
+  // bound the bootstrap engine's waits (AD-9 mirror).
+  assert.equal(SERVER_STARTUP_WAIT_MS, 20_000)
+  assert.equal(SERVER_STARTUP_LOCK_STALE_MS, 15_000)
+  assert.equal(SERVER_STARTUP_LOCK_MAX_BYTES, 512)
+  assert.equal(SERVER_ATTACH_POLL_MS, 50)
+  assert.equal(SERVER_HEALTH_PROBE_TIMEOUT_MS, 750)
+  assert.equal(SERVER_HEALTH_PROBE_MAX_BYTES, 64 * 1024)
+  assert.equal(SERVER_CHILD_REAP_TIMEOUT_MS, 2_000)
+  assert.ok(SERVER_STARTUP_WAIT_MS > SERVER_STARTUP_LOCK_STALE_MS, 'the wait must exceed the staleness window')
+})
+
 test('v0.1 limit groupings re-point to the constants module', () => {
   assert.deepEqual(DATABASE_LIMITS, {
     actorId: IDENTIFIER_MAX,
@@ -170,6 +209,7 @@ test('every v0.1 public error code has an HTTP status declared once', () => {
     'invalid_room_id',
     'invalid_text',
     'invalid_title',
+    'local_token_invalid',
     'message_frame_too_large',
     'message_not_found',
     'node_version_unsupported',
@@ -180,6 +220,10 @@ test('every v0.1 public error code has an HTTP status declared once', () => {
     'request_too_large',
     'room_not_found',
     'route_not_found',
+    'server_port_conflict',
+    'server_start_busy',
+    'server_start_failed',
+    'server_start_lock_invalid',
     'sqlite_version_unsupported',
     'unauthorized',
     'unknown_field',
@@ -220,6 +264,12 @@ test('every v0.1 public error code has an HTTP status declared once', () => {
     route_not_found: 404,
     unauthorized: 401,
     unknown_field: 400,
+    // Story 1.4: local credential file, bootstrap engine, port conflict.
+    local_token_invalid: 401,
+    server_port_conflict: 409,
+    server_start_busy: 503,
+    server_start_failed: 500,
+    server_start_lock_invalid: 500,
   }
   for (const [code, status] of Object.entries(expectedStatus)) {
     assert.equal(PUBLIC_ERROR_STATUS[code], status, code)
@@ -247,6 +297,7 @@ test('internal error codes are declared once and disjoint from the public table'
     'database_schema_invalid',
     'invalid_argument',
     'realm_already_minted',
+    'state_file_invalid',
     'store_connection_closed',
     'wal_unavailable',
   ])

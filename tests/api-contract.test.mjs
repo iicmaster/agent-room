@@ -172,6 +172,17 @@ test('route keys are stable method/path pairs', () => {
   assert.equal(routeKey(ROUTE_TABLE[ROUTE_TABLE.length - 1]), 'GET /health')
 })
 
+test('the implemented mark covers exactly the live frozen routes', () => {
+  // The implemented mark is the startup contract's data side (server.mjs
+  // asserts every marked route has a registered handler and vice versa).
+  // GET /health went live in Story 1.3, POST /api/auth/local in 1.4 with the
+  // public_key request field; 1.5-1.8 extend additively.
+  const implemented = ROUTE_TABLE.filter(route => route.implemented === true)
+  assert.deepEqual(implemented.map(routeKey), ['POST /api/auth/local', 'GET /health'])
+  const local = ROUTE_TABLE.find(route => routeKey(route) === 'POST /api/auth/local')
+  assert.deepEqual([...local.requestFields], ['public_key'])
+})
+
 test('the fixed pipeline order is the AD-7 order', () => {
   assert.deepEqual([...PIPELINE_STAGE_ORDER], ['protocol', 'transport', 'auth', 'budgets', 'authz'])
 })

@@ -112,6 +112,7 @@ export const PUBLIC_ERRORS = Object.freeze({
   invalid_room_id: 'room id is invalid',
   invalid_text: 'message text is invalid',
   invalid_title: 'room title is invalid',
+  local_token_invalid: 'agent-room local token is missing or invalid',
   message_frame_too_large: 'message cannot fit the daemon frame',
   message_not_found: 'message was not found',
   node_version_unsupported: 'Node runtime is unsupported',
@@ -122,6 +123,10 @@ export const PUBLIC_ERRORS = Object.freeze({
   request_too_large: 'request is too large',
   room_not_found: 'room was not found',
   route_not_found: 'route was not found',
+  server_port_conflict: 'agent-room server port is held by another process',
+  server_start_busy: 'another agent-room server start did not finish',
+  server_start_failed: 'agent-room server did not become ready',
+  server_start_lock_invalid: 'agent-room server start lock is not a bounded regular file',
   sqlite_version_unsupported: 'SQLite runtime is unsupported',
   unauthorized: 'session authentication is required',
   unknown_field: 'request contains an unknown field',
@@ -134,7 +139,13 @@ export const PUBLIC_ERRORS = Object.freeze({
 // rejections 400, unknown routes and routes without a registered handler 404
 // (route_not_found), and request_failed 500 — request_failed keeps only the
 // AD-8 "unknown error code" fallback role, and an internal fault must not
-// masquerade as a missing route. Declared once here — never per-route.
+// masquerade as a missing route. Story 1.4 additions: a missing or unusable
+// local credential file is a credential-class failure answered 401
+// (local_token_invalid, never created from the HTTP path), the bootstrap
+// engine's busy start mirrors daemon_start_busy (server_start_busy, 503),
+// startup and lock failures are 500, and a runtime record whose port a
+// foreign process holds is a conflicted state (server_port_conflict, 409)
+// that is never auto-killed. Declared once here — never per-route.
 export const PUBLIC_ERROR_STATUS = Object.freeze({
   actor_not_member: 403,
   client_message_id_conflict: 409,
@@ -156,6 +167,7 @@ export const PUBLIC_ERROR_STATUS = Object.freeze({
   invalid_room_id: 400,
   invalid_text: 400,
   invalid_title: 400,
+  local_token_invalid: 401,
   message_frame_too_large: 400,
   message_not_found: 404,
   node_version_unsupported: 500,
@@ -166,6 +178,10 @@ export const PUBLIC_ERROR_STATUS = Object.freeze({
   request_too_large: 400,
   room_not_found: 404,
   route_not_found: 404,
+  server_port_conflict: 409,
+  server_start_busy: 503,
+  server_start_failed: 500,
+  server_start_lock_invalid: 500,
   sqlite_version_unsupported: 500,
   unauthorized: 401,
   unknown_field: 400,
@@ -181,6 +197,7 @@ export const INTERNAL_ERROR_CODES = Object.freeze([
   'database_schema_invalid',
   'invalid_argument',
   'realm_already_minted',
+  'state_file_invalid',
   'store_connection_closed',
   'wal_unavailable',
 ])
@@ -195,3 +212,38 @@ export const STORE_OPEN_BUSY_BACKOFF_MS = 25
 
 // Entropy for opaque room ids: 16 random bytes → 22 base64url characters.
 export const ROOM_ID_ENTROPY_BYTES = 16
+
+// --- Story 1.4: local bootstrap & session auth --------------------------------
+
+// Session tokens: the 12 h sliding TTL is provisional per DR-2 (spine Open
+// Question 1 stays open until Story 4.1's data); the millisecond form derives
+// from the declared SESSION_TTL_SECONDS and is what the in-memory registry
+// consumes. Tokens are 256-bit (AD-5 bearer entropy); a presented credential
+// longer than the character bound can never be a valid token and is rejected
+// before hashing.
+export const SESSION_TTL_MS = SESSION_TTL_SECONDS * 1000
+export const SESSION_TOKEN_BYTES = 32
+export const SESSION_TOKEN_MAX_CHARS = 256
+// Session registry capacity: one Actor may hold many sessions (each with its
+// own Chat ID in Story 1.5), so the bound is per-realm, not per-Actor; issue()
+// lazily sweeps expired entries and evicts oldest-expired-then-oldest.
+export const SESSIONS_MAX = 1000
+
+// The local bootstrap credential file (0600, shared data dir) is a bounded
+// regular non-symlink file like every other private state file.
+export const LOCAL_TOKEN_MAX_BYTES = 4096
+
+// ensureServer's bootstrap engine (server/client/ensure-server.mjs). The wait
+// budget deliberately exceeds the 15 s staleness window so a stale lock is
+// reclaimable within one invocation; the poll/probe values pace attach
+// attempts and /health readiness probes; the reap timeout bounds how long a
+// failed boot waits before SIGKILL on the child it owns.
+export const SERVER_STARTUP_WAIT_MS = 20_000
+export const SERVER_STARTUP_LOCK_STALE_MS = 15_000
+export const SERVER_STARTUP_LOCK_MAX_BYTES = 512
+export const SERVER_ATTACH_POLL_MS = 50
+export const SERVER_HEALTH_PROBE_TIMEOUT_MS = 750
+// A /health probe reads at most this many bytes before the connection is
+// destroyed — a foreign responder on the recorded port cannot flood memory.
+export const SERVER_HEALTH_PROBE_MAX_BYTES = 64 * 1024
+export const SERVER_CHILD_REAP_TIMEOUT_MS = 2_000
