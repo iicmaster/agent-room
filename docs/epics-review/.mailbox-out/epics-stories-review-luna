@@ -1,0 +1,222 @@
+# Epic-and-story review — `epics-stories-review-luna`
+
+Review mode: read-only acceptance gate on the builder's behalf. Review moment: 2026-09-20. The full `epics.md`, PRD, architecture spine, D1–D19 addendum, and binding Q1–Q5 ruling were read.
+
+Evidence boundary: `epics.md` SHA-256 `77fac3369c99a2ae14195c19ac467a72aeff146fd8ced606511463f6131f7a83`; PRD `65cfaaa3fb906c8bc2ce095ab09ce9f648e962c3e964c8d7bc9ac8ad69db3c1b`; spine `a54481da20a3068d4ccd3e95af3410830503446a3a39d60533b7d67cf9185a0a`; addendum `8995d2163653736479874a0d19945e2ce587d6e98d9083ba60acb590d9e5e847`; ruling `c3ec3841dae9b304c02d8cb26406bcf8e8a951b40ca42217e43e76a69829d977`.
+
+## Gate verdict
+
+**NOT SAFE to hand to development agents yet.** The story template is mechanically complete, the main vertical checkpoints are present, and several safety/release gates are strong. The breakdown still has ordering blockers, frozen-contract omissions, unresolved decisions, and release-proof gaps. Every epic is `fix-first`; none is `safe` as written.
+
+The static scan found exactly 33 stories. Every story has an `As ... / I want ... / So that ...` statement and at least one `Given / When / Then` acceptance clause. That proves shape only. It does not prove that each clause is independently executable or that the story can be completed without a later story.
+
+The required bundled ACP 3-model gate was not run in this lane. `review-gate.mjs` requires a static packet file, while the request restricts review work to read-only and the only required write is the flat outbox. The round-table below is therefore an inline five-voice critique, not an independently dispatched three-model approval.
+
+## Per-epic verdicts
+
+| Epic | Verdict | Reason |
+|---|---|---|
+| Epic 1 — First Conversation | **FIX-FIRST** | The real-process checkpoint and packaging gate are good, but the checkpoint is placed as Story 1.8 although the ruling names the Story 1.5 milestone; the wire/middleware contracts and local-only guarantees are incomplete. |
+| Epic 2 — Nothing Is Lost | **FIX-FIRST** | Story 2.1 asserts preservation of invites and bans before their Epic 4 stories; Story 2.2 names remote key re-proof before Story 4.1. Migration idempotency is asserted but lacks a repeat-run oracle. |
+| Epic 3 — Safe to Talk to Strangers | **FIX-FIRST** | The four-story FR-10 decomposition is correct, but Story 3.5 is too thin to prove the complete FR-10 + FR-20 + AR-12 chain with real observable boundaries. HCI-4 ambiguity handling is also incomplete. |
+| Epic 4 — The Wider Room | **FIX-FIRST** | The dress rehearsal is strong, but identity lifecycle, invite secret shape/storage, the unresolved token TTL, and a compound operator/capacity story remain. |
+| Epic 5 — Watch from Outside | **FIX-FIRST** | Cookie and no-query-token rules are present, but DR-3 remains open inside Story 5.2 and the full state machine is asserted as one broad sentence. |
+| Epic 6 — Prove It & Ship | **FIX-FIRST** | REL-3, REL-4, packaging, and smoke tests are close. REL-1 Story 6.1 does not prove the viewer/presence part named by the release-proof map, and the Epic 6 entry is duplicated in the epic list. |
+
+## Severity-ranked findings
+
+### Blockers
+
+**B1 — Epic 2 depends on later Epic 4 behavior. Stories 2.1 and 2.2.**
+
+Story 2.1 requires an ordinary restart to prove that “enrollment, invites, bans, claims, and realm_id are unchanged,” but invite behavior is Story 4.2 and ban behavior is Stories 4.5–4.6. A test cannot exercise those entities in Epic 2 without either creating future-domain state early or silently depending on later stories. Story 2.2 says reconnect “re-proves its key,” while the remote challenge-response path is Story 4.1. Pin the local reconnect mechanism in Story 2.2, and move remote proof to Epic 4, or explicitly make the identity primitive an earlier prerequisite. Keep the ordinary-restart assertion separate from the one-time upgrade assertion.
+
+**B2 — The frozen wire contract and middleware contract are not acceptance-complete. Stories 1.1, 1.3, 1.7, and 4.4.**
+
+Story 1.3 tests missing/malformed/unsupported protocol headers and route-class exemptions, but it does not test the AD-7 order `protocol → transport → authentication → budgets → authorization → handler`, the response version echo, unknown request-field rejection, additive-only v1, no implicit downgrade, or state/cursor/invite invariants for rejection at every stage. Story 1.7 lists MCP tools and selected semantics, but does not bind the complete AD-8 route table, frozen field vocabulary, `{ok,result|error}` envelope, `PUBLIC_ERRORS` mapping, or HTTP-status table as normative inputs even though `epics.md` explicitly requires stories to cite AD-8 and AD-9 verbatim.
+
+Story 1.1's constants list omits the token-bucket limits, request-budget limits, enrollment rate limit, invite default, and session-token TTL from AD-9. Stories 4.2 and 4.4 then repeat numeric values directly. That permits drift between code, API, tests, and the release drill. Add one explicit contract test for the complete frozen tables and route pipeline, and make every later story import named constants rather than restating numbers.
+
+**B3 — Core boundaries and identity authority are named but not mechanically guarded. Stories 1.3, 1.7, and 4.1.**
+
+AR-3 requires adapters → core → store, no transport imports in `core/`, and policy outside route handlers. Story 1.3 only says handlers contain no gate logic; it does not require a structural import/boundary check. NFR-3 requires that no MCP argument carries sender identity or authority. Story 1.7 enumerates allowed arguments, but has no negative acceptance criterion that `actor_id`, public authority, or equivalent input is rejected and that identity comes only from plugin instance data. Story 4.1 also omits the FR-3 deletion rule: deleting plugin data must create a new unrelated Actor. Add explicit structural and negative tests before development agents split the adapters.
+
+**B4 — Release proof is incomplete at the primary release milestone. Stories 5.2 and 6.1.**
+
+The REL-1 inventory says the physical two-machine/two-client demonstration validates FR-18. Story 6.1 proves only DM and Broadcast exchange and captures a transcript/recording; it does not require the authenticated viewer, live presence, freshness, inert rendering, or DMs-excluded observation. Add viewer/presence evidence to 6.1 or correct the REL-1 validation map. Separately, Story 5.2 says “DR-3 is decided here” but does not select SSE or polling, define the decision owner, or add acceptance for reconnect and token-rotation transitions. An open architecture choice inside a supposedly complete story blocks estimation and test design.
+
+### High findings
+
+**H1 — The ruling's mid-Epic-1 checkpoint is in the wrong story. Story 1.8.**
+
+The binding ruling calls the mandatory anti-theater checkpoint a “Story 1.5 Milestone.” The current breakdown puts it in Story 1.8, after MCP adapter work and immediately before packaging. The checkpoint content is good: two real `mcp-stdio` children, a real spawned server, WAL SQLite, runtime attachment, local token auth, DM flow, contiguous sequences, byte matching, and zero mocks. Either move the milestone to the stated boundary or record an explicit ruling override and define which capabilities are intentionally available at that point.
+
+**H2 — Migration idempotency and state-survival proof are asserted without a sufficient oracle. Stories 2.1, 2.3, and 2.5.**
+
+Story 2.3 uses the word “idempotently” after a crash, but does not require that a second completed startup leaves the same room/sequence/reply map, that no remap is applied twice, or that the documented cursor reset occurs exactly once. AR-14's rule that a migrated server is a new realm with fresh trust is absent. Story 2.1 also does not name reply links, allowlist state, or in-flight work in its ordinary-restart preservation matrix. Add explicit before/crash/restart/restart-again assertions for logs, reply links, enrollment, realm ID, allowlist, cursors, in-flight work, and the upgrade-only cursor reset. Story 2.5 is a strong blocking REL-2 gate and should remain the exit condition.
+
+**H3 — The FR-10 + FR-20 + AR-12 end-to-end test is nominally present but too weak. Story 3.5.**
+
+The single scenario covers eviction, point read, allow, cursor movement, and remove, but it does not state that the test uses the real MCP response path, that held results contain metadata and no body, that the cursor is persisted under `(installation, realm, room)`, that allowlist state is plugin-local, or that the exact recovered body byte-matches the durable log while the cursor does not move backward. It also does not name a test file or forbid mocks. Strengthen 3.5 with those assertions and a distinct foreign Actor/key so the test proves the boundary rather than merely invoking the policy function.
+
+**H4 — Identity and invite lifecycle coverage drops source-level security clauses. Stories 4.1 and 4.2.**
+
+Story 4.1 covers nonce size/expiry, signatures, replay failure, private-key redaction, and canonical fingerprinting, but not one keypair per installation, file permissions, deletion-to-new-Actor behavior, or the “no authority in tool arguments” negative. Story 4.2 covers race safety and secret display hygiene, but not the exact `ar_inv1_` plus 43 base64url characters shape, 32 random bytes, SHA-256-only persistent storage, finite `--uses`/`--ttl`, or explicit rejection of unlimited/never-expiring invites. Add these as independent acceptance cases; they are security properties, not implementation detail.
+
+**H5 — `outcome_unknown` and the delivery acknowledgement contract are only indirectly covered. Stories 1.7, 2.5, and 3.3.**
+
+The literal `outcome_unknown` state does not appear in any story. Story 2.5 says in-flight sends resolve through idempotent retry, which is useful release evidence, but it does not assert the client state transition, the ack naming `(room, seq, idempotency key)`, or persistent cursors keyed by `(installation, realm, room)`. Story 3.3 asserts independent held/cursor state but does not prove the client-owned persistence boundary. Add one executable client contract covering lost response → `outcome_unknown` → same-key retry → original or conflict, with no duplicate and no token consumption.
+
+**H6 — DM privacy and Local Mode's no-configuration promise are not fully acceptance-tested. Stories 1.4, 1.7, 1.8, and 1.2.**
+
+The inventory requires loopback-only Local Mode, no URL/token/room-ID input, first-use parity with v0.1, and protocol-level denial of third-Actor DM access. The current stories show local token authentication and DM opening, but do not assert the bind address, the absence of those user inputs, the friction baseline, or a third Actor being denied from a Direct Room. Add these negative/edge cases to the local checkpoint and the room ACL contract.
+
+**H7 — HCI-4 and HCI-3 are reduced to data or command names, not complete human flows. Stories 1.7, 3.4, 4.2, and 4.6.**
+
+Story 1.7 returns `ambiguous_chat_id` candidates with fingerprints and last-seen values, which is good protocol coverage. HCI-4 also requires a human presentation and disambiguation flow; no story says how a human selects a candidate or how `agent-room allow <chat-id>` behaves when the name is ambiguous. HCI-3 requires CLI grammar and output formats; the operator stories list commands and redaction rules but do not define machine-readable output, errors, or ambiguity behavior. Add the minimal terminal interaction contract before implementation.
+
+### Medium findings
+
+**M1 — Several stories are larger than one coherent dev-agent unit. Stories 1.1, 1.3, 1.7, 2.4, 4.6, and 5.2.**
+
+Examples: 1.3 combines HTTP hosting, four middleware classes, health, realm bootstrap, and protocol rejection; 1.7 combines every MCP tool, first-run UX, frozen envelope, and basic sender statuses; 4.6 combines the full operator CLI, capacity admission, disk-full behavior, backup/restore guidance, and no-operator-route proof; 5.2 combines the complete viewer, live room, presence engine, all eight states, CSP, freshness, and the unresolved transport decision. Split only where the acceptance boundaries are genuinely independent, and put each required substrate into the first story that delivers its value. Do not create future invite/ban tables merely to satisfy 2.1.
+
+**M2 — Quality and performance requirements are present in the inventory but not in executable story acceptance. Stories 1.1, 1.2, 1.3, 2.4, 4.1–4.4, and 6.2.**
+
+NFR-5's send p95 ≤150 ms is absent from the stories. NFR-7's SQLite STRICT/WAL/FULL, append-only/no message deletion, and autocheckpoint requirements are not asserted as acceptance. NFR-1's zero external runtime dependency rule is not tested. AR-11's built-in crypto/no JWT-or-crypto-library rule and AR-15's MCP revision/Caddy v2.11.x pins are also only implicit. Add focused static/runtime checks or cite an existing check by name; do not leave these as inventory-only claims.
+
+**M3 — The epic list contains Epic 6 twice.**
+
+Lines 165–167 and 169–171 repeat “Prove It & Ship.” The story sections are not duplicated, but the navigation and traceability surface is ambiguous. Remove the duplicate before handing the breakdown to agents or release tooling.
+
+**M4 — Some “stable” or “all states” assertions need numeric or transition oracles. Stories 2.4, 4.8, 5.2, and 6.2.**
+
+“Stable FD counts,” “zero leaks,” and “all states explicitly handled” are directionally correct but not independently comparable without a sampling window, allowed delta, transition trigger, and expected result. The source gives a five-minute sample cadence and the ≤2% RSS rule for REL-3; carry equivalent measurable limits into the daily churn, remote churn, and viewer state tests.
+
+## Coverage walk
+
+Status means `Pass` = a real acceptance criterion exists, `Partial` = the story mentions or partly asserts the requirement but loses a material source condition, and `Gap` = no story-level proof was found.
+
+### Functional requirements
+
+| Requirement | Story coverage | Status |
+|---|---|---|
+| FR-1 Local Mode | 1.4, 1.7, 1.8 | **Partial** — no explicit loopback bind, no URL/token/room-ID input assertion, no SM-C1 first-use comparison. |
+| FR-2 Remote join | 4.2, 4.3, 4.8 | **Pass** — invite, verified HTTPS, persistence, reconnect, and dress rehearsal are present. |
+| FR-3 Identity/enrollment | 4.1, 4.2 | **Partial** — key lifecycle, delete-to-new-Actor, and no-authority-input negatives are missing. |
+| FR-4 Self-hosting | 4.6, 4.7 | **Partial** — TLS paths and guide are present; zero-dependency and same-handler proof are not explicit enough. |
+| FR-5 Presence | 1.5, 1.6, 5.2 | **Partial** — fields, TTL, offline, restart, and unreachable are present; operator tuning and the complete viewer state proof are incomplete. |
+| FR-6 Broadcast | 1.2, 1.7, 6.1 | **Partial** — durable/idempotent send is present; text/frame bounds and rejection are not acceptance-tested. |
+| FR-7 Direct Rooms | 1.2, 1.7, 5.2 | **Partial** — pair key and DM path are present; third-Actor ACL denial is absent. |
+| FR-8 Long-Poll reads | 1.2, 1.7, 1.8 | **Partial** — cursor/page/hold/deadline behavior is present; no-held-read-transaction proof is absent. |
+| FR-9 Untrusted marking | 1.7, 3.1 | **Pass** — envelope is frozen in Epic 1 and full two-lane labeling is stated. |
+| FR-10 Held messages | 3.2–3.5 | **Partial** — decomposition is correct; the end-to-end proof is too thin. |
+| FR-11 Restart survival | 2.1, 2.5 | **Partial** — crash continuity is present; later-state dependency and full survival matrix are unresolved. |
+| FR-12 Reconnection | 2.2, 2.5 | **Partial** — rooms, catch-up, backoff, and drill exist; remote key proof is sequenced later. |
+| FR-13 Endurance | 2.4, 6.2 | **Pass** — churn/harness and formal soak are partitioned correctly. |
+| FR-14 Invite lifecycle | 4.2, 4.8 | **Partial** — race/retry/rate/secret handling are present; exact token and finite-lifetime clauses are missing. |
+| FR-15 Ban | 4.5, 4.8 | **Pass** — send/read/re-enroll refusal and 20-second poll bound are explicit. |
+| FR-16 Rate limiting | 4.4, 4.8 | **Pass** — all four gates and their ordering are named, though constants must be centralized. |
+| FR-17 Sender notices | 1.7, 2.5, 4.4, 4.6 | **Partial** — six statuses are named; `outcome_unknown` is only indirect. |
+| FR-18 Viewer | 5.1–5.3, 6.1 | **Partial** — viewer stories cover core security/rendering; DR-3 and REL-1 viewer proof are incomplete. |
+| FR-19 Chat ID/rename | 1.5, 1.7, 1.8 | **Pass** — collision refusal, validation, claims, rename/history, and first-run retry are present. |
+| FR-20 Delivery contract | 1.2, 2.2, 2.5, 3.3 | **Partial** — durable retry/cursor independence are present; client persistence/ack transition is not explicit. |
+| FR-21 MCP surface | 1.7, 2.2 | **Partial** — tool names, ambiguity data, room status, and concurrency are present; HCI disambiguation and offline-open proof are incomplete. |
+| FR-22 Storage admission | 4.6 | **Pass** — capacity status, warn/refuse thresholds, disk-full behavior, and guide are present. |
+
+### Architecture and nonfunctional requirements
+
+| Requirement | Story coverage | Status |
+|---|---|---|
+| NFR-1 no runtime deps / Node floor | 1.1, 4.7 | **Partial** — runtime floor is tested; dependency absence is not. |
+| NFR-2 Agent Plugins conformance | 1.9, 6.3 | **Pass** — validate gate, dual package, byte identity, and claimed-client smoke tests are explicit. |
+| NFR-3 identity authority | 1.7, 4.1 | **Partial** — no explicit rejection test for authority-bearing arguments. |
+| NFR-4 guarantee lanes/security | 1.1, 3.1–3.4, 4.3, 5.1–5.3 | **Partial** — most lanes are named; architecture/security negatives are incomplete. |
+| NFR-5 performance | 1.1, 1.7, 4.4, 5.2 | **Partial** — hold/page/frame limits exist; p95 and bounded presence proof are absent. |
+| NFR-6 endurance | 2.4, 6.2 | **Pass** — single RSS rule and pinned soak are present. |
+| NFR-7 data semantics | 1.2, 1.8, 2.1, 2.3 | **Partial** — sequences/idempotency/WAL appear; STRICT/FULL/append-only/autocheckpoint are not asserted. |
+| NFR-8 wire versioning | 1.3, 1.7, 4.4, 5.1 | **Partial** — header/exemptions are present; echo, unknown fields, additive/no-downgrade rules are missing. |
+| AR-1 single HTTP(S) transport | 1.3, 1.4, 1.8 | **Partial** — local API/token path is present; retired unix-socket layer and loopback proof are not. |
+| AR-2 one process/realm/writer | 1.2, 1.4, 2.1 | **Partial** — race/shared data are present; one-process/one-realm/one-writer is not explicit. |
+| AR-3 hexagonal boundary | 1.3, 1.7 | **Gap** — no structural import or policy-placement acceptance. |
+| AR-4 schema v2/migration | 1.2, 2.3 | **Partial** — migration sequence is detailed; idempotent repeat oracle and upgrade-only reset proof are missing. |
+| AR-5 identity/session tokens | 1.4, 4.1 | **Partial** — two issuance paths and challenge exist; TTL remains DR-2 and key lifecycle is incomplete. |
+| AR-6 ephemeral sessions/durable claims | 1.5, 1.6, 1.7 | **Pass** — claims and restart/offline ambiguity behavior are real acceptance criteria. |
+| AR-7 fixed middleware pipeline | 1.3, 4.4, 5.1 | **Partial** — classes/exemptions exist; fixed order and no-state-change at each rejection do not. |
+| AR-8 frozen route/field/status contract | 1.3, 1.7, 1.9 | **Gap** — no complete normative AD-8 contract test or verbatim pointer. |
+| AR-9 single constants/error table | 1.1, 4.2, 4.4 | **Partial** — several limits are centralized; several required limits are repeated or absent. |
+| AR-10 local startup/stale reclaim | 1.4 | **Pass** — lock, 15-second stale rule, PID+health test, and dead-and-unreachable reclaim are explicit. |
+| AR-11 built-in crypto/TLS | 4.1–4.3, 4.7 | **Partial** — behavior is present; banned-library/built-in-only proof is absent. |
+| AR-12 plugin-local trust | 3.2–3.5 | **Partial** — storage and cursor separation are present; the E2E proof needs strengthening. |
+| AR-13 in-process operator CLI | 4.6 | **Pass** — no operator routes/API mutation path is explicit. |
+| AR-14 implicit Broadcast/new-realm trust | 1.3, 2.3, 3.2 | **Partial** — implicit Broadcast exists; migrated/rebuilt server fresh-realm/fresh-trust rule is absent. |
+| AR-15 stack pins | 1.1, 4.7, 6.3 | **Partial** — Node/SQLite floor appears; MCP revision and Caddy v2.11.x are not pinned in acceptance. |
+| AR-16 conventions/negative redaction | 1.1, 1.7, 4.2 | **Partial** — perms and some secret redaction exist; envelope/log/wire/error/naming checks are incomplete. |
+| AR-17 packaging/migration proof split | 1.9, 2.1–2.3, 6.3 | **Partial** — stories are separated; survival matrix and migration/new-realm semantics are incomplete. |
+
+### HCI and release gates
+
+| Requirement | Story coverage | Status |
+|---|---|---|
+| HCI-1 Chat ID prompt/collision retry | 1.5, 1.7, 1.8 | **Pass** |
+| HCI-2 held list/show/allow/remove | 3.3, 3.4 | **Pass** — the Instructed human-convention limitation is stated honestly. |
+| HCI-3 operator CLI grammar/output | 4.2, 4.6, 4.7 | **Partial** — command families/redaction exist; grammar and output contracts do not. |
+| HCI-4 ambiguous Chat ID resolution | 1.7, 3.4 | **Partial** — candidate data exists; human selection flow is absent. |
+| HCI-5 viewer experience | 5.1–5.3 | **Partial** — cookie/no-query/security/rendering states exist; DR-3 and transition proofs remain open. |
+| REL-1 | 6.1 | **Partial** — physical DM/Broadcast evidence exists; viewer/presence validation is missing. |
+| REL-2 | 2.5 | **Pass** — blocking ≥3 randomized kill/restore drill with external ack recorder. |
+| REL-3 | 6.2 | **Pass** — 8-hour integrated soak and single RSS rule. |
+| REL-4 | 6.2 | **Pass** — idle 0–5 Actor counter-metric is recorded. |
+| REL-5 | none by design | **Pass by exclusion** — the source explicitly says post-release and not a story acceptance criterion. |
+
+### Ruling-mandated gates
+
+- **Untrusted envelope and frozen schema:** real coverage exists in 1.7, regression coverage in 1.8, and full labeling in 3.1. The exact AD-8/AD-9 normative contract still needs binding test inputs.
+- **Checkpoint 1.8:** the zero-mock/real-process contract is present and strong, but its ruling milestone placement is wrong.
+- **REL-2 2.5:** present as a blocking exit gate and materially satisfies the ruling.
+- **Migration idempotency 2.3:** present as a named behavior, but the repeat-run oracle is missing.
+- **FR-10 decomposition:** satisfied by 3.1–3.4.
+- **FR-10 + FR-20 + AR-12 E2E 3.5:** named, but currently under-specified.
+- **Dress rehearsal 4.8:** satisfies the no-local-auth-bypass, full governance, rate-gate, and ban-verification contract.
+- **Validate from Epic 1:** satisfied by 1.9.
+- **Epic 6 deferred-QA rule:** satisfied in stated scope; 6.1–6.3 are integration/release stories rather than a component-QA dumping ground.
+
+## Round-table: five voices
+
+**John, PM:** “The product spine is right. DM-first ordering, Local Mode first, Epic 2 before Epic 3, and Epic 5 after the complete presence state machine all respect D14 and Q1–Q2. Stories 1.8, 2.5, 4.8, and 1.9 give the plan real gates. I would call this close to handoff if the missing acceptance clauses were small edits.”
+
+**Maya, systems architect:** “I disagree with ‘small edits’ as a readiness judgment. Story 2.1 cannot own preservation of invites and bans while their semantics arrive in Epic 4. Story 1.3 also says ‘gated identically’ without proving the fixed pipeline. The architecture is not just the names `core/`, `api/`, and `store/`; AR-3, AR-7, and AR-8 need structural and contract checks. Until those are explicit, two agents can implement different systems and both claim compliance.”
+
+**Grumbal, adversary:** “Maya is right on the contract risk. I am less worried about the basic envelope: 1.7 freezes it early and 3.1 preserves the two guarantee lanes. My blocker is the unproved negative space: no authority-bearing argument, no delete-to-new-Actor case, no exact invite secret storage, and no literal `outcome_unknown` transition. The plan says ‘safe’ in several places where it only says ‘framed.’ Story 3.5 must show that held text never enters an agent-visible result and that release recovers the exact durable body.”
+
+**Sally, UX and developer ergonomics:** “I disagree with treating the human flows as protocol details. HCI-2 is honest and well decomposed; the `held show` only-body surface and the Instructed limitation are good. HCI-4 is not complete: returning candidate fingerprints to an agent does not give a human a disambiguation flow, and `allow <chat-id>` is ambiguous by construction. Story 5.2 also asks one story to design every viewer state while leaving SSE versus polling open. I would split the interaction contracts before asking a dev agent to estimate.”
+
+**Level, QA and release:** “The anti-theater gates are the strongest part. Story 1.8 uses real child processes and zero mocks; 2.5 is a genuine blocking continuity drill; 4.8 forbids `/api/auth/local` and verifies the ban path. But REL-1 is not met by 6.1 as written because the release-proof map includes FR-18 and the story records only DM/Broadcast evidence. A passing component story cannot repair a missing release observation later. I therefore agree with Maya’s fix-first verdict, even though I rate 1.8, 2.5, and 4.8 as ready patterns worth preserving.”
+
+**John to Maya:** “I accept moving the invite/ban preservation checks out of the local continuity slice. I still want the Local Mode journey protected in Epic 1, so the fix must preserve DM-first sequencing and not turn Epic 2 into a remote-governance epic.”
+
+**Maya to John:** “Agreed on the product journey; the disagreement is where the state boundary is tested. Preserve local logs and cursors in 2.1, then test invite/ban persistence in their first owning story or a later integrated continuity case.”
+
+**Grumbal to Sally:** “The HCI flow matters because it is the only release path for held bodies, but a better terminal prompt cannot prove human provenance. Keep the documentation honest and test the code-enforced parts.”
+
+**Sally to Grumbal:** “Agreed. I am not asking for cryptographic proof of a human. I am asking for a usable, explicit candidate-selection path so the code does not silently guess.”
+
+**Level to all:** “The disagreement remains over how much to split. My gate is simpler: any unresolved decision or missing observable assertion makes the owning story fix-first. That applies to DR-2, DR-3, REL-1 viewer evidence, and the frozen wire tables.”
+
+## What could not be verified
+
+This was a document review. I did not run the implementation, Node/SQLite startup gates, real MCP child processes, migration crash injection, kill-drill, remote HTTPS rehearsal, browser viewer, Caddy, `claude plugin validate --strict`, Zcode, physical two-machine REL-1, or the 8-hour soak. I did not verify the repository commit state; the local Git command was blocked by the unaccepted Xcode license. I also did not empirically resolve DR-2 (12-hour sliding session TTL), DR-3 (SSE versus polling for viewer presence), the pending 24-hour/5-second assumptions, or claimed-client compatibility. The hashes above define the document-review boundary only.
+
+## Each voice's bottom line
+
+**John:** **No, fix-first.** The product order and major release gates are sound, but later-story dependencies and REL-1 viewer evidence must be corrected before estimates harden.
+
+**Maya:** **No, fix-first.** The story list needs explicit AR-3/AR-7/AR-8/AR-9 contract tests and a clean Epic 2 → Epic 4 dependency boundary.
+
+**Grumbal:** **No, fix-first.** The envelope is a good start, but identity authority, invite-secret, `outcome_unknown`, ACL, and held-body negative tests are not yet strong enough.
+
+**Sally:** **No, fix-first.** HCI-2 is credible; HCI-4, HCI-3, and the viewer decision/state contract are incomplete for a dev-agent handoff.
+
+**Level:** **No, fix-first.** Preserve the real-process 1.8 pattern, blocking 2.5 drill, 4.8 rehearsal, and 1.9 gate, then re-review the corrected acceptance evidence.
+
+TEAM_DONE epics-stories-review-luna
