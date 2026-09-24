@@ -14,6 +14,7 @@ import {
   FRAME_MAX_BYTES,
   HELD_CACHE_MAX,
   IDENTIFIER_MAX,
+  INTERNAL_ERROR_CODES,
   INVITE_MAX_USES,
   INVITE_TTL_SECONDS,
   KEYPAIR_FILE_MAX_BYTES,
@@ -32,6 +33,7 @@ import {
   RECONNECT_BACKOFF_MIN_SECONDS,
   REQUEST_BUDGET_BURST,
   REQUEST_BUDGET_PER_MINUTE,
+  ROOM_ID_ENTROPY_BYTES,
   SEND_STATUSES,
   SEND_TOKEN_CAPACITY,
   SEND_TOKEN_REFILL_PER_SECOND,
@@ -41,6 +43,8 @@ import {
   SESSION_TTL_SECONDS,
   STORAGE_REFUSE_FREE_BYTES,
   STORAGE_WARN_FREE_BYTES,
+  STORE_OPEN_BUSY_BACKOFF_MS,
+  STORE_OPEN_BUSY_RETRY_LIMIT,
   TITLE_MAX,
   VIEWER_FRESHNESS_SECONDS,
   WEB_ASSET_MAX_BYTES,
@@ -151,8 +155,10 @@ test('every v0.1 public error code has an HTTP status declared once', () => {
     'daemon_start_failed',
     'daemon_start_lock_invalid',
     'data_directory_invalid',
+    'database_schema_unsupported',
     'identity_key_invalid',
     'invalid_actor_id',
+    'invalid_chat_id',
     'invalid_client_message_id',
     'invalid_cursor',
     'invalid_display_name',
@@ -186,6 +192,7 @@ test('every v0.1 public error code has an HTTP status declared once', () => {
     actor_not_member: 403,
     client_message_id_conflict: 409,
     data_directory_invalid: 500,
+    database_schema_unsupported: 500,
     sqlite_version_unsupported: 500,
     reply_room_mismatch: 400,
     message_frame_too_large: 400,
@@ -196,6 +203,7 @@ test('every v0.1 public error code has an HTTP status declared once', () => {
     daemon_start_lock_invalid: 500,
     node_version_unsupported: 500,
     identity_key_invalid: 500,
+    invalid_chat_id: 400,
   }
   for (const [code, status] of Object.entries(expectedStatus)) {
     assert.equal(PUBLIC_ERROR_STATUS[code], status, code)
@@ -212,6 +220,32 @@ test('send-status enum and protocol header are the frozen wire contract', () => 
   assert.ok(Object.isFrozen(SEND_STATUSES))
   assert.equal(PROTOCOL_HEADER, 'Agent-Room-Protocol')
   assert.equal(PROTOCOL_VERSION, '1')
+})
+
+test('internal error codes are declared once and disjoint from the public table', () => {
+  assert.deepEqual([...INTERNAL_ERROR_CODES], [
+    'database_busy',
+    'database_configuration_failed',
+    'database_schema_invalid',
+    'invalid_argument',
+    'store_connection_closed',
+    'wal_unavailable',
+  ])
+  assert.ok(Object.isFrozen(INTERNAL_ERROR_CODES))
+  const publicCodes = new Set(Object.keys(PUBLIC_ERRORS))
+  for (const code of INTERNAL_ERROR_CODES) {
+    assert.equal(publicCodes.has(code), false, `${code} must not be public`)
+  }
+})
+
+test('schema-v2 store internals are declared once and distinct from reconnect backoff', () => {
+  assert.equal(STORE_OPEN_BUSY_RETRY_LIMIT, 8)
+  assert.equal(STORE_OPEN_BUSY_BACKOFF_MS, 25)
+  assert.equal(ROOM_ID_ENTROPY_BYTES, 16)
+  // Separate knobs from the public RECONNECT_BACKOFF_* pair: the store's
+  // synchronous open retry and client reconnect backoff never share values.
+  assert.notEqual(STORE_OPEN_BUSY_RETRY_LIMIT, RECONNECT_BACKOFF_MAX_SECONDS)
+  assert.notEqual(STORE_OPEN_BUSY_BACKOFF_MS, RECONNECT_BACKOFF_MIN_SECONDS)
 })
 
 test('no limit literal is restated outside the constants module', () => {

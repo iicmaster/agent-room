@@ -94,8 +94,10 @@ export const PUBLIC_ERRORS = Object.freeze({
   daemon_start_failed: 'agent-room daemon did not become ready',
   daemon_start_lock_invalid: 'agent-room daemon start lock is not a bounded regular file',
   data_directory_invalid: 'agent-room data directory is invalid',
+  database_schema_unsupported: 'database schema is not supported by this agent-room version',
   identity_key_invalid: 'agent-room identity key is invalid',
   invalid_actor_id: 'actor id is invalid',
+  invalid_chat_id: 'chat id is invalid',
   invalid_client_message_id: 'client_message_id is invalid',
   invalid_cursor: 'message cursor is invalid',
   invalid_display_name: 'display name is invalid',
@@ -125,8 +127,10 @@ export const PUBLIC_ERROR_STATUS = Object.freeze({
   daemon_start_failed: 500,
   daemon_start_lock_invalid: 500,
   data_directory_invalid: 500,
+  database_schema_unsupported: 500,
   identity_key_invalid: 500,
   invalid_actor_id: 400,
+  invalid_chat_id: 400,
   invalid_client_message_id: 400,
   invalid_cursor: 400,
   invalid_display_name: 400,
@@ -144,3 +148,27 @@ export const PUBLIC_ERROR_STATUS = Object.freeze({
   room_not_found: 404,
   sqlite_version_unsupported: 500,
 })
+
+// Internal (never wire-visible) error codes: store and runtime invariants.
+// Declared once here so every thrown code in the repository is a member of
+// PUBLIC_ERRORS or this list; extended additively as internal failures gain
+// coded names.
+export const INTERNAL_ERROR_CODES = Object.freeze([
+  'database_busy',
+  'database_configuration_failed',
+  'database_schema_invalid',
+  'invalid_argument',
+  'store_connection_closed',
+  'wal_unavailable',
+])
+
+// --- Schema-v2 store internals -------------------------------------------------
+
+// Open-time busy retry for concurrent openers (server/store/room-log.mjs).
+// Deliberately distinct from the public RECONNECT_BACKOFF_* pair: these tune
+// the store's synchronous open path, not client reconnects.
+export const STORE_OPEN_BUSY_RETRY_LIMIT = 8
+export const STORE_OPEN_BUSY_BACKOFF_MS = 25
+
+// Entropy for opaque room ids: 16 random bytes → 22 base64url characters.
+export const ROOM_ID_ENTROPY_BYTES = 16

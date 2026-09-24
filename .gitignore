@@ -5,3 +5,5 @@ coverage/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+.mailbox-out/
+.tmux-teams/
