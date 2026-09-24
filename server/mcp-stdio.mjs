@@ -6,8 +6,17 @@ import { fileURLToPath } from 'node:url'
 
 import { ensureDaemon, requestDaemon } from './daemon-client.mjs'
 import {
+  CLIENT_MESSAGE_ID_MAX,
+  DISPLAY_NAME_MAX,
+  FRAME_MAX_BYTES,
+  IDENTIFIER_MAX,
+  MESSAGE_TEXT_MAX,
+  READ_HOLD_MAX_MS,
+  READ_PAGE_MAX,
+  TITLE_MAX,
+} from './constants.mjs'
+import {
   APP_VERSION,
-  MAX_FRAME_BYTES,
   assertSupportedRuntime,
   daemonSocketPath,
   instanceDataDirectory,
@@ -16,10 +25,22 @@ import {
   sharedDataDirectory,
 } from './runtime.mjs'
 
+// Run the runtime gate before any other work. Direct launches report one
+// diagnosable line and exit 1 with no stack trace; importers get a catchable
+// rejection so harnesses can assert on the failure.
+try {
+  assertSupportedRuntime()
+} catch (error) {
+  if (launchedDirectly()) {
+    process.stderr.write(`agent-room MCP failed: ${error?.code ?? 'startup_failed'}: ${error?.message}\n`)
+    process.exit(1)
+  }
+  throw error
+}
+
 const JSONRPC_VERSION = '2.0'
 const SUPPORTED_PROTOCOLS = Object.freeze(['2025-06-18'])
 const DEFAULT_PROTOCOL = '2025-06-18'
-const MAX_TOOL_TEXT = 32 * 1024
 
 const TOOL_DESCRIPTORS = Object.freeze([
   {
@@ -30,7 +51,7 @@ const TOOL_DESCRIPTORS = Object.freeze([
       additionalProperties: false,
       required: ['title'],
       properties: {
-        title: { type: 'string', minLength: 1, maxLength: 120 },
+        title: { type: 'string', minLength: 1, maxLength: TITLE_MAX },
       },
     },
   },
@@ -42,8 +63,8 @@ const TOOL_DESCRIPTORS = Object.freeze([
       additionalProperties: false,
       required: ['room_id'],
       properties: {
-        room_id: { type: 'string', minLength: 1, maxLength: 128 },
-        display_name: { type: 'string', minLength: 1, maxLength: 80 },
+        room_id: { type: 'string', minLength: 1, maxLength: IDENTIFIER_MAX },
+        display_name: { type: 'string', minLength: 1, maxLength: DISPLAY_NAME_MAX },
       },
     },
   },
@@ -55,25 +76,25 @@ const TOOL_DESCRIPTORS = Object.freeze([
       additionalProperties: false,
       required: ['room_id', 'client_message_id', 'text'],
       properties: {
-        room_id: { type: 'string', minLength: 1, maxLength: 128 },
-        client_message_id: { type: 'string', minLength: 1, maxLength: 128 },
-        text: { type: 'string', minLength: 1, maxLength: MAX_TOOL_TEXT },
+        room_id: { type: 'string', minLength: 1, maxLength: IDENTIFIER_MAX },
+        client_message_id: { type: 'string', minLength: 1, maxLength: CLIENT_MESSAGE_ID_MAX },
+        text: { type: 'string', minLength: 1, maxLength: MESSAGE_TEXT_MAX },
         reply_to_seq: { type: 'integer', minimum: 1 },
       },
     },
   },
   {
     name: 'message_read',
-    description: 'Read ordered messages after a durable sequence cursor, optionally waiting up to 20 seconds for a new message.',
+    description: `Read ordered messages after a durable sequence cursor, optionally waiting up to ${READ_HOLD_MAX_MS / 1000} seconds for a new message.`,
     inputSchema: {
       type: 'object',
       additionalProperties: false,
       required: ['room_id'],
       properties: {
-        room_id: { type: 'string', minLength: 1, maxLength: 128 },
+        room_id: { type: 'string', minLength: 1, maxLength: IDENTIFIER_MAX },
         after_seq: { type: 'integer', minimum: 0, default: 0 },
-        limit: { type: 'integer', minimum: 1, maximum: 200, default: 50 },
-        wait_ms: { type: 'integer', minimum: 0, maximum: 20000, default: 0 },
+        limit: { type: 'integer', minimum: 1, maximum: READ_PAGE_MAX, default: 50 },
+        wait_ms: { type: 'integer', minimum: 0, maximum: READ_HOLD_MAX_MS, default: 0 },
       },
     },
   },
@@ -131,24 +152,24 @@ function validateArguments(name, args) {
   if (Object.keys(args).some(key => !allowed.has(key))) return 'tool arguments contain an unknown field'
   if (name === 'room_create') {
     if (typeof args.title !== 'string') return 'title must be a string'
-    if (args.title.trim().length < 1 || args.title.trim().length > 120) return 'title must contain 1 to 120 characters'
+    if (args.title.trim().length < 1 || args.title.trim().length > TITLE_MAX) return `title must contain 1 to ${TITLE_MAX} characters`
   }
   if (['room_join', 'message_send', 'message_read'].includes(name) && typeof args.room_id !== 'string') return 'room_id must be a string'
   if (name === 'room_join' && args.display_name !== undefined) {
     if (typeof args.display_name !== 'string') return 'display_name must be a string'
-    if (args.display_name.trim().length < 1 || args.display_name.trim().length > 80) return 'display_name must contain 1 to 80 characters'
+    if (args.display_name.trim().length < 1 || args.display_name.trim().length > DISPLAY_NAME_MAX) return `display_name must contain 1 to ${DISPLAY_NAME_MAX} characters`
   }
   if (name === 'message_send') {
     if (typeof args.client_message_id !== 'string') return 'client_message_id must be a string'
     if (typeof args.text !== 'string') return 'text must be a string'
-    if (args.client_message_id.length < 1 || args.client_message_id.length > 128) return 'client_message_id must contain 1 to 128 characters'
-    if (args.text.trim().length < 1 || args.text.length > MAX_TOOL_TEXT) return `text must contain 1 to ${MAX_TOOL_TEXT} characters`
+    if (args.client_message_id.length < 1 || args.client_message_id.length > CLIENT_MESSAGE_ID_MAX) return `client_message_id must contain 1 to ${CLIENT_MESSAGE_ID_MAX} characters`
+    if (args.text.trim().length < 1 || args.text.length > MESSAGE_TEXT_MAX) return `text must contain 1 to ${MESSAGE_TEXT_MAX} characters`
     if (args.reply_to_seq !== undefined && (!Number.isSafeInteger(args.reply_to_seq) || args.reply_to_seq < 1)) return 'reply_to_seq must be a positive integer'
   }
   if (name === 'message_read') {
     if (args.after_seq !== undefined && (!Number.isSafeInteger(args.after_seq) || args.after_seq < 0)) return 'after_seq must be a non-negative integer'
-    if (args.limit !== undefined && (!Number.isSafeInteger(args.limit) || args.limit < 1 || args.limit > 200)) return 'limit must be between 1 and 200'
-    if (args.wait_ms !== undefined && (!Number.isSafeInteger(args.wait_ms) || args.wait_ms < 0 || args.wait_ms > 20_000)) return 'wait_ms must be between 0 and 20000'
+    if (args.limit !== undefined && (!Number.isSafeInteger(args.limit) || args.limit < 1 || args.limit > READ_PAGE_MAX)) return `limit must be between 1 and ${READ_PAGE_MAX}`
+    if (args.wait_ms !== undefined && (!Number.isSafeInteger(args.wait_ms) || args.wait_ms < 0 || args.wait_ms > READ_HOLD_MAX_MS)) return `wait_ms must be between 0 and ${READ_HOLD_MAX_MS}`
   }
   return null
 }
@@ -284,7 +305,7 @@ export function createMcpServer({
 
   const lines = createInterface({ input, crlfDelay: Infinity, terminal: false })
   lines.on('line', line => {
-    if (Buffer.byteLength(line) > MAX_FRAME_BYTES) {
+    if (Buffer.byteLength(line) > FRAME_MAX_BYTES) {
       write(rpcError(null, -32600, 'request is too large'))
       return
     }

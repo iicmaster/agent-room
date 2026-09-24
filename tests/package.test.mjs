@@ -18,6 +18,8 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
+import { MIN_NODE_VERSION } from '../server/runtime.mjs';
+
 const execFile = promisify(execFileCallback);
 const repoRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const packageScript = join(repoRoot, 'scripts', 'package-release.mjs');
@@ -154,7 +156,7 @@ test('portable manifests and package metadata have exact closed shapes', async (
     version: '0.1.0',
     private: true,
     type: 'module',
-    engines: { node: '>=24' },
+    engines: { node: '>=24.15' },
     scripts: {
       test: 'node --test',
       package: 'node scripts/package-release.mjs',
@@ -162,6 +164,11 @@ test('portable manifests and package metadata have exact closed shapes', async (
   });
   assert.equal(Object.hasOwn(packageJson, 'dependencies'), false);
   assert.equal(Object.hasOwn(packageJson, 'devDependencies'), false);
+});
+
+test('engines.node agrees with the runtime Node floor and must not drift', async () => {
+  const packageJson = await readJson(join(repoRoot, 'package.json'));
+  assert.equal(packageJson.engines.node, `>=${MIN_NODE_VERSION}`);
 });
 
 test('release packaging creates two materialized byte-identical runtime artifacts', async (t) => {
@@ -196,7 +203,12 @@ test('release packaging creates two materialized byte-identical runtime artifact
     'web',
   ]);
 
-  await collectTree(out);
+  const artifactPaths = [...(await collectTree(out)).keys()];
+  assert.equal(
+    artifactPaths.some((path) => /(^|[/\\])node_modules([/\\]|$)/.test(path)),
+    false,
+    'packaged artifacts must not contain a node_modules directory',
+  );
   assert.deepEqual(
     await readFile(join(portableRoot, 'plugin.json')),
     await readFile(join(repoRoot, 'plugin.json')),

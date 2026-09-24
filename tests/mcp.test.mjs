@@ -7,6 +7,8 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
+import { MESSAGE_TEXT_MAX } from '../server/constants.mjs'
+
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const SERVER = join(ROOT, 'server', 'mcp-stdio.mjs')
 
@@ -176,7 +178,7 @@ test('two real MCP stdio clients with separate PLUGIN_DATA share one daemon and 
   const textBoundary = await alpha.tool('message_send', {
     room_id: room.id,
     client_message_id: 'too-long',
-    text: 'x'.repeat(32 * 1024 + 1),
+    text: 'x'.repeat(MESSAGE_TEXT_MAX + 1),
   })
   assert.equal(textBoundary.isError, true)
   assert.equal(textBoundary.structuredContent.error.code, 'invalid_arguments')

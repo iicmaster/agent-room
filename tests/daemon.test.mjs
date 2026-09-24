@@ -9,6 +9,7 @@ import test from 'node:test'
 
 import { requestDaemon } from '../server/daemon-client.mjs'
 import { startRoomDaemon } from '../server/roomd.mjs'
+import { MESSAGE_TEXT_MAX, READ_HOLD_MAX_MS, READ_PAGE_MAX } from '../server/constants.mjs'
 
 const actor = (id, displayName) => ({ id, displayName })
 
@@ -94,7 +95,7 @@ test('shared daemon serializes chat, long-polls, and serves an authenticated rea
       roomId: room.id,
       afterSeq: sent.message.seq,
       limit: 50,
-      waitMs: 20_000,
+      waitMs: READ_HOLD_MAX_MS,
     },
     timeoutMs: 25_000,
     signal: cancellation.signal,
@@ -118,7 +119,7 @@ test('shared daemon serializes chat, long-polls, and serves an authenticated rea
       roomId: room.id,
       afterSeq: sent.message.seq,
       limit: 50,
-      waitMs: 20_000,
+      waitMs: READ_HOLD_MAX_MS,
     },
   })}\n`)
   for (let index = 0; index < 100; index += 1) repeatedChunkSocket.write('x')
@@ -226,6 +227,14 @@ test('shared daemon serializes chat, long-polls, and serves an authenticated rea
   }
   assert.deepEqual(caughtUp.map(message => message.seq), Array.from({ length: 205 }, (_, index) => index + 1))
 
+  // The viewer route clamps oversized page requests to the owned read bound.
+  const clampedPage = await fetch(new URL(
+    `/api/rooms/${encodeURIComponent(room.id)}/messages?after=0&limit=${READ_PAGE_MAX + 1}&token=${encodeURIComponent(token)}`,
+    viewer.origin,
+  ))
+  assert.equal(clampedPage.status, 200)
+  assert.equal((await clampedPage.json()).messages.length, READ_PAGE_MAX)
+
   const tailController = new AbortController()
   const tailResponse = await fetch(new URL(
     `/api/rooms/${encodeURIComponent(room.id)}/events?after=0&token=${encodeURIComponent(token)}`,
@@ -239,7 +248,7 @@ test('shared daemon serializes chat, long-polls, and serves an authenticated rea
       roomId: room.id,
       actorId: alice.id,
       clientMessageId: `large-${index}`,
-      text: 'x'.repeat(32 * 1024),
+      text: 'x'.repeat(MESSAGE_TEXT_MAX),
     })
   }
   const largeMessages = []

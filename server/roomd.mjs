@@ -17,7 +17,6 @@ import { fileURLToPath } from 'node:url'
 import {
   APP_VERSION,
   DAEMON_PROTOCOL_VERSION,
-  MAX_FRAME_BYTES,
   assertSupportedRuntime,
   atomicWriteJson,
   daemonSocketPath,
@@ -25,31 +24,31 @@ import {
   loadOrCreateViewerToken,
   runtimeRecordPath,
 } from './runtime.mjs'
+import {
+  FRAME_MAX_BYTES,
+  PUBLIC_ERRORS,
+  READ_HOLD_MAX_MS,
+  READ_PAGE_MAX,
+  SSE_BACKLOG_MAX_BYTES,
+  SSE_BACKLOG_MAX_MESSAGES,
+  WEB_ASSET_MAX_BYTES,
+} from './constants.mjs'
+
+// Run the runtime gate before any other work. Direct launches report one
+// diagnosable line and exit 1 with no stack trace; importers get a catchable
+// rejection so harnesses can assert on the failure.
+try {
+  assertSupportedRuntime()
+} catch (error) {
+  if (launchedDirectly()) {
+    process.stderr.write(`agent-roomd: ${error?.code ?? 'startup_failed'}: ${error?.message}\n`)
+    process.exit(1)
+  }
+  throw error
+}
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const DEFAULT_WEB_ROOT = resolve(HERE, '..', 'web')
-const MAX_WAIT_MS = 20_000
-const MAX_SSE_BACKLOG_MESSAGES = 50
-const MAX_SSE_BACKLOG_BYTES = 512 * 1024
-
-const PUBLIC_ERRORS = Object.freeze({
-  actor_not_member: 'actor is not a member of this room',
-  client_message_id_conflict: 'client_message_id was already used for different content',
-  data_directory_invalid: 'agent-room data directory is invalid',
-  invalid_actor_id: 'actor id is invalid',
-  invalid_client_message_id: 'client_message_id is invalid',
-  invalid_cursor: 'message cursor is invalid',
-  invalid_display_name: 'display name is invalid',
-  invalid_limit: 'message limit is invalid',
-  invalid_reply_to_seq: 'reply target is invalid',
-  invalid_room_id: 'room id is invalid',
-  invalid_text: 'message text is invalid',
-  invalid_title: 'room title is invalid',
-  message_not_found: 'message was not found',
-  reply_room_mismatch: 'reply target belongs to another room',
-  room_not_found: 'room was not found',
-  sqlite_version_unsupported: 'SQLite runtime is unsupported',
-})
 
 function publicFailure(error) {
   const code = typeof error?.code === 'string' && /^[a-z0-9_]{1,64}$/.test(error.code)
@@ -233,7 +232,7 @@ export async function startRoomDaemon({
     for (const message of messages) {
       const candidate = { messages: [...selected, message], next_seq: message.seq, has_more: false }
       const envelope = { id: '00000000-0000-0000-0000-000000000000', result: candidate }
-      if (Buffer.byteLength(JSON.stringify(envelope)) + 1 > MAX_FRAME_BYTES) {
+      if (Buffer.byteLength(JSON.stringify(envelope)) + 1 > FRAME_MAX_BYTES) {
         if (selected.length === 0) {
           throw Object.assign(new Error('message cannot fit the daemon frame'), { code: 'message_frame_too_large' })
         }
@@ -298,7 +297,7 @@ export async function startRoomDaemon({
       try {
         const path = join(webRoot, name)
         const info = lstatSync(path)
-        if (info.isSymbolicLink() || !info.isFile() || info.size > 1024 * 1024) throw new Error('invalid asset')
+        if (info.isSymbolicLink() || !info.isFile() || info.size > WEB_ASSET_MAX_BYTES) throw new Error('invalid asset')
         response.writeHead(200, { 'Content-Type': contentType })
         response.end(readFileSync(path))
       } catch {
@@ -320,7 +319,7 @@ export async function startRoomDaemon({
         const messages = database.readRoomMessages({
           roomId: decodeURIComponent(messagesMatch[1]),
           afterSeq,
-          limit: Math.min(requestedLimit, 200),
+          limit: Math.min(requestedLimit, READ_PAGE_MAX),
         })
         writeJson(response, 200, { messages, next_seq: messages.at(-1)?.seq ?? afterSeq })
         return
@@ -335,10 +334,10 @@ export async function startRoomDaemon({
         const backlog = database.readRoomMessages({
           roomId,
           afterSeq,
-          limit: MAX_SSE_BACKLOG_MESSAGES,
+          limit: SSE_BACKLOG_MAX_MESSAGES,
         })
         const lastBacklogSeq = backlog.at(-1)?.seq ?? afterSeq
-        const hasMore = backlog.length === MAX_SSE_BACKLOG_MESSAGES
+        const hasMore = backlog.length === SSE_BACKLOG_MAX_MESSAGES
           && database.readRoomMessages({ roomId, afterSeq: lastBacklogSeq, limit: 1 }).length > 0
         const backlogBytes = backlog.reduce(
           (total, message) => total + Buffer.byteLength(JSON.stringify(message)) + 64,
@@ -350,7 +349,7 @@ export async function startRoomDaemon({
           'Cache-Control': 'no-store',
         })
         response.write('retry: 1000\n\n')
-        if (hasMore || backlogBytes > MAX_SSE_BACKLOG_BYTES) {
+        if (hasMore || backlogBytes > SSE_BACKLOG_MAX_BYTES) {
           response.end(`event: catchup_required\ndata: ${JSON.stringify({ after: afterSeq })}\n\n`)
           return
         }
@@ -445,7 +444,7 @@ export async function startRoomDaemon({
       const afterSeq = params.afterSeq ?? 0
       const limit = params.limit ?? 50
       let messages = database.readMessages({ roomId: params.roomId, actorId: actor?.id, afterSeq, limit })
-      const waitMs = Math.min(Math.max(Number(params.waitMs) || 0, 0), MAX_WAIT_MS)
+      const waitMs = Math.min(Math.max(Number(params.waitMs) || 0, 0), READ_HOLD_MAX_MS)
       if (messages.length === 0 && waitMs > 0) {
         await waitForRoom(params.roomId, waitMs, signal)
         if (signal?.aborted) throw Object.assign(new Error('request was cancelled'), { code: 'request_cancelled' })
@@ -479,7 +478,7 @@ export async function startRoomDaemon({
     socket.on('data', chunk => {
       if (answered || processing) return
       buffer += chunk
-      if (Buffer.byteLength(buffer) > MAX_FRAME_BYTES) {
+      if (Buffer.byteLength(buffer) > FRAME_MAX_BYTES) {
         answer({ id: null, error: { code: 'request_too_large', message: 'request is too large' } })
         return
       }

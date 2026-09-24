@@ -6,7 +6,7 @@ viewer follows committed messages in sequence order.
 
 ## Requirements
 
-- Node.js 24 or newer.
+- Node.js 24.15 or newer.
 - A Node build containing SQLite 3.51.3 or newer. The server checks this before opening data.
 - Agents running as the same operating-system user on one host. Remote and multi-host rooms
   are not part of version 0.1.0.

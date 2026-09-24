@@ -4,6 +4,14 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
 import {
+  CLIENT_MESSAGE_ID_MAX,
+  DISPLAY_NAME_MAX,
+  IDENTIFIER_MAX,
+  MESSAGE_TEXT_MAX,
+  READ_PAGE_MAX,
+  TITLE_MAX,
+} from './constants.mjs'
+import {
   AgentRoomRuntimeError,
   assertSupportedRuntime,
   ensurePrivateDirectory,
@@ -11,16 +19,18 @@ import {
 
 export const DATABASE_FILENAME = 'agent-room.sqlite'
 export const DATABASE_SCHEMA_VERSION = 1
+// Bounds are owned by constants.mjs (AD-9); this grouping only re-points them.
 export const DATABASE_LIMITS = Object.freeze({
-  actorId: 128,
-  clientMessageId: 128,
-  displayName: 80,
-  title: 120,
-  messageText: 32 * 1024,
-  readLimit: 200,
+  actorId: IDENTIFIER_MAX,
+  clientMessageId: CLIENT_MESSAGE_ID_MAX,
+  displayName: DISPLAY_NAME_MAX,
+  title: TITLE_MAX,
+  messageText: MESSAGE_TEXT_MAX,
+  readLimit: READ_PAGE_MAX,
 })
 
-const IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/
+// Bounds are owned by constants.mjs (AD-9); the pattern only derives from them.
+const IDENTIFIER_PATTERN = new RegExp(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,${IDENTIFIER_MAX - 1}}$`)
 const MESSAGE_PROJECTION = `
   SELECT
     seq,

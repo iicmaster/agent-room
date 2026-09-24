@@ -15,11 +15,17 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { homedir, platform } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 
+import { DISPLAY_NAME_MAX, IDENTIFIER_MAX } from './constants.mjs'
+
 export const APP_VERSION = '0.1.0'
 export const DAEMON_PROTOCOL_VERSION = 1
-export const MIN_NODE_MAJOR = 24
+export const MIN_NODE_VERSION = '24.15'
 export const MIN_SQLITE_VERSION = '3.51.3'
-export const MAX_FRAME_BYTES = 1024 * 1024
+
+export { FRAME_MAX_BYTES as MAX_FRAME_BYTES } from './constants.mjs'
+
+// Bounds are owned by constants.mjs (AD-9); the pattern only derives from them.
+const IDENTIFIER_PATTERN = new RegExp(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,${IDENTIFIER_MAX - 1}}$`)
 
 export class AgentRoomRuntimeError extends Error {
   constructor(code, message) {
@@ -48,17 +54,16 @@ export function assertSupportedRuntime({
   nodeVersion = process.versions.node,
   sqliteVersion = process.versions.sqlite,
 } = {}) {
-  const major = Number.parseInt(String(nodeVersion ?? '').split('.')[0], 10)
-  if (!Number.isInteger(major) || major < MIN_NODE_MAJOR) {
+  if (!nodeVersion || compareVersions(nodeVersion, MIN_NODE_VERSION) < 0) {
     throw new AgentRoomRuntimeError(
       'node_version_unsupported',
-      `agent-room requires Node ${MIN_NODE_MAJOR} or newer`,
+      `agent-room requires Node ${MIN_NODE_VERSION} or newer; found ${nodeVersion || 'unknown'}`,
     )
   }
   if (!sqliteVersion || compareVersions(sqliteVersion, MIN_SQLITE_VERSION) < 0) {
     throw new AgentRoomRuntimeError(
       'sqlite_version_unsupported',
-      `agent-room requires SQLite ${MIN_SQLITE_VERSION} or newer`,
+      `agent-room requires SQLite ${MIN_SQLITE_VERSION} or newer; found ${sqliteVersion || 'unknown'}`,
     )
   }
   return { nodeVersion: String(nodeVersion), sqliteVersion: String(sqliteVersion) }
@@ -116,7 +121,7 @@ export function startupLockPath(dataDir) {
   return join(resolve(dataDir), 'roomd.start.lock')
 }
 
-function regularPrivateFile(path, maxBytes = 64 * 1024) {
+export function regularPrivateFile(path, maxBytes = 64 * 1024) {
   const info = lstatSync(path)
   if (info.isSymbolicLink() || !info.isFile() || info.size > maxBytes) {
     throw new AgentRoomRuntimeError('state_file_invalid', 'agent-room state file is not a bounded regular file')
@@ -148,7 +153,7 @@ export function atomicWriteJson(path, value, mode = 0o600) {
 
 function cleanDisplayName(value) {
   const text = String(value ?? '').replace(/[\u0000-\u001f\u007f]/g, ' ').trim().replace(/\s+/g, ' ')
-  return text.slice(0, 80) || 'agent'
+  return text.slice(0, DISPLAY_NAME_MAX) || 'agent'
 }
 
 export function loadOrCreateIdentity(dataDir, suggestedName = 'agent') {
@@ -156,7 +161,7 @@ export function loadOrCreateIdentity(dataDir, suggestedName = 'agent') {
   const path = join(directory, 'identity.json')
   const read = () => {
     const value = readJsonFile(path, { maxBytes: 4096 })
-    if (typeof value.id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(value.id)) {
+    if (typeof value.id !== 'string' || !IDENTIFIER_PATTERN.test(value.id)) {
       throw new AgentRoomRuntimeError('identity_invalid', 'agent-room identity has an invalid id')
     }
     return { id: value.id, displayName: cleanDisplayName(value.displayName), path }

@@ -21,7 +21,7 @@ async function assertInvalidLock(dataDir) {
 test('oversized startup lock fails closed without reading the whole file repeatedly', async t => {
   const dataDir = await mkdtemp(join(tmpdir(), 'agent-room-lock-large-'))
   t.after(() => rm(dataDir, { recursive: true, force: true }))
-  writeFileSync(startupLockPath(dataDir), Buffer.alloc(1024 * 1024, 0x61))
+  writeFileSync(startupLockPath(dataDir), Buffer.alloc(4096, 0x61))
   await assertInvalidLock(dataDir)
 })
 
