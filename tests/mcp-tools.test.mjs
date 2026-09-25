@@ -704,6 +704,8 @@ test('first run: no configured Chat ID fails with coded guidance and the process
   const failure = structuredError(await mcp.tool('room_status'))
   assert.equal(failure.error.code, 'invalid_request')
   assert.match(failure.error.message, /No Chat ID is configured/)
+  // The guidance names the one-time command and never blocks the process.
+  assert.match(failure.error.message, /agent-room setup/)
 
   // The process stays alive and answers JSON-RPC afterwards.
   const listed = await mcp.request('tools/list')

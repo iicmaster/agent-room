@@ -64,7 +64,7 @@ export function loadChatIdConfig(pluginDataDir) {
   if (!existsSync(path)) {
     throw new AgentRoomRuntimeError(
       'invalid_request',
-      'No Chat ID is configured for this installation. The Chat ID is chosen once during setup and stored in this installation\'s config; configure it before using the agent-room tools.',
+      'No Chat ID is configured for this installation. Run "agent-room setup" in your terminal to choose one (it verifies the name is free), then reconnect.',
     )
   }
   let value
