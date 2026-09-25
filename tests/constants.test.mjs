@@ -237,6 +237,8 @@ test('every v0.1 public error code has an HTTP status declared once', () => {
   const codes = Object.keys(PUBLIC_ERRORS).sort()
   assert.deepEqual(codes, [
     'actor_not_member',
+    'ambiguous_chat_id',
+    'chat_id_not_found',
     'chat_id_taken',
     'client_message_id_conflict',
     'daemon_start_busy',
@@ -294,6 +296,11 @@ test('every v0.1 public error code has an HTTP status declared once', () => {
     // Story 1.5: a live chat id collision is a conflicted state — refused
     // explicitly, never suffixed.
     chat_id_taken: 409,
+    // Story 1.7: direct-open resolution never guesses — a name with no
+    // durable claim is a 404 miss, and a name held by several Actors is a
+    // 409 whose error envelope carries the candidates list.
+    chat_id_not_found: 404,
+    ambiguous_chat_id: 409,
     data_directory_invalid: 500,
     database_schema_unsupported: 500,
     sqlite_version_unsupported: 500,

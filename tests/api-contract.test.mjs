@@ -178,15 +178,19 @@ test('the implemented mark covers exactly the live frozen routes', () => {
   // The implemented mark is the startup contract's data side (server.mjs
   // asserts every marked route has a registered handler and vice versa).
   // GET /health went live in Story 1.3, POST /api/auth/local in 1.4, the
-  // session connect surface (POST/PATCH/DELETE /api/session) in 1.5, and the
-  // presence + status reads (GET /api/presence, GET /api/status) in 1.6;
-  // 1.7-1.8 extend additively.
+  // session connect surface (POST/PATCH/DELETE /api/session) in 1.5, the
+  // presence + status reads (GET /api/presence, GET /api/status) in 1.6, and
+  // the conversation surface (POST /api/rooms/direct and the messages pair)
+  // in 1.7; 1.8 extends additively.
   const implemented = ROUTE_TABLE.filter(route => route.implemented === true)
   assert.deepEqual(implemented.map(routeKey), [
     'POST /api/session',
     'PATCH /api/session',
     'DELETE /api/session',
     'GET /api/presence',
+    'POST /api/rooms/direct',
+    'GET /api/rooms/:id/messages',
+    'POST /api/rooms/:id/messages',
     'GET /api/status',
     'POST /api/auth/local',
     'GET /health',

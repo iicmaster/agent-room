@@ -18,11 +18,23 @@
 // to that key's fingerprint; the Story 1.5 session connect surface —
 // POST/PATCH/DELETE /api/session bind, rename, and release the session's
 // Chat ID against the live-session registry (server/core/session-registry.mjs)
-// and the durable chat_id_claims index in the store; and the Story 1.6
+// and the durable chat_id_claims index in the store; the Story 1.6
 // presence surface — GET /api/presence assembles the online and
 // offline-recently groups over the live registry and the claims index, and
 // GET /api/status answers {realm_id, version, broadcast_room_id} for FR-21
-// and the Story 1.8 checkpoint. Liveness is one mechanism: the actor-class
+// and the Story 1.8 checkpoint; and the Story 1.7 conversation surface —
+// POST /api/rooms/direct resolves a chat id through the durable claims index
+// (zero claims answer chat_id_not_found; several answer ambiguous_chat_id
+// with the candidates list riding the error envelope; target_fingerprint
+// completes disambiguation — never a guess; self-DM is refused) and opens
+// the idempotent pair room, GET /api/rooms/:id/messages long-polls the
+// durable log (a bounded in-process wait loop re-polling the store — no open
+// read transaction while waiting; a deadline return is a normal
+// possibly-empty page carrying next_after_seq and head_seq), and
+// POST /api/rooms/:id/messages appends idempotently (status committed, or
+// the coded client_message_id_conflict; the sender attribution always comes
+// from the session token's live Chat ID, never from the caller's hands).
+// Liveness is one mechanism: the actor-class
 // auth stage's sliding TTL refresh and the presence touch are the same event
 // (touch with the 1.5 persist pattern on every authenticated request) — no
 // dedicated heartbeat surface exists server-side; the 60 s client heartbeat
@@ -47,13 +59,19 @@ import {
   sharedDataDirectory,
 } from '../runtime.mjs'
 import {
+  CHAT_ID_INVALID_MESSAGE,
   CLAIMS_TTL_MS,
   CLIENT_TYPES,
+  LONGPOLL_POLL_INTERVAL_MS,
   PRESENCE_TTL_MS,
   PRUNE_INTERVAL_MS,
   PROTOCOL_HEADER,
   PROTOCOL_VERSION,
   PUBLIC_ERROR_STATUS,
+  READ_HOLD_MAX_MS,
+  READ_PAGE_DEFAULT,
+  READ_PAGE_MAX,
+  chatIdForms,
 } from '../constants.mjs'
 import { openRoomLog } from '../store/room-log.mjs'
 import { bootstrapRealm } from '../core/realm.mjs'
@@ -74,6 +92,13 @@ import { readLocalToken } from './local-token.mjs'
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1'])
 const API_PREFIX = '/api/'
 const SUCCESS_STATUS = 200
+
+// Canonical Actor fingerprint shape (see ../keys.mjs): `sha256:` plus 64
+// lowercase hex characters over the raw 32-byte public key. The same shape
+// every module that handles fingerprints cites; target_fingerprint on the
+// direct-open route must arrive in this form or the request is a shape
+// rejection.
+const FINGERPRINT_PATTERN = /^sha256:[0-9a-f]{64}$/
 
 const REGISTERED_HANDLERS = new Map()
 
@@ -317,6 +342,206 @@ registerHandler('GET /api/status', function status(context) {
     version: APP_VERSION,
     broadcast_room_id: broadcastRoom.id,
   }
+}, 'actor')
+
+// Story 1.7 conversation surface. Identity discipline (NFR-3) holds across
+// all three handlers: the caller's Actor fingerprint and Chat ID come only
+// from the session token (the principal and the session's live row) — no
+// request field carries sender identity or authority.
+
+// POST /api/rooms/direct: open (or reuse) the pair room with the agent whose
+// Chat ID is chat_id. Resolution runs over the durable claims index
+// (listClaimsForChatId, most recent first), deduplicated to the most recent
+// claim per Actor:
+//   0 claims (or none matching a supplied target_fingerprint)
+//         → 404 chat_id_not_found — the miss is named, never guessed past;
+//   several Actors (and no target_fingerprint)
+//         → 409 ambiguous_chat_id whose error envelope carries candidates
+//           [{fingerprint, last_seen}] — the caller picks one and retries
+//           with target_fingerprint, which completes resolution;
+//   exactly one resolved Actor
+//         → the canonical pair room via the store's pair-key idempotency, so
+//           concurrent opens (either argument order) converge on one room.
+// The pair is computed with the CALLER's token-derived fingerprint; a
+// resolved target equal to the caller is a self-DM, refused (v0.2 refuses
+// self-DM per D13) with a distinct message on the invalid_request family.
+// The response is deliberately minimal: room_id and kind — the pair room's
+// full shape is the store's, not the wire's.
+registerHandler('POST /api/rooms/direct', function directOpen(context) {
+  const principal = sessionPrincipalOf(context)
+  if (principal.ok === false) return principal
+  const chatId = context.body?.chat_id
+  if (chatId === undefined || chatId === null || chatId === '') {
+    return reject('invalid_request', 'chat_id is required: the Chat ID of the agent to open a pair room with')
+  }
+  const forms = chatIdForms(chatId)
+  if (forms === null) return reject('invalid_chat_id', CHAT_ID_INVALID_MESSAGE)
+  const targetFingerprint = context.body?.target_fingerprint
+  if (targetFingerprint !== undefined && targetFingerprint !== null
+    && (typeof targetFingerprint !== 'string' || !FINGERPRINT_PATTERN.test(targetFingerprint))) {
+    return reject('invalid_actor_id', 'target_fingerprint must be sha256: followed by 64 lowercase hex characters')
+  }
+
+  const claims = context.store.listClaimsForChatId(forms.display)
+  const mostRecentPerActor = new Map()
+  for (const claim of claims) {
+    if (!mostRecentPerActor.has(claim.actor_fingerprint)) {
+      mostRecentPerActor.set(claim.actor_fingerprint, claim)
+    }
+  }
+  let candidates = [...mostRecentPerActor.values()]
+  if (targetFingerprint !== undefined && targetFingerprint !== null) {
+    candidates = candidates.filter(claim => claim.actor_fingerprint === targetFingerprint)
+  }
+  if (candidates.length === 0) {
+    return reject(
+      'chat_id_not_found',
+      targetFingerprint !== undefined && targetFingerprint !== null
+        ? `no claim by the requested fingerprint exists for the chat id "${forms.display}"`
+        : `no actor has claimed the chat id "${forms.display}"`,
+    )
+  }
+  if (candidates.length > 1) {
+    return reject(
+      'ambiguous_chat_id',
+      `the chat id "${forms.display}" is claimed by ${candidates.length} actors; retry with one candidate fingerprint as target_fingerprint`,
+      {
+        candidates: candidates.map(claim => ({
+          fingerprint: claim.actor_fingerprint,
+          last_seen: claim.last_seen_at,
+        })),
+      },
+    )
+  }
+  const target = candidates[0].actor_fingerprint
+  if (target === principal.actorFingerprint) {
+    return reject('invalid_request', 'opening a pair room with your own chat id is refused (self-DM)')
+  }
+  const room = context.store.openDirectRoom({
+    actorFingerprints: [principal.actorFingerprint, target],
+  })
+  return { room_id: room.id, kind: room.kind }
+}, 'actor')
+
+// GET /api/rooms/:id/messages: the long-poll read. The page semantics are
+// the frozen read contract: after_seq strictly-greater, page ≤ READ_PAGE_MAX,
+// wait_ms a server hold capped at READ_HOLD_MAX_MS (anything above is refused
+// 400 before any waiting). The wait is a bounded in-process loop that
+// re-polls the store every LONGPOLL_POLL_INTERVAL_MS and sleeps between polls
+// — the store read is a short statement-level read, never a held read
+// transaction, so a held response holds no store lock. A message arriving at
+// any point returns immediately; silence runs out to the deadline and returns
+// a normal possibly-empty page — never 204, never an error. Every response
+// carries next_after_seq (the cursor to resume from: the last message's seq,
+// or the requested after_seq when the page is empty) and head_seq (the
+// room's largest allocated seq). Member ACL reuses the store: readPage (and
+// headSeq, ordered after it) enforce room_not_found / actor_not_member.
+function integerQuery(value, name, { min, max, code }) {
+  if (value === undefined || value === null || value === '') return { default: true, value: null }
+  if (typeof value !== 'string' || !/^[0-9]+$/.test(value)) {
+    return { error: reject(code, `${name} must be an integer`) }
+  }
+  const parsed = Number(value)
+  if (!Number.isSafeInteger(parsed) || parsed < min || parsed > max) {
+    return { error: reject(code, `${name} must be an integer from ${min} to ${max}`) }
+  }
+  return { value: parsed }
+}
+
+registerHandler('GET /api/rooms/:id/messages', async function readMessages(context) {
+  const principal = sessionPrincipalOf(context)
+  if (principal.ok === false) return principal
+
+  const afterSeqQuery = integerQuery(context.query?.after_seq, 'after_seq', {
+    min: 0, max: Number.MAX_SAFE_INTEGER, code: 'invalid_cursor',
+  })
+  if (afterSeqQuery.error) return afterSeqQuery.error
+  const limitQuery = integerQuery(context.query?.limit, 'limit', {
+    min: 1, max: READ_PAGE_MAX, code: 'invalid_limit',
+  })
+  if (limitQuery.error) return limitQuery.error
+  const waitMsQuery = integerQuery(context.query?.wait_ms, 'wait_ms', {
+    min: 0, max: READ_HOLD_MAX_MS, code: 'invalid_request',
+  })
+  if (waitMsQuery.error) return waitMsQuery.error
+
+  const roomId = context.params?.id
+  const afterSeq = afterSeqQuery.value ?? 0
+  const limit = limitQuery.value ?? READ_PAGE_DEFAULT
+  const waitMs = waitMsQuery.value ?? 0
+  const deadline = Date.now() + waitMs
+
+  for (;;) {
+    const messages = context.store.readPage({
+      roomId,
+      actorFingerprint: principal.actorFingerprint,
+      afterSeq,
+      limit,
+    })
+    if (messages.length > 0 || Date.now() >= deadline) {
+      const headSeq = context.store.headSeq(roomId, { actorFingerprint: principal.actorFingerprint })
+      return {
+        messages,
+        next_after_seq: messages.length > 0 ? messages[messages.length - 1].seq : afterSeq,
+        head_seq: headSeq,
+      }
+    }
+    await new Promise(resolvePromise => { setTimeout(resolvePromise, LONGPOLL_POLL_INTERVAL_MS) })
+  }
+}, 'actor')
+
+// POST /api/rooms/:id/messages: the idempotent append. The idempotency tuple
+// (Actor fingerprint, room, client_message_id) lives in the store: a matching
+// resend returns the original committed message (status committed, same seq —
+// the outcome_unknown resolution), a conflicting payload surfaces the coded
+// client_message_id_conflict. The attribution Chat ID is declared in the body
+// (the frozen route vocabulary) but holds no authority: it must match the
+// session's CURRENT live Chat ID — the name bound from the token side — and
+// the value attributed to the message is always the live row's display form,
+// so a session can never attribute a message to a name it does not hold.
+function requiredString(value, name, detail) {
+  if (value === undefined || value === null || value === '') {
+    return { error: reject('invalid_request', detail ?? `${name} is required`) }
+  }
+  if (typeof value !== 'string') {
+    return { error: reject('invalid_request', `${name} must be a string`) }
+  }
+  return { value }
+}
+
+registerHandler('POST /api/rooms/:id/messages', function appendMessageRoute(context) {
+  const principal = sessionPrincipalOf(context)
+  if (principal.ok === false) return principal
+
+  const chatIdField = requiredString(context.body?.chat_id, 'chat_id',
+    'chat_id is required: this session\'s connected Chat ID')
+  if (chatIdField.error) return chatIdField.error
+  const liveRegistry = context.liveSessionRegistry ?? LIVE_SESSION_REGISTRY
+  const live = liveRegistry.lookup(principal.sessionKey)
+  if (live === null) {
+    return reject('invalid_request', 'the session has no connected Chat ID; connect before sending')
+  }
+  const forms = chatIdForms(chatIdField.value)
+  if (forms === null) return reject('invalid_chat_id', CHAT_ID_INVALID_MESSAGE)
+  if (forms.normalized !== live.chatIdNormalized) {
+    return reject('invalid_request', 'chat_id does not match this session\'s connected Chat ID; the sender identity always comes from the session token')
+  }
+
+  const clientMessageIdField = requiredString(context.body?.client_message_id, 'client_message_id')
+  if (clientMessageIdField.error) return clientMessageIdField.error
+  const textField = requiredString(context.body?.text, 'text')
+  if (textField.error) return textField.error
+  const replyToSeq = context.body?.reply_to_seq
+
+  const { message } = context.store.appendMessage({
+    roomId: context.params?.id,
+    actorFingerprint: principal.actorFingerprint,
+    chatId: live.chatId,
+    clientMessageId: clientMessageIdField.value,
+    text: textField.value,
+    replyToSeq,
+  })
+  return { status: 'committed', seq: message.seq, room_id: message.room_id }
 }, 'actor')
 
 const UNREGISTERED_ROUTE_HANDLER = () => reject('route_not_found')

@@ -1037,6 +1037,34 @@ export function openRoomLog({ dataDir } = {}) {
         return rows.map(plainMessage)
       },
 
+      // Story 1.7: the room's head sequence for long-poll responses — the
+      // largest allocated room-local seq, or 0 for an empty room. The ACL
+      // mirrors getRoom exactly (direct rooms demand a member fingerprint),
+      // so a caller that can learn head_seq can also read the page; the
+      // messages handler still orders readPage first, so the coded
+      // room-not-found / actor-not-member outcomes come from the page read.
+      headSeq(roomId, options = {}) {
+        assertOpen()
+        const validRoomId = requireRoomId(roomId)
+        const { actorFingerprint = null } = requireObject(options)
+
+        const row = selectRoom(validRoomId)
+        if (!row) fail('room_not_found', `room ${validRoomId} does not exist`)
+
+        if (row.kind === DIRECT_KIND) {
+          if (actorFingerprint === null) {
+            fail('invalid_actor_id', 'actorFingerprint is required to inspect a direct room')
+          }
+          requireDirectMembership(row, requireFingerprint(actorFingerprint))
+        } else if (actorFingerprint !== null) {
+          requireFingerprint(actorFingerprint)
+        }
+        const head = database
+          .prepare('SELECT COALESCE(MAX(seq), 0) AS head FROM messages WHERE room_id = ?')
+          .get(validRoomId)
+        return Number(head.head)
+      },
+
       // Room metadata. Direct rooms are private: the caller must present a
       // member fingerprint (the pair key embeds both fingerprints, so an
       // unguarded row would leak identities to any id-holder). Broadcast

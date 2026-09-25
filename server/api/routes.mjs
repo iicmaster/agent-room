@@ -43,9 +43,17 @@ export const ROUTE_TABLE = Object.freeze([
   // boolean flag; anything else is rejected, never ignored).
   Object.freeze({ method: 'GET', path: '/api/presence', class: 'actor', implemented: true, requestFields: Object.freeze(['include_offline']) }),
   Object.freeze({ method: 'GET', path: '/api/rooms', class: 'actor', requestFields: Object.freeze([]) }),
-  Object.freeze({ method: 'POST', path: '/api/rooms/direct', class: 'actor', requestFields: Object.freeze(['chat_id', 'target_fingerprint']) }),
-  Object.freeze({ method: 'GET', path: '/api/rooms/:id/messages', class: 'actor', requestFields: Object.freeze(['after_seq', 'limit', 'wait_ms']) }),
-  Object.freeze({ method: 'POST', path: '/api/rooms/:id/messages', class: 'actor', requestFields: Object.freeze(['chat_id', 'client_message_id', 'text', 'reply_to_seq']) }),
+  // Story 1.7: the direct-open and conversation surface is live (handlers in
+  // server.mjs). POST /api/rooms/direct resolves the chat id through the
+  // durable claims index — zero claims answer chat_id_not_found, several
+  // answer ambiguous_chat_id with the candidates list in the error envelope,
+  // and target_fingerprint completes disambiguation (never a guess). The
+  // messages pair long-polls reads (wait_ms server hold, deadline = a normal
+  // possibly-empty page with next_after_seq/head_seq) over idempotent appends
+  // (status committed, or the coded client_message_id_conflict).
+  Object.freeze({ method: 'POST', path: '/api/rooms/direct', class: 'actor', implemented: true, requestFields: Object.freeze(['chat_id', 'target_fingerprint']) }),
+  Object.freeze({ method: 'GET', path: '/api/rooms/:id/messages', class: 'actor', implemented: true, requestFields: Object.freeze(['after_seq', 'limit', 'wait_ms']) }),
+  Object.freeze({ method: 'POST', path: '/api/rooms/:id/messages', class: 'actor', implemented: true, requestFields: Object.freeze(['chat_id', 'client_message_id', 'text', 'reply_to_seq']) }),
   // Story 1.6: GET /api/status is live — {realm_id, version, broadcast_room_id}
   // for FR-21 and the Story 1.8 checkpoint (broadcast_room_id joined the
   // response vocabulary by the dated 2026-09-25 spine amendment).
@@ -82,11 +90,14 @@ export const ROUTE_TABLE = Object.freeze([
 // pins these arrays against it; version and realm_id joined the response
 // vocabulary by the spine's 2026-09-25 amendment (AD-14's GET /api/status
 // requirement plus health/status self-description), session_token joined
-// by the Story 1.4 amendment (the local credential exchange's response), and
-// the Story 1.6 amendments add client_type to the requests (the closed-set
+// by the Story 1.4 amendment (the local credential exchange's response), the
+// Story 1.6 amendments add client_type to the requests (the closed-set
 // client type declared at bind time) and — by the Story 1.6 review
 // amendment — broadcast_room_id, the two presence group labels, and the
-// presence row fields chat_id and client_type to the responses.
+// presence row fields chat_id and client_type to the responses, and the
+// Story 1.7 amendment adds candidates to the responses (the optional
+// candidate list the ambiguous_chat_id error carries for target_fingerprint
+// disambiguation — never a guess).
 export const REQUEST_FIELD_VOCABULARY = Object.freeze([
   'chat_id',
   'client_message_id',
@@ -124,6 +135,7 @@ export const RESPONSE_FIELD_VOCABULARY = Object.freeze([
   'offline_recently',
   'chat_id',
   'client_type',
+  'candidates',
 ])
 
 // Matching: specific patterns first, wildcard (`/viewer/` + static assets)

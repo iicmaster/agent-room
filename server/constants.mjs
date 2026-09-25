@@ -107,6 +107,8 @@ export const SEND_STATUSES = Object.freeze([
 // stories register new codes here instead of restating messages per-route.
 export const PUBLIC_ERRORS = Object.freeze({
   actor_not_member: 'actor is not a member of this room',
+  ambiguous_chat_id: 'chat id is claimed by multiple actors; retry with one candidate fingerprint as target_fingerprint',
+  chat_id_not_found: 'no actor has claimed this chat id',
   chat_id_taken: 'chat id is already claimed by another connected session',
   client_message_id_conflict: 'client_message_id was already used for different content',
   daemon_start_busy: 'another agent-room daemon start did not finish',
@@ -162,9 +164,15 @@ export const PUBLIC_ERRORS = Object.freeze({
 // foreign process holds is a conflicted state (server_port_conflict, 409)
 // that is never auto-killed. Story 1.5 addition: a live-name collision is a
 // conflicted state answered 409 (chat_id_taken) — refused explicitly, never
-// suffixed or auto-mangled. Declared once here — never per-route.
+// suffixed or auto-mangled. Story 1.7 additions: a chat id with no durable
+// claim is a miss answered 404 (chat_id_not_found — never a guess), and a
+// name claimed by several Actors is a conflicted state answered 409
+// (ambiguous_chat_id) that carries the candidates list in the error envelope
+// for target_fingerprint disambiguation. Declared once here — never per-route.
 export const PUBLIC_ERROR_STATUS = Object.freeze({
   actor_not_member: 403,
+  ambiguous_chat_id: 409,
+  chat_id_not_found: 404,
   chat_id_taken: 409,
   client_message_id_conflict: 409,
   daemon_start_busy: 503,
@@ -293,3 +301,38 @@ export const OFFLINE_RECENTLY_WINDOW_MS = OFFLINE_RECENT_SECONDS * 1000
 // client type — a session that binds without declaring one stays null on its
 // presence row. Additive set: values join, names never rename.
 export const CLIENT_TYPES = Object.freeze(['mcp', 'cli', 'api'])
+
+// --- Story 1.7: MCP adapter, api-client, cursors & setup ----------------------
+
+// The MCP adapter's five tools (no native-named aliases). The connecting
+// session always binds with this client type; identity comes only from the
+// session token — never a tool argument (NFR-3).
+export const MCP_CLIENT_TYPE = 'mcp'
+
+// api-client (server/client/api-client.mjs) request timeouts: the default
+// bound for one HTTP round trip, and the margin added on top of a long-poll's
+// wait_ms so the server's hold (<= READ_HOLD_MAX_MS) always wins the race
+// before the client gives up.
+export const CLIENT_REQUEST_TIMEOUT_MS = 10_000
+export const CLIENT_LONGPOLL_MARGIN_MS = 3_000
+
+// Server-side long-poll wake-up cadence (GET /api/rooms/:id/messages): the
+// handler re-polls the store at this interval inside the request — no open
+// read transaction is held while waiting.
+export const LONGPOLL_POLL_INTERVAL_MS = 250
+
+// The default read page the adapter requests when the caller gives no limit;
+// the page bound itself stays READ_PAGE_MAX.
+export const READ_PAGE_DEFAULT = 50
+
+// The one-time setup command's config file (PLUGIN_DATA/config.json) is a
+// bounded regular non-symlink file like every other private state file; the
+// MCP adapter refuses to run without it (first-run guidance) and the setup
+// command writes it atomically at 0600.
+export const CLIENT_CONFIG_MAX_BYTES = 4096
+
+// Version of the static untrusted-message envelope the client wraps around a
+// foreign sender's message body (sender fingerprint != the local
+// installation's). Same-Actor messages return plain. The schema is frozen
+// from this story forward: later changes are additive with a new version.
+export const UNTRUSTED_ENVELOPE_VERSION = '1'

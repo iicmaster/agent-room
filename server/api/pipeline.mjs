@@ -49,8 +49,11 @@ const BODY_METHODS = new Set(['POST', 'PATCH'])
 // not whitelisted falls back to `request_failed` per AD-8 ("unknown →
 // request_failed", v0.1 ratified) and never leaks its raw name or message.
 // request_failed is 500: an internal fault must not masquerade as a missing
-// route, and the 5xx class must stay reachable.
-export function reject(code, message) {
+// route, and the 5xx class must stay reachable. The optional extra object
+// (Story 1.7's dated amendment) carries additional error-envelope fields for
+// codes that declare them — ambiguous_chat_id's `candidates` — and is dropped
+// entirely when absent, so every pre-existing rejection keeps its exact shape.
+export function reject(code, message, extra) {
   const status = PUBLIC_ERROR_STATUS[code]
   if (status === undefined) {
     return {
@@ -60,15 +63,32 @@ export function reject(code, message) {
       status: PUBLIC_ERROR_STATUS.request_failed,
     }
   }
-  return { ok: false, code, message: message ?? PUBLIC_ERRORS[code], status }
+  return {
+    ok: false,
+    code,
+    message: message ?? PUBLIC_ERRORS[code],
+    status,
+    ...(extra === undefined ? {} : extra),
+  }
 }
 
 export function successEnvelope(result) {
   return { ok: true, result }
 }
 
+// The error envelope is {ok, error:{code,message}} plus, additively (the
+// dated Story 1.7 amendment), any declared extra fields the failure carries —
+// currently only ambiguous_chat_id's optional `candidates` list. Failures
+// without extras serialize exactly as before.
 export function errorEnvelope(failure) {
-  return { ok: false, error: { code: failure.code, message: failure.message } }
+  return {
+    ok: false,
+    error: {
+      code: failure.code,
+      message: failure.message,
+      ...(failure.candidates === undefined ? {} : { candidates: failure.candidates }),
+    },
+  }
 }
 
 function isRejection(outcome) {
