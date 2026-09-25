@@ -124,9 +124,14 @@ export function bearerTokenFromHeaders(headers) {
 // The real actor-class session check that replaces Story 1.3's reject-all
 // default: a missing Bearer credential and an unresolvable token both answer
 // the canonical 401 unauthorized; a valid token passes its actor fingerprint
-// to the pipeline as the session principal. The local token file is never a
-// session: it is not a registry entry, so presenting it on an actor route is
-// rejected here like any other unknown credential.
+// to the pipeline as the session principal. The principal also carries the
+// session key — the SHA-256 digest of the presented token, the same key the
+// registry stored the session under — so Story 1.5's live-session registry
+// keys its rows without ever seeing a raw token (the digest never leaves this
+// module's hashing). The registry's own verify() contract stays exactly
+// {actorFingerprint}; this wrapper is where the session key joins. The local
+// token file is never a session: it is not a registry entry, so presenting it
+// on an actor route is rejected here like any other unknown credential.
 export function createSessionVerifier({ registry } = {}) {
   if (!registry || typeof registry.issue !== 'function' || typeof registry.verify !== 'function') {
     throw new AgentRoomRuntimeError('invalid_argument', 'createSessionVerifier requires a session registry')
@@ -134,6 +139,20 @@ export function createSessionVerifier({ registry } = {}) {
   return context => {
     const token = bearerTokenFromHeaders(context?.headers)
     if (token === null) return reject('unauthorized')
-    return registry.verify(token)
+    const outcome = registry.verify(token)
+    // Pass rejections and non-principal outcomes through untouched — the
+    // pipeline's normalizer owns malformed-verifier classification.
+    if (outcome === undefined || outcome === null || typeof outcome !== 'object' || Array.isArray(outcome) || outcome.ok === false) {
+      return outcome
+    }
+    return { ...outcome, sessionKey: sessionKeyFromToken(token) }
   }
+}
+
+// The live-session registry's key for a session token: the SHA-256 digest the
+// registry itself stores the session under. The verifier attaches it to the
+// principal; the server handle's touch wiring and Story 1.6's heartbeat path
+// derive the same key from a held token with this helper.
+export function sessionKeyFromToken(token) {
+  return sessionDigest(token)
 }

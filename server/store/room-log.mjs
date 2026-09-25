@@ -28,6 +28,7 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
 import {
+  CHAT_ID_INVALID_MESSAGE,
   CHAT_ID_MAX,
   CLIENT_MESSAGE_ID_MAX,
   IDENTIFIER_MAX,
@@ -37,6 +38,7 @@ import {
   STORE_OPEN_BUSY_BACKOFF_MS,
   STORE_OPEN_BUSY_RETRY_LIMIT,
   TITLE_MAX,
+  chatIdForms,
 } from '../constants.mjs'
 import {
   AgentRoomRuntimeError,
@@ -57,8 +59,10 @@ const FINGERPRINT_HEX_LENGTH = 64
 const FINGERPRINT_PATTERN = new RegExp(
   `^${FINGERPRINT_PREFIX}[0-9a-f]{${FINGERPRINT_HEX_LENGTH}}$`,
 )
-// Chat id grammar: 1-CHAT_ID_MAX characters of [A-Za-z0-9_.-].
-const CHAT_ID_PATTERN = new RegExp(`^[A-Za-z0-9_.-]{1,${CHAT_ID_MAX}}$`)
+// Chat id grammar: 1-CHAT_ID_MAX characters of [A-Za-z0-9_.-] — the shared
+// chatIdForms gate in the constants module owns the DR-1 validation and the
+// canonical rejection detail; this store and the live-session registry cite
+// them instead of restating either.
 // Realm ids are UUIDs minted at first boot (AD-14); the store validates the
 // shape so the minted key is always a well-formed UUID string.
 const REALM_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -120,13 +124,9 @@ function requireRoomId(value) {
 }
 
 function requireChatId(value) {
-  if (typeof value !== 'string' || !CHAT_ID_PATTERN.test(value)) {
-    fail(
-      'invalid_chat_id',
-      `chatId must be 1-${CHAT_ID_MAX} characters using letters, numbers, dot, underscore, or hyphen`,
-    )
-  }
-  return value
+  const forms = chatIdForms(value)
+  if (forms === null) fail('invalid_chat_id', CHAT_ID_INVALID_MESSAGE)
+  return forms.display
 }
 
 function requireClientMessageId(value) {
@@ -204,6 +204,22 @@ function requireReplyToSeq(value) {
     fail('invalid_reply_to_seq', 'replyToSeq must be null or a positive safe integer')
   }
   return value
+}
+
+// Claim timestamps are canonical ISO 8601 strings — the same form every other
+// timestamp in this store uses — normalized at write time so the prune
+// comparison is exact. An injected value must parse as a date; anything else
+// is a coded internal failure.
+function requireClaimTimestamp(value) {
+  if (value === undefined || value === null) return new Date().toISOString()
+  if (typeof value !== 'string') {
+    fail('invalid_argument', 'lastSeenAt must be an ISO 8601 timestamp string')
+  }
+  const parsed = Date.parse(value)
+  if (!Number.isFinite(parsed)) {
+    fail('invalid_argument', 'lastSeenAt must be an ISO 8601 timestamp string')
+  }
+  return new Date(parsed).toISOString()
 }
 
 // Canonical DM pair identity: the two fingerprints sorted lexicographically,
@@ -486,10 +502,10 @@ function verifyStrictTables(database) {
     SELECT name, strict
     FROM pragma_table_list
     WHERE schema = 'main'
-      AND name IN ('rooms', 'direct_members', 'messages', 'realms')
+      AND name IN ('rooms', 'direct_members', 'messages', 'realms', 'chat_id_claims')
   `).all()
   const strictByName = new Map(strictTables.map(row => [row.name, Number(row.strict)]))
-  for (const name of ['rooms', 'direct_members', 'messages', 'realms']) {
+  for (const name of ['rooms', 'direct_members', 'messages', 'realms', 'chat_id_claims']) {
     if (strictByName.get(name) !== 1) {
       fail('database_schema_invalid', `database table ${name} is missing or is not STRICT`)
     }
@@ -545,6 +561,57 @@ function ensureNullableRoomCreator(database) {
     .get()
   if (!restored || Number(restored.notnull) !== 0) {
     fail('database_schema_invalid', 'rooms.created_by_fingerprint did not converge to nullable')
+  }
+}
+
+// Story 1.5 (additive, no schema-version bump): the durable chat_id_claims
+// index — one row per (normalized chat id, actor fingerprint) pair with the
+// display form and last_seen_at — joins the schema via the same IF NOT EXISTS
+// convergence pattern as the realms table. Multiple Actors may hold claims on
+// one name (exactly the ambiguity data room_direct_open resolves), and
+// historical (name, actor) pairs persist after rename or disconnect. Live
+// uniqueness is deliberately NOT a property of this table: it is the
+// in-memory live-session registry's rule, so no schema beyond this additive
+// index is required. The CHECK pins the normalization invariant — the
+// normalized form is the ASCII-lowercased display form, which the grammar's
+// character class makes exact.
+function ensureChatIdClaimsTable(database) {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS chat_id_claims (
+      chat_id_normalized TEXT NOT NULL,
+      actor_fingerprint TEXT NOT NULL,
+      chat_id_display TEXT NOT NULL,
+      last_seen_at TEXT NOT NULL,
+      PRIMARY KEY (chat_id_normalized, actor_fingerprint),
+      ${fingerprintCheck('actor_fingerprint')},
+      CHECK (length(chat_id_normalized) BETWEEN 1 AND ${CHAT_ID_MAX}),
+      CHECK (length(chat_id_display) BETWEEN 1 AND ${CHAT_ID_MAX}),
+      CHECK (chat_id_normalized = lower(chat_id_display))
+    ) STRICT;
+  `)
+}
+
+// Story 1.5 review hardening: CREATE TABLE IF NOT EXISTS silently keeps a
+// pre-existing table of a different shape, so the column set is verified
+// right after the convergence step — a foreign or drifted chat_id_claims is a
+// coded schema failure at open, never a runtime surprise mid-write.
+const CHAT_ID_CLAIMS_COLUMNS = Object.freeze([
+  'chat_id_normalized',
+  'actor_fingerprint',
+  'chat_id_display',
+  'last_seen_at',
+])
+
+function verifyChatIdClaimsColumns(database) {
+  const columns = database
+    .prepare(`SELECT name FROM pragma_table_info('chat_id_claims') ORDER BY cid`)
+    .all()
+    .map(row => row.name)
+  if (
+    columns.length !== CHAT_ID_CLAIMS_COLUMNS.length
+    || CHAT_ID_CLAIMS_COLUMNS.some((name, index) => columns[index] !== name)
+  ) {
+    fail('database_schema_invalid', 'database table chat_id_claims has a divergent column set')
   }
 }
 
@@ -644,6 +711,8 @@ export function openRoomLog({ dataDir } = {}) {
       if (probedVersion === 0) createSchema(database)
       ensureRealmTable(database)
       ensureNullableRoomCreator(database)
+      ensureChatIdClaimsTable(database)
+      verifyChatIdClaimsColumns(database)
       verifyStrictTables(database)
 
       // Report the file's actual version, never the compiled constant.
@@ -1021,6 +1090,103 @@ export function openRoomLog({ dataDir } = {}) {
           LIMIT 1
         `).get()
         return row ? plainRoom(row) : null
+      },
+
+      // Durable chat id claims (Story 1.5, FR-5/FR-21): one row per
+      // (normalized name, actor fingerprint) pair, written on connect and
+      // rename and pruned at CLAIMS_TTL_MS. The row set is the
+      // offline-discovery ambiguity data: multiple Actors may hold claims on
+      // one name, and historical (name, actor) pairs persist after rename or
+      // disconnect — this index never refuses a write and never deletes one
+      // on a connect/rename. Recency is monotonic: a write never moves
+      // last_seen_at backwards (a stale write refreshes only the display
+      // form), so a lagging clock cannot age a live claim out of the prune
+      // window. Live uniqueness is the in-memory live-session registry's
+      // rule, not this table's. Each write is its own BEGIN IMMEDIATE
+      // transaction.
+      upsertChatIdClaim(options) {
+        assertOpen()
+        const { chatId, actorFingerprint, lastSeenAt } = requireObject(options)
+        const validChatId = requireChatId(chatId)
+        const validFingerprint = requireFingerprint(actorFingerprint)
+        const lastSeen = requireClaimTimestamp(lastSeenAt)
+        const normalized = validChatId.toLowerCase()
+
+        return withImmediateTransaction(database, () => {
+          database.prepare(`
+            INSERT INTO chat_id_claims (chat_id_normalized, actor_fingerprint, chat_id_display, last_seen_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT (chat_id_normalized, actor_fingerprint) DO UPDATE SET
+              chat_id_display = excluded.chat_id_display,
+              last_seen_at = CASE
+                WHEN excluded.last_seen_at > chat_id_claims.last_seen_at
+                THEN excluded.last_seen_at
+                ELSE chat_id_claims.last_seen_at
+              END
+          `).run(normalized, validFingerprint, validChatId, lastSeen)
+          // Report the row as stored — the effective (monotonic) recency and
+          // display form — never the attempted input.
+          const row = database.prepare(`
+            SELECT chat_id_normalized, actor_fingerprint, chat_id_display, last_seen_at
+            FROM chat_id_claims
+            WHERE chat_id_normalized = ? AND actor_fingerprint = ?
+          `).get(normalized, validFingerprint)
+          return {
+            chat_id: row.chat_id_display,
+            chat_id_normalized: row.chat_id_normalized,
+            actor_fingerprint: row.actor_fingerprint,
+            last_seen_at: row.last_seen_at,
+          }
+        })
+      },
+
+      // Every durable claim on a name, most recently seen first. Lookup is by
+      // the case-insensitive normalized form; the display form rides along so
+      // consumers never re-derive case.
+      listClaimsForChatId(chatId) {
+        assertOpen()
+        const validChatId = requireChatId(chatId)
+        const normalized = validChatId.toLowerCase()
+        const rows = database.prepare(`
+          SELECT chat_id_normalized, actor_fingerprint, chat_id_display, last_seen_at
+          FROM chat_id_claims
+          WHERE chat_id_normalized = ?
+          ORDER BY last_seen_at DESC, actor_fingerprint ASC
+        `).all(normalized)
+        return rows.map(row => ({
+          chat_id: row.chat_id_display,
+          chat_id_normalized: row.chat_id_normalized,
+          actor_fingerprint: row.actor_fingerprint,
+          last_seen_at: row.last_seen_at,
+        }))
+      },
+
+      // Prune claim rows whose last_seen_at is older than olderThanMs,
+      // measured against `now` (an epoch-ms number or a function returning
+      // one, injectable for tests). Returns the number of deleted rows. A row
+      // exactly at the cutoff is kept: strictly older rows are deleted. The
+      // cutoff is validated finite — a coded invalid_argument, never a
+      // RangeError from formatting a non-finite date.
+      pruneChatIdClaims(olderThanMs, now = Date.now) {
+        assertOpen()
+        if (!Number.isSafeInteger(olderThanMs) || olderThanMs <= 0) {
+          fail('invalid_argument', 'olderThanMs must be a positive safe integer')
+        }
+        const timestamp = typeof now === 'function' ? now() : now
+        if (typeof timestamp !== 'number' || !Number.isFinite(timestamp)) {
+          fail('invalid_argument', 'now must be an epoch-millisecond number or a function returning one')
+        }
+        const cutoffMs = timestamp - olderThanMs
+        if (!Number.isFinite(cutoffMs)) {
+          fail('invalid_argument', 'the prune cutoff must be a finite epoch-millisecond value')
+        }
+        const cutoff = new Date(cutoffMs).toISOString()
+        return withImmediateTransaction(database, () => {
+          const result = database
+            .prepare('DELETE FROM chat_id_claims WHERE last_seen_at < ?')
+            .run(cutoff)
+          return Number(result.changes)
+        })
       },
     }
     return Object.freeze(api)

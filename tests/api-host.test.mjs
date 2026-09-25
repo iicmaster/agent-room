@@ -978,7 +978,8 @@ test('a pre-1.3 v2 store (no realms table, NOT NULL creator) converges on open a
   const tableNames = inspector.prepare(`
     SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name
   `).all().map(row => row.name)
-  assert.deepEqual(tableNames, ['direct_members', 'messages', 'realms', 'rooms'])
+  // Story 1.5: chat_id_claims joins additively beside the 1.3 realms table.
+  assert.deepEqual(tableNames, ['chat_id_claims', 'direct_members', 'messages', 'realms', 'rooms'])
   const creatorColumn = inspector
     .prepare(`SELECT "notnull" AS "notnull" FROM pragma_table_info('rooms') WHERE name = 'created_by_fingerprint'`)
     .get()

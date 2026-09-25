@@ -61,6 +61,20 @@ export const CLIENT_MESSAGE_ID_MAX = 128
 export const DISPLAY_NAME_MAX = 80
 export const TITLE_MAX = 120
 export const CHAT_ID_MAX = 32
+// DR-1 chat id grammar: 1-CHAT_ID_MAX characters of [A-Za-z0-9_.-]. Derived
+// from CHAT_ID_MAX so the bound is stated once (AD-9). Comparison and
+// uniqueness are case-insensitive: the normalized form is the lowercase chat
+// id and the display form preserves the caller's case.
+export const CHAT_ID_PATTERN = new RegExp(`^[A-Za-z0-9_.-]{1,${CHAT_ID_MAX}}$`)
+// Canonical DR-1 grammar gate and rejection detail, shared verbatim by the
+// store's requireChatId and the live-session registry (one validation point;
+// callers attach their own coded error to the null result). Non-strings are
+// invalid: the gate never coerces.
+export function chatIdForms(value) {
+  if (typeof value !== 'string' || !CHAT_ID_PATTERN.test(value)) return null
+  return Object.freeze({ display: value, normalized: value.toLowerCase() })
+}
+export const CHAT_ID_INVALID_MESSAGE = `chatId must be 1-${CHAT_ID_MAX} characters using letters, numbers, dot, underscore, or hyphen`
 
 // --- File bounds -------------------------------------------------------------
 
@@ -93,6 +107,7 @@ export const SEND_STATUSES = Object.freeze([
 // stories register new codes here instead of restating messages per-route.
 export const PUBLIC_ERRORS = Object.freeze({
   actor_not_member: 'actor is not a member of this room',
+  chat_id_taken: 'chat id is already claimed by another connected session',
   client_message_id_conflict: 'client_message_id was already used for different content',
   daemon_start_busy: 'another agent-room daemon start did not finish',
   daemon_start_failed: 'agent-room daemon did not become ready',
@@ -145,9 +160,12 @@ export const PUBLIC_ERRORS = Object.freeze({
 // engine's busy start mirrors daemon_start_busy (server_start_busy, 503),
 // startup and lock failures are 500, and a runtime record whose port a
 // foreign process holds is a conflicted state (server_port_conflict, 409)
-// that is never auto-killed. Declared once here — never per-route.
+// that is never auto-killed. Story 1.5 addition: a live-name collision is a
+// conflicted state answered 409 (chat_id_taken) — refused explicitly, never
+// suffixed or auto-mangled. Declared once here — never per-route.
 export const PUBLIC_ERROR_STATUS = Object.freeze({
   actor_not_member: 403,
+  chat_id_taken: 409,
   client_message_id_conflict: 409,
   daemon_start_busy: 503,
   daemon_start_failed: 500,
@@ -232,6 +250,15 @@ export const SESSIONS_MAX = 1000
 // The local bootstrap credential file (0600, shared data dir) is a bounded
 // regular non-symlink file like every other private state file.
 export const LOCAL_TOKEN_MAX_BYTES = 4096
+
+// --- Story 1.5: chat id connect, rename & durable claims ----------------------
+
+// The durable chat_id_claims index (server/store/room-log.mjs) prunes claim
+// rows whose last_seen_at is older than the TTL — 7 days by default, the
+// single constant an operator tunes via startServer({claimsTtlMs}). The lazy
+// prune cycle paces itself on the interval between boot prunes.
+export const CLAIMS_TTL_MS = 7 * 24 * 60 * 60 * 1000
+export const PRUNE_INTERVAL_MS = 60 * 60 * 1000
 
 // ensureServer's bootstrap engine (server/client/ensure-server.mjs). The wait
 // budget deliberately exceeds the 15 s staleness window so a stale lock is

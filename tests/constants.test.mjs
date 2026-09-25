@@ -6,6 +6,8 @@ import test from 'node:test'
 
 import {
   CHAT_ID_MAX,
+  CHAT_ID_PATTERN,
+  CLAIMS_TTL_MS,
   CLIENT_MESSAGE_ID_MAX,
   DISPLAY_NAME_MAX,
   DUPLICATE_WINDOW_MS,
@@ -26,6 +28,7 @@ import {
   PRESENCE_TTL_SECONDS,
   PROTOCOL_HEADER,
   PROTOCOL_VERSION,
+  PRUNE_INTERVAL_MS,
   PUBLIC_ERRORS,
   PUBLIC_ERROR_STATUS,
   READ_HOLD_MAX_MS,
@@ -174,6 +177,32 @@ test('story 1.4 bootstrap limits are pinned with their ratified values', () => {
   assert.ok(SERVER_STARTUP_WAIT_MS > SERVER_STARTUP_LOCK_STALE_MS, 'the wait must exceed the staleness window')
 })
 
+test('story 1.5 chat id grammar and claims pruning derive from the declared constants', () => {
+  // DR-1: 1-32 characters of [A-Za-z0-9_.-]; the pattern derives from
+  // CHAT_ID_MAX so the bound is stated once (AD-9). Comparison and uniqueness
+  // are case-insensitive via the lowercase normalized form; the display form
+  // preserves case.
+  assert.equal(CHAT_ID_PATTERN.source, `^[A-Za-z0-9_.-]{1,${CHAT_ID_MAX}}$`)
+  assert.ok(CHAT_ID_PATTERN.test('Alice'))
+  assert.ok(CHAT_ID_PATTERN.test('a.b_c-d'))
+  assert.ok(CHAT_ID_PATTERN.test('x'.repeat(CHAT_ID_MAX)))
+  for (const bad of ['', 'x'.repeat(CHAT_ID_MAX + 1), 'bad name', 'bad!', 'ünicode']) {
+    assert.equal(CHAT_ID_PATTERN.test(bad), false, String(bad))
+  }
+  // The pattern is the shape gate for strings; enforcement points type-check
+  // first, so non-strings are refused before the pattern ever runs (a bare
+  // RegExp.test would coerce them).
+  for (const bad of [42, null, undefined, {}]) {
+    assert.equal(typeof bad === 'string' && CHAT_ID_PATTERN.test(bad), false, String(bad))
+  }
+  // Durable claims live 7 days by default (operator-tunable via
+  // startServer({claimsTtlMs})); the lazy prune cycle paces itself on the
+  // interval between boot prunes.
+  assert.equal(CLAIMS_TTL_MS, 7 * 24 * 60 * 60 * 1000)
+  assert.equal(PRUNE_INTERVAL_MS, 60 * 60 * 1000)
+  assert.ok(PRUNE_INTERVAL_MS < CLAIMS_TTL_MS, 'the prune cycle must run within the TTL window')
+})
+
 test('v0.1 limit groupings re-point to the constants module', () => {
   assert.deepEqual(DATABASE_LIMITS, {
     actorId: IDENTIFIER_MAX,
@@ -190,6 +219,7 @@ test('every v0.1 public error code has an HTTP status declared once', () => {
   const codes = Object.keys(PUBLIC_ERRORS).sort()
   assert.deepEqual(codes, [
     'actor_not_member',
+    'chat_id_taken',
     'client_message_id_conflict',
     'daemon_start_busy',
     'daemon_start_failed',
@@ -243,6 +273,9 @@ test('every v0.1 public error code has an HTTP status declared once', () => {
     room_not_found: 404,
     actor_not_member: 403,
     client_message_id_conflict: 409,
+    // Story 1.5: a live chat id collision is a conflicted state — refused
+    // explicitly, never suffixed.
+    chat_id_taken: 409,
     data_directory_invalid: 500,
     database_schema_unsupported: 500,
     sqlite_version_unsupported: 500,

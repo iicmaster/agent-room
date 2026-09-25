@@ -11,15 +11,18 @@
 // internal-fallback errors — echoes Agent-Room-Protocol: 1; viewer and health
 // responses carry no echo (protocol-exempt classes). Unknown paths answer 404
 // route_not_found. Statuses are never hard-coded: every error status derives
-// from reject()/PUBLIC_ERROR_STATUS. Handlers live here: GET /health plus the
+// from reject()/PUBLIC_ERROR_STATUS. Handlers live here: GET /health; the
 // Story 1.4 local credential path — POST /api/auth/local exchanges the
 // shared-data-dir local token (Bearer) plus the installation's public key
 // (Local Mode auto-enrollment, additive AD-8 amendment) for a session bound
-// to that key's fingerprint; the sliding 12 h session TTL is provisional per
-// DR-2 (ratified at Story 4.1). The actor-class auth stage runs the real
-// session verifier from session.mjs (the 1.3 reject-all default remains only
-// as the pipeline's structural fallback). Every other frozen AD-8 route stays
-// unregistered (404 route_not_found behind the gates).
+// to that key's fingerprint; and the Story 1.5 session connect surface —
+// POST/PATCH/DELETE /api/session bind, rename, and release the session's
+// Chat ID against the live-session registry (server/core/session-registry.mjs)
+// and the durable chat_id_claims index in the store. The sliding 12 h session
+// TTL is provisional per DR-2 (ratified at Story 4.1). The actor-class auth
+// stage runs the real session verifier from session.mjs (the 1.3 reject-all
+// default remains only as the pipeline's structural fallback). Every other
+// frozen AD-8 route stays unregistered (404 route_not_found behind the gates).
 
 import { createServer } from 'node:http'
 import { timingSafeEqual } from 'node:crypto'
@@ -34,9 +37,16 @@ import {
   runtimeRecordPath,
   sharedDataDirectory,
 } from '../runtime.mjs'
-import { PROTOCOL_HEADER, PROTOCOL_VERSION, PUBLIC_ERROR_STATUS } from '../constants.mjs'
+import {
+  CLAIMS_TTL_MS,
+  PRUNE_INTERVAL_MS,
+  PROTOCOL_HEADER,
+  PROTOCOL_VERSION,
+  PUBLIC_ERROR_STATUS,
+} from '../constants.mjs'
 import { openRoomLog } from '../store/room-log.mjs'
 import { bootstrapRealm } from '../core/realm.mjs'
+import { createLiveSessionRegistry } from '../core/session-registry.mjs'
 import { fingerprintFromPublicKey } from '../keys.mjs'
 import { ROUTE_TABLE, matchRoute, routeKey as routeKeyOf } from './routes.mjs'
 import {
@@ -64,6 +74,14 @@ const REGISTERED_HANDLERS = new Map()
 // OS user. startServer({sessionRegistry}) overrides it so an injected
 // verifier and its registry stay one coherent pair.
 const SESSION_REGISTRY = createSessionRegistry()
+
+// Story 1.5: one live Chat ID registry per server process, mirroring the
+// session registry's default-plus-override pattern. Ephemeral by design — a
+// restart clears it and it rebuilds as sessions reconnect; the durable
+// (chat_id, actor_fingerprint, last_seen_at) ambiguity data lives in the
+// store's chat_id_claims index. startServer({liveSessionRegistry}) overrides
+// it so tests can isolate each server instance.
+const LIVE_SESSION_REGISTRY = createLiveSessionRegistry()
 
 // Constant-time credential comparison; an equal-length dummy compare keeps
 // the timing profile uniform across mismatched lengths.
@@ -150,6 +168,81 @@ registerHandler('POST /api/auth/local', function localAuth(context) {
   return { session_token: sessionToken }
 })
 
+// Story 1.5 session connect surface. The auth stage has already resolved the
+// bearer token, so the principal carries the actor fingerprint (identity —
+// always from the token, never the body) and the session token digest (the
+// live registry's key; raw tokens never leave the session module).
+function sessionPrincipalOf(context) {
+  const session = context.session
+  if (
+    session
+    && typeof session === 'object'
+    && typeof session.sessionKey === 'string' && session.sessionKey.length > 0
+    && typeof session.actorFingerprint === 'string' && session.actorFingerprint.length > 0
+  ) {
+    return session
+  }
+  return reject('unauthorized')
+}
+
+// POST /api/session and PATCH /api/session share one atomic bind (the
+// registry's claim): collision check, then the durable claim write, then the
+// memory commit — a refusal changes no state anywhere. POST is the connect
+// verb: it binds the session's Chat ID for the session's lifetime, treats an
+// exact re-bind as an idempotent refresh, and swaps immediately when the
+// session re-binds to a different free name — rename-equivalence, documented
+// and pinned by tests. PATCH is the rename verb: immediate, the old name
+// freed in the same instant, refused with the original retained on a live
+// collision. Neither verb ever rewrites history: messages keep their
+// send-time chat ids in the store. Both echo the accepted chat_id (display
+// form) alongside the session timestamps.
+function bindSession(context) {
+  const principal = sessionPrincipalOf(context)
+  if (principal.ok === false) return principal
+  // Field-reporting convention (matching 1.4's public_key): an absent or
+  // empty chat_id is a request-shape rejection naming the missing field; a
+  // malformed value falls through to the registry's DR-1 grammar gate.
+  const chatId = context.body?.chat_id
+  if (chatId === undefined || chatId === null || chatId === '') {
+    return reject('invalid_request', 'chat_id is required: the Chat ID to claim for this session')
+  }
+  const registry = context.liveSessionRegistry ?? LIVE_SESSION_REGISTRY
+  const state = registry.claim({
+    sessionKey: principal.sessionKey,
+    chatId,
+    actorFingerprint: principal.actorFingerprint,
+    // The durable claim write runs inside the registry's atomic claim step —
+    // after the collision check, before the memory commit — timestamped by
+    // the registry's own clock (one clock for live and durable recency), so
+    // a refused claim never touches the store and a failed write never
+    // leaves a phantom live row behind.
+    persist: claimPayload => context.store.upsertChatIdClaim(claimPayload),
+  })
+  return {
+    chat_id: state.chatId,
+    connected_since: new Date(state.connectedSince).toISOString(),
+    last_seen: new Date(state.lastSeen).toISOString(),
+  }
+}
+
+registerHandler('POST /api/session', bindSession, 'actor')
+registerHandler('PATCH /api/session', bindSession, 'actor')
+
+// DELETE /api/session ends the session's live presence: the registry row is
+// removed and the name is free for the next claimer immediately. The durable
+// claim row stays — the (name, actor) pair remains the ambiguity data offline
+// discovery resolves. Token invalidation is deliberately not performed
+// (documented choice): the session registry entry is left to expire naturally
+// (12 h sliding, DR-2) — the token re-authenticates to a nameless session,
+// and connecting again re-claims.
+registerHandler('DELETE /api/session', function disconnectSession(context) {
+  const principal = sessionPrincipalOf(context)
+  if (principal.ok === false) return principal
+  const registry = context.liveSessionRegistry ?? LIVE_SESSION_REGISTRY
+  registry.release(principal.sessionKey)
+  return null
+}, 'actor')
+
 const UNREGISTERED_ROUTE_HANDLER = () => reject('route_not_found')
 
 function respondJson(response, status, payload, extraHeaders = {}) {
@@ -206,6 +299,8 @@ async function handleRequest(request, response, options) {
     bodyStream: request,
     dataDir: options.dataDir,
     sessionRegistry: options.sessionRegistry,
+    liveSessionRegistry: options.liveSessionRegistry,
+    store: options.store,
   }
 
   try {
@@ -265,7 +360,18 @@ async function handleRequest(request, response, options) {
   }
 }
 
-export async function startServer({ dataDir, host = '127.0.0.1', port = 0, sessionVerifier, viewerVerifier, sessionRegistry } = {}) {
+export async function startServer({
+  dataDir,
+  host = '127.0.0.1',
+  port = 0,
+  sessionVerifier,
+  viewerVerifier,
+  sessionRegistry,
+  liveSessionRegistry,
+  claimsTtlMs = CLAIMS_TTL_MS,
+  pruneIntervalMs,
+  pruneClaims,
+} = {}) {
   // Runtime gate first: Node >= 24.15 / SQLite >= 3.51.3, diagnosable error.
   assertSupportedRuntime()
   if (typeof dataDir !== 'string' || dataDir.trim().length === 0) {
@@ -294,6 +400,28 @@ export async function startServer({ dataDir, host = '127.0.0.1', port = 0, sessi
       || typeof sessionRegistry.issue !== 'function' || typeof sessionRegistry.verify !== 'function')) {
     throw new AgentRoomRuntimeError('invalid_argument', 'sessionRegistry must be a session registry (issue/verify) when provided')
   }
+  if (liveSessionRegistry !== undefined
+    && (typeof liveSessionRegistry !== 'object' || liveSessionRegistry === null
+      || typeof liveSessionRegistry.claim !== 'function'
+      || typeof liveSessionRegistry.release !== 'function'
+      || typeof liveSessionRegistry.rename !== 'function'
+      || typeof liveSessionRegistry.touch !== 'function'
+      || typeof liveSessionRegistry.lookup !== 'function'
+      || typeof liveSessionRegistry.clear !== 'function')) {
+    throw new AgentRoomRuntimeError(
+      'invalid_argument',
+      'liveSessionRegistry must be a live-session registry (claim/release/rename/touch/lookup/clear) when provided',
+    )
+  }
+  if (!Number.isSafeInteger(claimsTtlMs) || claimsTtlMs <= 0) {
+    throw new AgentRoomRuntimeError('invalid_argument', 'claimsTtlMs must be a positive safe integer')
+  }
+  if (pruneIntervalMs !== undefined && (!Number.isSafeInteger(pruneIntervalMs) || pruneIntervalMs <= 0)) {
+    throw new AgentRoomRuntimeError('invalid_argument', 'pruneIntervalMs must be a positive safe integer when provided')
+  }
+  if (pruneClaims !== undefined && typeof pruneClaims !== 'function') {
+    throw new AgentRoomRuntimeError('invalid_argument', 'pruneClaims must be a function when provided')
+  }
   // implemented-flag enforcement: every frozen route marked implemented must
   // have a registered handler, and every registered handler must belong to a
   // marked route — a mismatch fails startup instead of silently 404ing a
@@ -309,13 +437,40 @@ export async function startServer({ dataDir, host = '127.0.0.1', port = 0, sessi
   }
   const effectiveRegistry = sessionRegistry ?? SESSION_REGISTRY
   const effectiveSessionVerifier = sessionVerifier ?? createSessionVerifier({ registry: effectiveRegistry })
+  const effectiveLiveRegistry = liveSessionRegistry ?? LIVE_SESSION_REGISTRY
 
   const store = openRoomLog({ dataDir })
   let httpServer = null
+  let pruneTimer = null
   try {
     // First boot mints the realm id and the implicit Broadcast Room; restarts
     // and racing bootstraps on the same data dir converge on both (AD-14).
     bootstrapRealm(store)
+
+    // Story 1.5 claims maintenance: prune the durable chat_id_claims index
+    // once on boot, then lazily on the (overridable) interval. A tuned TTL
+    // below the interval clamps the interval to half the TTL — pruning must
+    // keep pace with expiry or rows would outlive their window for a full
+    // cycle. The timer never holds the process open (unref) and is cleared on
+    // close; a failed cycle is one bounded stderr line — the next interval
+    // retries, the server keeps serving. `pruneClaims` is the injectable
+    // seam (default: the store's prune at the tuned TTL) used by tests to
+    // prove that containment.
+    const effectivePruneIntervalMs = Math.min(
+      pruneIntervalMs ?? PRUNE_INTERVAL_MS,
+      Math.floor(claimsTtlMs / 2),
+    )
+    const pruneStep = pruneClaims ?? (() => store.pruneChatIdClaims(claimsTtlMs))
+    const pruneSafely = () => {
+      try {
+        pruneStep()
+      } catch (error) {
+        process.stderr.write(`agent-room-server: chat id claims prune failed: ${internalDetailOf(error)}\n`)
+      }
+    }
+    pruneSafely()
+    pruneTimer = setInterval(pruneSafely, effectivePruneIntervalMs)
+    pruneTimer.unref()
 
     httpServer = createServer((request, response) => {
       // handleRequest maps its own failures; this guard only contains a
@@ -325,6 +480,8 @@ export async function startServer({ dataDir, host = '127.0.0.1', port = 0, sessi
         viewerVerifier,
         dataDir,
         sessionRegistry: effectiveRegistry,
+        liveSessionRegistry: effectiveLiveRegistry,
+        store,
       }).catch(() => {
         response.destroy()
       })
@@ -354,6 +511,11 @@ export async function startServer({ dataDir, host = '127.0.0.1', port = 0, sessi
 
     let closePromise = null
     const closeServerAndStore = async () => {
+      if (pruneTimer !== null) clearInterval(pruneTimer)
+      // A restart-within-process must find no stale names: when this server
+      // owns the process-default live registry, its close drops every live
+      // row (an injected registry is the caller's to manage).
+      if (effectiveLiveRegistry === LIVE_SESSION_REGISTRY) LIVE_SESSION_REGISTRY.clear()
       await new Promise(resolvePromise => {
         httpServer.close(() => resolvePromise())
         httpServer.closeAllConnections?.()
@@ -364,6 +526,16 @@ export async function startServer({ dataDir, host = '127.0.0.1', port = 0, sessi
     return Object.freeze({
       port: address.port,
       runtimeRecord,
+      // Story 1.6 pre-wiring and test seam: one operation refreshing a live
+      // session's in-memory recency AND its durable claim row's last_seen_at
+      // — the same persist-callback pattern the connect/rename bind uses,
+      // timestamped by the live registry's own clock. The heartbeat story's
+      // handler will drive the registry through this same pattern.
+      touchSession(sessionKey) {
+        return effectiveLiveRegistry.touch(sessionKey, {
+          persist: claimPayload => store.upsertChatIdClaim(claimPayload),
+        })
+      },
       close() {
         if (!closePromise) {
           closePromise = (async () => {
@@ -381,6 +553,7 @@ export async function startServer({ dataDir, host = '127.0.0.1', port = 0, sessi
       },
     })
   } catch (error) {
+    if (pruneTimer !== null) clearInterval(pruneTimer)
     if (httpServer !== null) {
       try {
         await new Promise(resolvePromise => {
@@ -409,6 +582,33 @@ function launchedDirectly() {
   }
 }
 
+// Direct-launch operator surface for the durable claim TTL: the same knob as
+// startServer({claimsTtlMs}), read from the environment so a real operator
+// can tune the 7-day window without code. Strictly validated — a positive
+// finite integer in digits — and a present-but-invalid value never blocks a
+// boot: one stderr warning line and the declared default.
+export function claimsTtlMsFromEnv(env = process.env) {
+  const raw = env?.AGENT_ROOM_CLAIMS_TTL_MS
+  if (raw === undefined || String(raw).trim() === '') {
+    return { claimsTtlMs: CLAIMS_TTL_MS }
+  }
+  const trimmed = String(raw).trim()
+  if (!/^[0-9]+$/.test(trimmed)) {
+    return {
+      claimsTtlMs: CLAIMS_TTL_MS,
+      warning: `ignoring invalid AGENT_ROOM_CLAIMS_TTL_MS "${raw}": must be a positive integer number of milliseconds; using the default ${CLAIMS_TTL_MS} ms`,
+    }
+  }
+  const value = Number(trimmed)
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    return {
+      claimsTtlMs: CLAIMS_TTL_MS,
+      warning: `ignoring invalid AGENT_ROOM_CLAIMS_TTL_MS "${raw}": must be a positive integer number of milliseconds; using the default ${CLAIMS_TTL_MS} ms`,
+    }
+  }
+  return { claimsTtlMs: value }
+}
+
 // Run the runtime gate before any other work. Direct launches report one
 // diagnosable line and exit 1 with no stack trace; importers get a catchable
 // rejection so harnesses (tests/runtime.test.mjs entrypoint gates) can assert
@@ -427,7 +627,9 @@ try {
 // configuration, AD-10) and stay up until signaled. Startup failures —
 // including the runtime gate — report one diagnosable stderr line and exit 1.
 if (launchedDirectly()) {
-  startServer({ dataDir: sharedDataDirectory() })
+  const { claimsTtlMs, warning } = claimsTtlMsFromEnv()
+  if (warning) process.stderr.write(`agent-room-server: ${warning}\n`)
+  startServer({ dataDir: sharedDataDirectory(), claimsTtlMs })
     .then(server => {
       let shuttingDown = false
       const shutdown = () => {

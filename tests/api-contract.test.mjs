@@ -175,12 +175,27 @@ test('route keys are stable method/path pairs', () => {
 test('the implemented mark covers exactly the live frozen routes', () => {
   // The implemented mark is the startup contract's data side (server.mjs
   // asserts every marked route has a registered handler and vice versa).
-  // GET /health went live in Story 1.3, POST /api/auth/local in 1.4 with the
-  // public_key request field; 1.5-1.8 extend additively.
+  // GET /health went live in Story 1.3, POST /api/auth/local in 1.4, and the
+  // session connect surface (POST/PATCH/DELETE /api/session) in 1.5;
+  // 1.6-1.8 extend additively.
   const implemented = ROUTE_TABLE.filter(route => route.implemented === true)
-  assert.deepEqual(implemented.map(routeKey), ['POST /api/auth/local', 'GET /health'])
+  assert.deepEqual(implemented.map(routeKey), [
+    'POST /api/session',
+    'PATCH /api/session',
+    'DELETE /api/session',
+    'POST /api/auth/local',
+    'GET /health',
+  ])
   const local = ROUTE_TABLE.find(route => routeKey(route) === 'POST /api/auth/local')
   assert.deepEqual([...local.requestFields], ['public_key'])
+  // The session surface: chat_id on connect and rename, none on disconnect —
+  // actor identity always comes from the token, never the body.
+  const connect = ROUTE_TABLE.find(route => routeKey(route) === 'POST /api/session')
+  const rename = ROUTE_TABLE.find(route => routeKey(route) === 'PATCH /api/session')
+  const disconnect = ROUTE_TABLE.find(route => routeKey(route) === 'DELETE /api/session')
+  assert.deepEqual([...connect.requestFields], ['chat_id'])
+  assert.deepEqual([...rename.requestFields], ['chat_id'])
+  assert.deepEqual([...disconnect.requestFields], [])
 })
 
 test('the fixed pipeline order is the AD-7 order', () => {

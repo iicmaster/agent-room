@@ -24,9 +24,16 @@ export const ROUTE_TABLE = Object.freeze([
   // actor (AD-8): POST /api/session · PATCH /api/session · DELETE /api/session
   // · GET /api/presence · GET /api/rooms · POST /api/rooms/direct ·
   // GET|POST /api/rooms/:id/messages · GET /api/status
-  Object.freeze({ method: 'POST', path: '/api/session', class: 'actor', requestFields: Object.freeze(['chat_id']) }),
-  Object.freeze({ method: 'PATCH', path: '/api/session', class: 'actor', requestFields: Object.freeze(['chat_id']) }),
-  Object.freeze({ method: 'DELETE', path: '/api/session', class: 'actor', requestFields: Object.freeze([]) }),
+  //
+  // Story 1.5: the session connect surface is live (handlers in server.mjs).
+  // POST binds the authenticated Actor to a Chat ID for the session's
+  // lifetime; PATCH renames immediately (the old name freed in the same
+  // instant); DELETE releases the live name (the durable claim row stays).
+  // chat_id always comes from the body; actor identity always comes from the
+  // token.
+  Object.freeze({ method: 'POST', path: '/api/session', class: 'actor', implemented: true, requestFields: Object.freeze(['chat_id']) }),
+  Object.freeze({ method: 'PATCH', path: '/api/session', class: 'actor', implemented: true, requestFields: Object.freeze(['chat_id']) }),
+  Object.freeze({ method: 'DELETE', path: '/api/session', class: 'actor', implemented: true, requestFields: Object.freeze([]) }),
   Object.freeze({ method: 'GET', path: '/api/presence', class: 'actor', requestFields: Object.freeze(['include_offline']) }),
   Object.freeze({ method: 'GET', path: '/api/rooms', class: 'actor', requestFields: Object.freeze([]) }),
   Object.freeze({ method: 'POST', path: '/api/rooms/direct', class: 'actor', requestFields: Object.freeze(['chat_id', 'target_fingerprint']) }),
