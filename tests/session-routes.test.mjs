@@ -168,6 +168,53 @@ function sessionRequest(port, method, sessionToken, body) {
   })
 }
 
+test('re-auth recovery: a dead holder\'s name is released for the SAME Actor, never for a live one and never for another Actor', async t => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'agent-room-dead-holder-'))
+  t.after(() => rmSync(dataDir, { recursive: true, force: true }))
+  const sessionRegistry = createSessionRegistry()
+  const liveSessionRegistry = createLiveSessionRegistry()
+  const server = await startServer({ dataDir, sessionRegistry, liveSessionRegistry })
+  t.after(() => server.close())
+  const localToken = loadOrCreateLocalToken(dataDir)
+  const alice = installation()
+
+  // Alice binds 'Agent' with a session the server then forgets.
+  const first = await exchange(server.port, alice, localToken)
+  assert.equal(first.status, 200, first.text)
+  const staleToken = first.json().result.session_token
+  const staleKey = sessionKeyFromToken(staleToken)
+  assert.equal(
+    (await sessionRequest(server.port, 'POST', staleToken, { chat_id: 'Agent' })).status,
+    200,
+  )
+
+  // A LIVE holder of the same name is never displaced, even by the same Actor.
+  assert.throws(() => liveSessionRegistry.claim({
+    sessionKey: 'other-session',
+    chatId: 'agent',
+    actorFingerprint: alice.fingerprint,
+  }), error => error?.code === 'chat_id_taken')
+
+  // The server forgets the session (revoke) — the row still holds the name.
+  assert.equal(sessionRegistry.revoke(staleKey), true)
+  assert.equal(liveSessionRegistry.holderOf('Agent').sessionKey, staleKey)
+
+  // The same Actor re-authenticates and re-binds: the dead holder is released
+  // and the bind succeeds.
+  const second = await exchange(server.port, alice, localToken)
+  assert.equal(second.status, 200, second.text)
+  const rebound = await sessionRequest(server.port, 'POST', second.json().result.session_token, { chat_id: 'Agent' })
+  assert.equal(rebound.status, 200, rebound.text)
+  assert.notEqual(liveSessionRegistry.holderOf('Agent').sessionKey, staleKey)
+
+  // A DIFFERENT Actor still gets the explicit refusal on that live name.
+  const bob = installation()
+  const bobAuth = await exchange(server.port, bob, localToken)
+  const bobBind = await sessionRequest(server.port, 'POST', bobAuth.json().result.session_token, { chat_id: 'Agent' })
+  assert.equal(bobBind.status, 409)
+  assert.equal(bobBind.json().error.code, 'chat_id_taken')
+})
+
 // Full client path for one installation: exchange + connect.
 async function connectInstallation(port, localToken, installation_, chatId) {
   const auth = await exchange(port, installation_, localToken)

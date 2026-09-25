@@ -26,8 +26,10 @@ import {
   routeKey,
 } from '../server/api/routes.mjs'
 import {
+  ERROR_ENVELOPE_EXTRAS,
   PIPELINE_STAGE_ORDER,
   errorEnvelope,
+  reject,
   successEnvelope,
 } from '../server/api/pipeline.mjs'
 
@@ -114,6 +116,46 @@ test('the AD-8 envelope sentence pins the wire shape and the fallback code', () 
     ok: false,
     error: { code: 'protocol_required', message: 'Agent-Room-Protocol header is required' },
   })
+})
+
+test('error-envelope extras are a declared allowlist gated by code and can never clobber fixed fields', () => {
+  // The Story 1.7 amendment declared exactly one entry: ambiguous_chat_id's
+  // optional candidates list.
+  assert.deepEqual(Object.keys(ERROR_ENVELOPE_EXTRAS), ['ambiguous_chat_id'])
+  assert.deepEqual([...ERROR_ENVELOPE_EXTRAS.ambiguous_chat_id], ['candidates'])
+
+  // Fixed fields are construction-time protected: no declared extra may be
+  // named ok, code, message, or status, and a spread of unlisted extras is
+  // dropped.
+  const fixed = new Set(['ok', 'code', 'message', 'status'])
+  for (const [code, names] of Object.entries(ERROR_ENVELOPE_EXTRAS)) {
+    for (const name of names) {
+      assert.equal(fixed.has(name), false, `${code} declares envelope-clobbering extra "${name}"`)
+    }
+  }
+
+  // The coded path carries the declared extra; an undeclared code's extras
+  // never reach the envelope, and no extra can overwrite the fixed fields.
+  const ambiguous = reject('ambiguous_chat_id', 'ambiguous', {
+    candidates: [{ fingerprint: 'sha256:' + 'a'.repeat(64), last_seen: new Date(0).toISOString() }],
+    ok: false,
+    code: 'smuggled',
+    message: 'smuggled',
+    status: 500,
+  })
+  assert.equal(ambiguous.candidates.length, 1)
+  assert.equal(ambiguous.code, 'ambiguous_chat_id')
+  assert.equal(ambiguous.message, 'ambiguous')
+  assert.equal(ambiguous.status, 409)
+  assert.equal(ambiguous.ok, false)
+  assert.deepEqual(errorEnvelope(ambiguous), {
+    ok: false,
+    error: { code: 'ambiguous_chat_id', message: 'ambiguous', candidates: ambiguous.candidates },
+  })
+
+  const undeclared = reject('chat_id_taken', 'taken', { candidates: [{ fingerprint: 'x', last_seen: 'y' }] })
+  assert.equal(undeclared.candidates, undefined, 'extras on undeclared codes are dropped')
+  assert.deepEqual(errorEnvelope(undeclared), { ok: false, error: { code: 'chat_id_taken', message: 'taken' } })
 })
 
 test('the route table is deep-frozen immutable data', () => {

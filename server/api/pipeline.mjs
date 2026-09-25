@@ -44,15 +44,48 @@ const LOOPBACK_REMOTE_ADDRESSES = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1
 
 const BODY_METHODS = new Set(['POST', 'PATCH'])
 
+// Declared per-code extras for the error envelope (the additive AD-8
+// vocabulary): a code may carry ONLY the extra field names listed here, and a
+// name that would clobber one of the envelope's fixed fields is a
+// construction-time error — extras can never overwrite ok, code, message, or
+// status. Story 1.7's amendment declared exactly one entry:
+// ambiguous_chat_id's optional candidates list.
+export const ERROR_ENVELOPE_EXTRAS = Object.freeze({
+  ambiguous_chat_id: Object.freeze(['candidates']),
+})
+
+const ENVELOPE_FIXED_FIELDS = new Set(['ok', 'code', 'message', 'status'])
+
+for (const [code, names] of Object.entries(ERROR_ENVELOPE_EXTRAS)) {
+  for (const name of names) {
+    if (ENVELOPE_FIXED_FIELDS.has(name)) {
+      throw new AgentRoomRuntimeError(
+        'invalid_argument',
+        `error-envelope extra "${name}" for ${code} would clobber a fixed envelope field`,
+      )
+    }
+  }
+}
+
+function declaredExtras(code, source) {
+  const allowed = ERROR_ENVELOPE_EXTRAS[code]
+  if (allowed === undefined || source === undefined || source === null) return {}
+  const picked = {}
+  for (const name of allowed) {
+    if (source[name] !== undefined) picked[name] = source[name]
+  }
+  return picked
+}
+
 // Shared reject helper: builds the failure outcome for a wire-visible error.
 // The HTTP status always comes from PUBLIC_ERROR_STATUS (AD-9); a code that is
 // not whitelisted falls back to `request_failed` per AD-8 ("unknown →
 // request_failed", v0.1 ratified) and never leaks its raw name or message.
 // request_failed is 500: an internal fault must not masquerade as a missing
 // route, and the 5xx class must stay reachable. The optional extra object
-// (Story 1.7's dated amendment) carries additional error-envelope fields for
-// codes that declare them — ambiguous_chat_id's `candidates` — and is dropped
-// entirely when absent, so every pre-existing rejection keeps its exact shape.
+// contributes only the extras declared for the code (see
+// ERROR_ENVELOPE_EXTRAS) — anything else is dropped, so a rejection keeps its
+// exact pre-declaration shape unless the code declared the field.
 export function reject(code, message, extra) {
   const status = PUBLIC_ERROR_STATUS[code]
   if (status === undefined) {
@@ -68,7 +101,7 @@ export function reject(code, message, extra) {
     code,
     message: message ?? PUBLIC_ERRORS[code],
     status,
-    ...(extra === undefined ? {} : extra),
+    ...declaredExtras(code, extra),
   }
 }
 
@@ -76,17 +109,17 @@ export function successEnvelope(result) {
   return { ok: true, result }
 }
 
-// The error envelope is {ok, error:{code,message}} plus, additively (the
-// dated Story 1.7 amendment), any declared extra fields the failure carries —
-// currently only ambiguous_chat_id's optional `candidates` list. Failures
-// without extras serialize exactly as before.
+// The error envelope is {ok, error:{code,message}} plus, additively, only the
+// extras the failure's code declares (currently ambiguous_chat_id's optional
+// candidates). The fixed fields can never be clobbered: extras are picked by
+// declared name, never spread.
 export function errorEnvelope(failure) {
   return {
     ok: false,
     error: {
       code: failure.code,
       message: failure.message,
-      ...(failure.candidates === undefined ? {} : { candidates: failure.candidates }),
+      ...declaredExtras(failure.code, failure),
     },
   }
 }

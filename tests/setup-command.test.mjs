@@ -22,6 +22,8 @@ import test from 'node:test'
 
 import { DatabaseSync } from 'node:sqlite'
 
+import { CHAT_ID_INVALID_MESSAGE } from '../server/constants.mjs'
+import { atomicWriteJson } from '../server/runtime.mjs'
 import { loadOrCreateLocalToken } from '../server/api/local-token.mjs'
 import { runSetup, SETUP_REQUIRES_TTY_MESSAGE } from '../server/cli/agent-room.mjs'
 
@@ -296,17 +298,16 @@ test('setup without a TTY prompts nothing, touches nothing, and answers guidance
   assert.equal(echoed, '', 'not a single prompt byte was written')
 })
 
-test('setup aborts cleanly when the input ends before a name is chosen', async t => {
+
+test('setup overwrite guard: an existing configuration is never silently replaced', async t => {
   const world = makeWorld(t)
   await world.waitReady()
   const input = interactiveInput()
   const output = new PassThrough()
-  t.after(() => {
-    input.end()
-    output.end()
-  })
   const echo = collectEcho(output)
-  const waitForEcho = echo.waitFor
+
+  // Pre-existing configuration from an earlier setup.
+  atomicWriteJson(join(world.pluginData, CONFIG_FILENAME), { chat_id: 'Original', set_up_at: new Date(0).toISOString() })
 
   const pending = runSetup({
     input,
@@ -314,7 +315,92 @@ test('setup aborts cleanly when the input ends before a name is chosen', async t
     sharedDataDir: world.sharedData,
     pluginDataDir: world.pluginData,
   })
-  await waitForEcho(/Choose a Chat ID/)
+  await echo.waitFor(/already configured for this installation/)
+  await echo.waitFor(/Overwrite it\? \[y\/N\]/)
+
+  // Declining keeps the old configuration byte-for-byte and aborts honestly.
+  input.write('n\n')
+  const declined = await pending
+  assert.equal(declined.status, 'aborted')
+  assert.match(declined.message, /kept the existing configuration; nothing was changed/)
+  assert.equal(JSON.parse(readFileSync(join(world.pluginData, CONFIG_FILENAME), 'utf8')).chat_id, 'Original')
+
+  // No claim row, no probe: the guard fires before the server is even used.
+  assert.deepEqual(claimRows(world.sharedData), [])
+})
+
+test('setup overwrite guard: an interactive yes proceeds and replaces the stored Chat ID', async t => {
+  const world = makeWorld(t)
+  const record = await world.waitReady()
+  const input = interactiveInput()
+  const output = new PassThrough()
+  const echo = collectEcho(output)
+
+  atomicWriteJson(join(world.pluginData, CONFIG_FILENAME), { chat_id: 'Original', set_up_at: new Date(0).toISOString() })
+
+  const pending = runSetup({
+    input,
+    output,
+    sharedDataDir: world.sharedData,
+    pluginDataDir: world.pluginData,
+  })
+  await echo.waitFor(/Overwrite it\? \[y\/N\]/)
+  input.write('y\n')
+  await echo.waitFor(/Choose a Chat ID/)
+  input.write('Bobby\n')
+  const outcome = await pending
+
+  assert.equal(outcome.status, 'configured')
+  assert.equal(outcome.chatId, 'Bobby')
+  assert.equal(JSON.parse(readFileSync(join(world.pluginData, CONFIG_FILENAME), 'utf8')).chat_id, 'Bobby')
+  assert.deepEqual(claimRows(world.sharedData).map(row => row.chat_id_normalized), ['bobby'])
+  const nextClaim = await connectInstallation(record.port, world.sharedData, 'Bobby')
+  assert.ok(nextClaim.sessionToken)
+})
+
+test('setup prompt text derives the grammar from the constants, not a restated sentence', async t => {
+  const world = makeWorld(t)
+  await world.waitReady()
+  const input = interactiveInput()
+  const output = new PassThrough()
+  const echo = collectEcho(output)
+
+  const pending = runSetup({
+    input,
+    output,
+    sharedDataDir: world.sharedData,
+    pluginDataDir: world.pluginData,
+  })
+  // Wait for the prompt before answering: a line written before the question
+  // is pending is never consumed by the readline question.
+  await echo.waitFor(/Welcome to agent-room setup/)
+  await echo.waitFor(/Choose a Chat ID/)
+  input.write('bad name!\n')
+  await echo.waitFor(/not a valid Chat ID:/)
+  input.end()
+  const outcome = await pending
+
+  // The echoed guidance is the shared DR-1 detail verbatim (the wire-name
+  // wording, chat_id), and the flow aborted without writing anything.
+  assert.match(echo.text(), new RegExp(CHAT_ID_INVALID_MESSAGE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  assert.equal(outcome.status, 'aborted')
+  assert.equal(existsSync(join(world.pluginData, CONFIG_FILENAME)), false)
+})
+
+test('setup aborts cleanly when the input ends before a name is chosen', async t => {
+  const world = makeWorld(t)
+  await world.waitReady()
+  const input = interactiveInput()
+  const output = new PassThrough()
+  const echo = collectEcho(output)
+
+  const pending = runSetup({
+    input,
+    output,
+    sharedDataDir: world.sharedData,
+    pluginDataDir: world.pluginData,
+  })
+  await echo.waitFor(/Choose a Chat ID/)
   input.end()
   const outcome = await pending
 

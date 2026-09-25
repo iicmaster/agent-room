@@ -17,17 +17,20 @@
 //
 // No name is ever stored unless it passed the grammar gate AND the live
 // probe; a refused probe writes no config, so a half-finished setup leaves
-// no state behind.
+// no state behind. An existing configuration is never silently overwritten:
+// the human confirms the replacement interactively.
 
 import { createInterface } from 'node:readline'
 import http from 'node:http'
-import { realpathSync } from 'node:fs'
+import { existsSync, realpathSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import {
   CHAT_ID_INVALID_MESSAGE,
   CHAT_ID_MAX,
+  CLIENT_CONFIG_MAX_BYTES,
+  CLIENT_REQUEST_TIMEOUT_MS,
   PROTOCOL_HEADER,
   PROTOCOL_VERSION,
   chatIdForms,
@@ -36,6 +39,7 @@ import {
   AgentRoomRuntimeError,
   atomicWriteJson,
   instanceDataDirectory,
+  readJsonFile,
   sharedDataDirectory,
 } from '../runtime.mjs'
 import { loadOrCreateKeypair } from '../keys.mjs'
@@ -46,7 +50,7 @@ const OK_STATUS = 200
 const CONFLICT_STATUS = 409
 export const SETUP_REQUIRES_TTY_MESSAGE = 'agent-room setup asks a human to choose the Chat ID, so it needs an interactive terminal (a TTY). Run it in your own terminal: agent-room setup'
 
-function httpJson(port, method, path, headers, body) {
+function httpJson(port, method, path, headers, body, timeoutMs = CLIENT_REQUEST_TIMEOUT_MS) {
   return new Promise((resolvePromise, rejectPromise) => {
     const request = http.request(
       { host: '127.0.0.1', port, method, path, headers, agent: false },
@@ -62,6 +66,9 @@ function httpJson(port, method, path, headers, body) {
         })
       },
     )
+    // Every probe round trip is bounded: a server that accepts and stalls
+    // cannot hang the interactive command.
+    request.setTimeout(timeoutMs, () => request.destroy(new AgentRoomRuntimeError('request_failed', 'request timed out')))
     request.on('error', rejectPromise)
     if (body !== undefined) request.write(JSON.stringify(body))
     request.end()
@@ -77,13 +84,15 @@ function bearerHeaders(token) {
 }
 
 // One claim probe with a fresh session: bind the candidate name, and on
-// success release it immediately — the name is verified claimable and then
-// freed for the session that will actually use it. A live collision is the
+// success release it — the name is verified claimable and then freed for the
+// session that will actually use it. The release is best-effort: if it fails,
+// the answer says so honestly, because the probe session keeps the name
+// live-claimed until its session lease expires. A live collision is the
 // caller's signal to re-prompt; any other coded answer is a real failure.
-async function probeClaim({ port, localToken, publicKey, chatId }) {
+async function probeClaim({ port, localToken, publicKey, chatId, timeoutMs = CLIENT_REQUEST_TIMEOUT_MS }) {
   const exchange = await httpJson(port, 'POST', '/api/auth/local', bearerHeaders(localToken), {
     public_key: publicKey,
-  })
+  }, timeoutMs)
   if (exchange.status !== OK_STATUS || exchange.body?.result?.session_token === undefined) {
     throw new AgentRoomRuntimeError(
       exchange.body?.error?.code ?? 'request_failed',
@@ -91,22 +100,26 @@ async function probeClaim({ port, localToken, publicKey, chatId }) {
     )
   }
   const sessionToken = exchange.body.result.session_token
-  const bind = await httpJson(port, 'POST', '/api/session', bearerHeaders(sessionToken), {
-    chat_id: chatId,
-    client_type: 'cli',
-  })
-  if (bind.status === OK_STATUS) {
-    const released = await httpJson(port, 'DELETE', '/api/session', bearerHeaders(sessionToken))
-    if (released.status !== OK_STATUS) {
-      throw new AgentRoomRuntimeError(
-        released.body?.error?.code ?? 'request_failed',
-        released.body?.error?.message ?? 'the probe session could not be released',
-      )
+  let released = true
+  let bind
+  try {
+    bind = await httpJson(port, 'POST', '/api/session', bearerHeaders(sessionToken), {
+      chat_id: chatId,
+      client_type: 'cli',
+    }, timeoutMs)
+  } finally {
+    try {
+      const releasedResponse = await httpJson(port, 'DELETE', '/api/session', bearerHeaders(sessionToken), undefined, timeoutMs)
+      released = releasedResponse.status === OK_STATUS
+    } catch {
+      released = false
     }
-    return { claimed: true }
+  }
+  if (bind.status === OK_STATUS) {
+    return { claimed: true, released }
   }
   if (bind.status === CONFLICT_STATUS && bind.body?.error?.code === 'chat_id_taken') {
-    return { claimed: false }
+    return { claimed: false, released }
   }
   throw new AgentRoomRuntimeError(
     bind.body?.error?.code ?? 'request_failed',
@@ -130,12 +143,6 @@ export async function runSetup({
     return { status: 'not-a-tty', message: SETUP_REQUIRES_TTY_MESSAGE }
   }
 
-  // Local Mode bootstrap: the shared server (and, after a boot, the local
-  // credential file) exists before the first probe.
-  const server = await ensureServer({ dataDir: sharedDataDir, ...(waitMs === undefined ? {} : { waitMs }) })
-  const localToken = loadOrCreateLocalToken(sharedDataDir)
-  const keypair = loadOrCreateKeypair(pluginDataDir)
-
   const lines = createInterface({ input, output, terminal: false })
   // One pending ask at a time. When the interface closes (the human pressed
   // Ctrl-D, or the input ended), the pending question resolves with null so
@@ -157,10 +164,37 @@ export async function runSetup({
   })
   const say = message => output.write(`${message}\n`)
 
-  say(`Welcome to agent-room setup. This installation needs one Chat ID (1-${CHAT_ID_MAX} characters: letters, numbers, dot, underscore, hyphen) — other agents will use it to find and message you.`)
+  // The grammar text is derived from the constants module, never restated.
+  say(`Welcome to agent-room setup. This installation needs one Chat ID — ${CHAT_ID_INVALID_MESSAGE} — other agents will use it to find and message you.`)
   const configPath = join(pluginDataDir, 'config.json')
 
   try {
+    // An existing configuration is never silently overwritten: the human
+    // confirms the replacement interactively before anything else happens
+    // (and before the shared server is even booted).
+    if (existsSync(configPath)) {
+      let existing = null
+      try {
+        existing = readJsonFile(configPath, { maxBytes: CLIENT_CONFIG_MAX_BYTES })
+      } catch {
+        existing = null
+      }
+      const existingChatId = typeof existing?.chat_id === 'string' ? existing.chat_id : '(unreadable)'
+      const answer = await ask(`A Chat ID ("${existingChatId}") is already configured for this installation (${configPath}). Overwrite it? [y/N] `)
+      if (answer === null) {
+        return { status: 'aborted', message: 'agent-room setup ended before an answer was given; no configuration was written' }
+      }
+      if (!/^(y|yes)$/i.test(String(answer).trim())) {
+        return { status: 'aborted', message: 'agent-room setup kept the existing configuration; nothing was changed' }
+      }
+    }
+
+    // Local Mode bootstrap: the shared server (and, after a boot, the local
+    // credential file) exists before the first probe.
+    const server = await ensureServer({ dataDir: sharedDataDir, ...(waitMs === undefined ? {} : { waitMs }) })
+    const localToken = loadOrCreateLocalToken(sharedDataDir)
+    const keypair = loadOrCreateKeypair(pluginDataDir)
+
     for (;;) {
       const answer = await ask(`Choose a Chat ID: `)
       if (answer === null) {
@@ -199,6 +233,9 @@ export async function runSetup({
         set_up_at: new Date().toISOString(),
       })
       say(`Done. This installation's Chat ID is "${forms.display}".`)
+      if (!probe.released) {
+        say(`Warning: the probe session could not be released, so "${forms.display}" stays live-claimed until that session's lease expires; connecting with it may answer chat_id_taken until then.`)
+      }
       say(`Stored in ${configPath} — the agent-room tools are ready to use.`)
       return { status: 'configured', chatId: forms.display, configPath }
     }

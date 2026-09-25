@@ -62,6 +62,7 @@ import {
   CHAT_ID_INVALID_MESSAGE,
   CLAIMS_TTL_MS,
   CLIENT_TYPES,
+  FINGERPRINT_PATTERN,
   LONGPOLL_POLL_INTERVAL_MS,
   PRESENCE_TTL_MS,
   PRUNE_INTERVAL_MS,
@@ -92,13 +93,6 @@ import { readLocalToken } from './local-token.mjs'
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1'])
 const API_PREFIX = '/api/'
 const SUCCESS_STATUS = 200
-
-// Canonical Actor fingerprint shape (see ../keys.mjs): `sha256:` plus 64
-// lowercase hex characters over the raw 32-byte public key. The same shape
-// every module that handles fingerprints cites; target_fingerprint on the
-// direct-open route must arrive in this form or the request is a shape
-// rejection.
-const FINGERPRINT_PATTERN = /^sha256:[0-9a-f]{64}$/
 
 const REGISTERED_HANDLERS = new Map()
 
@@ -256,6 +250,24 @@ function bindSession(context) {
     return reject('invalid_request', `client_type must be one of: ${CLIENT_TYPES.join(', ')}`)
   }
   const registry = context.liveSessionRegistry ?? LIVE_SESSION_REGISTRY
+  // Re-auth recovery (Story 1.7): a client whose session token was
+  // invalidated or expired re-authenticates and re-binds the SAME Chat ID.
+  // The dead session's row still holds the name until its lease, which would
+  // make the client permanently unrecoverable. When — and only when — the
+  // current holder is the SAME Actor and that holder's session token no longer
+  // authenticates, the row is released and the name re-claimed. A live session
+  // (even of the same Actor) is never displaced, and a different Actor never
+  // is.
+  if (typeof registry.holderOf === 'function') {
+    const holder = registry.holderOf(chatId)
+    if (holder !== null
+      && holder.sessionKey !== principal.sessionKey
+      && holder.actorFingerprint === principal.actorFingerprint
+      && typeof context.sessionRegistry?.isLive === 'function'
+      && context.sessionRegistry.isLive(holder.sessionKey) === false) {
+      registry.release(holder.sessionKey)
+    }
+  }
   const state = registry.claim({
     sessionKey: principal.sessionKey,
     chatId,
@@ -425,20 +437,22 @@ registerHandler('POST /api/rooms/direct', function directOpen(context) {
 
 // GET /api/rooms/:id/messages: the long-poll read. The page semantics are
 // the frozen read contract: after_seq strictly-greater, page ≤ READ_PAGE_MAX,
-// wait_ms a server hold capped at READ_HOLD_MAX_MS (anything above is refused
-// 400 before any waiting). The wait is a bounded in-process loop that
-// re-polls the store every LONGPOLL_POLL_INTERVAL_MS and sleeps between polls
-// — the store read is a short statement-level read, never a held read
-// transaction, so a held response holds no store lock. A message arriving at
-// any point returns immediately; silence runs out to the deadline and returns
-// a normal possibly-empty page — never 204, never an error. Every response
-// carries next_after_seq (the cursor to resume from: the last message's seq,
-// or the requested after_seq when the page is empty) and head_seq (the
-// room's largest allocated seq). Member ACL reuses the store: readPage (and
-// headSeq, ordered after it) enforce room_not_found / actor_not_member.
+// wait_ms a server hold capped at READ_HOLD_MAX_MS (anything above — or any
+// non-integer junk, including an empty string — is refused before any
+// waiting; the hold code is invalid_wait_ms). The wait is a bounded loop
+// that re-polls the store and sleeps between polls, never past the deadline:
+// the sleep clamps to the remaining time. The store read is a short
+// statement-level read, never a held read transaction, so a held response
+// holds no store lock. A message arriving at any point returns immediately;
+// silence runs out to the deadline and returns a normal possibly-empty page —
+// never 204, never an error. Every response carries next_after_seq (the
+// cursor to resume from: the last message's seq, or the requested after_seq
+// when the page is empty) and head_seq (the room's largest allocated seq).
+// Member ACL reuses the store: readPage (and headSeq, ordered after it)
+// enforce room_not_found / actor_not_member.
 function integerQuery(value, name, { min, max, code }) {
-  if (value === undefined || value === null || value === '') return { default: true, value: null }
-  if (typeof value !== 'string' || !/^[0-9]+$/.test(value)) {
+  if (value === undefined || value === null) return { default: true, value: null }
+  if (value === '' || typeof value !== 'string' || !/^[0-9]+$/.test(value)) {
     return { error: reject(code, `${name} must be an integer`) }
   }
   const parsed = Number(value)
@@ -461,7 +475,7 @@ registerHandler('GET /api/rooms/:id/messages', async function readMessages(conte
   })
   if (limitQuery.error) return limitQuery.error
   const waitMsQuery = integerQuery(context.query?.wait_ms, 'wait_ms', {
-    min: 0, max: READ_HOLD_MAX_MS, code: 'invalid_request',
+    min: 0, max: READ_HOLD_MAX_MS, code: 'invalid_wait_ms',
   })
   if (waitMsQuery.error) return waitMsQuery.error
 
@@ -478,7 +492,8 @@ registerHandler('GET /api/rooms/:id/messages', async function readMessages(conte
       afterSeq,
       limit,
     })
-    if (messages.length > 0 || Date.now() >= deadline) {
+    const remainingMs = deadline - Date.now()
+    if (messages.length > 0 || remainingMs <= 0) {
       const headSeq = context.store.headSeq(roomId, { actorFingerprint: principal.actorFingerprint })
       return {
         messages,
@@ -486,7 +501,11 @@ registerHandler('GET /api/rooms/:id/messages', async function readMessages(conte
         head_seq: headSeq,
       }
     }
-    await new Promise(resolvePromise => { setTimeout(resolvePromise, LONGPOLL_POLL_INTERVAL_MS) })
+    // The wake-up sleep never overshoots the deadline: it clamps to the
+    // remaining hold time, so a response always lands within wait_ms.
+    await new Promise(resolvePromise => {
+      setTimeout(resolvePromise, Math.min(LONGPOLL_POLL_INTERVAL_MS, remainingMs))
+    })
   }
 }, 'actor')
 

@@ -42,8 +42,8 @@ const expectedMcpConfig = {
   },
 };
 
-const portableEntries = ['plugin.json', 'mcp.json', 'server', 'web', 'README.md', 'LICENSE', 'CHANGELOG.md'];
-const sharedEntries = ['server', 'web', 'README.md', 'LICENSE', 'CHANGELOG.md'];
+const portableEntries = ['plugin.json', 'mcp.json', 'server', 'web', 'README.md', 'LICENSE', 'CHANGELOG.md', 'package.json'];
+const sharedEntries = ['server', 'web', 'README.md', 'LICENSE', 'CHANGELOG.md', 'package.json'];
 
 function isWithin(candidate, boundary) {
   const pathFromBoundary = relative(boundary, candidate);

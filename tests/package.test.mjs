@@ -9,6 +9,7 @@ import {
   readFile,
   readdir,
   rm,
+  stat,
   symlink,
   writeFile,
 } from 'node:fs/promises';
@@ -114,7 +115,7 @@ async function collectTree(root, relativePath = '', entries = new Map()) {
 
 async function sharedSnapshot(root) {
   const snapshot = new Map();
-  for (const entry of ['server', 'web', 'README.md', 'LICENSE', 'CHANGELOG.md']) {
+  for (const entry of ['server', 'web', 'README.md', 'LICENSE', 'CHANGELOG.md', 'package.json']) {
     const path = join(root, entry);
     const info = await lstat(path);
     assert.equal(info.isSymbolicLink(), false, `shared entry is a symlink: ${entry}`);
@@ -156,6 +157,7 @@ test('portable manifests and package metadata have exact closed shapes', async (
     version: '0.1.0',
     private: true,
     type: 'module',
+    bin: { 'agent-room': './server/cli/agent-room.mjs' },
     engines: { node: '>=24.15' },
     scripts: {
       test: 'node --test',
@@ -164,6 +166,12 @@ test('portable manifests and package metadata have exact closed shapes', async (
   });
   assert.equal(Object.hasOwn(packageJson, 'dependencies'), false);
   assert.equal(Object.hasOwn(packageJson, 'devDependencies'), false);
+
+  // The bin target must be the setup CLI, and it must carry the shebang a
+  // bin launcher relies on.
+  assert.equal(packageJson.bin['agent-room'], './server/cli/agent-room.mjs');
+  const cliSource = await readFile(join(repoRoot, 'server', 'cli', 'agent-room.mjs'), 'utf8');
+  assert.match(cliSource, /^#!\/usr\/bin\/env node\n/);
 });
 
 test('engines.node agrees with the runtime Node floor and must not drift', async () => {
@@ -189,6 +197,7 @@ test('release packaging creates two materialized byte-identical runtime artifact
     'LICENSE',
     'README.md',
     'mcp.json',
+    'package.json',
     'plugin.json',
     'server',
     'web',
@@ -199,6 +208,7 @@ test('release packaging creates two materialized byte-identical runtime artifact
     'CHANGELOG.md',
     'LICENSE',
     'README.md',
+    'package.json',
     'server',
     'web',
   ]);
@@ -229,6 +239,19 @@ test('release packaging creates two materialized byte-identical runtime artifact
     if (expected.type === 'file') {
       assert.deepEqual(actual.bytes, expected.bytes, `runtime bytes differ: ${path}`);
     }
+  }
+
+  // The setup command ships exposed in every artifact: the bin entry and an
+  // executable, shebang-carrying CLI (a bin launcher depends on both).
+  for (const artifactRoot of [portableRoot, claudeRoot]) {
+    const artifactPackage = await readJson(join(artifactRoot, 'package.json'));
+    assert.deepEqual(artifactPackage.bin, { 'agent-room': './server/cli/agent-room.mjs' });
+    const cliPath = join(artifactRoot, 'server', 'cli', 'agent-room.mjs');
+    const artifactCliSource = await readFile(cliPath, 'utf8');
+    assert.match(artifactCliSource, /^#!\/usr\/bin\/env node\n/);
+    const cliInfo = await stat(cliPath);
+    assert.equal(cliInfo.isFile(), true);
+    assert.notEqual(cliInfo.mode & 0o111, 0, 'the packaged setup CLI must be executable');
   }
 });
 

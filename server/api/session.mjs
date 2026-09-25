@@ -25,6 +25,7 @@
 import { createHash, randomBytes } from 'node:crypto'
 
 import {
+  FINGERPRINT_PATTERN,
   SESSIONS_MAX,
   SESSION_TOKEN_BYTES,
   SESSION_TOKEN_MAX_CHARS,
@@ -32,10 +33,6 @@ import {
 } from '../constants.mjs'
 import { AgentRoomRuntimeError } from '../runtime.mjs'
 import { reject } from './pipeline.mjs'
-
-// Canonical Actor fingerprint shape (see ../keys.mjs): `sha256:` plus
-// lowercase hex over 32 raw bytes.
-const FINGERPRINT_PATTERN = /^sha256:[0-9a-f]{64}$/
 
 function sessionDigest(token) {
   return createHash('sha256').update(token, 'utf8').digest('hex')
@@ -87,6 +84,35 @@ export function createSessionRegistry({
     return token
   }
 
+  // Liveness by session KEY (the digest the live-session registry holds).
+  // The api layer needs it to tell a DEAD session's stale Chat-ID row from a
+  // live holder's during the re-auth recovery path. Read-only: verifying
+  // nothing, it never slides the TTL and never creates an entry.
+  function isLive(sessionKey) {
+    if (typeof sessionKey !== 'string' || sessionKey.length === 0) return false
+    const entry = sessions.get(sessionKey)
+    if (!entry) return false
+    return now() < entry.expiresAt
+  }
+
+  // Explicit revocation by session KEY: the session stops authenticating at
+  // once. Used by the re-auth recovery path's counterpart (logout, ban in
+  // Epic 4) and by the dead-holder release rule. Returns whether an entry
+  // was actually removed.
+  // The live session keys (digests), for operator diagnostics and for the
+  // server-side invalidation path. Read-only: a copy of the live key set.
+  function sessionKeys() {
+    const timestamp = now()
+    return [...sessions.entries()]
+      .filter(([, entry]) => timestamp < entry.expiresAt)
+      .map(([digest]) => digest)
+  }
+
+  function revoke(sessionKey) {
+    if (typeof sessionKey !== 'string' || sessionKey.length === 0) return false
+    return sessions.delete(sessionKey)
+  }
+
   function verify(token) {
     if (typeof token !== 'string' || token.length === 0 || token.length > SESSION_TOKEN_MAX_CHARS) {
       return reject('unauthorized')
@@ -104,7 +130,7 @@ export function createSessionRegistry({
     return { actorFingerprint: entry.actorFingerprint }
   }
 
-  return { issue, verify }
+  return { issue, verify, isLive, revoke, sessionKeys }
 }
 
 // Extract the Bearer credential from request headers. The scheme is

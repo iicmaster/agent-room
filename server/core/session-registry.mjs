@@ -192,7 +192,10 @@ export function createLiveSessionRegistry({ now = Date.now, leaseMs = SESSION_TT
 
     const holder = names.get(forms.normalized)
     if (holder !== undefined && holder !== key) {
-      // Explicit refusal, no suffixing, no state change.
+      // Explicit refusal, no suffixing, no state change. A same-Actor
+      // re-claim is a collision here TOO — the caller (the api layer) may
+      // release a DEAD holder's row via release() and claim again; the
+      // registry itself never decides a live session may lose its name.
       fail('chat_id_taken', PUBLIC_ERRORS.chat_id_taken)
     }
 
@@ -239,6 +242,19 @@ export function createLiveSessionRegistry({ now = Date.now, leaseMs = SESSION_TT
   // immediately. The durable claim row is deliberately untouched — the
   // (name, actor) pair stays in the store as ambiguity data. Returns whether
   // a live row existed.
+  // The api layer needs to know WHO holds a name before it can decide that a
+  // collision is against a dead session of the same Actor (the re-auth
+  // recovery path). Read-only; it never mutates.
+  function holderOf(chatId) {
+    const forms = chatIdForms(chatId)
+    if (forms === null) return null
+    const key = names.get(forms.normalized)
+    if (key === undefined) return null
+    const row = sessions.get(key)
+    if (row === undefined) return null
+    return { sessionKey: key, actorFingerprint: row.actorFingerprint, chatId: row.chatId }
+  }
+
   function release(sessionKey) {
     const key = requireSessionKey(sessionKey)
     const current = sessions.get(key)
@@ -374,5 +390,5 @@ export function createLiveSessionRegistry({ now = Date.now, leaseMs = SESSION_TT
     names.clear()
   }
 
-  return Object.freeze({ claim, rename, release, touch, lookup, presenceSnapshot, clear })
+  return Object.freeze({ claim, rename, release, touch, lookup, holderOf, presenceSnapshot, clear })
 }

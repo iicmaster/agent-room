@@ -5,12 +5,14 @@ import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
 import {
+  CHAT_ID_INVALID_MESSAGE,
   CHAT_ID_MAX,
   CHAT_ID_PATTERN,
   CLAIMS_TTL_MS,
   CLIENT_MESSAGE_ID_MAX,
   CLIENT_TYPES,
   DISPLAY_NAME_MAX,
+  FINGERPRINT_PATTERN,
   DUPLICATE_WINDOW_MS,
   ENROLLMENT_BURST,
   ENROLLMENT_PER_MINUTE,
@@ -198,6 +200,15 @@ test('story 1.5 chat id grammar and claims pruning derive from the declared cons
   for (const bad of [42, null, undefined, {}]) {
     assert.equal(typeof bad === 'string' && CHAT_ID_PATTERN.test(bad), false, String(bad))
   }
+  // The rejection detail names the wire field (chat_id), never a camelCase
+  // local name.
+  assert.match(CHAT_ID_INVALID_MESSAGE, /^chat_id must be 1-/)
+  // The canonical Actor fingerprint shape is declared once here; every
+  // fingerprint-handling module imports it.
+  assert.equal(FINGERPRINT_PATTERN.source, '^sha256:[0-9a-f]{64}$')
+  assert.equal(FINGERPRINT_PATTERN.test('sha256:' + 'a'.repeat(64)), true)
+  assert.equal(FINGERPRINT_PATTERN.test('sha256:' + 'A'.repeat(64)), false, 'uppercase hex is not canonical')
+  assert.equal(FINGERPRINT_PATTERN.test('sha256:xyz'), false)
   // Durable claims live 7 days by default (operator-tunable via
   // startServer({claimsTtlMs})); the lazy prune cycle paces itself on the
   // interval between boot prunes.
@@ -259,6 +270,7 @@ test('every v0.1 public error code has an HTTP status declared once', () => {
     'invalid_room_id',
     'invalid_text',
     'invalid_title',
+    'invalid_wait_ms',
     'local_token_invalid',
     'message_frame_too_large',
     'message_not_found',
@@ -289,6 +301,8 @@ test('every v0.1 public error code has an HTTP status declared once', () => {
     invalid_room_id: 400,
     invalid_text: 400,
     invalid_title: 400,
+    // Story 1.7 review: the long-poll hold bound owns its coded shape error.
+    invalid_wait_ms: 400,
     message_not_found: 404,
     room_not_found: 404,
     actor_not_member: 403,

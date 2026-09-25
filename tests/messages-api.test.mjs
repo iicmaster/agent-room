@@ -200,7 +200,9 @@ test('long-poll returns the moment a message lands, with correct next_after_seq 
   assert.deepEqual(silent.json().result.messages, [])
   assert.equal(silent.json().result.next_after_seq, 0, 'an empty page resumes from the requested cursor')
   assert.equal(silent.json().result.head_seq, 0, 'an empty room has head 0')
-  assert.ok(silentElapsed >= 250 && silentElapsed < 5 * 1000, `held for the deadline, took ${silentElapsed}ms`)
+  // The wake-up sleep clamps to the remaining hold time, so the response
+  // lands within the requested wait, never a full extra poll past it.
+  assert.ok(silentElapsed >= 250 && silentElapsed < 1000, `held for the deadline, took ${silentElapsed}ms`)
 
   // Hold with a mid-flight arrival: the peer sends ~150ms in; the read must
   // return with the message well before the hold expires.
@@ -247,22 +249,28 @@ test('a deadline return is a normal possibly-empty page; the hold cap is refused
   assert.equal(exhausted.json().result.next_after_seq, 1, 'an empty page never moves the cursor backwards')
   assert.equal(exhausted.json().result.head_seq, 1, 'head_seq reports the room\'s largest seq')
 
-  // Holds above the cap are refused before any waiting.
+  // Holds above the cap are refused before any waiting, with the hold's own
+  // coded shape error.
   const overCap = await sessioned(record.port, 'GET', aliceSession.sessionToken,
     `/api/rooms/${roomId}/messages?wait_ms=${READ_HOLD_MAX_MS + 5_000}`)
   assert.equal(overCap.status, 400, overCap.text)
-  assert.equal(overCap.json().error.code, 'invalid_request')
+  assert.equal(overCap.json().error.code, 'invalid_wait_ms')
 
-  // Malformed bounds are coded, never lenient.
-  for (const query of ['after_seq=-1', 'after_seq=abc', 'limit=0', `limit=${READ_PAGE_MAX + 1}`, 'wait_ms=-1', 'wait_ms=nope']) {
+  // Malformed bounds are coded, never lenient — and an empty-string param is
+  // junk like any other, never silently defaulted.
+  for (const query of ['after_seq=-1', 'after_seq=abc', 'after_seq=', 'limit=0', `limit=${READ_PAGE_MAX + 1}`, 'limit=', 'wait_ms=-1', 'wait_ms=nope', 'wait_ms=']) {
     const refused = await sessioned(record.port, 'GET', aliceSession.sessionToken,
       `/api/rooms/${roomId}/messages?${query}`)
     assert.equal(refused.status, 400, query)
     assert.ok(
-      ['invalid_cursor', 'invalid_limit', 'invalid_request'].includes(refused.json().error.code),
-      query,
+      ['invalid_cursor', 'invalid_limit', 'invalid_wait_ms'].includes(refused.json().error.code),
+      `${query} -> ${refused.json().error.code}`,
     )
   }
+  // The empty hold param names the wait code, not a generic shape error.
+  const emptyHold = await sessioned(record.port, 'GET', aliceSession.sessionToken,
+    `/api/rooms/${roomId}/messages?wait_ms=`)
+  assert.equal(emptyHold.json().error.code, 'invalid_wait_ms')
 
   // Unknown query fields are rejected, not ignored.
   const unknownField = await sessioned(record.port, 'GET', aliceSession.sessionToken,

@@ -74,7 +74,17 @@ export function chatIdForms(value) {
   if (typeof value !== 'string' || !CHAT_ID_PATTERN.test(value)) return null
   return Object.freeze({ display: value, normalized: value.toLowerCase() })
 }
-export const CHAT_ID_INVALID_MESSAGE = `chatId must be 1-${CHAT_ID_MAX} characters using letters, numbers, dot, underscore, or hyphen`
+export const CHAT_ID_INVALID_MESSAGE = `chat_id must be 1-${CHAT_ID_MAX} characters using letters, numbers, dot, underscore, or hyphen`
+
+// Canonical Actor fingerprint shape (see ./keys.mjs): `sha256:` plus 64
+// lowercase hex characters over the raw 32-byte Ed25519 public key. Declared
+// once here beside the other identifier shapes; every module that handles
+// fingerprints imports these instead of restating them.
+export const FINGERPRINT_PREFIX = 'sha256:'
+export const FINGERPRINT_HEX_LENGTH = 64
+export const FINGERPRINT_PATTERN = new RegExp(
+  `^${FINGERPRINT_PREFIX}[0-9a-f]{${FINGERPRINT_HEX_LENGTH}}$`,
+)
 
 // --- File bounds -------------------------------------------------------------
 
@@ -129,6 +139,7 @@ export const PUBLIC_ERRORS = Object.freeze({
   invalid_room_id: 'room id is invalid',
   invalid_text: 'message text is invalid',
   invalid_title: 'room title is invalid',
+  invalid_wait_ms: 'wait_ms is invalid',
   local_token_invalid: 'agent-room local token is missing or invalid',
   message_frame_too_large: 'message cannot fit the daemon frame',
   message_not_found: 'message was not found',
@@ -165,10 +176,12 @@ export const PUBLIC_ERRORS = Object.freeze({
 // that is never auto-killed. Story 1.5 addition: a live-name collision is a
 // conflicted state answered 409 (chat_id_taken) — refused explicitly, never
 // suffixed or auto-mangled. Story 1.7 additions: a chat id with no durable
-// claim is a miss answered 404 (chat_id_not_found — never a guess), and a
-// name claimed by several Actors is a conflicted state answered 409
-// (ambiguous_chat_id) that carries the candidates list in the error envelope
-// for target_fingerprint disambiguation. Declared once here — never per-route.
+// claim is a miss answered 404 (chat_id_not_found — never a guess), a
+// long-poll hold outside its window is a shape rejection answered 400
+// (invalid_wait_ms — the hold bound is READ_HOLD_MAX_MS), and a name claimed
+// by several Actors is a conflicted state answered 409 (ambiguous_chat_id)
+// that carries the candidates list in the error envelope for
+// target_fingerprint disambiguation. Declared once here — never per-route.
 export const PUBLIC_ERROR_STATUS = Object.freeze({
   actor_not_member: 403,
   ambiguous_chat_id: 409,
@@ -193,6 +206,7 @@ export const PUBLIC_ERROR_STATUS = Object.freeze({
   invalid_room_id: 400,
   invalid_text: 400,
   invalid_title: 400,
+  invalid_wait_ms: 400,
   local_token_invalid: 401,
   message_frame_too_large: 400,
   message_not_found: 404,

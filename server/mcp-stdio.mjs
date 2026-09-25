@@ -34,7 +34,9 @@ import { fileURLToPath } from 'node:url'
 
 import {
   CHAT_ID_MAX,
+  CHAT_ID_PATTERN,
   CLIENT_MESSAGE_ID_MAX,
+  FINGERPRINT_PATTERN,
   FRAME_MAX_BYTES,
   IDENTIFIER_MAX,
   MESSAGE_TEXT_MAX,
@@ -44,6 +46,7 @@ import {
 } from './constants.mjs'
 import {
   APP_VERSION,
+  AgentRoomRuntimeError,
   assertSupportedRuntime,
   atomicWriteJson,
   instanceDataDirectory,
@@ -69,7 +72,9 @@ const JSONRPC_VERSION = '2.0'
 const SUPPORTED_PROTOCOLS = Object.freeze(['2025-06-18'])
 const DEFAULT_PROTOCOL = '2025-06-18'
 
-const FINGERPRINT_SCHEMA_PATTERN = '^sha256:[0-9a-f]{64}$'
+// Schema patterns derive from the constants module (each shape declared once);
+// the JSON-schema form anchors the shared source expression.
+const FINGERPRINT_SCHEMA_PATTERN = `^${FINGERPRINT_PATTERN.source}$`
 
 // The five tools. Descriptions carry the "list agents" phrasing and the Agent
 // Room identity; there are no native-named aliases and no join verbs. The
@@ -95,7 +100,7 @@ const TOOL_DESCRIPTORS = Object.freeze([
       additionalProperties: false,
       required: ['chat_id'],
       properties: {
-        chat_id: { type: 'string', minLength: 1, maxLength: CHAT_ID_MAX, description: 'The Chat ID of the agent to open a pair room with.' },
+        chat_id: { type: 'string', minLength: 1, maxLength: CHAT_ID_MAX, pattern: CHAT_ID_PATTERN.source, description: 'The Chat ID of the agent to open a pair room with.' },
         target_fingerprint: { type: 'string', pattern: FINGERPRINT_SCHEMA_PATTERN, description: 'Disambiguator: the fingerprint of the candidate to resolve to when the chat id is ambiguous.' },
       },
     },
@@ -124,7 +129,7 @@ const TOOL_DESCRIPTORS = Object.freeze([
       required: ['room_id'],
       properties: {
         room_id: { type: 'string', minLength: 1, maxLength: IDENTIFIER_MAX },
-        after_seq: { type: 'integer', minimum: 0, default: 0, description: 'Resume strictly after this sequence; omitted means the stored cursor.' },
+        after_seq: { type: 'integer', minimum: 0, description: 'Resume strictly after this sequence; omitted means the stored cursor.' },
         limit: { type: 'integer', minimum: 1, maximum: READ_PAGE_MAX, default: READ_PAGE_DEFAULT },
         wait_ms: { type: 'integer', minimum: 0, maximum: READ_HOLD_MAX_MS, default: 0 },
       },
@@ -198,9 +203,10 @@ function validateArguments(name, args) {
   if (name === 'room_direct_open') {
     if (typeof args.chat_id !== 'string') return 'chat_id must be a string'
     if (args.chat_id.length < 1 || args.chat_id.length > CHAT_ID_MAX) return `chat_id must contain 1 to ${CHAT_ID_MAX} characters`
+    if (!CHAT_ID_PATTERN.test(args.chat_id)) return `chat_id must be 1 to ${CHAT_ID_MAX} characters using letters, numbers, dot, underscore, or hyphen`
     if (args.target_fingerprint !== undefined) {
       if (typeof args.target_fingerprint !== 'string') return 'target_fingerprint must be a string'
-      if (!/^sha256:[0-9a-f]{64}$/.test(args.target_fingerprint)) return 'target_fingerprint must be sha256: followed by 64 lowercase hex characters'
+      if (!FINGERPRINT_PATTERN.test(args.target_fingerprint)) return 'target_fingerprint must be sha256: followed by 64 lowercase hex characters'
     }
   }
   if (['message_send', 'message_read'].includes(name) && typeof args.room_id !== 'string') return 'room_id must be a string'
@@ -226,25 +232,104 @@ function validateArguments(name, args) {
 // rewritten 0600 file per realm. A missing or unusable file means "no cursor
 // yet"; a corrupt file never blocks a read (it falls back to the beginning
 // and is overwritten on the next advance).
+//
+// Discipline:
+//   - The realm id is validated against a safe-key shape before any path is
+//     built from it — a malformed realm id is a coded refusal, never a path
+//     escape.
+//   - A write never moves a room's cursor backwards: the persisted value is
+//     max(existing, next_after_seq), so an explicit low after_seq read
+//     re-consumes history without regressing the durable cursor.
+//   - Read-modify-write cycles are serialized through a per-realm promise
+//     chain, so concurrent reads of different rooms can never lose each
+//     other's updates.
+//   - A failed cursor write is reported back on the read result
+//     (cursor_persisted: false plus a coded note) — the consumed page is
+//     never discarded because the disk write failed.
+
+// Safe cursor-key shape for a realm id: the only characters allowed into a
+// path segment under PLUGIN_DATA/realms/.
+const CURSOR_KEY_PATTERN = /^[A-Za-z0-9._-]+$/
+
+function assertCursorKeyRealm(realmId) {
+  if (typeof realmId !== 'string' || !CURSOR_KEY_PATTERN.test(realmId)) {
+    throw new AgentRoomRuntimeError(
+      'invalid_request',
+      'the agent-room realm id is not a safe cursor key; refusing to build a cursor path from it',
+    )
+  }
+  return realmId
+}
+
 function cursorFilePath(pluginData, realmId) {
-  return join(pluginData, 'realms', realmId, 'cursors.json')
+  return join(pluginData, 'realms', assertCursorKeyRealm(realmId), 'cursors.json')
+}
+
+// In-process cursor memory: the durable file is the source of truth across
+// restarts, but a file that cannot be read (or a write that failed) must
+// never rewind THIS process's read position — doing so re-delivers messages
+// the caller already consumed. Memory is merged OVER the file's values.
+const cursorMemory = new Map()
+
+function cursorMemoryKey(realmId, roomId) {
+  return `${realmId}\u0000${roomId}`
 }
 
 function loadCursors(pluginData, realmId) {
   const path = cursorFilePath(pluginData, realmId)
-  if (!existsSync(path)) return {}
-  try {
-    const value = readJsonFile(path)
-    return plainObject(value) && plainObject(value.cursors) ? value.cursors : {}
-  } catch {
-    return {}
+  let stored = {}
+  if (existsSync(path)) {
+    try {
+      const value = readJsonFile(path)
+      stored = plainObject(value) && plainObject(value.cursors) ? value.cursors : {}
+    } catch {
+      stored = {}
+    }
   }
+  const merged = { ...stored }
+  const prefix = `${realmId}\u0000`
+  for (const [key, entry] of cursorMemory) {
+    if (key.startsWith(prefix) && plainObject(entry) && typeof entry.after_seq === 'number') {
+      merged[key.slice(prefix.length)] = entry
+    }
+  }
+  return merged
 }
 
-function persistCursor(pluginData, realmId, roomId, afterSeq) {
+function writeCursors(pluginData, realmId, roomId, afterSeq) {
   const cursors = loadCursors(pluginData, realmId)
-  cursors[roomId] = { after_seq: afterSeq, updated_at: new Date().toISOString() }
+  const previous = cursors[roomId]?.after_seq
+  // A cursor is monotonic per room: an explicit low after_seq read must
+  // never move the durable cursor backwards.
+  const next = typeof previous === 'number'
+    && Number.isSafeInteger(previous)
+    && previous >= 0
+    && previous > afterSeq
+    ? previous
+    : afterSeq
+  const entry = { after_seq: next, updated_at: new Date().toISOString() }
+  cursors[roomId] = entry
+  // Memory is updated FIRST: even if the durable write throws, this process
+  // keeps the advanced position and the read result is returned with
+  // cursor_persisted: false rather than re-delivering the consumed page.
+  cursorMemory.set(cursorMemoryKey(realmId, roomId), entry)
   atomicWriteJson(cursorFilePath(pluginData, realmId), { version: 1, cursors })
+  return next
+}
+
+// One serialized read-modify-write chain per realm: cursor writes across
+// concurrent reads (different rooms, one realm) queue behind each other in
+// arrival order, so a later write never races an earlier one's read.
+const cursorChains = new Map()
+
+function queueCursorPersist(pluginData, realmId, roomId, afterSeq) {
+  assertCursorKeyRealm(realmId)
+  const previous = cursorChains.get(realmId) ?? Promise.resolve()
+  const next = previous
+    .catch(() => { /* a failed write must not poison the chain */ })
+    .then(() => writeCursors(pluginData, realmId, roomId, afterSeq))
+  cursorChains.set(realmId, next)
+  return next
 }
 
 // --- The MCP server -------------------------------------------------------------
@@ -262,6 +347,10 @@ export function createMcpServer({
   let negotiatedProtocol = DEFAULT_PROTOCOL
 
   const write = message => output.write(`${JSON.stringify(message)}\n`)
+  // In-flight tool calls, keyed by their MCP request id: a cancelled
+  // notification (or stdin closing) aborts the call's HTTP round trip through
+  // the signal the api-client threads into every request.
+  const pending = new Map()
 
   // The api-client (and through it the local server) boots lazily on the
   // first tool call. Construction itself only reads local state (the setup
@@ -278,22 +367,31 @@ export function createMcpServer({
     if (realmId !== null) return realmId
     const readyClient = await getClient()
     const status = await readyClient.status()
+    // Path-escape guard: the realm id keys directories under PLUGIN_DATA, so
+    // its shape is verified before any cursor path is built from it.
+    if (typeof status.realm_id !== 'string' || !/^[A-Za-z0-9._-]+$/.test(status.realm_id)) {
+      throw new AgentRoomRuntimeError(
+        'invalid_request',
+        'the agent-room realm id is not a safe cursor key; refusing to build a cursor path from it',
+      )
+    }
     realmId = status.realm_id
     return realmId
   }
 
-  const callTool = async (name, args) => {
+  const callTool = async (name, args, signal) => {
     const invalid = validateArguments(name, args)
     if (invalid) return toolResult({ code: 'invalid_arguments', message: invalid }, true)
     try {
       const readyClient = await getClient()
       if (name === 'room_presence') {
-        return toolResult(await readyClient.presence({ includeOffline: args.include_offline ?? false }))
+        return toolResult(await readyClient.presence({ includeOffline: args.include_offline ?? false, signal }))
       }
       if (name === 'room_direct_open') {
         return toolResult(await readyClient.directOpen({
           chatId: args.chat_id,
           ...(args.target_fingerprint === undefined ? {} : { targetFingerprint: args.target_fingerprint }),
+          signal,
         }))
       }
       if (name === 'message_send') {
@@ -302,12 +400,15 @@ export function createMcpServer({
           clientMessageId: args.client_message_id,
           text: args.text,
           ...(args.reply_to_seq === undefined ? {} : { replyToSeq: args.reply_to_seq }),
+          signal,
         }))
       }
       if (name === 'message_read') {
         // Cursor discipline: an omitted after_seq resumes from the persisted
-        // cursor (0 on first read); every successful read advances it to the
-        // response's next_after_seq, durably, before the result is returned.
+        // cursor (0 on first read); the durable cursor is advanced to
+        // max(existing, next_after_seq) — monotonic, serialized per realm —
+        // and a failed write is reported on the result instead of discarding
+        // the consumed page.
         const realm = await realmIdOf()
         const stored = loadCursors(pluginData, realm)[args.room_id]?.after_seq
         const afterSeq = args.after_seq !== undefined
@@ -318,16 +419,26 @@ export function createMcpServer({
           afterSeq,
           limit: args.limit ?? READ_PAGE_DEFAULT,
           waitMs: args.wait_ms ?? 0,
+          signal,
         })
-        persistCursor(pluginData, realm, args.room_id, result.next_after_seq)
-        return toolResult({
+        const page = {
           messages: result.messages,
           next_after_seq: result.next_after_seq,
           head_seq: result.head_seq,
-        })
+        }
+        try {
+          await queueCursorPersist(pluginData, realm, args.room_id, result.next_after_seq)
+          return toolResult(page)
+        } catch (error) {
+          return toolResult({
+            ...page,
+            cursor_persisted: false,
+            note: `cursor not persisted: ${error?.code ?? 'write_failed'}`,
+          })
+        }
       }
       if (name === 'room_status') {
-        const status = await readyClient.status()
+        const status = await readyClient.status({ signal })
         return toolResult({
           realm_id: status.realm_id,
           broadcast_room_id: status.broadcast_room_id,
@@ -355,8 +466,13 @@ export function createMcpServer({
     const hasId = Object.hasOwn(message, 'id')
     const id = message.id
     if (!hasId) {
-      // Notifications need no response; cancellation is advisory here (each
-      // tool call is one bounded HTTP round trip on the api-client).
+      if (message.method === 'notifications/cancelled') {
+        // An MCP host may cancel any in-flight call: the tool's HTTP round
+        // trip is aborted through its signal and the tool result answers
+        // right away with a cancelled-call failure.
+        const requestId = message.params?.requestId
+        pending.get(String(requestId))?.abort()
+      }
       return
     }
     if (message.method === 'initialize') {
@@ -386,7 +502,13 @@ export function createMcpServer({
         write(rpcError(id, -32602, 'unknown tool'))
         return
       }
-      write(rpcResult(id, await callTool(message.params.name, message.params.arguments ?? {})))
+      const controller = new AbortController()
+      pending.set(String(id), controller)
+      try {
+        write(rpcResult(id, await callTool(message.params.name, message.params.arguments ?? {}, controller.signal)))
+      } finally {
+        pending.delete(String(id))
+      }
       return
     }
     write(rpcError(id, -32601, 'method not found'))
@@ -423,13 +545,18 @@ export function createMcpServer({
   const onStdinError = error => errorOutput.write(`agent-room MCP input failed: ${error.message}\n`)
   input.on('error', onStdinError)
   input.once('close', () => {
-    // Nothing in-flight to unwind: tool calls are bounded HTTP round trips.
+    // The JSON-RPC channel is gone: abort every in-flight call so the process
+    // never lingers on a held long-poll with no host attached.
+    for (const controller of pending.values()) controller.abort()
+    pending.clear()
   })
 
   return {
     close() {
       input.removeListener('data', onStdinData)
       input.removeListener('error', onStdinError)
+      for (const controller of pending.values()) controller.abort()
+      pending.clear()
     },
     get protocolVersion() { return negotiatedProtocol },
     tools: TOOL_DESCRIPTORS,

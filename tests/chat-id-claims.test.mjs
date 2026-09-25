@@ -308,6 +308,20 @@ test('the live registry binds a session to a chat id and reports the snapshot', 
   assert.equal(registry.lookup('unknown'), null)
 })
 
+test('holderOf reports the live holder of a name and nothing else', () => {
+  const { registry } = makeRegistry()
+  assert.equal(registry.holderOf('alice'), null, 'an unclaimed name has no holder')
+  registry.claim({ sessionKey: 'k1', chatId: 'Alice', actorFingerprint: FINGERPRINT_A })
+  const holder = registry.holderOf('alice')
+  assert.equal(holder.sessionKey, 'k1')
+  assert.equal(holder.actorFingerprint, FINGERPRINT_A)
+  assert.equal(holder.chatId, 'Alice', 'the display form is the holder\'s own')
+  assert.equal(registry.holderOf('bob'), null)
+  assert.equal(registry.holderOf('not a name'), null, 'a malformed name has no holder')
+  // Read-only: asking never displaces the holder.
+  assert.equal(registry.lookup('k1').chatId, 'Alice')
+})
+
 test('a live collision is refused explicitly in any casing; the first holder is unaffected', () => {
   const { registry } = makeRegistry()
   registry.claim({ sessionKey: 'k1', chatId: 'Alice', actorFingerprint: FINGERPRINT_A })
