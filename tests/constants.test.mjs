@@ -9,6 +9,7 @@ import {
   CHAT_ID_PATTERN,
   CLAIMS_TTL_MS,
   CLIENT_MESSAGE_ID_MAX,
+  CLIENT_TYPES,
   DISPLAY_NAME_MAX,
   DUPLICATE_WINDOW_MS,
   ENROLLMENT_BURST,
@@ -23,8 +24,10 @@ import {
   LOCAL_TOKEN_MAX_BYTES,
   MESSAGE_TEXT_MAX,
   OFFLINE_RECENT_SECONDS,
+  OFFLINE_RECENTLY_WINDOW_MS,
   PRESENCE_HEARTBEAT_JITTER,
   PRESENCE_HEARTBEAT_SECONDS,
+  PRESENCE_TTL_MS,
   PRESENCE_TTL_SECONDS,
   PROTOCOL_HEADER,
   PROTOCOL_VERSION,
@@ -203,6 +206,21 @@ test('story 1.5 chat id grammar and claims pruning derive from the declared cons
   assert.ok(PRUNE_INTERVAL_MS < CLAIMS_TTL_MS, 'the prune cycle must run within the TTL window')
 })
 
+test('story 1.6 presence windows and the client-type set derive from the declared constants', () => {
+  // The millisecond forms derive from the declared seconds values (AD-9: the
+  // bound is stated once). The presence TTL is the online liveness window; a
+  // session silent strictly longer drops from the online group. The
+  // offline-recently window is inclusive at its boundary.
+  assert.equal(PRESENCE_TTL_MS, PRESENCE_TTL_SECONDS * 1000)
+  assert.equal(PRESENCE_TTL_MS, 180 * 1000)
+  assert.equal(OFFLINE_RECENTLY_WINDOW_MS, OFFLINE_RECENT_SECONDS * 1000)
+  assert.equal(OFFLINE_RECENTLY_WINDOW_MS, 24 * 60 * 60 * 1000)
+  // The closed set of client types a session may declare at bind time — the
+  // server never derives one (v0.1's MCP-client-derived naming is retired).
+  assert.deepEqual([...CLIENT_TYPES], ['mcp', 'cli', 'api'])
+  assert.ok(Object.isFrozen(CLIENT_TYPES))
+})
+
 test('v0.1 limit groupings re-point to the constants module', () => {
   assert.deepEqual(DATABASE_LIMITS, {
     actorId: IDENTIFIER_MAX,
@@ -330,6 +348,9 @@ test('internal error codes are declared once and disjoint from the public table'
     'database_schema_invalid',
     'invalid_argument',
     'realm_already_minted',
+    // Story 1.6: GET /api/status without the minted Broadcast Room is a
+    // bootstrap invariant failure — a coded 500, never a fabricated id.
+    'realm_bootstrap_incomplete',
     'state_file_invalid',
     'store_connection_closed',
     'wal_unavailable',

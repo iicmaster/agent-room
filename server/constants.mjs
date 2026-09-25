@@ -215,6 +215,7 @@ export const INTERNAL_ERROR_CODES = Object.freeze([
   'database_schema_invalid',
   'invalid_argument',
   'realm_already_minted',
+  'realm_bootstrap_incomplete',
   'state_file_invalid',
   'store_connection_closed',
   'wal_unavailable',
@@ -274,3 +275,21 @@ export const SERVER_HEALTH_PROBE_TIMEOUT_MS = 750
 // destroyed — a foreign responder on the recorded port cannot flood memory.
 export const SERVER_HEALTH_PROBE_MAX_BYTES = 64 * 1024
 export const SERVER_CHILD_REAP_TIMEOUT_MS = 2_000
+
+// --- Story 1.6: presence — online & offline-recently --------------------------
+
+// Millisecond forms of the ratified presence windows, derived from the
+// declared seconds values so each bound is stated once (AD-9). PRESENCE_TTL_MS
+// is the online liveness window: a live session silent strictly longer than
+// the TTL drops from the online group (read-time lease sweep). The
+// offline-recently window is inclusive at its boundary — a claim last seen
+// exactly OFFLINE_RECENTLY_WINDOW_MS ago is still in the group.
+export const PRESENCE_TTL_MS = PRESENCE_TTL_SECONDS * 1000
+export const OFFLINE_RECENTLY_WINDOW_MS = OFFLINE_RECENT_SECONDS * 1000
+
+// The closed set of client types a session may declare at bind time (the
+// additive client_type request field, Story 1.6 spine amendment). v0.1's
+// MCP-client-derived naming is retired: the server never derives or guesses a
+// client type — a session that binds without declaring one stays null on its
+// presence row. Additive set: values join, names never rename.
+export const CLIENT_TYPES = Object.freeze(['mcp', 'cli', 'api'])

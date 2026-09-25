@@ -591,6 +591,19 @@ function ensureChatIdClaimsTable(database) {
   `)
 }
 
+// Story 1.6 (additive, no schema-version bump): the offline-recently read
+// (recentClaims) window-scans this table by last_seen_at, so the query gets
+// an index instead of a full scan. IF NOT EXISTS converges every open, and
+// the named-index verification below refuses a foreign squatter. The index
+// joins AFTER the column verification so a divergent pre-existing table
+// fails coded before the index build ever touches it.
+function ensureChatIdClaimsLastSeenIndex(database) {
+  database.exec(`
+    CREATE INDEX IF NOT EXISTS idx_chat_id_claims_last_seen_at
+      ON chat_id_claims (last_seen_at);
+  `)
+}
+
 // Story 1.5 review hardening: CREATE TABLE IF NOT EXISTS silently keeps a
 // pre-existing table of a different shape, so the column set is verified
 // right after the convergence step — a foreign or drifted chat_id_claims is a
@@ -612,6 +625,19 @@ function verifyChatIdClaimsColumns(database) {
     || CHAT_ID_CLAIMS_COLUMNS.some((name, index) => columns[index] !== name)
   ) {
     fail('database_schema_invalid', 'database table chat_id_claims has a divergent column set')
+  }
+}
+
+// Story 1.6: the last-seen index joins the convergence discipline — the
+// named index must exist after the open (IF NOT EXISTS recreates a dropped
+// one), and a foreign index squatting the name is a coded schema failure.
+function verifyChatIdClaimsIndex(database) {
+  const indexes = database
+    .prepare(`SELECT name FROM pragma_index_list('chat_id_claims')`)
+    .all()
+    .map(row => row.name)
+  if (!indexes.includes('idx_chat_id_claims_last_seen_at')) {
+    fail('database_schema_invalid', 'database table chat_id_claims is missing the last_seen_at index')
   }
 }
 
@@ -713,6 +739,8 @@ export function openRoomLog({ dataDir } = {}) {
       ensureNullableRoomCreator(database)
       ensureChatIdClaimsTable(database)
       verifyChatIdClaimsColumns(database)
+      ensureChatIdClaimsLastSeenIndex(database)
+      verifyChatIdClaimsIndex(database)
       verifyStrictTables(database)
 
       // Report the file's actual version, never the compiled constant.
@@ -1153,6 +1181,48 @@ export function openRoomLog({ dataDir } = {}) {
           WHERE chat_id_normalized = ?
           ORDER BY last_seen_at DESC, actor_fingerprint ASC
         `).all(normalized)
+        return rows.map(row => ({
+          chat_id: row.chat_id_display,
+          chat_id_normalized: row.chat_id_normalized,
+          actor_fingerprint: row.actor_fingerprint,
+          last_seen_at: row.last_seen_at,
+        }))
+      },
+
+      // Story 1.6's offline source: every durable claim last seen within
+      // windowMs of `now` (an epoch-ms number or a function returning one,
+      // injectable for tests), most recently seen first so the caller's
+      // per-Actor dedupe keeps each Actor's most recent claim. The window is
+      // inclusive at both boundaries — a claim last seen exactly windowMs ago
+      // is still in the set (the same strictness the prune applies: strictly
+      // older rows go), and a claim dated in the FUTURE relative to now is
+      // excluded, so a clock moved backwards can never surface a forward-
+      // dated row in the offline view. The query is bounded by last_seen_at
+      // only: the claims index is pruned at CLAIMS_TTL_MS and indexed on
+      // last_seen_at, so the windowed set is bounded and indexed. Timestamps
+      // are canonical ISO 8601 UTC (normalized at write time), so the string
+      // comparison is chronological.
+      recentClaims(windowMs, now = Date.now) {
+        assertOpen()
+        if (!Number.isSafeInteger(windowMs) || windowMs <= 0) {
+          fail('invalid_argument', 'windowMs must be a positive safe integer')
+        }
+        const timestamp = typeof now === 'function' ? now() : now
+        if (typeof timestamp !== 'number' || !Number.isFinite(timestamp)) {
+          fail('invalid_argument', 'now must be an epoch-millisecond number or a function returning one')
+        }
+        const cutoffMs = timestamp - windowMs
+        if (!Number.isFinite(cutoffMs)) {
+          fail('invalid_argument', 'the window cutoff must be a finite epoch-millisecond value')
+        }
+        const cutoff = new Date(cutoffMs).toISOString()
+        const upperBound = new Date(timestamp).toISOString()
+        const rows = database.prepare(`
+          SELECT chat_id_normalized, actor_fingerprint, chat_id_display, last_seen_at
+          FROM chat_id_claims
+          WHERE last_seen_at >= ? AND last_seen_at <= ?
+          ORDER BY last_seen_at DESC, actor_fingerprint ASC, chat_id_normalized ASC
+        `).all(cutoff, upperBound)
         return rows.map(row => ({
           chat_id: row.chat_id_display,
           chat_id_normalized: row.chat_id_normalized,

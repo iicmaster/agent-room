@@ -68,8 +68,10 @@ function parseAd8Routes(section) {
 
 // Parse the AD-8 vocabulary sentence into the request and response name lists.
 // The requests segment's "(added ...)" amendment mentions tool names in
-// backticks and is stripped; the responses segment's amendment names only
-// response fields, so it stays in and its names are extracted in order.
+// backticks and is stripped (globally — every dated amendment in the requests
+// segment is stripped, so additive amendments never leak names); the responses
+// segment's amendments name only response fields, so they stay in and their
+// names are extracted in order.
 function parseAd8Vocabulary(section) {
   const start = section.indexOf('**Frozen field vocabulary**')
   const end = section.indexOf('**Read semantics')
@@ -77,7 +79,7 @@ function parseAd8Vocabulary(section) {
   const sentence = section.slice(start, end)
   const splitAt = sentence.indexOf('; responses ')
   assert.ok(splitAt > 0, 'the vocabulary sentence lost its requests/responses split')
-  const requestsPart = sentence.slice(0, splitAt).replace(/\*\(added .*?\)\*/, '')
+  const requestsPart = sentence.slice(0, splitAt).replace(/\*\(added .*?\)\*/g, '')
   const responsesPart = sentence.slice(splitAt)
   const names = part => [...part.matchAll(/`([^`]+)`/g)].map(match => match[1].replace(/\[\]$/, ''))
   return { requests: names(requestsPart), responses: names(responsesPart), sentence }
@@ -175,27 +177,37 @@ test('route keys are stable method/path pairs', () => {
 test('the implemented mark covers exactly the live frozen routes', () => {
   // The implemented mark is the startup contract's data side (server.mjs
   // asserts every marked route has a registered handler and vice versa).
-  // GET /health went live in Story 1.3, POST /api/auth/local in 1.4, and the
-  // session connect surface (POST/PATCH/DELETE /api/session) in 1.5;
-  // 1.6-1.8 extend additively.
+  // GET /health went live in Story 1.3, POST /api/auth/local in 1.4, the
+  // session connect surface (POST/PATCH/DELETE /api/session) in 1.5, and the
+  // presence + status reads (GET /api/presence, GET /api/status) in 1.6;
+  // 1.7-1.8 extend additively.
   const implemented = ROUTE_TABLE.filter(route => route.implemented === true)
   assert.deepEqual(implemented.map(routeKey), [
     'POST /api/session',
     'PATCH /api/session',
     'DELETE /api/session',
+    'GET /api/presence',
+    'GET /api/status',
     'POST /api/auth/local',
     'GET /health',
   ])
   const local = ROUTE_TABLE.find(route => routeKey(route) === 'POST /api/auth/local')
   assert.deepEqual([...local.requestFields], ['public_key'])
-  // The session surface: chat_id on connect and rename, none on disconnect —
-  // actor identity always comes from the token, never the body.
+  // The session surface: chat_id plus the 1.6 closed-set client_type
+  // declaration on connect and rename, none on disconnect — actor identity
+  // always comes from the token, never the body.
   const connect = ROUTE_TABLE.find(route => routeKey(route) === 'POST /api/session')
   const rename = ROUTE_TABLE.find(route => routeKey(route) === 'PATCH /api/session')
   const disconnect = ROUTE_TABLE.find(route => routeKey(route) === 'DELETE /api/session')
-  assert.deepEqual([...connect.requestFields], ['chat_id'])
-  assert.deepEqual([...rename.requestFields], ['chat_id'])
+  assert.deepEqual([...connect.requestFields], ['chat_id', 'client_type'])
+  assert.deepEqual([...rename.requestFields], ['chat_id', 'client_type'])
   assert.deepEqual([...disconnect.requestFields], [])
+  // The Story 1.6 reads: the presence query allowlist is exactly the one
+  // boolean flag; status takes no fields at all.
+  const presence = ROUTE_TABLE.find(route => routeKey(route) === 'GET /api/presence')
+  const status = ROUTE_TABLE.find(route => routeKey(route) === 'GET /api/status')
+  assert.deepEqual([...presence.requestFields], ['include_offline'])
+  assert.deepEqual([...status.requestFields], [])
 })
 
 test('the fixed pipeline order is the AD-7 order', () => {

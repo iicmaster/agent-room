@@ -1,8 +1,9 @@
-// Live-session registry (Story 1.5): the server-resident, ephemeral side of
-// the chat id rules. One row per currently-connected session, keyed by the
-// session token digest — the api layer derives that digest from the presented
-// bearer token, so a raw token never enters this module — mapping to
-// {chatId, chatIdNormalized, actorFingerprint, connectedSince, lastSeen}.
+// Live-session registry (Stories 1.5-1.6): the server-resident, ephemeral
+// side of the chat id rules. One row per currently-connected session, keyed
+// by the session token digest — the api layer derives that digest from the
+// presented bearer token, so a raw token never enters this module — mapping
+// to {chatId, chatIdNormalized, actorFingerprint, clientType, connectedSince,
+// lastSeen}.
 //
 // DR-1 discipline lives here: the chat id grammar (1-CHAT_ID_MAX characters
 // of [A-Za-z0-9_.-], validated by the shared chatIdForms gate from the
@@ -15,6 +16,14 @@
 // (messages keep their send-time chat ids in the store; this registry owns no
 // message state).
 //
+// Story 1.6: a bind may declare the session's client type from the closed
+// CLIENT_TYPES set (the additive client_type request field). The type is
+// never derived or guessed — an omitted declaration stays null on the
+// presence row (v0.1's MCP-client-derived naming is retired). presenceSnapshot
+// is the presence read model: one row per live Session within the presence
+// TTL, plus — when the caller asks — the separately-labeled offline-recently
+// group assembled from the durable claims index via the injected claimsReader.
+//
 // Atomicity: the registry is an in-memory Map pair and the server runs
 // handlers on one thread, so claim's sequence — lease sweep, collision check,
 // durable persist callback, memory commit — is atomic within the process; no
@@ -22,8 +31,8 @@
 // layer's store write, which runs inside its own BEGIN IMMEDIATE transaction)
 // fires only after the collision check passes and receives the claim payload
 // with THIS registry's clock timestamp — one clock source for the live row
-// and the durable row. A refusal — grammar or collision — changes no state
-// anywhere; a persist failure leaves the memory side untouched.
+// and the durable row. A refusal — grammar, type, or collision — changes no
+// state anywhere; a persist failure leaves the memory side untouched.
 //
 // Lease: live rows are ephemeral with a lease equal to SESSION_TTL_MS. A dead
 // session (crash, kill -9, an auth token that expired without a disconnect)
@@ -31,20 +40,36 @@
 // sweeps rows whose lastSeen is older than the lease and frees their names —
 // the same lazy-sweep pattern the session registry uses on issue. The durable
 // chat_id_claims rows are deliberately untouched by the sweep: the (name,
-// actor) pair stays as ambiguity data.
+// actor) pair stays as ambiguity data. This claim-time sweep is the ONLY
+// name-freeing path. Presence liveness is a shorter window
+// (presenceTtlMs, default PRESENCE_TTL_MS): presenceSnapshot FILTERS rows
+// silent strictly longer than the TTL out of the online group at read time —
+// a read never mutates this registry and never frees a name — and
+// touch(), driven by the api layer on every authenticated request, refreshes
+// lastSeen so an idle-but-alive session reappears online without re-binding.
+// There is no server-side heartbeat timer: the server only judges liveness
+// from the rows it holds.
 //
 // Ephemeral by design: a restart clears the registry and it rebuilds as
 // sessions reconnect; clear() drops every live row (the server invokes it on
 // close when it owns the process-default registry). The durable (chat_id,
 // actor_fingerprint, last_seen_at) ambiguity data is the store's
 // chat_id_claims index, which survives restart and is pruned at CLAIMS_TTL_MS.
-// touch() is Story 1.6's heartbeat hook: wired with the same persist callback
+// touch() is Story 1.6's liveness hook: wired with the same persist callback
 // as claim, it refreshes a live session's lastSeen AND the durable claim
 // row's last_seen_at in one operation (the server handle pre-wires that
-// callback). Nothing in this story calls it on a request path: exposed,
-// documented, pre-wired.
+// callback and drives it from the actor-class post-auth path — one liveness
+// mechanism for the auth TTL slide and presence).
 
-import { PUBLIC_ERRORS, SESSION_TTL_MS, chatIdForms, CHAT_ID_INVALID_MESSAGE } from '../constants.mjs'
+import {
+  CLIENT_TYPES,
+  OFFLINE_RECENTLY_WINDOW_MS,
+  PRESENCE_TTL_MS,
+  PUBLIC_ERRORS,
+  SESSION_TTL_MS,
+  chatIdForms,
+  CHAT_ID_INVALID_MESSAGE,
+} from '../constants.mjs'
 import { AgentRoomRuntimeError } from '../runtime.mjs'
 
 function fail(code, message) {
@@ -61,6 +86,17 @@ function requireSessionKey(value) {
 function requireActorFingerprint(value) {
   if (typeof value !== 'string' || value.length === 0) {
     fail('invalid_argument', 'actorFingerprint must be a non-empty string')
+  }
+  return value
+}
+
+// Story 1.6: the bind may declare the session's client type from the closed
+// set in the constants module. An omitted declaration is valid and normalizes
+// to null — the server never derives one; a present value must be a member.
+function requireClientType(value) {
+  if (value === undefined) return null
+  if (typeof value !== 'string' || !CLIENT_TYPES.includes(value)) {
+    fail('invalid_argument', `clientType must be one of: ${CLIENT_TYPES.join(', ')}`)
   }
   return value
 }
@@ -85,12 +121,19 @@ function requirePersist(persist) {
 // `now` is injectable so tests can drive connectedSince/lastSeen and the
 // lease sweep without the wall clock; `leaseMs` defaults to the auth session
 // TTL — a live row is exactly as durable as the credential behind it.
-export function createLiveSessionRegistry({ now = Date.now, leaseMs = SESSION_TTL_MS } = {}) {
+// `presenceTtlMs` (default PRESENCE_TTL_MS) is the online-visibility window
+// the presenceSnapshot view applies — an operator-tunable surface
+// (startServer({presenceTtlMs}) feeds the process-default registry); it never
+// widens the claim lease, which stays leaseMs.
+export function createLiveSessionRegistry({ now = Date.now, leaseMs = SESSION_TTL_MS, presenceTtlMs = PRESENCE_TTL_MS } = {}) {
   if (typeof now !== 'function') {
     throw new AgentRoomRuntimeError('invalid_argument', 'live session registry now must be a function')
   }
   if (!Number.isSafeInteger(leaseMs) || leaseMs <= 0) {
     throw new AgentRoomRuntimeError('invalid_argument', 'live session registry leaseMs must be a positive safe integer')
+  }
+  if (!Number.isSafeInteger(presenceTtlMs) || presenceTtlMs <= 0) {
+    throw new AgentRoomRuntimeError('invalid_argument', 'live session registry presenceTtlMs must be a positive safe integer')
   }
 
   // sessionKey (token digest) → row, and chatIdNormalized → sessionKey. The
@@ -103,13 +146,15 @@ export function createLiveSessionRegistry({ now = Date.now, leaseMs = SESSION_TT
     chatId: row.chatId,
     chatIdNormalized: row.chatIdNormalized,
     actorFingerprint: row.actorFingerprint,
+    clientType: row.clientType,
     connectedSince: row.connectedSince,
     lastSeen: row.lastSeen,
   })
 
   // Lazy lease sweep (claim-time, same pattern as the session registry's
   // issue-time sweep): strictly older than the lease means dead. Memory only
-  // — the durable claim row stays.
+  // — the durable claim row stays. This is the ONLY name-freeing path:
+  // presence reads deliberately never sweep.
   function sweepExpired(timestamp) {
     for (const [key, row] of sessions) {
       if (timestamp - row.lastSeen > leaseMs) {
@@ -125,14 +170,20 @@ export function createLiveSessionRegistry({ now = Date.now, leaseMs = SESSION_TT
   // holder is unaffected), then the durable persist callback, then the memory
   // commit. An idempotent re-bind of the held name refreshes lastSeen (and
   // the display case) while keeping connectedSince; a different name swaps
-  // immediately, freeing the old one. The persist callback receives
-  // { chatId, actorFingerprint, lastSeenAt } — the exact durable-write
-  // payload, timestamped by this registry's clock.
-  function claim({ sessionKey, chatId, actorFingerprint, persist } = {}) {
+  // immediately, freeing the old one. The optional clientType (Story 1.6's
+  // closed-set declaration) is validated against CLIENT_TYPES: a declared
+  // value becomes the row's type on every accepted bind; an omitted one
+  // carries the row's existing type over — on the same-name path and on the
+  // different-name path alike, exactly like connectedSince (a rename is not
+  // an undeclaration) — and a fresh row stays null (never derived). The
+  // persist callback receives { chatId, actorFingerprint, lastSeenAt } — the
+  // exact durable-write payload, timestamped by this registry's clock.
+  function claim({ sessionKey, chatId, actorFingerprint, clientType, persist } = {}) {
     const key = requireSessionKey(sessionKey)
     const forms = chatIdForms(chatId)
     if (forms === null) fail('invalid_chat_id', CHAT_ID_INVALID_MESSAGE)
     const fingerprint = requireActorFingerprint(actorFingerprint)
+    const type = requireClientType(clientType)
     const persistStep = requirePersist(persist)
 
     const timestamp = now()
@@ -153,6 +204,7 @@ export function createLiveSessionRegistry({ now = Date.now, leaseMs = SESSION_TT
       // Same normalized name, possibly re-claimed in a different case: the
       // latest claim's display form is the session's current name.
       current.chatId = forms.display
+      if (clientType !== undefined) current.clientType = type
       current.lastSeen = timestamp
       return snapshot(current)
     }
@@ -165,6 +217,7 @@ export function createLiveSessionRegistry({ now = Date.now, leaseMs = SESSION_TT
       chatId: forms.display,
       chatIdNormalized: forms.normalized,
       actorFingerprint: fingerprint,
+      clientType: clientType !== undefined ? type : current !== undefined ? current.clientType : null,
       connectedSince: current !== undefined ? current.connectedSince : timestamp,
       lastSeen: timestamp,
     }
@@ -195,11 +248,12 @@ export function createLiveSessionRegistry({ now = Date.now, leaseMs = SESSION_TT
     return true
   }
 
-  // Story 1.6's heartbeat hook, pre-wired with claim's persist pattern: the
+  // Story 1.6's liveness hook, pre-wired with claim's persist pattern: the
   // { persist } callback (the server handle passes the durable claim write)
   // refreshes the claim row's last_seen_at in the same operation and with the
-  // same clock tick as the in-memory refresh. Returns the snapshot, or null
-  // for an unknown key.
+  // same clock tick as the in-memory refresh. The api layer's actor-class
+  // post-auth path drives it on every authenticated request. Returns the
+  // snapshot, or null for an unknown key.
   function touch(sessionKey, { persist } = {}) {
     const key = requireSessionKey(sessionKey)
     const current = sessions.get(key)
@@ -220,6 +274,98 @@ export function createLiveSessionRegistry({ now = Date.now, leaseMs = SESSION_TT
     return current === undefined ? null : snapshot(current)
   }
 
+  // Story 1.6's presence read model: the one PURE assembly over the live rows
+  // and (when asked) the durable claims index — no mutation of this registry,
+  // no store writes. The handler consumes the wire's include_offline query
+  // flag as this option set. Options:
+  //   includeOffline    — boolean (default false): also assemble the
+  //                       separately-labeled offline_recently group.
+  //   now               — the read's clock: a finite epoch-ms number or a
+  //                       function returning one; defaults to this registry's
+  //                       own clock, so every presence timestamp comes from
+  //                       the one injectable source.
+  //   claimsReader      — function (windowMs, nowMs) → claim rows with
+  //                       last_seen_at within the window (inclusive at the
+  //                       boundary, never future-dated past now), most-
+  //                       recent-first — the store's recentClaims shape.
+  //                       Required when includeOffline is true; the registry
+  //                       owns the window constant.
+  //   readerFingerprint — the reading session's Actor fingerprint, excluded
+  //                       from the offline group (reading your own stale
+  //                       claim while unreachable is noise); optional.
+  //
+  // online: one row per live Session (wire-named: chat_id display form,
+  // client_type, connected_since, last_seen, fingerprint), in connect order.
+  // A row silent strictly longer than this registry's presenceTtlMs is
+  // HIDDEN from the group — filtered out of the view only: the row itself
+  // stays alive (its next authenticated touch re-lists it without a re-bind)
+  // and the claim-time lease sweep remains the only name-freeing path.
+  // offline_recently: one row per Actor — the most recent claim (the reader's
+  // rows arrive most-recent-first, so the first row per fingerprint wins) —
+  // with a claim last seen within OFFLINE_RECENTLY_WINDOW_MS, excluding
+  // currently-online Actors (no double-listing across groups) and the
+  // reader's own Actor. Offline rows cannot carry client_type: the claims
+  // index holds none. Groups are always both present; the offline group is
+  // empty unless includeOffline.
+  function presenceSnapshot({ includeOffline = false, now: nowOverride, claimsReader, readerFingerprint } = {}) {
+    if (typeof includeOffline !== 'boolean') {
+      fail('invalid_argument', 'includeOffline must be a boolean')
+    }
+    if (readerFingerprint !== undefined
+      && (typeof readerFingerprint !== 'string' || readerFingerprint.length === 0)) {
+      fail('invalid_argument', 'readerFingerprint must be a non-empty string when provided')
+    }
+    if (includeOffline && (claimsReader === undefined || typeof claimsReader !== 'function')) {
+      fail('invalid_argument', 'claimsReader must be a function when includeOffline is true')
+    }
+    const raw = nowOverride === undefined ? now() : nowOverride
+    const timestamp = typeof raw === 'function' ? raw() : raw
+    if (typeof timestamp !== 'number' || !Number.isFinite(timestamp)) {
+      fail('invalid_argument', 'now must resolve to a finite epoch-millisecond value')
+    }
+
+    // Pure view over the live rows: a row silent strictly longer than the
+    // presence TTL is hidden from online — nothing is deleted, so a
+    // third party's read can neither free a name nor break the lease, and an
+    // idle session's next authenticated touch re-lists it as-is.
+    const online = []
+    const onlineFingerprints = new Set()
+    for (const row of sessions.values()) {
+      if (timestamp - row.lastSeen > presenceTtlMs) continue
+      online.push({
+        chat_id: row.chatId,
+        client_type: row.clientType,
+        connected_since: new Date(row.connectedSince).toISOString(),
+        last_seen: new Date(row.lastSeen).toISOString(),
+        fingerprint: row.actorFingerprint,
+      })
+      onlineFingerprints.add(row.actorFingerprint)
+    }
+
+    const offlineRecently = []
+    if (includeOffline) {
+      // The window is inclusive at its boundary: a claim last seen exactly
+      // OFFLINE_RECENTLY_WINDOW_MS ago is still in the group. Dedupe by Actor
+      // fingerprint keeps each Actor's most recent claim; online Actors and
+      // the reading session's own Actor never appear here.
+      const seen = new Set()
+      for (const claim of claimsReader(OFFLINE_RECENTLY_WINDOW_MS, timestamp)) {
+        const fingerprint = claim.actor_fingerprint
+        if (seen.has(fingerprint)) continue
+        if (onlineFingerprints.has(fingerprint)) continue
+        if (fingerprint === readerFingerprint) continue
+        seen.add(fingerprint)
+        offlineRecently.push({
+          chat_id: claim.chat_id,
+          fingerprint,
+          last_seen: claim.last_seen_at,
+        })
+      }
+    }
+
+    return { online, offline_recently: offlineRecently }
+  }
+
   // Drop every live row: the server close path invokes this when it owns the
   // process-default registry, so a restart-within-process finds no stale
   // names. Durable claim rows are untouched — ephemeral side only.
@@ -228,5 +374,5 @@ export function createLiveSessionRegistry({ now = Date.now, leaseMs = SESSION_TT
     names.clear()
   }
 
-  return Object.freeze({ claim, rename, release, touch, lookup, clear })
+  return Object.freeze({ claim, rename, release, touch, lookup, presenceSnapshot, clear })
 }

@@ -30,16 +30,26 @@ export const ROUTE_TABLE = Object.freeze([
   // lifetime; PATCH renames immediately (the old name freed in the same
   // instant); DELETE releases the live name (the durable claim row stays).
   // chat_id always comes from the body; actor identity always comes from the
-  // token.
-  Object.freeze({ method: 'POST', path: '/api/session', class: 'actor', implemented: true, requestFields: Object.freeze(['chat_id']) }),
-  Object.freeze({ method: 'PATCH', path: '/api/session', class: 'actor', implemented: true, requestFields: Object.freeze(['chat_id']) }),
+  // token. Story 1.6 (additive spine amendment): client_type joins the bind
+  // vocabulary — the connecting session may declare its client type from the
+  // closed set in the constants module; an omitted declaration stays null
+  // (the server never derives one).
+  Object.freeze({ method: 'POST', path: '/api/session', class: 'actor', implemented: true, requestFields: Object.freeze(['chat_id', 'client_type']) }),
+  Object.freeze({ method: 'PATCH', path: '/api/session', class: 'actor', implemented: true, requestFields: Object.freeze(['chat_id', 'client_type']) }),
   Object.freeze({ method: 'DELETE', path: '/api/session', class: 'actor', implemented: true, requestFields: Object.freeze([]) }),
-  Object.freeze({ method: 'GET', path: '/api/presence', class: 'actor', requestFields: Object.freeze(['include_offline']) }),
+  // Story 1.6: the presence read is live — one row per live Session within
+  // the TTL, plus a separately-labeled offline-recently group from the durable
+  // claims index when include_offline is set (query allowlist: this one
+  // boolean flag; anything else is rejected, never ignored).
+  Object.freeze({ method: 'GET', path: '/api/presence', class: 'actor', implemented: true, requestFields: Object.freeze(['include_offline']) }),
   Object.freeze({ method: 'GET', path: '/api/rooms', class: 'actor', requestFields: Object.freeze([]) }),
   Object.freeze({ method: 'POST', path: '/api/rooms/direct', class: 'actor', requestFields: Object.freeze(['chat_id', 'target_fingerprint']) }),
   Object.freeze({ method: 'GET', path: '/api/rooms/:id/messages', class: 'actor', requestFields: Object.freeze(['after_seq', 'limit', 'wait_ms']) }),
   Object.freeze({ method: 'POST', path: '/api/rooms/:id/messages', class: 'actor', requestFields: Object.freeze(['chat_id', 'client_message_id', 'text', 'reply_to_seq']) }),
-  Object.freeze({ method: 'GET', path: '/api/status', class: 'actor', requestFields: Object.freeze([]) }),
+  // Story 1.6: GET /api/status is live — {realm_id, version, broadcast_room_id}
+  // for FR-21 and the Story 1.8 checkpoint (broadcast_room_id joined the
+  // response vocabulary by the dated 2026-09-25 spine amendment).
+  Object.freeze({ method: 'GET', path: '/api/status', class: 'actor', implemented: true, requestFields: Object.freeze([]) }),
 
   // pre-auth (AD-8): POST /api/auth/enroll · POST /api/auth/challenge ·
   // POST /api/auth/answer · POST /api/auth/local
@@ -71,8 +81,12 @@ export const ROUTE_TABLE = Object.freeze([
 // names never rename"). The contract test parses the live spine document and
 // pins these arrays against it; version and realm_id joined the response
 // vocabulary by the spine's 2026-09-25 amendment (AD-14's GET /api/status
-// requirement plus health/status self-description), and session_token joined
-// by the Story 1.4 amendment (the local credential exchange's response).
+// requirement plus health/status self-description), session_token joined
+// by the Story 1.4 amendment (the local credential exchange's response), and
+// the Story 1.6 amendments add client_type to the requests (the closed-set
+// client type declared at bind time) and — by the Story 1.6 review
+// amendment — broadcast_room_id, the two presence group labels, and the
+// presence row fields chat_id and client_type to the responses.
 export const REQUEST_FIELD_VOCABULARY = Object.freeze([
   'chat_id',
   'client_message_id',
@@ -88,6 +102,7 @@ export const REQUEST_FIELD_VOCABULARY = Object.freeze([
   'signature',
   'realm_id',
   'target_fingerprint',
+  'client_type',
 ])
 
 export const RESPONSE_FIELD_VOCABULARY = Object.freeze([
@@ -104,6 +119,11 @@ export const RESPONSE_FIELD_VOCABULARY = Object.freeze([
   'version',
   'realm_id',
   'session_token',
+  'broadcast_room_id',
+  'online',
+  'offline_recently',
+  'chat_id',
+  'client_type',
 ])
 
 // Matching: specific patterns first, wildcard (`/viewer/` + static assets)

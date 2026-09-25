@@ -60,10 +60,42 @@ test('chat_id_claims joins the schema additively as a STRICT table and converges
   }
 })
 
+test('the chat_id_claims last-seen index joins additively and converges on reopen', t => {
+  // Story 1.6: the offline-recently read window-scans by last_seen_at, so
+  // the index is part of the additive convergence like the table itself.
+  const { store, dataDir } = makeStore(t)
+  const dbPath = store.databasePath
+  const indexNames = () => {
+    const raw = new DatabaseSync(dbPath)
+    try {
+      return raw.prepare(`SELECT name FROM pragma_index_list('chat_id_claims')`).all().map(row => row.name)
+    } finally {
+      raw.close()
+    }
+  }
+  assert.ok(indexNames().includes('idx_chat_id_claims_last_seen_at'), 'the index exists on a fresh store')
+  store.close()
+
+  // Simulate a pre-1.6 v2 file whose index was never created (or was
+  // dropped): the next open converges without a version bump.
+  const raw = new DatabaseSync(dbPath)
+  raw.exec('DROP INDEX idx_chat_id_claims_last_seen_at')
+  raw.close()
+  assert.equal(indexNames().includes('idx_chat_id_claims_last_seen_at'), false)
+
+  const reopened = openRoomLog({ dataDir })
+  try {
+    assert.ok(indexNames().includes('idx_chat_id_claims_last_seen_at'), 'the open recreated the index')
+    // The offline source query works over the converged index.
+    assert.deepEqual(reopened.recentClaims(1000, 1_000_000), [])
+  } finally {
+    reopened.close()
+  }
+})
+
 test('upsertChatIdClaim keys the lowercase form and keeps the display form', t => {
   const { store } = makeStore(t)
-  try {
-    const written = store.upsertChatIdClaim({
+  try {    const written = store.upsertChatIdClaim({
       chatId: 'Alice',
       actorFingerprint: FINGERPRINT_A,
       lastSeenAt: '2026-09-25T00:00:00.000Z',
@@ -262,10 +294,13 @@ function makeRegistry() {
 test('the live registry binds a session to a chat id and reports the snapshot', () => {
   const { registry } = makeRegistry()
   const state = registry.claim({ sessionKey: 'k1', chatId: 'Alice', actorFingerprint: FINGERPRINT_A })
+  // Story 1.6: the bind may declare a client type; an undeclared one stays
+  // null on the row (the server never derives one).
   assert.deepEqual(state, {
     chatId: 'Alice',
     chatIdNormalized: 'alice',
     actorFingerprint: FINGERPRINT_A,
+    clientType: null,
     connectedSince: 1_000_000,
     lastSeen: 1_000_000,
   })

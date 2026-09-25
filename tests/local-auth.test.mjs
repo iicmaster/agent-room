@@ -572,14 +572,16 @@ test('a session token authenticates actor routes; unregistered routes 404 after 
 
   // The real verifier accepts: the request passes the auth stage and reaches
   // the (still unregistered) route position — 404 route_not_found, never 401.
-  const status = await request(record.port, 'GET', '/api/status', {
+  // (GET /api/status went live in Story 1.6; the probe uses GET /api/rooms
+  // until its story lands.)
+  const status = await request(record.port, 'GET', '/api/rooms', {
     headers: { [PROTOCOL_KEY]: '1', authorization: `Bearer ${sessionToken}` },
   })
   assert.equal(status.status, 404)
   assert.equal(status.json().error.code, 'route_not_found')
 
   // Contrast: without a credential the same route answers 401.
-  const anonymous = await request(record.port, 'GET', '/api/status', {
+  const anonymous = await request(record.port, 'GET', '/api/rooms', {
     headers: { [PROTOCOL_KEY]: '1' },
   })
   assert.equal(anonymous.status, 401)
@@ -661,8 +663,9 @@ test('an injected sessionRegistry and the default verifier stay one coherent pai
     assert.deepEqual(registry.verify(sessionToken), { actorFingerprint: identity.fingerprint })
 
     // ...and the default session verifier reads the same registry: the
-    // session authenticates an actor route (404 after the gate, never 401).
-    const { result: outcome, chunks } = await captureStderr(() => request(server.port, 'GET', '/api/status', {
+    // session authenticates an actor route (404 after the gate, never 401;
+    // GET /api/rooms is still unregistered — /api/status went live in 1.6).
+    const { result: outcome, chunks } = await captureStderr(() => request(server.port, 'GET', '/api/rooms', {
       headers: { [PROTOCOL_KEY]: '1', authorization: `Bearer ${sessionToken}` },
     }))
     assert.equal(outcome.status, 404)

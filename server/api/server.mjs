@@ -15,14 +15,23 @@
 // Story 1.4 local credential path — POST /api/auth/local exchanges the
 // shared-data-dir local token (Bearer) plus the installation's public key
 // (Local Mode auto-enrollment, additive AD-8 amendment) for a session bound
-// to that key's fingerprint; and the Story 1.5 session connect surface —
+// to that key's fingerprint; the Story 1.5 session connect surface —
 // POST/PATCH/DELETE /api/session bind, rename, and release the session's
 // Chat ID against the live-session registry (server/core/session-registry.mjs)
-// and the durable chat_id_claims index in the store. The sliding 12 h session
-// TTL is provisional per DR-2 (ratified at Story 4.1). The actor-class auth
-// stage runs the real session verifier from session.mjs (the 1.3 reject-all
-// default remains only as the pipeline's structural fallback). Every other
-// frozen AD-8 route stays unregistered (404 route_not_found behind the gates).
+// and the durable chat_id_claims index in the store; and the Story 1.6
+// presence surface — GET /api/presence assembles the online and
+// offline-recently groups over the live registry and the claims index, and
+// GET /api/status answers {realm_id, version, broadcast_room_id} for FR-21
+// and the Story 1.8 checkpoint. Liveness is one mechanism: the actor-class
+// auth stage's sliding TTL refresh and the presence touch are the same event
+// (touch with the 1.5 persist pattern on every authenticated request) — no
+// dedicated heartbeat surface exists server-side; the 60 s client heartbeat
+// cadence belongs to the Story 1.7 adapter and is only a constant here. The
+// sliding 12 h session TTL is provisional per DR-2 (ratified at Story 4.1).
+// The actor-class auth stage runs the real session verifier from session.mjs
+// (the 1.3 reject-all default remains only as the pipeline's structural
+// fallback). Every other frozen AD-8 route stays unregistered (404
+// route_not_found behind the gates).
 
 import { createServer } from 'node:http'
 import { timingSafeEqual } from 'node:crypto'
@@ -39,6 +48,8 @@ import {
 } from '../runtime.mjs'
 import {
   CLAIMS_TTL_MS,
+  CLIENT_TYPES,
+  PRESENCE_TTL_MS,
   PRUNE_INTERVAL_MS,
   PROTOCOL_HEADER,
   PROTOCOL_VERSION,
@@ -206,11 +217,25 @@ function bindSession(context) {
   if (chatId === undefined || chatId === null || chatId === '') {
     return reject('invalid_request', 'chat_id is required: the Chat ID to claim for this session')
   }
+  // Story 1.6 (additive spine amendment): the bind may declare the session's
+  // client type from the closed set in the constants module. An omitted
+  // declaration — or an explicit null, the chat_id convention for "not
+  // provided" — keeps the row's existing type (a fresh row stays null: the
+  // server never derives one; v0.1's MCP-derived naming is retired); a
+  // present-but-invalid value is a request-shape refusal before any state
+  // changes.
+  const declaredRaw = context.body?.client_type
+  const declaredType = declaredRaw === null ? undefined : declaredRaw
+  if (declaredType !== undefined
+    && (typeof declaredType !== 'string' || !CLIENT_TYPES.includes(declaredType))) {
+    return reject('invalid_request', `client_type must be one of: ${CLIENT_TYPES.join(', ')}`)
+  }
   const registry = context.liveSessionRegistry ?? LIVE_SESSION_REGISTRY
   const state = registry.claim({
     sessionKey: principal.sessionKey,
     chatId,
     actorFingerprint: principal.actorFingerprint,
+    clientType: declaredType,
     // The durable claim write runs inside the registry's atomic claim step —
     // after the collision check, before the memory commit — timestamped by
     // the registry's own clock (one clock for live and durable recency), so
@@ -241,6 +266,57 @@ registerHandler('DELETE /api/session', function disconnectSession(context) {
   const registry = context.liveSessionRegistry ?? LIVE_SESSION_REGISTRY
   registry.release(principal.sessionKey)
   return null
+}, 'actor')
+
+// Story 1.6 presence read (actor class, frozen route). The query allowlist
+// already rejected everything but include_offline (a misspelling is
+// unknown_field, an extra body invalid_request); the flag's value parses
+// strictly: absent, bare (?include_offline), "true", or "false" — anything
+// else throws a coded rejection, so the helper's answer is always a genuine
+// boolean and can never be mistaken for one. The snapshot comes from the
+// registry's one pure assembly: online rows within the presence TTL (stale
+// rows are hidden from the view — a read never frees a name), and, when the
+// flag is set, the separately-labeled offline_recently group from the durable
+// claims index (most recent claim per Actor, online Actors and the reading
+// session's own Actor excluded — no double-listing, no self-listing; claims
+// hold no client type, so offline rows carry none). The reader's fingerprint
+// is the token-derived principal, never a request field; the window and TTL
+// constants live in the registry and store, never here.
+function includeOfflineFlag(rawValue) {
+  if (rawValue === undefined) return false
+  if (rawValue === '' || rawValue === 'true') return true
+  if (rawValue === 'false') return false
+  throw new AgentRoomRuntimeError('invalid_request', 'include_offline must be true or false')
+}
+
+registerHandler('GET /api/presence', function presence(context) {
+  const principal = sessionPrincipalOf(context)
+  if (principal.ok === false) return principal
+  const registry = context.liveSessionRegistry ?? LIVE_SESSION_REGISTRY
+  return registry.presenceSnapshot({
+    includeOffline: includeOfflineFlag(context.query?.include_offline),
+    claimsReader: (windowMs, nowMs) => context.store.recentClaims(windowMs, nowMs),
+    readerFingerprint: principal.actorFingerprint,
+  })
+}, 'actor')
+
+// Story 1.6 registers the frozen GET /api/status (actor class): the stable
+// realm id (AD-14, minted at first boot and converged by this store's
+// bootstrap), the server version, and the implicit Broadcast Room's id —
+// FR-21 needs them and the Story 1.8 checkpoint consumes them. The id is
+// minted, never fabricated: a store without its Broadcast Room is a bootstrap
+// invariant failure answered as a coded 500 (request_failed on the wire, one
+// diagnosable stderr line), never a silent null.
+registerHandler('GET /api/status', function status(context) {
+  const broadcastRoom = context.store.findBroadcastRoom()
+  if (broadcastRoom === null) {
+    throw new AgentRoomRuntimeError('realm_bootstrap_incomplete', 'the realm Broadcast Room is missing from the store')
+  }
+  return {
+    realm_id: context.store.getRealmId(),
+    version: APP_VERSION,
+    broadcast_room_id: broadcastRoom.id,
+  }
 }, 'actor')
 
 const UNREGISTERED_ROUTE_HANDLER = () => reject('route_not_found')
@@ -371,6 +447,7 @@ export async function startServer({
   claimsTtlMs = CLAIMS_TTL_MS,
   pruneIntervalMs,
   pruneClaims,
+  presenceTtlMs = PRESENCE_TTL_MS,
 } = {}) {
   // Runtime gate first: Node >= 24.15 / SQLite >= 3.51.3, diagnosable error.
   assertSupportedRuntime()
@@ -407,10 +484,11 @@ export async function startServer({
       || typeof liveSessionRegistry.rename !== 'function'
       || typeof liveSessionRegistry.touch !== 'function'
       || typeof liveSessionRegistry.lookup !== 'function'
+      || typeof liveSessionRegistry.presenceSnapshot !== 'function'
       || typeof liveSessionRegistry.clear !== 'function')) {
     throw new AgentRoomRuntimeError(
       'invalid_argument',
-      'liveSessionRegistry must be a live-session registry (claim/release/rename/touch/lookup/clear) when provided',
+      'liveSessionRegistry must be a live-session registry (claim/release/rename/touch/lookup/presenceSnapshot/clear) when provided',
     )
   }
   if (!Number.isSafeInteger(claimsTtlMs) || claimsTtlMs <= 0) {
@@ -421,6 +499,13 @@ export async function startServer({
   }
   if (pruneClaims !== undefined && typeof pruneClaims !== 'function') {
     throw new AgentRoomRuntimeError('invalid_argument', 'pruneClaims must be a function when provided')
+  }
+  // The presence TTL tunes the online-visibility window of the process-default
+  // live registry (an injected registry owns its own). It narrows or widens
+  // the VIEW only — the claim lease stays the auth session TTL, so a tuned
+  // presence TTL can never free a name.
+  if (!Number.isSafeInteger(presenceTtlMs) || presenceTtlMs <= 0) {
+    throw new AgentRoomRuntimeError('invalid_argument', 'presenceTtlMs must be a positive safe integer')
   }
   // implemented-flag enforcement: every frozen route marked implemented must
   // have a registered handler, and every registered handler must belong to a
@@ -436,10 +521,44 @@ export async function startServer({
     }
   }
   const effectiveRegistry = sessionRegistry ?? SESSION_REGISTRY
-  const effectiveSessionVerifier = sessionVerifier ?? createSessionVerifier({ registry: effectiveRegistry })
-  const effectiveLiveRegistry = liveSessionRegistry ?? LIVE_SESSION_REGISTRY
+  // Story 1.6: the process-default live registry receives the operator-tuned
+  // presence TTL; an injected registry is the caller's to configure.
+  const effectiveLiveRegistry = liveSessionRegistry ?? createLiveSessionRegistry({ presenceTtlMs })
 
   const store = openRoomLog({ dataDir })
+
+  // Story 1.6: one liveness mechanism. The actor-class auth stage already
+  // slides the 12 h auth TTL on every successful verify (the documented
+  // zero-state boundary exception); the same event now refreshes presence
+  // liveness too — registry.touch with the 1.5 persist pattern, so the
+  // durable claim row's last_seen_at advances with the in-memory row and no
+  // dedicated heartbeat surface exists server-side (the 60 s ±10% client
+  // heartbeat cadence belongs to the 1.7 adapter; its requests are simply
+  // authenticated requests here). The touch fires only for a resolved
+  // principal carrying the session key: a 401, a pre-auth/viewer/health
+  // route (the session slot never runs there), and an unbound session (no
+  // live row — touch returns null) all leave presence untouched, so viewer
+  // and daemon activity can never create or refresh presence. A touch
+  // failure propagates as the coded internal-fault fallback: the store is
+  // the server's own state, and a failed liveness write must not silently
+  // masquerade as freshness.
+  const baseSessionVerifier = sessionVerifier ?? createSessionVerifier({ registry: effectiveRegistry })
+  const effectiveSessionVerifier = context => {
+    const outcome = baseSessionVerifier(context)
+    if (
+      outcome
+      && typeof outcome === 'object'
+      && !Array.isArray(outcome)
+      && outcome.ok !== false
+      && typeof outcome.sessionKey === 'string'
+      && outcome.sessionKey.length > 0
+    ) {
+      effectiveLiveRegistry.touch(outcome.sessionKey, {
+        persist: claimPayload => store.upsertChatIdClaim(claimPayload),
+      })
+    }
+    return outcome
+  }
   let httpServer = null
   let pruneTimer = null
   try {
@@ -526,11 +645,12 @@ export async function startServer({
     return Object.freeze({
       port: address.port,
       runtimeRecord,
-      // Story 1.6 pre-wiring and test seam: one operation refreshing a live
-      // session's in-memory recency AND its durable claim row's last_seen_at
-      // — the same persist-callback pattern the connect/rename bind uses,
-      // timestamped by the live registry's own clock. The heartbeat story's
-      // handler will drive the registry through this same pattern.
+      // Story 1.5/1.6 touch seam: one operation refreshing a live session's
+      // in-memory recency AND its durable claim row's last_seen_at — the
+      // same persist-callback pattern the connect/rename bind uses and the
+      // actor-class post-auth path drives on every authenticated request
+      // (one liveness mechanism). Exposed for callers that must advance a
+      // session outside the request path, and for tests.
       touchSession(sessionKey) {
         return effectiveLiveRegistry.touch(sessionKey, {
           persist: claimPayload => store.upsertChatIdClaim(claimPayload),
@@ -609,6 +729,32 @@ export function claimsTtlMsFromEnv(env = process.env) {
   return { claimsTtlMs: value }
 }
 
+// Story 1.6 review: the same operator surface for the presence TTL —
+// startServer({presenceTtlMs}) via AGENT_ROOM_PRESENCE_TTL_MS, identical
+// strict validation and warning-fallback shape. (The 60 s client heartbeat
+// cadence is the Story 1.7 adapter's surface — deliberately not tunable here.)
+export function presenceTtlMsFromEnv(env = process.env) {
+  const raw = env?.AGENT_ROOM_PRESENCE_TTL_MS
+  if (raw === undefined || String(raw).trim() === '') {
+    return { presenceTtlMs: PRESENCE_TTL_MS }
+  }
+  const trimmed = String(raw).trim()
+  if (!/^[0-9]+$/.test(trimmed)) {
+    return {
+      presenceTtlMs: PRESENCE_TTL_MS,
+      warning: `ignoring invalid AGENT_ROOM_PRESENCE_TTL_MS "${raw}": must be a positive integer number of milliseconds; using the default ${PRESENCE_TTL_MS} ms`,
+    }
+  }
+  const value = Number(trimmed)
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    return {
+      presenceTtlMs: PRESENCE_TTL_MS,
+      warning: `ignoring invalid AGENT_ROOM_PRESENCE_TTL_MS "${raw}": must be a positive integer number of milliseconds; using the default ${PRESENCE_TTL_MS} ms`,
+    }
+  }
+  return { presenceTtlMs: value }
+}
+
 // Run the runtime gate before any other work. Direct launches report one
 // diagnosable line and exit 1 with no stack trace; importers get a catchable
 // rejection so harnesses (tests/runtime.test.mjs entrypoint gates) can assert
@@ -629,7 +775,9 @@ try {
 if (launchedDirectly()) {
   const { claimsTtlMs, warning } = claimsTtlMsFromEnv()
   if (warning) process.stderr.write(`agent-room-server: ${warning}\n`)
-  startServer({ dataDir: sharedDataDirectory(), claimsTtlMs })
+  const { presenceTtlMs, warning: presenceWarning } = presenceTtlMsFromEnv()
+  if (presenceWarning) process.stderr.write(`agent-room-server: ${presenceWarning}\n`)
+  startServer({ dataDir: sharedDataDirectory(), claimsTtlMs, presenceTtlMs })
     .then(server => {
       let shuttingDown = false
       const shutdown = () => {
