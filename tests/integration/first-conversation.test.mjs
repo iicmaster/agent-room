@@ -10,14 +10,16 @@
 // from a production helper — so a producer regression cannot make both sides
 // drift together.
 //
-// No stubs, doubles, or fakes of any kind: the only traffic is
-// line-delimited MCP JSON-RPC over each child's pipes into the real server
-// executable. Direct SQLite access is read-only inspection of the live
-// server's own file; no production module supplies behavior or expected
-// values.
+// No stubs, doubles, or fakes of any kind. Alice, Bob, and Eve drive every
+// checkpoint behavior through line-delimited MCP JSON-RPC into the real server
+// executable. Raw HTTP is limited to the local-token negatives and short-lived
+// released binds that seed the ambiguous-name precondition; direct SQLite
+// access remains read-only inspection. No production module supplies behavior
+// or expected values.
 
 import assert from 'node:assert/strict'
 import { execFile, spawn } from 'node:child_process'
+import { createPrivateKey, createPublicKey } from 'node:crypto'
 import {
   chmodSync,
   existsSync,
@@ -51,18 +53,26 @@ const SCHEMA_VERSION = 2
 // (3 s), and a reaping grace for every child.
 const SERVER_READY_TIMEOUT_MS = 25_000
 const CLIENT_CALL_TIMEOUT_MS = 30_000
-const HELD_READ_WAIT_MS = 2_000
+// The hold is deliberately far longer than the request-arrival barrier and
+// the observed response bound. A server that sleeps the whole wait therefore
+// misses the deadline assertion instead of being mistaken for a wake-up.
+const HELD_READ_WAIT_MS = 10_000
 const HOLD_ENTRY_TIMEOUT_MS = 1_500
-const HOLD_SETTLE_MS = 75
-const HOLD_DEADLINE_MARGIN_MS = 100
+const HOLD_SETTLE_MS = 500
+const HOLD_DEADLINE_MARGIN_MS = 3_000
+const WAKE_RESPONSE_MAX_MS = 2_000
 const CHILD_REAP_GRACE_MS = 2_000
 const PROBE_TIMEOUT_MS = 1_500
+const PROCESS_INVENTORY_TIMEOUT_MS = 5_000
 
-// Fixed multiline Unicode payloads. Byte/character preservation is
-// observable: a normalization, escaping, or wrapping change anywhere on the
-// path makes the literal comparisons fail.
+// Fixed multiline Unicode payloads. Each contains a decomposed combining mark
+// and an astral code point. The explicit UTF-8 Buffer oracles below make
+// normalization detectable even where a renderer visually hides the
+// difference.
 const ALICE_TEXT = 'สวัสดี Alice — first line 🙂\nsecond line: “你好” with e\u0301'
 const BOB_TEXT = 'Reply from Bob — line one 🌏\nline two: naïve cafe\u0301'
+const ALICE_TEXT_BYTES = Buffer.from(ALICE_TEXT, 'utf8')
+const BOB_TEXT_BYTES = Buffer.from(BOB_TEXT, 'utf8')
 
 // The frozen v1 foreign-body oracle, as a literal template (not the
 // production helper). Only the sender chat id, fingerprint, and body are
@@ -79,6 +89,10 @@ function literalForeignEnvelope({ senderChatId, senderFingerprint, text }) {
 
 const sleep = ms => new Promise(resolvePromise => { setTimeout(resolvePromise, ms) })
 const keysOf = value => Object.keys(value).sort()
+
+function assertUtf8Bytes(actual, expectedBytes, label) {
+  assert.deepEqual(Buffer.from(actual, 'utf8'), expectedBytes, `${label}: UTF-8 bytes differ from the sent fixture`)
+}
 
 function privateStat(path, kind) {
   const info = lstatSync(path)
@@ -151,27 +165,114 @@ async function processTable() {
   return rows
 }
 
-function descendantsOf(pid, rows) {
-  const children = new Map()
-  for (const row of rows) {
-    const list = children.get(row.ppid) ?? []
-    list.push(row)
-    children.set(row.ppid, list)
-  }
-  const found = new Map()
-  const visit = parent => {
-    for (const child of children.get(parent) ?? []) {
-      if (found.has(child.pid)) continue
-      found.set(child.pid, child)
-      visit(child.pid)
-    }
-  }
-  visit(pid)
-  return [...found.values()]
-}
-
 function executesServerEntry(command) {
   return command.split(/\s+/).includes(SERVER_ENTRY)
+}
+
+function parsePidField(stdout) {
+  return stdout.split('\n')
+    .map(line => /^p(\d+)$/.exec(line.trim()))
+    .filter(Boolean)
+    .map(match => Number(match[1]))
+}
+
+async function darwinPidsUsingPaths(paths) {
+  if (paths.length === 0) return []
+  try {
+    const { stdout } = await commandOutput('lsof', [
+      '-nP', '-F', 'p', ...paths,
+    ], PROCESS_INVENTORY_TIMEOUT_MS)
+    return parsePidField(stdout)
+  } catch (error) {
+    if (error?.code === 1) return []
+    throw error
+  }
+}
+
+function linuxPidsUsingPaths(paths) {
+  const wanted = new Set(paths)
+  const pids = []
+  for (const entry of readdirSync('/proc')) {
+    if (!/^\d+$/.test(entry)) continue
+    const fdDirectory = `/proc/${entry}/fd`
+    let descriptors
+    try {
+      descriptors = readdirSync(fdDirectory)
+    } catch (error) {
+      if (error?.code === 'ENOENT' || error?.code === 'EACCES') continue
+      throw error
+    }
+    for (const descriptor of descriptors) {
+      let target
+      try {
+        target = readlinkSync(`${fdDirectory}/${descriptor}`)
+      } catch (error) {
+        if (error?.code === 'ENOENT') continue
+        throw error
+      }
+      if (target.endsWith(' (deleted)')) target = target.slice(0, -' (deleted)'.length)
+      if (wanted.has(target)) {
+        pids.push(Number(entry))
+        break
+      }
+    }
+  }
+  return pids
+}
+
+async function serverPidsBoundToDatabase(databasePath) {
+  const paths = [
+    databasePath,
+    `${databasePath}-wal`,
+    `${databasePath}-shm`,
+  ].filter(existsSync)
+  const rows = await processTable()
+  const openPids = process.platform === 'darwin'
+    ? await darwinPidsUsingPaths([databasePath])
+    : process.platform === 'linux'
+      ? linuxPidsUsingPaths(paths)
+      : assert.fail(`unsupported process-inventory platform: ${process.platform}`)
+  const openSet = new Set(openPids)
+  return rows
+    .filter(row => openSet.has(row.pid) && executesServerEntry(row.command))
+    .map(row => row.pid)
+    .sort((left, right) => left - right)
+}
+
+async function darwinListeningPids(port) {
+  try {
+    const { stdout } = await commandOutput('lsof', [
+      '-nP', '-F', 'p', `-iTCP:${port}`, '-sTCP:LISTEN',
+    ], PROCESS_INVENTORY_TIMEOUT_MS)
+    return parsePidField(stdout)
+  } catch (error) {
+    if (error?.code === 1) return []
+    throw error
+  }
+}
+
+function linuxListeningPids(port) {
+  const socketInodes = new Set()
+  const wantedPort = port.toString(16).toUpperCase().padStart(4, '0')
+  for (const table of ['/proc/net/tcp', '/proc/net/tcp6']) {
+    if (!existsSync(table)) continue
+    for (const line of readFileSync(table, 'utf8').split('\n').slice(1)) {
+      const columns = line.trim().split(/\s+/)
+      if (columns.length < 10 || columns[3] !== '0A') continue
+      if (columns[1]?.split(':')[1] !== wantedPort) continue
+      socketInodes.add(columns[9])
+    }
+  }
+  if (socketInodes.size === 0) return []
+  return linuxPidsUsingPaths([...socketInodes].map(inode => `socket:[${inode}]`))
+}
+
+async function listeningPids(port) {
+  return process.platform === 'darwin'
+    ? darwinListeningPids(port)
+    : process.platform === 'linux'
+      ? linuxListeningPids(port)
+      : assert.fail(`unsupported listener-inventory platform: ${process.platform}`)
 }
 
 function pidAlive(pid) {
@@ -282,6 +383,30 @@ async function waitForNewEstablishedSocket(pid, port, previous, label) {
   throw new Error(`${label}: no new ESTABLISHED socket to ${port} within ${HOLD_ENTRY_TIMEOUT_MS} ms${lastError ? `; last error=${lastError.message}` : ''}`)
 }
 
+async function waitForClaimRefresh(database, actorFingerprint, previousSeenMs, previousDataVersion, label) {
+  const deadline = Date.now() + HOLD_ENTRY_TIMEOUT_MS
+  const versionQuery = database.prepare('PRAGMA data_version')
+  const claimQuery = database.prepare(`
+    SELECT last_seen_at
+    FROM chat_id_claims
+    WHERE actor_fingerprint = ?
+  `)
+  let lastError = null
+  while (Date.now() < deadline) {
+    try {
+      const version = Number(versionQuery.get().data_version)
+      const claim = claimQuery.get(actorFingerprint)
+      if (version !== previousDataVersion && claim && Date.parse(claim.last_seen_at) > previousSeenMs) {
+        return { dataVersion: version, lastSeenAt: claim.last_seen_at }
+      }
+    } catch (error) {
+      lastError = error
+    }
+    await sleep(25)
+  }
+  throw new Error(`${label}: the server did not refresh Bob's authenticated claim within ${HOLD_ENTRY_TIMEOUT_MS} ms${lastError ? `; last error=${lastError.message}` : ''}`)
+}
+
 function awaitExit(exited, label, timeoutMs) {
   return new Promise((resolvePromise, rejectPromise) => {
     const timer = setTimeout(() => {
@@ -317,6 +442,57 @@ function rawHttpJson({ port, method, path, headers, body }) {
   })
 }
 
+function installationPublicKeyBase64Url(installation) {
+  const keyPath = join(installation.pluginData, 'identity.key')
+  assert.equal(modeOf(keyPath, 'file'), 0o600, `${installation.chatId}: identity.key is a regular 0600 file`)
+  const privateKey = createPrivateKey(readFileSync(keyPath, 'utf8'))
+  const spki = createPublicKey(privateKey).export({ type: 'spki', format: 'der' })
+  assert.ok(spki.length >= 32, `${installation.chatId}: Ed25519 SPKI public key is present`)
+  return Buffer.from(spki.subarray(spki.length - 32)).toString('base64url')
+}
+
+// Seeds one durable ambiguity claim with an existing real MCP installation's
+// keypair, then explicitly releases its temporary live session. The row under
+// test is still driven through Alice's MCP child; this setup exists because
+// mcp-stdio intentionally exposes no logout/rename tool with which two
+// claimants could release a name between real-child binds.
+async function seedAndReleaseClaim({ port, localToken, installation, chatId, label }) {
+  const baseHeaders = {
+    'Agent-Room-Protocol': '1',
+    'content-type': 'application/json; charset=utf-8',
+  }
+  const exchange = await rawHttpJson({
+    port,
+    method: 'POST',
+    path: '/api/auth/local',
+    headers: { ...baseHeaders, authorization: `Bearer ${localToken}` },
+    body: JSON.stringify({ public_key: installationPublicKeyBase64Url(installation) }),
+  })
+  assert.equal(exchange.status, 200, `${label}: temporary local auth succeeds`)
+  const sessionToken = exchange.json().result?.session_token
+  assert.equal(typeof sessionToken, 'string', `${label}: temporary session token is issued`)
+  const sessionHeaders = { ...baseHeaders, authorization: `Bearer ${sessionToken}` }
+  try {
+    const bound = await rawHttpJson({
+      port,
+      method: 'POST',
+      path: '/api/session',
+      headers: sessionHeaders,
+      body: JSON.stringify({ chat_id: chatId, client_type: 'mcp' }),
+    })
+    assert.equal(bound.status, 200, `${label}: temporary ambiguity claim binds (${bound.text})`)
+    assert.equal(bound.json().result.chat_id, chatId, `${label}: temporary bind echoes the ambiguity name`)
+  } finally {
+    const released = await rawHttpJson({
+      port,
+      method: 'DELETE',
+      path: '/api/session',
+      headers: sessionHeaders,
+    })
+    assert.equal(released.status, 200, `${label}: temporary ambiguity session is explicitly released`)
+  }
+}
+
 function isLoopbackAddress(address) {
   return address === '::1'
     || address.startsWith('127.')
@@ -327,11 +503,22 @@ function familyOf(entry) {
   return entry.family === 'IPv4' || entry.family === 4 ? 'IPv4' : 'IPv6'
 }
 
-// One TCP dial with a bounded outcome: 'connected' (a leak), the refusal
-// code, or 'timeout' (no acceptance within the bound).
-function probeConnection({ host, port }) {
+function dialHostFor(entry) {
+  const family = familyOf(entry)
+  if (family === 'IPv6' && entry.address.toLowerCase().startsWith('fe80:') && Number.isInteger(entry.scopeid) && entry.scopeid > 0) {
+    return `${entry.address}%${entry.scopeid}`
+  }
+  return entry.address
+}
+
+// One numeric-address TCP dial with the address family supplied explicitly.
+// Routing/scope failures remain distinct from a listener refusal: only
+// ECONNREFUSED or a bounded timeout can satisfy the non-loopback row.
+function probeConnection({ host, port, family }) {
+  const numericFamily = family === 'IPv4' ? 4 : family === 'IPv6' ? 6 : null
+  assert.ok(numericFamily !== null, `probeConnection requires an explicit IPv4 or IPv6 family for ${host}`)
   return new Promise(resolvePromise => {
-    const socket = net.connect({ host, port })
+    const socket = net.connect({ host, port, family: numericFamily })
     let settled = false
     const finish = outcome => {
       if (settled) return
@@ -339,9 +526,9 @@ function probeConnection({ host, port }) {
       socket.destroy()
       resolvePromise(outcome)
     }
-    socket.setTimeout(PROBE_TIMEOUT_MS, () => finish('timeout'))
-    socket.once('connect', () => finish('connected'))
-    socket.once('error', error => finish(error?.code ?? 'error'))
+    socket.setTimeout(PROBE_TIMEOUT_MS, () => finish({ outcome: 'timeout', code: 'ETIMEDOUT' }))
+    socket.once('connect', () => finish({ outcome: 'connected', code: null }))
+    socket.once('error', error => finish({ outcome: 'error', code: error?.code ?? 'UNKNOWN' }))
   })
 }
 
@@ -349,10 +536,9 @@ function probeConnection({ host, port }) {
 
 // Spawns server/mcp-stdio.mjs and speaks newline-delimited JSON-RPC over its
 // pipes. Response ids are correlated; stderr is retained for timeouts and
-// early exits; every byte written to stdin is recorded as an outbound-frame
-// self-check, not as an observation of a child's read-only fd 0. close() is
-// idempotent and reaps the child with a bounded SIGTERM/SIGKILL fallback. The
-// child's close is registered into the world's ordered cleanup list at spawn —
+// early exits. close() is idempotent and reaps the child with a bounded
+// SIGTERM/SIGKILL fallback. The child's close is registered into the world's
+// ordered cleanup list at spawn —
 // before any frame is sent.
 function startMcpChild(world, { pluginData, label }) {
   const { sharedData } = world
@@ -378,7 +564,6 @@ function startMcpChild(world, { pluginData, label }) {
   let closed = false
   let nextId = 1
   const pending = new Map()
-  const outboundFrames = []
   let initialized = false
 
   // Bind both lifecycle promises immediately. `exit` records process state;
@@ -474,9 +659,8 @@ function startMcpChild(world, { pluginData, label }) {
         timer,
         cancelTimer: null,
       })
-      outboundFrames.push(`${JSON.stringify(frame)}\n`)
       try {
-        child.stdin.write(outboundFrames[outboundFrames.length - 1])
+        child.stdin.write(`${JSON.stringify(frame)}\n`)
       } catch (error) {
         settlePending(id, { error: true, reason: `stdin write failed: ${error.message}` })
       }
@@ -495,7 +679,6 @@ function startMcpChild(world, { pluginData, label }) {
       params: { requestId: Number(requestId) },
     })}\n`
     try {
-      outboundFrames.push(notification)
       child.stdin.write(notification)
     } catch (error) {
       settlePending(key, { error: true, reason: `cancellation write failed: ${error.message}` })
@@ -518,9 +701,7 @@ function startMcpChild(world, { pluginData, label }) {
     assert.equal(response.error, undefined, `${label}: initialize answered with ${JSON.stringify(response.error)}`)
     assert.equal(response.result.protocolVersion, '2025-06-18', `${label}: negotiated MCP protocol version`)
     assert.equal(typeof response.result.serverInfo?.name, 'string', `${label}: serverInfo.name is present`)
-    const notification = `${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' })}\n`
-    outboundFrames.push(notification)
-    child.stdin.write(notification)
+    child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' })}\n`)
     initialized = true
   }
 
@@ -571,6 +752,7 @@ function startMcpChild(world, { pluginData, label }) {
       if (child.exitCode === null && child.signalCode === null) {
         throw new Error(`${label}: the MCP child was not reaped after SIGTERM/SIGKILL`)
       }
+      if (lifecycleError) throw lifecycleError
       if (stdoutError) throw stdoutError
       assert.equal(stdoutBuffer.trim(), '', `${label}: child stdout ended with a partial JSON frame`)
     } catch (error) {
@@ -590,25 +772,28 @@ function startMcpChild(world, { pluginData, label }) {
     cancelPending,
     close,
     get stderr() { return stderr },
-    get outboundFrames() { return outboundFrames },
     get stdoutLines() { return stdoutLines },
     get isRunning() { return child.exitCode === null && child.signalCode === null },
   }
 }
 
-async function assertNoServerDescendant(world, participant) {
-  if (!participant.isRunning || participant.child.pid === undefined) return
-  const rows = await processTable()
-  const descendants = descendantsOf(participant.child.pid, rows)
-  const serverPids = descendants
-    .filter(row => executesServerEntry(row.command))
-    .map(row => row.pid)
-  if (serverPids.length === 0) return
-  for (const pid of serverPids) world.detachedPids.add(pid)
-  const cleanup = () => terminatePids(serverPids)
-  world.pidCleanups.push(cleanup)
-  await cleanup()
-  assert.fail(`${participant.label}: detached sibling server process(es) detected and terminated: ${serverPids.join(', ')}`)
+async function assertOnlyExpectedServer(world, label) {
+  const runtimeRecord = world.runtimeRecord
+  const [boundPids, listenerPids] = await Promise.all([
+    serverPidsBoundToDatabase(world.databasePath),
+    listeningPids(runtimeRecord.port),
+  ])
+  const expectedPid = world.server.pid
+  const uniqueListenerPids = [...new Set(listenerPids)].sort((left, right) => left - right)
+  const unexpectedBoundPids = boundPids.filter(pid => pid !== expectedPid)
+  for (const pid of unexpectedBoundPids) world.detachedPids.add(pid)
+  if (unexpectedBoundPids.length > 0) await terminatePids(unexpectedBoundPids)
+  const unexpectedListenerPids = uniqueListenerPids.filter(pid => pid !== expectedPid)
+  if (unexpectedBoundPids.length > 0 || unexpectedListenerPids.length > 0) {
+    assert.fail(`${label}: unexpected server process(es) bound in the temp world or listening on ${runtimeRecord.port}; bound=${unexpectedBoundPids.join(',') || 'none'}, listeners=${unexpectedListenerPids.join(',') || 'none'}`)
+  }
+  assert.deepEqual(boundPids, [expectedPid], `${label}: only the pre-spawned server may hold this temp world's database`)
+  assert.deepEqual(uniqueListenerPids, [expectedPid], `${label}: only the pre-spawned server may listen on runtime.json's port`)
 }
 
 // --- The isolated world and the pre-spawned server child ------------------------
@@ -627,12 +812,16 @@ function makeWorld(t) {
   // live child. node:test runs after hooks in registration order, so the
   // order is expressed here rather than left to hook ordering.
   const childCleanups = []
-  const pidCleanups = []
   const children = []
   const detachedPids = new Set()
+  let sharedData = null
+  let databasePath = null
+  let runtimeRecord = null
   let server = null
   let serverExited = null
+  let serverLifecycleError = null
   let serverStderr = ''
+  let serverStdout = ''
 
   const stopServer = async () => {
     if (server === null) return
@@ -660,9 +849,10 @@ function makeWorld(t) {
     }
   }
 
-  // Register this before creating any state or spawning any process: even a
-  // setup assertion failure removes the temporary parent rather than leaking
-  // it, and a later MCP spawn appends its close to the same ordered list.
+  // Register this before creating any state or spawning any process. Cleanup
+  // is remove-last: close/reap every handle, discover and terminate any
+  // unparented server still bound to this world's database, then remove the
+  // parent only after every known pid is proven dead.
   t.after(async () => {
     const failures = []
     for (const cleanup of childCleanups) {
@@ -672,25 +862,55 @@ function makeWorld(t) {
         failures.push(error)
       }
     }
-    for (const cleanup of pidCleanups) {
-      try {
-        await cleanup()
-      } catch (error) {
-        failures.push(error)
-      }
+
+    const discoverUnexpectedServers = async () => {
+      if (databasePath === null) return []
+      const expectedPid = server?.pid
+      const pids = await serverPidsBoundToDatabase(databasePath)
+      const unexpected = pids.filter(pid => pid !== expectedPid)
+      for (const pid of unexpected) detachedPids.add(pid)
+      return unexpected
+    }
+
+    try {
+      const unexpected = await discoverUnexpectedServers()
+      if (unexpected.length > 0) await terminatePids(unexpected)
+    } catch (error) {
+      failures.push(error)
     }
     try {
       await stopServer()
     } catch (error) {
       failures.push(error)
     }
+    // A detached ensureServer sibling can outlive its MCP parent and therefore
+    // has no ChildProcess handle. Re-inventory the unique database after the
+    // normal children/server are gone and reap anything still present.
+    try {
+      const unexpected = await discoverUnexpectedServers()
+      if (unexpected.length > 0) await terminatePids(unexpected)
+    } catch (error) {
+      failures.push(error)
+    }
+
     const live = children
       .filter(({ child }) => child.exitCode === null && child.signalCode === null)
       .map(({ label, child }) => `${label}:${child.pid ?? 'unknown'}`)
     for (const pid of detachedPids) {
       if (pidAlive(pid)) live.push(`detached:${pid}`)
     }
-    if (server !== null && server.exitCode === null && server.signalCode === null) live.push(`server:${server.pid ?? 'unknown'}`)
+    if (server !== null && server.exitCode === null && server.signalCode === null) {
+      live.push(`server:${server.pid ?? 'unknown'}`)
+    }
+    try {
+      const remainingServers = await discoverUnexpectedServers()
+      if (remainingServers.length > 0) {
+        live.push(...remainingServers.map(pid => `undiscovered-server:${pid}`))
+      }
+    } catch (error) {
+      failures.push(error)
+    }
+
     if (live.length === 0) {
       try {
         rmSync(parent, { recursive: true, force: true })
@@ -700,10 +920,13 @@ function makeWorld(t) {
     } else {
       failures.push(new Error(`preserved temporary parent because processes remain live: ${live.join(', ')}`))
     }
-    if (failures.length > 0) throw failures[0]
+    if (failures.length > 0) {
+      throw new AggregateError(failures, `first-conversation cleanup failed with ${failures.length} error(s)`)
+    }
   })
 
-  const sharedData = join(parent, 'shared')
+  sharedData = join(parent, 'shared')
+  databasePath = join(sharedData, DATABASE_FILENAME)
   mkdirSync(sharedData, { mode: 0o700 })
   const installations = {}
   for (const [key, chatId] of [['alice', 'alice'], ['bob', 'bob'], ['eaves', 'eaves']]) {
@@ -746,16 +969,26 @@ function makeWorld(t) {
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   serverExited = new Promise(resolveExit => server.once('exit', (code, signal) => resolveExit({ code, signal })))
-  server.on('error', error => { serverStderr += `agent-room-server child error: ${error.message}\n` })
-  server.stderr.on('error', error => { serverStderr += `agent-room-server stderr error: ${error.message}\n` })
-  assert.ok(server.pid, 'the server child spawned')
+  const recordServerLifecycleError = (kind, error) => {
+    serverLifecycleError ??= new Error(`${kind}: ${error?.message ?? error}`)
+    serverStderr += `agent-room-server ${kind}: ${error?.message ?? error}\n`
+  }
+  server.on('error', error => recordServerLifecycleError('child error', error))
+  server.stdout.on('error', error => recordServerLifecycleError('stdout error', error))
+  server.stderr.on('error', error => recordServerLifecycleError('stderr error', error))
+  assert.ok(server.pid, `the server child spawned${serverLifecycleError ? `: ${serverLifecycleError.message}` : ''}`)
+  server.stdout.setEncoding('utf8')
   server.stderr.setEncoding('utf8')
+  server.stdout.on('data', chunk => { serverStdout += chunk })
   server.stderr.on('data', chunk => { serverStderr += chunk })
 
   const runtimePath = join(sharedData, RUNTIME_RECORD_FILENAME)
   const waitReady = async () => {
     const deadline = Date.now() + SERVER_READY_TIMEOUT_MS
     for (;;) {
+      if (serverLifecycleError !== null) {
+        throw new Error(`the server child lifecycle failed: ${serverLifecycleError.message}; stderr=${serverStderr}`)
+      }
       if (server.exitCode !== null || server.signalCode !== null) {
         throw new Error(`the server child exited early (code=${server.exitCode} signal=${server.signalCode}); stderr=${serverStderr}`)
       }
@@ -767,7 +1000,10 @@ function makeWorld(t) {
           && Number.isInteger(record.pid) && record.pid > 0
           && Number.isInteger(record.port) && record.port > 0 && record.port <= 65535
           && typeof record.version === 'string' && record.version.length > 0
-        ) return record
+        ) {
+          runtimeRecord = record
+          return record
+        }
       }
       if (Date.now() > deadline) {
         throw new Error(`the server child never published runtime.json within ${SERVER_READY_TIMEOUT_MS} ms; stderr=${serverStderr}`)
@@ -778,16 +1014,19 @@ function makeWorld(t) {
 
   return {
     sharedData,
+    databasePath,
     installations,
     childCleanups,
-    pidCleanups,
     children,
     detachedPids,
     server,
     runtimePath,
     waitReady,
     stopServer,
+    get runtimeRecord() { return runtimeRecord },
+    get serverLifecycleError() { return serverLifecycleError },
     get serverStderr() { return serverStderr },
+    get serverStdout() { return serverStdout },
     get serverIsRunning() { return server.exitCode === null && server.signalCode === null },
   }
 }
@@ -795,11 +1034,17 @@ function makeWorld(t) {
 // --- The checkpoint -------------------------------------------------------------
 
 test('first conversation: two real MCP children converse through one real WAL server, cursors persist, a third Actor is denied', async t => {
+  // Static stdin-purity oracle, reused from tests/mcp-tools.test.mjs. Runtime
+  // stdout is independently parsed as JSON-RPC below; the old outbound-frame
+  // loop only re-parsed the parent's own writes and could never observe an
+  // adapter write to fd 0.
   const mcpSource = readFileSync(MCP_ENTRY, 'utf8')
   assert.equal(/prompt|readline/i.test(mcpSource), false, 'MCP stdio contains no prompt/readline machinery')
-  assert.equal(/stdin\.write|input\.write/.test(mcpSource), false, 'MCP stdio never writes to its input stream')
+  assert.equal(/room_create|room_join/.test(mcpSource), false, 'MCP stdio has no retired room_create/room_join prompt path')
+  assert.equal(/stdin\.write|input\.write/.test(mcpSource), false, 'MCP stdio never writes to fd 0 through stdin/input')
   const world = makeWorld(t)
   const runtimeRecord = await world.waitReady()
+  await assertOnlyExpectedServer(world, 'fresh pre-spawned server')
   assert.deepEqual(
     keysOf(runtimeRecord),
     ['pid', 'port', 'version'],
@@ -858,14 +1103,20 @@ test('first conversation: two real MCP children converse through one real WAL se
   assertSameFileIdentity(world.runtimePath, runtimeIdentityAtReady, 'runtime.json after first MCP calls')
   assert.equal(world.serverIsRunning, true, 'the spawned server is still the live server')
   assert.equal(JSON.parse(readFileSync(world.runtimePath, 'utf8')).pid, world.server.pid, 'the live record still names the spawned child')
+  await assertOnlyExpectedServer(world, 'after Alice and Bob attach')
 
-  // Local-token auth: the shared 0600 credential exists beside runtime.json.
+  // Local-token auth: the shared 0600 credential exists beside runtime.json,
+  // and the checkpoint's own raw auth route rejects both absent and wrong
+  // bearers without changing runtime/token state.
   const localTokenPath = join(world.sharedData, LOCAL_TOKEN_FILENAME)
   assert.equal(existsSync(localTokenPath), true, 'the local token file exists beside runtime.json')
   assert.equal(modeOf(localTokenPath, 'file'), 0o600, 'the local token file is 0600')
+  const localTokenIdentity = fileIdentity(localTokenPath)
   const localTokenBytes = readFileSync(localTokenPath, 'utf8')
   const localToken = localTokenBytes.trim()
+  assert.ok(localToken.length > 0, 'the local token credential is non-empty')
   const wrongBearer = `${localToken[0] === 'A' ? 'B' : 'A'}${localToken.slice(1)}`
+  assert.notEqual(wrongBearer, localToken, 'the negative bearer differs from the real credential')
   const authBody = JSON.stringify({ public_key: Buffer.alloc(32).toString('base64url') })
   const authHeaders = {
     'Agent-Room-Protocol': '1',
@@ -886,6 +1137,7 @@ test('first conversation: two real MCP children converse through one real WAL se
   assert.equal(readFileSync(world.runtimePath, 'utf8'), runtimeBytesAtReady, 'negative auth probes do not rewrite runtime.json')
   assertSameFileIdentity(world.runtimePath, runtimeIdentityAtReady, 'runtime.json after negative auth probes')
   assert.equal(readFileSync(localTokenPath, 'utf8'), localTokenBytes, 'negative auth probes do not rewrite local-token')
+  assertSameFileIdentity(localTokenPath, localTokenIdentity, 'local-token after negative auth probes')
   assert.equal(modeOf(localTokenPath, 'file'), 0o600, 'local-token remains 0600 after negative auth probes')
 
   // Presence: each child sees both participants, one online row each, every
@@ -942,26 +1194,88 @@ test('first conversation: two real MCP children converse through one real WAL se
   assert.ok(selfOpenResult.structuredContent.room_id.length > 0, 'same-Actor open returns a room id')
   assert.notEqual(selfOpenResult.structuredContent.room_id, aliceOpen.room_id, 'same-Actor room is distinct from the Alice↔Bob room')
 
-  // Long-poll wake-up: Bob's read is started (with after_seq omitted, so the
-  // client-owned cursor discipline applies). The barrier observes a NEW
-  // ESTABLISHED socket owned by Bob's PID and connected to the runtime port;
-  // only then does Alice send. This rejects both a deadline-only response and
-  // a request dispatched only after Alice's commit.
-  const socketsBeforeHold = await establishedSocketKeys(bob.child.pid, runtimeRecord.port)
-  const readStartedAt = Date.now()
-  const bobHeldReadPromise = bob.tool('message_read', { room_id: aliceOpen.room_id, wait_ms: HELD_READ_WAIT_MS })
-  bobHeldReadPromise.catch(() => { /* the finally block owns settlement */ })
+  // The missing-name refusal travels through Alice's real MCP tool call; the
+  // adapter, not a raw HTTP shortcut, owns the exact invalid_arguments shape.
+  const missingOpenResult = await alice.tool('room_direct_open', {})
+  assert.equal(missingOpenResult.isError, true, `alice missing-name open: ${JSON.stringify(missingOpenResult.structuredContent)}`)
+  assert.deepEqual(keysOf(missingOpenResult.structuredContent), ['error', 'ok'], 'missing-name denial carries exactly {ok, error}')
+  assert.equal(missingOpenResult.structuredContent.ok, false, 'missing-name denial carries ok: false')
+  assert.deepEqual(
+    missingOpenResult.structuredContent.error,
+    { code: 'invalid_arguments', message: 'chat_id must be a string' },
+    'missing-name denial is the exact MCP argument error',
+  )
+
+  // Long-poll wake-up: prime Bob's client-owned realm/cursor path with an
+  // explicit empty read so the held call below is exactly one authenticated
+  // HTTP read, not realmIdOf()'s preliminary status request.
+  const bobPreflight = (await bob.tool('message_read', {
+    room_id: aliceOpen.room_id,
+    after_seq: 0,
+  })).structuredContent
+  assert.deepEqual(keysOf(bobPreflight), ['head_seq', 'messages', 'next_after_seq'], 'Bob preflight has the frozen page keys')
+  assert.deepEqual(bobPreflight.messages, [], 'Bob preflight sees the empty room')
+  assert.equal(bobPreflight.head_seq, 0, 'Bob preflight starts at head 0')
+  assert.equal(bobPreflight.next_after_seq, 0, 'Bob preflight leaves the durable cursor at 0')
+
+  // The arrival barrier has two independent server-side observations: Bob's
+  // MCP child owns a new ESTABLISHED socket to runtime.json's port, and the
+  // server's actor-auth stage commits a newer data_version/last_seen claim for
+  // Bob's fingerprint. Only after both, plus more than one 250 ms server poll
+    // interval, does Alice send. This rules out a request that merely runs after
+    // the commit; the 10 s hold and strict response bounds make a non-waking
+
+  // full-wait implementation fail.
+  assert.equal(modeOf(world.databasePath, 'file'), 0o600, 'the request-arrival observer sees the regular 0600 database')
+  const requestObserver = new DatabaseSync(world.databasePath, { readOnly: true })
   let bobReadResult
   let bobPage
+  let bobHeldReadPromise = null
   try {
-    const heldSocket = await waitForNewEstablishedSocket(
-      bob.child.pid,
-      runtimeRecord.port,
-      socketsBeforeHold,
-      'bob held message_read',
+    const claimBefore = requestObserver.prepare(`
+      SELECT last_seen_at
+      FROM chat_id_claims
+      WHERE actor_fingerprint = ?
+    `).get(bobStatus.fingerprint)
+    assert.ok(claimBefore, "Bob's durable authenticated claim exists before the held read")
+    const previousSeenMs = Date.parse(claimBefore.last_seen_at)
+    assert.equal(Number.isFinite(previousSeenMs), true, "Bob's prior claim timestamp is valid")
+    while (Date.now() <= previousSeenMs) await sleep(1)
+    const previousDataVersion = Number(requestObserver.prepare('PRAGMA data_version').get().data_version)
+    const socketsBeforeHold = await establishedSocketKeys(bob.child.pid, runtimeRecord.port)
+    const readStartedAt = Date.now()
+    const deadlineAt = readStartedAt + HELD_READ_WAIT_MS
+    bobHeldReadPromise = bob.tool('message_read', {
+      room_id: aliceOpen.room_id,
+      wait_ms: HELD_READ_WAIT_MS,
+    })
+    let heldReadSettled = false
+    bobHeldReadPromise.then(
+      () => { heldReadSettled = true },
+      () => { heldReadSettled = true },
     )
-    assert.ok(heldSocket, 'bob held message_read entered an ESTABLISHED socket')
+    assert.equal(heldReadSettled, false, 'Bob held read is pending immediately after dispatch')
+
+    const [heldSocket, refreshedClaim] = await Promise.all([
+      waitForNewEstablishedSocket(
+        bob.child.pid,
+        runtimeRecord.port,
+        socketsBeforeHold,
+        'bob held message_read',
+      ),
+      waitForClaimRefresh(
+        requestObserver,
+        bobStatus.fingerprint,
+        previousSeenMs,
+        previousDataVersion,
+        'bob held message_read',
+      ),
+    ])
+    assert.ok(heldSocket, 'bob held message_read entered a new ESTABLISHED server socket')
+    assert.ok(refreshedClaim.dataVersion !== previousDataVersion, 'the held read committed through the server actor-auth stage')
+    assert.ok(Date.parse(refreshedClaim.lastSeenAt) > previousSeenMs, "Bob's held read advanced the server-side claim before Alice sent")
     await sleep(HOLD_SETTLE_MS)
+    assert.equal(heldReadSettled, false, 'Bob remains in the hold after the request-arrival barrier and one poll interval')
 
     const aliceSendStartedAt = Date.now()
     const aliceSent = (await alice.tool('message_send', {
@@ -970,7 +1284,6 @@ test('first conversation: two real MCP children converse through one real WAL se
       text: ALICE_TEXT,
     })).structuredContent
     const aliceSendFinishedAt = Date.now()
-    const deadlineAt = readStartedAt + HELD_READ_WAIT_MS
     assert.ok(
       aliceSendFinishedAt < deadlineAt - HOLD_DEADLINE_MARGIN_MS,
       `alice's send (${aliceSendFinishedAt - aliceSendStartedAt} ms) landed before bob's deadline margin`,
@@ -992,9 +1305,16 @@ test('first conversation: two real MCP children converse through one real WAL se
       bobWokenAt < deadlineAt - HOLD_DEADLINE_MARGIN_MS,
       `bob's page returned at ${bobWokenAt - readStartedAt} ms, before the ${HELD_READ_WAIT_MS} ms deadline margin`,
     )
+    assert.ok(
+      bobWokenAt >= aliceSendStartedAt && bobWokenAt - aliceSendStartedAt <= WAKE_RESPONSE_MAX_MS,
+      `bob's page returned ${bobWokenAt - aliceSendStartedAt} ms after Alice's send began (bound ${WAKE_RESPONSE_MAX_MS} ms)`,
+    )
   } finally {
-    bob.cancelPending(bobHeldReadPromise.requestId)
-    await Promise.allSettled([bobHeldReadPromise])
+    if (bobHeldReadPromise !== null) {
+      bob.cancelPending(bobHeldReadPromise.requestId)
+      await Promise.allSettled([bobHeldReadPromise])
+    }
+    requestObserver.close()
   }
 
   // The frozen foreign envelope, byte for byte, with Alice's raw payload
@@ -1020,7 +1340,15 @@ test('first conversation: two real MCP children converse through one real WAL se
   assert.equal(aliceMessage.text, aliceEnvelope, "bob's page carries the literal v1 envelope around alice's exact payload")
   assert.equal(aliceMessage.text.split('</untrusted_message>').length - 1, 1, 'the wrapped body has exactly one closing tag')
   assert.ok(aliceMessage.text.startsWith('<untrusted_message version="1" sender_chat_id="alice" '), 'the opening tag is the frozen v1 tag')
-  assert.ok(aliceMessage.text.includes(ALICE_TEXT), 'the raw payload is embedded verbatim inside the envelope')
+  const aliceBodyOffset = aliceMessage.text.indexOf(ALICE_TEXT)
+  assert.notEqual(aliceBodyOffset, -1, 'the exact decomposed payload occurs inside the foreign envelope')
+  assertUtf8Bytes(
+    aliceMessage.text.slice(aliceBodyOffset, aliceBodyOffset + ALICE_TEXT.length),
+    ALICE_TEXT_BYTES,
+    "Alice's foreign payload returned to Bob",
+  )
+  assert.equal(ALICE_TEXT.includes('e\u0301'), true, 'Alice fixture contains a decomposed combining sequence')
+  assert.equal([...ALICE_TEXT].some(character => character.codePointAt(0) > 0xffff), true, 'Alice fixture contains an astral character')
 
   // Second committed send: Bob replies, and the room sequence is contiguous.
   const bobSent = (await bob.tool('message_send', {
@@ -1046,12 +1374,19 @@ test('first conversation: two real MCP children converse through one real WAL se
   const [aliceOwn, bobForeign] = alicePage.messages
   assert.equal(aliceOwn.actor_fingerprint, aliceStatus.fingerprint, 'seq 1 is alice’s own message')
   assert.equal(aliceOwn.text, ALICE_TEXT, "alice's own message stays plain and byte-equal to her payload")
+  assertUtf8Bytes(aliceOwn.text, ALICE_TEXT_BYTES, "Alice's own stored message returned to Alice")
   assert.equal(bobForeign.actor_fingerprint, bobStatus.fingerprint, 'seq 2 is bob’s message')
-  assert.equal(
-    bobForeign.text,
-    literalForeignEnvelope({ senderChatId: 'bob', senderFingerprint: bobStatus.fingerprint, text: BOB_TEXT }),
-    "bob's message rides the literal v1 envelope in alice's page",
+  const bobEnvelope = literalForeignEnvelope({ senderChatId: 'bob', senderFingerprint: bobStatus.fingerprint, text: BOB_TEXT })
+  assert.equal(bobForeign.text, bobEnvelope, "bob's message rides the literal v1 envelope in alice's page")
+  const bobBodyOffset = bobForeign.text.indexOf(BOB_TEXT)
+  assert.notEqual(bobBodyOffset, -1, 'the exact decomposed Bob payload occurs inside the foreign envelope')
+  assertUtf8Bytes(
+    bobForeign.text.slice(bobBodyOffset, bobBodyOffset + BOB_TEXT.length),
+    BOB_TEXT_BYTES,
+    "Bob's foreign payload returned to Alice",
   )
+  assert.equal(BOB_TEXT.includes('cafe\u0301'), true, 'Bob fixture contains a decomposed combining sequence')
+  assert.equal([...BOB_TEXT].some(character => character.codePointAt(0) > 0xffff), true, 'Bob fixture contains an astral character')
 
   // Durable client cursors: each participant's own 0700 realm directory and
   // 0600 cursors.json hold its own direct-room cursor — Bob 1, Alice 2.
@@ -1096,6 +1431,34 @@ test('first conversation: two real MCP children converse through one real WAL se
       'the live server database reports WAL journal mode',
     )
     assert.equal(Number(inspector.prepare('PRAGMA user_version').get().user_version), SCHEMA_VERSION, 'the live server database is the schema-v2 file')
+
+    const storedMessages = inspector.prepare(`
+      SELECT seq, room_id, actor_fingerprint, text
+      FROM messages
+      WHERE room_id = ?
+      ORDER BY seq
+    `).all(aliceOpen.room_id)
+    assert.deepEqual(storedMessages.map(row => Number(row.seq)), [1, 2], 'the server database stores the two committed room messages in sequence order')
+    assert.equal(storedMessages[0].actor_fingerprint, aliceStatus.fingerprint, 'database seq 1 is Alice raw text without an envelope')
+    assert.equal(storedMessages[1].actor_fingerprint, bobStatus.fingerprint, 'database seq 2 is Bob raw text without an envelope')
+    assertUtf8Bytes(storedMessages[0].text, ALICE_TEXT_BYTES, 'Alice payload bytes in the live SQLite store')
+    assertUtf8Bytes(storedMessages[1].text, BOB_TEXT_BYTES, 'Bob payload bytes in the live SQLite store')
+
+    const openedRoomRows = inspector.prepare(`
+      SELECT id, kind, pair_key
+      FROM rooms
+      WHERE id IN (?, ?)
+      ORDER BY id
+    `).all(aliceOpen.room_id, selfOpenResult.structuredContent.room_id)
+    assert.equal(openedRoomRows.length, 2, 'the pair and same-Actor rooms both exist in the live store')
+    const openedRoomById = new Map(openedRoomRows.map(row => [row.id, row]))
+    const pairRoom = openedRoomById.get(aliceOpen.room_id)
+    const selfRoom = openedRoomById.get(selfOpenResult.structuredContent.room_id)
+    assert.equal(pairRoom.kind, 'direct', 'the unequal-fingerprint open is stored as a Direct Room')
+    const [pairMin, pairMax] = [aliceStatus.fingerprint, bobStatus.fingerprint].sort()
+    assert.equal(pairRoom.pair_key, `direct:${pairMin}:${pairMax}`, 'the unequal pair uses the canonical sorted pair key')
+    assert.equal(selfRoom.kind, 'direct', 'the same-Actor open is stored as a Direct Room')
+    assert.equal(selfRoom.pair_key, `direct:${aliceStatus.fingerprint}:${aliceStatus.fingerprint}`, 'the same-Actor room repeats the caller fingerprint in its canonical pair key')
   } finally {
     inspector.close()
   }
@@ -1104,28 +1467,46 @@ test('first conversation: two real MCP children converse through one real WAL se
 
   // Loopback-only binding: 127.0.0.1:<runtime port> connects, and every
   // non-internal IPv4/IPv6 address the host exposes refuses or times out.
-  const loopbackOutcome = await probeConnection({ host: '127.0.0.1', port: runtimeRecord.port })
-  assert.equal(loopbackOutcome, 'connected', `127.0.0.1:${runtimeRecord.port} accepts connections`)
+  const loopbackOutcome = await probeConnection({
+    host: '127.0.0.1',
+    port: runtimeRecord.port,
+    family: 'IPv4',
+  })
+  assert.equal(loopbackOutcome.outcome, 'connected', `127.0.0.1:${runtimeRecord.port} accepts connections`)
   const externalAddresses = []
   for (const [name, entries] of Object.entries(networkInterfaces())) {
     for (const entry of entries ?? []) {
       if (entry.internal || isLoopbackAddress(entry.address)) continue
-      externalAddresses.push({ name, address: entry.address, family: familyOf(entry) })
+      externalAddresses.push({
+        name,
+        address: entry.address,
+        dialHost: dialHostFor(entry),
+        family: familyOf(entry),
+      })
     }
   }
-  // Probed concurrently: a host with several link-local IPv6 addresses
-  // answers no dial at all, so sequential probes would spend the full bound
-  // per address. Every address is still probed, and the row accepts either
-  // outcome — a refusal or a timeout — as long as nothing accepts.
+  // Probed concurrently: a host with several link-local IPv6 addresses can
+  // spend the full timeout per address. Every numeric address carries an
+  // explicit family (and link-local scope) into net.connect. A timeout or
+  // ECONNREFUSED proves no listener; routing/scope errors fail closed rather
+  // than masquerading as a refusal.
   const externalOutcomes = await Promise.all(externalAddresses.map(async target => ({
     ...target,
-    outcome: await probeConnection({ host: target.address, port: runtimeRecord.port }),
+    result: await probeConnection({
+      host: target.dialHost,
+      port: runtimeRecord.port,
+      family: target.family,
+    }),
   })))
-  for (const { name, address, family, outcome } of externalOutcomes) {
+  for (const { name, address, dialHost, family, result } of externalOutcomes) {
     assert.notEqual(
-      outcome,
+      result.outcome,
       'connected',
-      `${name} ${family} ${address} must not accept a connection on the server's runtime port (got ${outcome})`,
+      `${name} ${family} ${address} must not accept a connection on the server's runtime port`,
+    )
+    assert.ok(
+      result.outcome === 'timeout' || (result.outcome === 'error' && result.code === 'ECONNREFUSED'),
+      `${name} ${family} ${address} was undialable rather than refused/timeout (dial=${dialHost}, outcome=${result.outcome}, code=${result.code})`,
     )
   }
 
@@ -1145,9 +1526,10 @@ test('first conversation: two real MCP children converse through one real WAL se
   assert.equal(eveStatus.chat_id, 'eaves', 'eaves binds as its own Chat ID through the real MCP path')
   assert.notEqual(eveStatus.fingerprint, aliceStatus.fingerprint, 'eaves is a distinct installation')
   assert.notEqual(eveStatus.fingerprint, bobStatus.fingerprint, 'eaves is distinct from bob')
-  // Re-check after Eve's first real tool call: a detached ensureServer sibling
-  // must be discovered while the MCP process is still inspectable.
-  for (const participant of [alice, bob, eve]) await assertNoServerDescendant(world, participant)
+  // Re-check after Eve's first real tool call: the temporary database has one
+  // server process and runtime.json's port has one listener, even though an
+  // ensureServer regression could detach and reparent a sibling with no handle.
+  await assertOnlyExpectedServer(world, 'after Eve attaches')
 
   const eveDeniedResult = await eve.tool('message_read', { room_id: aliceOpen.room_id, after_seq: 0 })
   assert.equal(eveDeniedResult.isError, true, `eaves' read is an error result: ${JSON.stringify(eveDeniedResult.structuredContent)}`)
@@ -1167,37 +1549,80 @@ test('first conversation: two real MCP children converse through one real WAL se
     'the denied read creates no room cursor for eaves',
   )
 
+  // Ambiguity row through the real MCP path. The checkpoint's existing Bob and
+  // Eve installations already created their keypairs through mcp-stdio. Two
+  // short-lived authenticated binds seed and immediately release one fresh
+  // name (mcp-stdio intentionally has no logout/rename tool); the behavior
+  // under test is Alice's real MCP direct-open call, which must return
+  // candidates rather than guess a room.
+  for (const [label, installation] of [
+    ['Bob ambiguity fixture', world.installations.bob],
+    ['Eve ambiguity fixture', world.installations.eaves],
+  ]) {
+    await seedAndReleaseClaim({
+      port: runtimeRecord.port,
+      localToken,
+      installation,
+      chatId: 'shared-claimant',
+      label,
+    })
+  }
+  await assertOnlyExpectedServer(world, 'after temporary ambiguity claims')
+
+  const ambiguousOpenResult = await alice.tool('room_direct_open', { chat_id: 'shared-claimant' })
+  assert.equal(ambiguousOpenResult.isError, true, `alice ambiguous open: ${JSON.stringify(ambiguousOpenResult.structuredContent)}`)
+  assert.deepEqual(keysOf(ambiguousOpenResult.structuredContent), ['error', 'ok'], 'ambiguous denial carries exactly {ok, error}')
+  assert.equal(ambiguousOpenResult.structuredContent.ok, false, 'ambiguous denial carries ok: false')
+  assert.deepEqual(
+    keysOf(ambiguousOpenResult.structuredContent.error),
+    ['candidates', 'code', 'message'],
+    'ambiguous denial carries code, message, and candidates',
+  )
+  assert.equal(ambiguousOpenResult.structuredContent.error.code, 'ambiguous_chat_id', 'the shared name is explicitly ambiguous')
+  const ambiguityCandidates = ambiguousOpenResult.structuredContent.error.candidates
+  assert.equal(Array.isArray(ambiguityCandidates), true, 'ambiguous denial candidates are an array')
+  assert.equal(ambiguityCandidates.length, 2, 'ambiguous denial names both claimants')
+  assert.deepEqual(
+    ambiguityCandidates.map(candidate => candidate.fingerprint).sort(),
+    [bobStatus.fingerprint, eveStatus.fingerprint].sort(),
+    'ambiguous denial candidates are the two real MCP installation fingerprints',
+  )
+  for (const candidate of ambiguityCandidates) {
+    assert.deepEqual(keysOf(candidate), ['fingerprint', 'last_seen'], 'ambiguity candidate has exactly fingerprint and last_seen')
+    assert.equal(Number.isFinite(Date.parse(candidate.last_seen)), true, 'ambiguity candidate last_seen is a timestamp')
+  }
+
   assertSameFileIdentity(world.runtimePath, runtimeIdentityAtReady, 'runtime.json at checkpoint completion')
   for (const [label, { path, identity }] of Object.entries(cursorIdentities)) {
     assertSameFileIdentity(path, identity, `${label}: cursors.json at checkpoint completion`)
   }
   assertSameFileIdentity(databasePath, databaseIdentity, 'agent-room.sqlite at checkpoint completion')
 
-  // JSON-RPC channel purity: this loop checks the frames written by the
-  // parent, while the static source oracle above checks that the child has no
-  // prompt/readline or input-writing machinery of its own.
-  for (const participant of [alice, bob, eve]) {
-    assert.ok(participant.outboundFrames.length > 0, `${participant.label}: the harness drove the child over stdin`)
-    for (const line of participant.outboundFrames) {
-      const frame = JSON.parse(line)
-      assert.equal(frame.jsonrpc, '2.0', `${participant.label}: every outbound frame is JSON-RPC 2.0`)
-      assert.equal(typeof frame.method, 'string', `${participant.label}: every outbound frame carries a method`)
+  // Runtime response-channel purity is checked on what the child actually
+  // wrote, unlike the removed loop over the harness's own outbound writes. The
+  // static source oracle above is the fd-0 half of the contract.
+  const allMcpChildren = [alice, bob, eve]
+  for (const participant of allMcpChildren) {
+    assert.ok(participant.stdoutLines.length > 0, `${participant.label}: the child answered on stdout`)
+    for (const line of participant.stdoutLines) {
+      const response = JSON.parse(line)
+      assert.equal(response.jsonrpc, '2.0', `${participant.label}: every child-written response frame is JSON-RPC 2.0`)
     }
+    assert.equal(participant.stderr, '', `${participant.label}: the MCP child wrote nothing to stderr`)
   }
 
-  // The server produced no diagnostics across the whole checkpoint.
+  // The server produced no output or lifecycle diagnostics across the whole
+  // checkpoint.
+  assert.equal(world.serverLifecycleError, null, 'the server child and both pipes had no lifecycle error')
+  assert.equal(world.serverStdout, '', 'the server child wrote nothing to stdout')
   assert.equal(world.serverStderr, '', 'the server child wrote nothing to stderr')
 
-  // Cleanup: inventory descendants immediately before every close, then
-  // close each MCP child (bounded reaping), stop the server, and leave the
-  // temporary world for the registered final removal.
-  await assertNoServerDescendant(world, alice)
-  await alice.close()
-  await assertNoServerDescendant(world, bob)
-  await bob.close()
-  await assertNoServerDescendant(world, eve)
-  await eve.close()
-  for (const participant of [alice, bob, eve]) {
+  // Cleanup: inventory the unique database and listener before every close,
+  // then reap each MCP child and stop the server. The registered hook removes
+  // the temporary parent only after a final pid inventory is empty.
+  for (const participant of allMcpChildren) {
+    await assertOnlyExpectedServer(world, `before closing ${participant.label}`)
+    await participant.close()
     assert.equal(participant.isRunning, false, `${participant.label}: the child is reaped after close`)
   }
   await world.stopServer()
