@@ -145,7 +145,7 @@ const TOOL_NAMES = new Set(TOOL_DESCRIPTORS.map(tool => tool.name))
 // The per-tool argument allowlists mirror the schemas exactly (the schema-
 // level NFR-3 negatives assert the mirror); anything else — including
 // identity-shaped fields — is rejected before any call.
-const TOOL_ARGUMENT_FIELDS = Object.freeze(new Map([
+export const TOOL_ARGUMENT_FIELDS = Object.freeze(new Map([
   ['room_presence', Object.freeze(new Set(['include_offline']))],
   ['room_direct_open', Object.freeze(new Set(['chat_id', 'target_fingerprint']))],
   ['message_send', Object.freeze(new Set(['room_id', 'client_message_id', 'text', 'reply_to_seq']))],
