@@ -92,6 +92,19 @@ deferred: []
 **Given** the spawned server, **When** inspected from the test, **Then** it bound 127.0.0.1 only, and a third session's attempt to read alice↔bob's Direct Room is denied (DM ACL exercised at the gate).
 **Given** any regression in the envelope, sequence contiguity, the frozen response schema, or client cursor persistence, **When** the checkpoint runs, **Then** it fails; zero mocks are permitted in this test.
 
+
+### 2026-09-25 — follow-up review pass (after the automated run's own review)
+The first automated pass closed the story on a green suite, but the reviewers (and luna,
+independently) found that the checkpoint's CENTRAL claim was not actually proven: the held-read
+wake-up assertions had bounds wider than the deadline, so a server that never woke on arrival
+passed. The workflow's own defects found in the same pass (luna parser fail-open, baseline
+captured after implementation, unscoped `git add -A`, exit-code-only green) are fixed in
+`docs/implementation/workflows/agent-room-story-build.ts` for subsequent runs (fail-closed
+`readLunaReport` with file/mtime/marker/verdict validation, spec-derived baseline with
+`assertBaselineHead`, story allowlist for review scope and staging, suite green requiring
+pass > 0 with zero skips and a self-consistent count, static gates, unconditional patch step).
+Checkpoint hardening landed in commit 6f0fcb1.
+
 ## Spec Change Log
 
 ### 2026-09-25 — initial ready-for-dev checkpoint plan
