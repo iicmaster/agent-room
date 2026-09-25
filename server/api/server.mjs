@@ -26,7 +26,8 @@
 // POST /api/rooms/direct resolves a chat id through the durable claims index
 // (zero claims answer chat_id_not_found; several answer ambiguous_chat_id
 // with the candidates list riding the error envelope; target_fingerprint
-// completes disambiguation — never a guess; self-DM is refused) and opens
+// completes disambiguation — never a guess; same-Actor direct rooms are
+// supported with the caller's fingerprint twice) and opens
 // the idempotent pair room, GET /api/rooms/:id/messages long-polls the
 // durable log (a bounded in-process wait loop re-polling the store — no open
 // read transaction while waiting; a deadline return is a normal
@@ -374,11 +375,11 @@ registerHandler('GET /api/status', function status(context) {
 //   exactly one resolved Actor
 //         → the canonical pair room via the store's pair-key idempotency, so
 //           concurrent opens (either argument order) converge on one room.
-// The pair is computed with the CALLER's token-derived fingerprint; a
-// resolved target equal to the caller is a self-DM, refused (v0.2 refuses
-// self-DM per D13) with a distinct message on the invalid_request family.
-// The response is deliberately minimal: room_id and kind — the pair room's
-// full shape is the store's, not the wire's.
+// The pair is computed with the CALLER's token-derived fingerprint. A resolved
+// target equal to the caller is a first-class same-Actor Direct Room (D14):
+// the store keys it with the same fingerprint twice, so two local sessions can
+// coordinate privately. The response is deliberately minimal: room_id and
+// kind — the pair room's full shape is the store's, not the wire's.
 registerHandler('POST /api/rooms/direct', function directOpen(context) {
   const principal = sessionPrincipalOf(context)
   if (principal.ok === false) return principal
@@ -426,11 +427,12 @@ registerHandler('POST /api/rooms/direct', function directOpen(context) {
     )
   }
   const target = candidates[0].actor_fingerprint
-  if (target === principal.actorFingerprint) {
-    return reject('invalid_request', 'opening a pair room with your own chat id is refused (self-DM)')
-  }
   const room = context.store.openDirectRoom({
-    actorFingerprints: [principal.actorFingerprint, target],
+    // AD-6/D14: a same-Actor pair is represented by the same fingerprint
+    // twice; the store's canonical pair key and membership insert converge it.
+    actorFingerprints: target === principal.actorFingerprint
+      ? [principal.actorFingerprint, principal.actorFingerprint]
+      : [principal.actorFingerprint, target],
   })
   return { room_id: room.id, kind: room.kind }
 }, 'actor')

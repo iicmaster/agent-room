@@ -5,8 +5,8 @@
 // one room), the ambiguity round-trip (several Actors claiming one name
 // answer 409 ambiguous_chat_id with candidates — fingerprint + last_seen —
 // and target_fingerprint completes resolution, never a guess), the unknown
-// name (404 chat_id_not_found, naming the miss), self-DM refusal, and the
-// shape/NFR-3 rejections (unknown fields, malformed grammar, malformed
+// name (404 chat_id_not_found, naming the miss), the same-Actor Direct Room,
+// and the shape/NFR-3 rejections (unknown fields, malformed grammar, malformed
 // fingerprint, credential-less).
 
 import assert from 'node:assert/strict'
@@ -192,6 +192,20 @@ function roomRows(dataDir) {
   }
 }
 
+function roomMemberRows(dataDir, roomId) {
+  const db = new DatabaseSync(join(dataDir, 'agent-room.sqlite'))
+  try {
+    return db.prepare(`
+      SELECT room_id, actor_fingerprint
+      FROM direct_members
+      WHERE room_id = ?
+      ORDER BY actor_fingerprint
+    `).all(roomId)
+  } finally {
+    db.close()
+  }
+}
+
 // --- Matrix rows (real child processes) -------------------------------------------
 
 test('direct open happy path: the unique claim resolves to a pair room, concurrent opens converge on one room', async t => {
@@ -364,7 +378,7 @@ test('unknown chat id and unmatched target fingerprint answer 404 chat_id_not_fo
   await stop()
 })
 
-test('self-DM is refused with a distinct message on the invalid_request family', async t => {
+test('same-Actor direct open: one private room, idempotent, with a single membership row', async t => {
   const dataDir = makeDataDir(t)
   const { waitReady, stop } = spawnServerChild(t, dataDir)
   const record = await waitReady()
@@ -372,25 +386,28 @@ test('self-DM is refused with a distinct message on the invalid_request family',
   const alice = installation()
 
   const aliceSession = await connectInstallation(record.port, localToken, alice, 'Alice')
-  await connectInstallation(record.port, localToken, installation(), 'Mirror')
 
-  // Alice's own name: her claim resolves to her own fingerprint — refused.
   const self = await directOpen(record.port, aliceSession.sessionToken, { chat_id: 'Alice' })
-  assert.equal(self.status, 400, self.text)
-  assert.equal(self.json().error.code, 'invalid_request')
-  assert.match(self.json().error.message, /self-DM/)
+  assert.equal(self.status, 200, self.text)
+  const first = self.json().result
+  assert.deepEqual(Object.keys(first).sort(), ['kind', 'room_id'])
+  assert.equal(first.kind, 'direct')
+  assert.equal(typeof first.room_id, 'string')
+  assert.ok(first.room_id.length > 0)
 
-  // The same by fingerprint: target_fingerprint equal to the caller (her own
-  // claim on her own name) is the same self-DM refusal.
-  const byFingerprint = await directOpen(record.port, aliceSession.sessionToken, {
-    chat_id: 'Alice',
-    target_fingerprint: alice.fingerprint,
-  })
-  assert.equal(byFingerprint.status, 400, byFingerprint.text)
-  assert.equal(byFingerprint.json().error.code, 'invalid_request')
-  assert.match(byFingerprint.json().error.message, /self-DM/)
+  const again = await directOpen(record.port, aliceSession.sessionToken, { chat_id: 'Alice' })
+  assert.equal(again.status, 200, again.text)
+  assert.deepEqual(again.json().result, first, 'same-Actor opens converge on one room')
 
-  assert.equal(roomRows(dataDir).length, 0)
+  const rooms = roomRows(dataDir)
+  assert.equal(rooms.length, 1)
+  assert.equal(rooms[0].id, first.room_id)
+  assert.equal(rooms[0].kind, 'direct')
+  assert.equal(rooms[0].pair_key, `direct:${alice.fingerprint}:${alice.fingerprint}`)
+  const members = roomMemberRows(dataDir, first.room_id)
+  assert.equal(members.length, 1, 'the same-Actor room has one membership row')
+  assert.deepEqual({ ...members[0] }, { room_id: first.room_id, actor_fingerprint: alice.fingerprint })
+
   await stop()
 })
 
