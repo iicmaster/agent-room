@@ -1,0 +1,165 @@
+# Acceptance-criteria evidence — Epic 1 (First Conversation)
+#
+# The sweep (node scripts/ac-sweep.mjs --epic 1) checks that every story of the
+# epic has at least one evidence pointer and that every cited test still exists
+# in the live suite. It CANNOT check that a cited test covers its criterion —
+# that judgement is the `note` on each entry, written here by a human and
+# revisited at the next retro.
+#
+# Why this file exists: Story 1.7c added the `agent-room setup` CLI without the
+# runtime gate, which broke Story 1.1's "any entrypoint exits non-zero"
+# criterion. The suite stayed green for the rest of the epic. An AC with no
+# evidence pointer is exactly the condition that let that pass.
+
+  1.1:                       # Runtime foundation & single limits module (4 criteria)
+    note: >-
+      Proves the startup gate, the keypair file discipline, the constants
+      single-source check, and the zero-dependency check are executable. Does
+      NOT prove that every bound any future story needs is named here — a new
+      literal outside constants.mjs is caught only by the static scan, and a
+      new BOUND nobody declares is invisible to every test in the epic.
+    evidence:
+      - test: "every entrypoint exits non-zero when Node is below the 24.15 floor"
+        file: "tests/runtime.test.mjs"
+      - test: "a directly launched entrypoint below the floor prints one diagnosable line and exits 1 with no stack trace"
+        file: "tests/runtime.test.mjs"
+      - test: "a fresh installation creates one bounded 0600 regular key file and a canonical fingerprint"
+        file: "tests/keys.test.mjs"
+      - test: "no limit literal is restated outside the constants module"
+        file: "tests/constants.test.mjs"
+      - test: "package.json declares zero runtime and development dependencies"
+        file: "tests/zero-deps.test.mjs"
+
+  1.2:                       # Store schema v2 — rooms & the durable log (6 criteria)
+    note: >-
+      Proves contiguity, idempotency, crash-before-commit, append-only, the
+      pragma discipline and third-actor denial against a real WAL database. Does
+      NOT prove the write path meets the NFR-5 budget — the epic's own wording
+      defers that executable check to Story 4.4, so this evidence is structural
+      only.
+    evidence:
+      - test: "sequences are room-local, contiguous from 1; each room starts at 1"
+        file: "tests/store.test.mjs"
+      - test: "an idempotent resend returns the original message and adds no row"
+        file: "tests/store.test.mjs"
+      - test: "a crash mid-insert leaves no acknowledgment, no message, and its seq unconsumed"
+        file: "tests/store.test.mjs"
+      - test: "a third actor is denied post and read on a direct room"
+        file: "tests/store.test.mjs"
+
+  1.3:                       # HTTP API host, middleware classes, health & realm bootstrap (7 criteria)
+    note: >-
+      Proves the fixed stage order, the four route classes, the protocol-header
+      scope, rejection invariants, and that the frozen contract is read from the
+      live spine rather than an embedded copy. Does NOT prove any single route
+      BEHAVES correctly — the routes this epic's later stories register are
+      covered by those stories' own evidence.
+    evidence:
+      - test: "the four classes assemble the one fixed pipeline; viewer and health skip protocol"
+        file: "tests/api-host.test.mjs"
+      - test: "a rejection at any stage never reaches the handler or a later stage"
+        file: "tests/api-host.test.mjs"
+      - test: "the field vocabulary is the live spine AD-8 vocabulary, verbatim"
+        file: "tests/api-contract.test.mjs"
+      - test: "core imports no transport, no MCP SDK, no CLI library, and no adapter"
+        file: "tests/core-boundary.test.mjs"
+
+  1.4:                       # Local bootstrap & local session auth (4 criteria)
+    note: >-
+      Proves the race, both staleness rules, orphan reaping, the session bound
+      to the caller's public key, and the failure modes of a dead holder. Does
+      NOT prove anything about a server that is slow rather than dead, nor about
+      a same-user process that is malicious — both are inside Local Mode's stated
+      OS-user trust boundary.
+    evidence:
+      - test: "two concurrent ensureServer calls on a fresh dir spawn exactly one server"
+        file: "tests/ensure-server.test.mjs"
+      - test: "the server binds loopback only: no other local address answers"
+        file: "tests/ensure-server.test.mjs"
+      - test: "a stalled server is bounded by the enforced client request timeout"
+        file: "tests/mcp-tools.test.mjs"
+      - test: "a bind that fails while idle clears the held token and surfaces the coded cause; the client recovers after the name frees"
+        file: "tests/mcp-tools.test.mjs"
+
+  1.5:                       # Chat ID connect, rename & durable claims (3 criteria)
+    note: >-
+      Proves DR-1's grammar, case-insensitive live uniqueness with explicit
+      refusal, rename immediacy, restart durability, ambiguity rows, and the
+      7-day prune. Does NOT prove uniqueness against a name held by a live
+      session of the SAME Actor — the dead-holder release rule is tested
+      separately, and the live-collision refusal is asserted for a different
+      Actor.
+    evidence:
+      - test: "a live collision is refused in any casing; the first holder is unaffected; nothing is written"
+        file: "tests/session-routes.test.mjs"
+      - test: "connect happy path: a session binds a chat id and the durable claim row lands"
+        file: "tests/session-routes.test.mjs"
+      - test: "the grammar gate refuses malformed chat ids with coded 400s and zero state change"
+        file: "tests/session-routes.test.mjs"
+      - test: "the live registry refuses a non-canonical actor fingerprint, not just an empty one"
+        file: "tests/chat-id-claims.test.mjs"
+
+  1.6:                       # Presence — online & offline-recently (3 criteria)
+    note: >-
+      Proves the online row shape, the 24 h offline-recently group with its
+      boundaries, that reads are pure filters, and that the payload stays inside
+      the frozen vocabulary. Does NOT prove presence under a server that has
+      been up for weeks with many churned sessions — the offline group is
+      bounded by the 24 h window and the claims prune, not by a test at scale.
+    evidence:
+      - test: "online rows: one per live Session, in connect order, with the full row shape"
+        file: "tests/presence.test.mjs"
+      - test: "any authenticated request refreshes liveness: last_seen advances, connected_since holds"
+        file: "tests/presence.test.mjs"
+      - test: "presence and status payload keys are all frozen AD-8 response vocabulary names"
+        file: "tests/presence.test.mjs"
+
+  1.7:                       # MCP adapter — tools, first-run prompt & untrusted envelope (7 criteria)
+    note: >-
+      Proves the five tools against real stdio children, the ambiguity
+      round-trip, client cursor persistence, outcome_unknown retry, the NFR-3
+      negatives, the envelope's fail-closed behaviour, and that stdin stays pure
+      JSON-RPC. Does NOT prove what a human sees on first run — the setup
+      command's own suite covers that, and neither covers the guided path a host
+      like Claude Code actually takes.
+    evidence:
+      - test: "end-to-end: status, presence (mcp client type), direct open, committed send, peer round-trip, long-poll read"
+        file: "tests/mcp-tools.test.mjs"
+      - test: "ambiguity round-trips through the tool: candidates ride the error, target_fingerprint resolves"
+        file: "tests/mcp-tools.test.mjs"
+      - test: "outcome_unknown: a send whose response is dropped retries with the identical client_message_id and never duplicates"
+        file: "tests/mcp-tools.test.mjs"
+      - test: "NFR-3 dynamic negatives: identity-smuggling arguments are rejected on every tool before any call"
+        file: "tests/mcp-tools.test.mjs"
+      - test: "stdin purity: JSON-RPC only, parse errors and oversized frames answered, no prompt machinery in the source"
+        file: "tests/mcp-tools.test.mjs"
+      - test: "setup collision retry: a live-taken name is refused and re-prompted; no config until a free name lands"
+        file: "tests/setup-command.test.mjs"
+
+  1.8:                       # First-conversation integration checkpoint *(blocking gate — ruling Q3)* (2 criteria)
+    note: >-
+      Proves the whole vertical stack with two real MCP children, no mocks, and
+      a real WAL server — including that the held read WAKES on arrival rather
+      than returning at its deadline (a deliberate non-waking mutation is
+      required to fail the test). Does NOT prove behaviour across a server
+      restart or a client crash — that is Epic 2's subject, and this gate is
+      about the steady-state first conversation only.
+    evidence:
+      - test: "first conversation: two real MCP children converse through one real WAL server, cursors persist, a third Actor is denied"
+        file: "tests/integration/first-conversation.test.mjs"
+
+  1.9:                       # Packaging & the validate gate (2 criteria)
+    note: >-
+      Proves both packages materialize, that the validator is really executed
+      and really bites, that the source tree (not the pair) is the snapshot
+      oracle, and that materialization is refused inside the repository. Does
+      NOT prove the gate survives the vendor changing the CLI's JSON shape — a
+      schema change surfaces as a red gate, which is the intended failure, but
+      someone must be there to read it.
+    evidence:
+      - test: "the materialized Claude Code package passes the fail-closed `claude plugin validate --strict` gate"
+        file: "tests/package.test.mjs"
+      - test: "the validate gate is load-bearing: an unknown manifest field fails it in strict mode"
+        file: "tests/package.test.mjs"
+      - test: "release packaging refuses existing, relative, and unsafe output paths"
+        file: "tests/package.test.mjs"
