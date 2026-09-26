@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 09-21-2026 08:52
-last_updated: 09-26-2026 09:15
+last_updated: 09-26-2026 15:08
 project: agent-room
 project_key: NOKEY
 tracking_system: file-system
@@ -92,7 +92,7 @@ action_items:
       Criteria from docs/epics.md and check it against the code, not the spec, before
       declaring an epic done"
     owner: "orchestrator"
-    status: open
+    status: done
     ref: "docs/implementation/epic-1-retro-2026-09-26.md"
   - id: "epic-1-retro-item-2-collapse-the-fingerprint-pattern-to-a-si"
     epic: 1
@@ -100,7 +100,7 @@ action_items:
       and have server/api/server.mjs, server/mcp-stdio.mjs and the validator import
       it"
     owner: "next story touching fingerprints (Epic 4)"
-    status: open
+    status: done
     ref: "docs/implementation/epic-1-retro-2026-09-26.md"
   - id: "epic-1-retro-item-3-decide-the-fate-of-the-retired-v0-1-daem"
     epic: 1
@@ -122,12 +122,12 @@ action_items:
       gate stories and store/API changes get the full gauntlet, mechanical changes
       get two"
     owner: "orchestrator"
-    status: open
+    status: done
     ref: "docs/implementation/epic-1-retro-2026-09-26.md"
   - id: "epic-1-retro-item-6-do-not-let-the-story-build-workflow-carr"
     epic: 1
     action: "Do not let the story-build workflow carry a blocking gate until it has
       closed a full story unattended on a clean tree"
     owner: "orchestrator"
-    status: open
+    status: done
     ref: "docs/implementation/epic-1-retro-2026-09-26.md"
