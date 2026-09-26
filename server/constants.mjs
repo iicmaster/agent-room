@@ -296,6 +296,9 @@ export const SERVER_HEALTH_PROBE_TIMEOUT_MS = 750
 // A /health probe reads at most this many bytes before the connection is
 // destroyed — a foreign responder on the recorded port cannot flood memory.
 export const SERVER_HEALTH_PROBE_MAX_BYTES = 64 * 1024
+
+// Default ceiling for a private state file read (identity, viewer token, lock).
+export const STATE_FILE_MAX_BYTES = 64 * 1024
 export const SERVER_CHILD_REAP_TIMEOUT_MS = 2_000
 
 // --- Story 1.6: presence — online & offline-recently --------------------------

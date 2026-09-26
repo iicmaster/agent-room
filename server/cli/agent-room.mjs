@@ -32,6 +32,7 @@ import {
   CLIENT_CONFIG_MAX_BYTES,
   CLIENT_REQUEST_TIMEOUT_MS,
   PROTOCOL_HEADER,
+  PUBLIC_ERROR_STATUS,
   PROTOCOL_VERSION,
   chatIdForms,
 } from '../constants.mjs'
@@ -48,7 +49,8 @@ import { loadOrCreateLocalToken } from '../api/local-token.mjs'
 import { ensureServer } from '../client/ensure-server.mjs'
 
 const OK_STATUS = 200
-const CONFLICT_STATUS = 409
+// The collision status is owned by the constants table (chat_id_taken), never restated.
+const CONFLICT_STATUS = PUBLIC_ERROR_STATUS.chat_id_taken
 export const SETUP_REQUIRES_TTY_MESSAGE = 'agent-room setup asks a human to choose the Chat ID, so it needs an interactive terminal (a TTY). Run it in your own terminal: agent-room setup'
 
 function httpJson(port, method, path, headers, body, timeoutMs = CLIENT_REQUEST_TIMEOUT_MS) {

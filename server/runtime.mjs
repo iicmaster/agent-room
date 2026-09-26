@@ -128,7 +128,7 @@ export function serverStartupLockPath(dataDir) {
   return join(resolve(dataDir), 'server.start.lock')
 }
 
-export function regularPrivateFile(path, maxBytes = 64 * 1024) {
+export function regularPrivateFile(path, maxBytes = STATE_FILE_MAX_BYTES) {
   const info = lstatSync(path)
   if (info.isSymbolicLink() || !info.isFile() || info.size > maxBytes) {
     throw new AgentRoomRuntimeError('state_file_invalid', 'agent-room state file is not a bounded regular file')

@@ -154,3 +154,18 @@ Status: done
 **Verification performed:** `node --test` → 55 pass / 0 fail / 0 skipped (includes real packager run, two live MCP clients + daemon, and a two-child keypair race test); spawned-child gate test with Node 24.14.9 → exit 1, one-line message naming the Node gate; literal scan outside constants.mjs → clean; no node_modules, dependency count 0. Matrix Test Audit: all 7 I/O matrix rows covered by named passing tests (fresh keypair, reload, invalid/oversized/symlinked key file, Node below/at floor, SQLite below floor, dependency audit).
 
 **Residual risks:** `PUBLIC_ERROR_STATUS` is seeded but unconsumed until Story 1.3 routes land (viewer routes keep v0.1 statuses meanwhile); `keys.mjs` is born but unwired — Epic 1 consumers (pair keys, claims, presence, envelope) adopt the fingerprint from Stories 1.2–1.7 onward; SSE cadence and daemon gate-stderr deferrals above; `sprint-status.yaml` still lists 1-1 as backlog (owned by bmad-sprint-planning — rerun that skill to refresh).
+
+### 2026-09-25 — codex-advisor[gpt-6-luna] audit of the foundation (the one story that shipped before the auditor was in the loop)
+Verdict FIX-FIRST, no high findings. All accepted and applied in `bd91f98` + the follow-up commit.
+
+- intent_gap: 0
+- bad_spec: 0
+- patch: 4: (medium 2, low 2)
+- defer: 1: (low 1)
+- reject: 0
+- addressed_findings:
+  - `medium` `patch` `openSync(path, O_RDONLY | (O_NOFOLLOW ?? 0))` silently opened the symlink the check exists to refuse on any platform lacking the flag — O_NOFOLLOW is now REQUIRED and a platform that cannot enforce it refuses to read an identity key file rather than reading one it cannot verify
+  - `medium` `patch` the static guards missed real restatements — `runtime.mjs`'s `64 * 1024` state-file default is now the named `STATE_FILE_MAX_BYTES`, and the setup CLI's `CONFLICT_STATUS` is derived from `PUBLIC_ERROR_STATUS.chat_id_taken` instead of a literal 409
+  - `low` `patch` the direct-launch half of the gate contract (one diagnosable line, exit 1, no stack trace) was untested — now proven per entrypoint by spawning a real launch
+  - `low` `patch` FR-3 claimed proof of possession for every connection while the ratified Local Mode path only presents the key — PRD carries a dated amendment stating that possession proof is the remote path's guarantee (Epic 4) and that Local Mode's claim is the OS-user boundary
+- notes: the auditor also confirmed the setup CLI shipped ungated, which this pass fixed (Story 1.7c added an entrypoint that Story 1.1's "every entrypoint" AC had to cover) — the entrypoint list in tests/runtime.test.mjs is now the regression guard. Deferred: the SSE keep-alive divergence in the retired v0.1 `roomd.mjs` (already recorded in 1.1; nothing spawns that daemon). Not fixed by choice: the literal-import scanner's blind spot for computed specifiers, since a computed bare specifier is a code smell the runtime already rejects (zero-dep) and broadening the scanner was rejected in 1.1's own triage.

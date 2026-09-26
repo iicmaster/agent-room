@@ -149,6 +149,34 @@ test('entrypoints started exactly at the floor import cleanly and exit zero', as
   }
 })
 
+test('a directly launched entrypoint below the floor prints one diagnosable line and exits 1 with no stack trace', async () => {
+  // The import-branch assertions above prove the gate throws; this proves the
+  // OTHER half of the contract — a real direct launch (`node <entrypoint>`) must
+  // print one line naming the failed gate and exit 1, never a stack trace.
+  for (const entrypoint of ENTRYPOINTS) {
+    const script = [
+      "Object.defineProperty(process.versions, 'node', { value: '24.14.9' });",
+      `process.argv[1] = ${JSON.stringify(entrypoint)};`,
+      `import(${JSON.stringify(pathToFileURL(entrypoint).href)});`,
+    ].join('\n')
+    const { code, stderr } = await new Promise((resolveRun, rejectRun) => {
+      const child = spawn(process.execPath, ['-e', script], {
+        stdio: ['ignore', 'ignore', 'pipe'],
+        env: { ...process.env, PLUGIN_DATA: entrypoint + '.probe', AGENT_ROOM_DATA_DIR: entrypoint + '.probe' },
+      })
+      let captured = ''
+      child.stderr.setEncoding('utf8')
+      child.stderr.on('data', chunk => { captured += chunk })
+      child.once('error', rejectRun)
+      child.once('exit', exitCode => resolveRun({ code: exitCode, stderr: captured }))
+    })
+    assert.equal(code, 1, `${entrypoint} must exit 1 on a direct launch; stderr=${stderr}`)
+    assert.match(stderr, /node_version_unsupported/, entrypoint)
+    assert.match(stderr, /Node 24\.15 or newer/, entrypoint)
+    assert.doesNotMatch(stderr, /at [A-Za-z_$][\w$]*\s*\(.*:\d+:\d+\)/, `${entrypoint} must not print a stack trace`)
+  }
+})
+
 test('portable and Claude instance data paths are explicit and shared state override is separate', () => {
   assert.equal(instanceDataDirectory({ PLUGIN_DATA: '/tmp/plugin-a' }, '/ignored'), '/tmp/plugin-a')
   assert.equal(instanceDataDirectory({ CLAUDE_PLUGIN_DATA: '/tmp/plugin-b' }, '/ignored'), '/tmp/plugin-b')

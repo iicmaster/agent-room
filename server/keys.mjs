@@ -61,15 +61,25 @@ function rawPublicKeyFrom(privateKey) {
 // TOCTOU-safe read: lstat validation first, then an O_NOFOLLOW open whose
 // descriptor is fstat-re-verified, so a path swapped to a symlink or an
 // oversized/non-regular file can never be followed or trusted.
+//
+// O_NOFOLLOW is REQUIRED, not optional. Coercing a missing flag to 0 would
+// silently open the symlink the check exists to refuse, on exactly the
+// platforms where the guarantee is least visible. Where the platform cannot
+// enforce it, this refuses rather than reading a key file it cannot trust.
+const NOFOLLOW = fsConstants.O_NOFOLLOW ?? 0
+
 function readPrivateKeyPem(path) {
   try {
     regularPrivateFile(path, KEYPAIR_FILE_MAX_BYTES)
   } catch (error) {
     fail(`agent-room identity key file is unusable: ${error.message}`)
   }
+  if (NOFOLLOW === 0) {
+    fail('agent-room cannot enforce O_NOFOLLOW on this platform; refusing to read an identity key file it cannot verify')
+  }
   let descriptor
   try {
-    descriptor = openSync(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0))
+    descriptor = openSync(path, fsConstants.O_RDONLY | NOFOLLOW)
   } catch (error) {
     fail(`agent-room identity key file is unreadable: ${error.message}`)
   }

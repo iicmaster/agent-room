@@ -98,6 +98,8 @@ A user can point a plugin installation at any Room Server URL (self-hosted or sh
 
 Each installation holds one Identity Key; enrollment registers it on a given Server as that Actor's security identity; reconnection re-proves the same key — proof of possession, not public-key presentation — without re-enrollment. Realizes UJ-3.
 
+*(Amended 2026-09-25 after the Epic 1 build review: possession proof is the REMOTE path's guarantee (the Ed25519 challenge-response, Epic 4). In Local Mode the key is PRESENTED on `POST /api/auth/local` and the possession claim is the OS-user boundary itself — the loopback server trusts same-user processes and never sees a signature. The session is bound to the declared key's fingerprint, so a client cannot borrow another Actor's identity, but it does not cryptographically prove it holds the private key. Recorded in the spine's AD-8 amendment so the wire contract and this FR agree.)*
+
 **Consequences (testable):**
 - The private key never appears in tool output, logs, or network traffic; authentication is a fresh possession proof per connection with replay resistance.
 - Deleting plugin data creates a new, unrelated Actor (no identity recovery in v0.2).
