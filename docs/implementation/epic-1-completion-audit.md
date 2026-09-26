@@ -1,6 +1,6 @@
 # Epic 1 Completion Audit — First Conversation
 
-Date: 2026-09-25 · Commit range `8e95118` (planning) → `ddca669` · Suite: **305 pass / 0 fail / 0 skipped**
+Date: 2026-09-25 · Commit range `8e95118` (planning) → `a7da9fd` · Suite: **306 pass / 0 fail / 0 skipped**
 
 This audit checks each of Epic 1's nine stories against real evidence — the spec's own recorded
 state, executable tests, and (for both blocking gates) a command run by hand. Claims without
@@ -17,7 +17,7 @@ below with what changed.
 
 | Story | Commit | Spec | Tests that prove it |
 |---|---|---|---|
-| 1.1 runtime foundation | `df015f6` | done | `tests/constants.test.mjs` (limits stated once), `keys.test.mjs` (keypair atomic publish, canonical fingerprint), `runtime.test.mjs` (24.15 gate, non-zero exit per entrypoint) |
+| 1.1 runtime foundation | `df015f6` + `bd91f98`/`a7da9fd` | done | `tests/constants.test.mjs` (limits stated once), `keys.test.mjs` (keypair atomic publish, canonical fingerprint), `runtime.test.mjs` (24.15 gate, non-zero exit per entrypoint) |
 | 1.2 store schema v2 | `4f94f73` | done | `tests/store.test.mjs` (31) — contiguous room-local seq, idempotency, mid-INSERT SIGKILL, concurrent writers, DM ACL |
 | 1.3 HTTP host + middleware | `2c49347` | done | `api-host.test.mjs` (fixed order + reorder-fails), `api-contract.test.mjs` (contract read from the live spine), `core-boundary.test.mjs` (core imports no transport) |
 | 1.4 local bootstrap + session auth | `ec5a10e` | done | `ensure-server.test.mjs` (race, staleness, orphan reap), `local-auth.test.mjs` (session bound to `public_key`, 12 h sliding, class isolation) |
@@ -82,6 +82,23 @@ setup` is a real packaged command), **HCI-4** (ambiguity round-trips to resoluti
 6. **The build workflow's own auditor integration failed open** — a missing or unparseable luna
    outbox read as `SHIP`. Found by luna itself. Now fail-closed on file type, freshness, terminal
    marker, and verdict.
+
+## Post-completion audit pass (the auditor's own sweep)
+
+A second sweep after the epic was declared complete, verifying each story's AC against code rather
+than against its spec, found and closed two real gaps:
+
+- **Story 1.1's "every entrypoint" AC was unmet.** The `agent-room setup` CLI, added in Story
+  1.7c, shipped without the runtime gate: on Node 23.5.0 it loaded and printed usage instead of
+  refusing (probed by hand before fixing). It now uses the same fail-closed shape as the other
+  entrypoints and is listed in the `ENTRYPOINTS` guard, so a future entrypoint cannot repeat the
+  omission.
+- **Story 1.1's `O_NOFOLLOW` protection silently vanished on platforms lacking the flag**
+  (`?? 0` coercion), which is exactly where the guarantee is least visible. It is now required:
+  a platform that cannot enforce it refuses to read an identity key file.
+
+Story 1.1 was also the only story without an independent `gpt-6-luna` audit; it now has one
+(`docs/implementation/reviews/story-1.1-luna-gpt6.md`) whose four accepted findings are applied.
 
 ## Known limits at Epic 1 close (carried, not hidden)
 
