@@ -112,7 +112,7 @@ function suiteState(result: { exitCode: number; stdout: string; stderr: string }
     .map(match => match[1] ?? "")
     .filter(name => !name.startsWith("failing tests"))
     .join("\n");
-  const countLine = name => {
+  const countLine = (name: string): number | null => {
     const match = result.stdout.match(new RegExp(`^ℹ ${name} (\\d+)\\s*$`, "m"));
     return match ? Number(match[1]) : null;
   };
@@ -225,7 +225,8 @@ async function assertPreexistingUnrelated(
     try {
       actual = await hashPath(path);
     } catch (error) {
-      throw new Error(`${label}: pre-existing untracked path disappeared or became unreadable: ${path}; ${error.message}`);
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new Error(`${label}: pre-existing untracked path disappeared or became unreadable: ${path}; ${reason}`);
     }
     if (actual !== expected) throw new Error(`${label}: pre-existing untracked path changed: ${path}`);
   }
@@ -556,7 +557,7 @@ await assertBaselineHead(baselineRevision);
 
 phase("รันชุดทดสอบจนเขียว");
 let verification = await runContractVerification(allowlist, baselineRevision);
-const verificationIsRed = value => !value.focused.green || !value.full.green || !value.staticGreen;
+const verificationIsRed = (value: VerificationResult): boolean => !value.focused.green || !value.full.green || !value.staticGreen;
 let fixRound = 0;
 while (verificationIsRed(verification) && fixRound < maxPatchRounds) {
   fixRound += 1;
@@ -845,10 +846,12 @@ await artifact.file("spec", plan.specPath, {
 });
 await assertScopedFinalState(allowlist, preexistingUntracked, preexistingSnapshots, ephemeralPaths, baselineRevision);
 
-const resolutionById = new Map<string, "patch" | "defer" | "reject">(
+type ResolutionKind = "patch" | "defer" | "reject";
+const resolutionById = new Map<string, ResolutionKind>(
   resolutionEntries.map(entry => {
     const id = /^\[([A-Za-z0-9_-]+)\]/.exec(entry.text.trim())?.[1] ?? "";
-    return [id, entry.kind];
+    const kind: ResolutionKind = entry.kind as ResolutionKind;
+    return [id, kind] as [string, ResolutionKind];
   }),
 );
 const highCount = allFindings.filter(f => f.severity === "high").length;
