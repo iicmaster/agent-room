@@ -526,15 +526,31 @@ if (existing.length === 1) {
 report({ story, step: "planned", state: "planned", specPath: plan.specPath, matrixRows: plan.matrixRows }, "story");
 
 const adoptedSpecText = await files.read(plan.specPath);
-const baselineRevision = parseBaselineRevision(adoptedSpecText, plan.specPath);
+// The spec records the revision the story was PLANNED against; that value is
+// information, not the run's integrity anchor. The anchor is HEAD when this run
+// started: assertBaselineHead then means exactly "nothing committed while this
+// run worked", which is what keeps the review diff trustworthy. A stale
+// baseline_revision (any commit since planning) must not fail the run.
+const plannedBaselineRevision = parseBaselineRevision(adoptedSpecText, plan.specPath);
+const baselineRevision = (await world.run("git", ["rev-parse", "HEAD"])).stdout.trim();
+if (!/^[0-9a-f]{40}$/.test(baselineRevision)) {
+  throw new Error(`could not resolve HEAD at run start (got ${JSON.stringify(baselineRevision)})`);
+}
+log(`baseline ${baselineRevision.slice(0, 7)} (planned against ${plannedBaselineRevision.slice(0, 7)})`);
 const resolvedBaseline = await world.run("git", ["rev-parse", "--verify", `${baselineRevision}^{commit}`]);
 if (resolvedBaseline.exitCode !== 0 || resolvedBaseline.stdout.trim() !== baselineRevision) {
   throw new Error(`${plan.specPath}: baseline_revision ${baselineRevision} does not resolve to that exact commit`);
 }
 await assertBaselineHead(baselineRevision);
 const preexistingUntracked = new Set(await untrackedPaths());
+// Tracked files already modified when the run started are pre-existing work,
+// not the story's: a run may begin on a dirty tree. They are snapshotted so the
+// scope check can tell "already dirty" from "this run touched it".
+const preexistingModified = new Set(await gitLines(["diff", "--name-only", "HEAD", "--"]));
 const preexistingSnapshots = new Map<string, string>();
-for (const path of preexistingUntracked) preexistingSnapshots.set(path, await hashPath(path));
+for (const path of [...preexistingUntracked, ...preexistingModified]) {
+  preexistingSnapshots.set(path, await hashPath(path));
+}
 const allowlist = implementationAllowlist(adoptedSpecText, plan.specPath, story);
 for (const path of [...allowlist]) {
   if (path.startsWith("docs/implementation/workflows/")) allowlist.delete(path);
@@ -590,9 +606,15 @@ phase("รวบรวมรายการไฟล์ที่เปลี่�
 // shell, and world.run can. Reviewers are handed the baseline and the exact
 // file list and read the files with their own tools — a 200 KB diff pasted
 // into four prompts costs more than letting each reviewer fetch what it needs.
-const trackedPaths = await changedPathsFromBaseline(baselineRevision);
+// The scope of THIS run is what it produced: files that were clean at start
+// and are dirty now, plus files it created. Measuring against the story's
+// historical baseline instead would sweep in every commit made since the
+// story was planned — including the workflow's own file.
 const currentUntracked = await untrackedPaths();
 const newlyCreatedUntracked = currentUntracked.filter(path => !preexistingUntracked.has(path));
+const dirtyNow = await gitLines(["diff", "--name-only", "HEAD", "--"]);
+const newlyDirtyTracked = dirtyNow.filter(path => !preexistingModified.has(path));
+const trackedPaths = newlyDirtyTracked;
 await assertScope([...trackedPaths, ...newlyCreatedUntracked], allowlist, "after implementation");
 await assertPreexistingUnrelated(preexistingSnapshots, allowlist, ephemeralPaths, "after implementation");
 const changedPaths = [...new Set([
