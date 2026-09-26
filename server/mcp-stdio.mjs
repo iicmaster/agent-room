@@ -74,7 +74,9 @@ const DEFAULT_PROTOCOL = '2025-06-18'
 
 // Schema patterns derive from the constants module (each shape declared once);
 // the JSON-schema form anchors the shared source expression.
-const FINGERPRINT_SCHEMA_PATTERN = `^${FINGERPRINT_PATTERN.source}$`
+// JSON Schema `pattern` is already anchored, so the shared pattern is reused as-is
+// (prefixing another ^ here would produce a doubled anchor).
+const FINGERPRINT_SCHEMA_PATTERN = FINGERPRINT_PATTERN.source
 
 // The five tools. Descriptions carry the "list agents" phrasing and the Agent
 // Room identity; there are no native-named aliases and no join verbs. The

@@ -63,6 +63,9 @@
 
 import {
   CLIENT_TYPES,
+  FINGERPRINT_HEX_LENGTH,
+  FINGERPRINT_PATTERN,
+  FINGERPRINT_PREFIX,
   OFFLINE_RECENTLY_WINDOW_MS,
   PRESENCE_TTL_MS,
   PUBLIC_ERRORS,
@@ -83,9 +86,21 @@ function requireSessionKey(value) {
   return value
 }
 
+// The canonical Actor fingerprint shape is owned by the constants module (its
+// prefix and hex length travel in as FINGERPRINT_PREFIX /
+// FINGERPRINT_HEX_LENGTH; this file deliberately embeds no fingerprint-shaped
+// literal of its own). This registry is the last layer before the value reaches
+// the durable claims table, whose own CHECK enforces the same shape — so a
+// malformed fingerprint must be refused HERE, as a clean coded rejection, not
+// surface later as a store constraint failure.
 function requireActorFingerprint(value) {
-  if (typeof value !== 'string' || value.length === 0) {
-    fail('invalid_argument', 'actorFingerprint must be a non-empty string')
+  if (typeof value !== 'string' || !FINGERPRINT_PATTERN.test(value)) {
+    // The message is composed from the shared constants, not from a literal
+    // here: server/core/ embeds no fingerprint-shaped string of its own.
+    fail(
+      'invalid_argument',
+      `actorFingerprint must be ${FINGERPRINT_PREFIX} followed by ${FINGERPRINT_HEX_LENGTH} lowercase hex characters`,
+    )
   }
   return value
 }

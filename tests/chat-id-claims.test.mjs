@@ -308,6 +308,25 @@ test('the live registry binds a session to a chat id and reports the snapshot', 
   assert.equal(registry.lookup('unknown'), null)
 })
 
+test('the live registry refuses a non-canonical actor fingerprint, not just an empty one', () => {
+  // The registry is the last layer before the durable claims table, whose own
+  // CHECK enforces the fingerprint shape. A malformed value must be refused
+  // here as a clean coded rejection, never surface later as a store
+  // constraint failure.
+  const { registry } = makeRegistry()
+  for (const bad of ['', 'agent:1', 'sha256:', 'sha256:' + 'A'.repeat(64), 'sha256:' + 'g'.repeat(64), 'x'.repeat(71), 42, null]) {
+    assert.throws(
+      () => registry.claim({ sessionKey: 'k1', chatId: 'alice', actorFingerprint: bad }),
+      error => error?.code === 'invalid_argument',
+      String(bad),
+    )
+  }
+  assert.equal(registry.lookup('k1'), null, 'a refused fingerprint claims nothing')
+  // The canonical shape still binds.
+  registry.claim({ sessionKey: 'k1', chatId: 'alice', actorFingerprint: FINGERPRINT_A })
+  assert.equal(registry.lookup('k1').actorFingerprint, FINGERPRINT_A)
+})
+
 test('holderOf reports the live holder of a name and nothing else', () => {
   const { registry } = makeRegistry()
   assert.equal(registry.holderOf('alice'), null, 'an unclaimed name has no holder')
