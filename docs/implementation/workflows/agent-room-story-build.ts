@@ -484,8 +484,15 @@ async function assertRunnableHere(storyKey: string): Promise<void> {
     );
   }
   const epics = await files.read("docs/epics.md").catch(() => "");
-  const gate = new RegExp(`^### Story ${storyKey.replace(".", "\\.")}:.*(blocking gate|validate gate)`, "im").test(epics);
-  if (!gate) return;
+  // Story keys are hyphenated here ("1-8") and dotted in epics.md ("### Story 1.8:").
+  // Converting the wrong separator once made this guard silently never match —
+  // found only by running it, which is the only way a refusal proves it refuses.
+  const dotted = storyKey.replace("-", ".");
+  // A line test, not a clever pattern: the heading line itself says "gate".
+  const heading = epics
+    .split("\n")
+    .some(line => line.startsWith(`### Story ${dotted}:`) && /gate/i.test(line));
+  if (!heading) return;
   const proven = await files
     .read("docs/implementation/workflows/.unattended-proven.json")
     .then(text => /"closed_unattended"\s*:\s*\d+/.test(text))
