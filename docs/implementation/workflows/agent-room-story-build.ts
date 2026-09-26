@@ -438,9 +438,70 @@ async function resolveStory(): Promise<string> {
   throw new Error("no unfinished story found — is every story spec already done?");
 }
 
+
+// F9: review depth follows blast radius, not a fixed count. Epic 1's evidence:
+// the stories whose defect would reach every later story (the store, the API
+// host, the gate story) each needed the full gauntle, while the mechanical ones
+// were clean on one pass — so a fixed number spends the most attention where
+// the risk is lowest. The caller can still override with args.reviewers.
+function blastRadiusTier(storyKey: string, specText: string): "full" | "standard" | "light" {
+  const upper = specText.toUpperCase()
+  const gate = /BLOCKING GATE|VALIDATE GATE|--STRICT/.test(upper)
+  const store = /SCHEMA|MIGRAT|TRANSACTION|DURABLE LOG|SQLITE/.test(upper)
+  const wire = /API HOST|MIDDLEWARE|WIRE|ENVELOPE|SESSION AUTH|BOOTSTRAP/.test(upper)
+  if (gate) return "full"
+  if (store || wire) return "standard"
+  if (/^\d+\.\d+$/.test(storyKey)) return "standard"
+  return "light"
+}
+
+const TIER_DEPTH: Record<"full" | "standard" | "light", number> = {
+  full: 5,      // four internal lenses + the external auditor
+  standard: 4,  // three internal lenses + the external auditor
+  light: 2,     // one internal lens + the external auditor
+}
+
+
+// F8 preconditions. Epic 1's evidence: this workflow failed six runs on one
+// story, every failure a bug in the script or a tree I edited underneath it,
+// and a blocking-gate story was then finished by hand because the automation
+// could not be trusted with it. Two rules follow, and both are refusals rather
+// than warnings — a gate story deserves a loop that says "no" when unsure.
+//
+// 1. Start from a clean tree. The scope guard compares what this run produced
+//    against what was already dirty; starting dirty makes that comparison lie.
+// 2. A blocking-gate story is refused until this workflow has closed at least
+//    one story unattended. The marker is the evidence, and it is only written
+//    by a successful finalize.
+async function assertRunnableHere(storyKey: string): Promise<void> {
+  const status = await world.run("git", ["status", "--porcelain"]);
+  const dirty = status.stdout.split("\n").map(line => line.trim()).filter(Boolean);
+  if (dirty.length > 0) {
+    throw new Error(
+      `refusing to start story ${storyKey} on a dirty tree: ${dirty.length} path(s) already modified or ` +
+        `untracked (${dirty.slice(0, 5).join(", ")}${dirty.length > 5 ? ", …" : ""}). Commit, stash, or ` +
+        `finish the other work first — the scope guard cannot tell your edits from this run's.`,
+    );
+  }
+  const epics = await files.read("docs/epics.md").catch(() => "");
+  const gate = new RegExp(`^### Story ${storyKey.replace(".", "\\.")}:.*(blocking gate|validate gate)`, "im").test(epics);
+  if (!gate) return;
+  const proven = await files
+    .read("docs/implementation/workflows/.unattended-proven.json")
+    .then(text => /"closed_unattended"\s*:\s*\d+/.test(text))
+    .catch(() => false);
+  if (!proven) {
+    throw new Error(
+      `refusing story ${storyKey}: it is a blocking gate, and this workflow has not yet closed a story ` +
+        `unattended (docs/implementation/workflows/.unattended-proven.json is absent). Epic 1's evidence ` +
+        `is six failed runs on one gate story — run this on a non-gate story first, or build the gate by hand.`,
+    );
+  }
+}
+
 const story = await resolveStory();
 log(`กำลังสร้างสตอรี่ ${story}`);
-const reviewDepth = parseBoundedInteger(args.reviewers, "reviewers", 1, 5, 5);
+await assertRunnableHere(story);
 const maxPatchRounds = parseBoundedInteger(args.patchRounds, "patchRounds", 1, null, 3);
 
 const LUNA_OUTBOX = `/Users/ngs/agent-skills/plugins/agent-room/.mailbox-out/story-${story}-audit-luna`;
@@ -526,6 +587,16 @@ if (existing.length === 1) {
 report({ story, step: "planned", state: "planned", specPath: plan.specPath, matrixRows: plan.matrixRows }, "story");
 
 const adoptedSpecText = await files.read(plan.specPath);
+
+// Review depth follows blast radius (see blastRadiusTier). The spec's own text
+// is the input: a story that names a gate, a schema, or the wire surface is
+// classified from what it says it touches.
+const tier = blastRadiusTier(story, adoptedSpecText);
+const tierDepth = TIER_DEPTH[tier];
+const reviewDepth = args.reviewers === undefined
+  ? tierDepth
+  : parseBoundedInteger(args.reviewers, "reviewers", 1, 5, 5);
+log(`ระดับการตรวจ: ${tier} (${tierDepth} สายตา${args.reviewers === undefined ? "" : ", ผู้เรียกกำหนดเอง"})`);
 // The spec records the revision the story was PLANNED against; that value is
 // information, not the run's integrity anchor. The anchor is HEAD when this run
 // started: assertBaselineHead then means exactly "nothing committed while this
