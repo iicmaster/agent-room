@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 09-21-2026 08:52
-last_updated: 09-25-2026 17:35
+last_updated: 09-26-2026 09:15
 project: agent-room
 project_key: NOKEY
 tracking_system: file-system
@@ -45,7 +45,7 @@ development_status:
   1-7-mcp-adapter-tools-first-run-prompt-untrusted-envelope: done
   1-8-first-conversation-integration-checkpoint-blocking-gate-ruli: done
   1-9-packaging-the-validate-gate: done
-  epic-1-retrospective: optional
+  epic-1-retrospective: done
 
   epic-2: backlog
   2-1-ordinary-restart-survival: backlog
@@ -85,3 +85,49 @@ development_status:
   6-2-rel-3-the-formal-soak: backlog
   6-3-release-packaging-client-smoke-tests: backlog
   epic-6-retrospective: optional
+action_items:
+  - id: "epic-1-retro-item-1-add-a-per-epic-ac-sweep-to-the-build-loo"
+    epic: 1
+    action: "Add a per-epic AC sweep to the build loop: re-read each story Acceptance
+      Criteria from docs/epics.md and check it against the code, not the spec, before
+      declaring an epic done"
+    owner: "orchestrator"
+    status: open
+    ref: "docs/implementation/epic-1-retro-2026-09-26.md"
+  - id: "epic-1-retro-item-2-collapse-the-fingerprint-pattern-to-a-si"
+    epic: 1
+    action: "Collapse the fingerprint pattern to a single definition in server/constants.mjs
+      and have server/api/server.mjs, server/mcp-stdio.mjs and the validator import
+      it"
+    owner: "next story touching fingerprints (Epic 4)"
+    status: open
+    ref: "docs/implementation/epic-1-retro-2026-09-26.md"
+  - id: "epic-1-retro-item-3-decide-the-fate-of-the-retired-v0-1-daem"
+    epic: 1
+    action: "Decide the fate of the retired v0.1 daemon (server/roomd.mjs, server/database.mjs,
+      server/daemon-client.mjs) which still ships but is never called"
+    owner: "Epic 2 (migration)"
+    status: open
+    ref: "docs/implementation/epic-1-retro-2026-09-26.md"
+  - id: "epic-1-retro-item-4-run-bmad-review-over-the-epic-1-diff-as"
+    epic: 1
+    action: "Run bmad-review over the Epic 1 diff as a whole, weighting the seams
+      between stories that no per-story review saw from both sides"
+    owner: "next retro or on demand"
+    status: open
+    ref: "docs/implementation/epic-1-retro-2026-09-26.md"
+  - id: "epic-1-retro-item-5-scale-review-depth-to-blast-radius-inste"
+    epic: 1
+    action: "Scale review depth to blast radius instead of fixing it at four lenses:
+      gate stories and store/API changes get the full gauntlet, mechanical changes
+      get two"
+    owner: "orchestrator"
+    status: open
+    ref: "docs/implementation/epic-1-retro-2026-09-26.md"
+  - id: "epic-1-retro-item-6-do-not-let-the-story-build-workflow-carr"
+    epic: 1
+    action: "Do not let the story-build workflow carry a blocking gate until it has
+      closed a full story unattended on a clean tree"
+    owner: "orchestrator"
+    status: open
+    ref: "docs/implementation/epic-1-retro-2026-09-26.md"
