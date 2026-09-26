@@ -42,6 +42,7 @@ import {
   readJsonFile,
   sharedDataDirectory,
 } from '../runtime.mjs'
+import { assertSupportedRuntime } from '../runtime.mjs'
 import { loadOrCreateKeypair } from '../keys.mjs'
 import { loadOrCreateLocalToken } from '../api/local-token.mjs'
 import { ensureServer } from '../client/ensure-server.mjs'
@@ -265,6 +266,22 @@ export async function main(argv = process.argv.slice(2)) {
     process.stderr.write(`${outcome.message}\n`)
     process.exitCode = 1
   }
+}
+
+// Story 1.1's contract gates EVERY entrypoint. This one was added later (the
+// setup command) and initially shipped ungated, which the Story 1.1 audit
+// caught: on Node < 24.15 the module loaded and printed usage instead of
+// refusing. Same shape as mcp-stdio / roomd / the API server: a direct launch
+// reports one diagnosable line and exits 1 with no stack trace; an importer
+// gets a catchable rejection so harnesses can assert on the failure.
+try {
+  assertSupportedRuntime()
+} catch (error) {
+  if (launchedDirectly()) {
+    process.stderr.write(`agent-room setup failed: ${error?.code ?? 'startup_failed'}: ${error?.message}\n`)
+    process.exit(1)
+  }
+  throw error
 }
 
 if (launchedDirectly()) {

@@ -18,10 +18,15 @@ import {
 } from '../server/runtime.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+// Every directly-launchable entrypoint. The setup CLI was added by Story 1.7
+// and initially shipped ungated — it loaded and printed usage on Node < 24.15
+// instead of refusing. This list is the regression guard: a new entrypoint must
+// be added here, and this test is what keeps it honest.
 const ENTRYPOINTS = [
   join(ROOT, 'server', 'mcp-stdio.mjs'),
   join(ROOT, 'server', 'roomd.mjs'),
   join(ROOT, 'server', 'api', 'server.mjs'),
+  join(ROOT, 'server', 'cli', 'agent-room.mjs'),
 ]
 
 test('version comparison and runtime gates reject unsafe SQLite builds', () => {
