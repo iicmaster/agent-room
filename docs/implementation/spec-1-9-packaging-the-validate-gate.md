@@ -142,10 +142,19 @@ _No implementation review has run for this story yet. This section is reserved f
 
 ## Review Triage Log
 
+### 2026-09-25 — codex-advisor[gpt-6-luna] audit of the finished story
+Verdict FIX-FIRST: two high findings, both about the gate going green for the wrong reason.
+
 - intent_gap: 0
 - bad_spec: 0
-- patch: 0 (the tests landed with the run; the hands-on pass found nothing to change)
+- patch: 4: (high 2, medium 1, low 1)
 - defer: 0 · reject: 0
+- addressed_findings:
+  - `high` `patch` TMPDIR inside the repository let the packager materialize and validate there, violating the contract's outside-the-repo rule — every temp parent now goes through an `assertOutsideRepository` guard that runs BEFORE the packager child is spawned; proven by fault injection (`TMPDIR=$PWD/docs` → 8 tests red, nothing left on disk)
+  - `high` `patch` pairwise snapshot comparison could bless two equally incomplete runtime trees (a file missing from BOTH still matches, and the validator never opens those files) — the SOURCE tree is now the oracle: the exact shared-entry key set is pinned and every entry compared byte-for-byte against the source, with a test that drops a non-entrypoint file from both packages and shows it failing
+  - `medium` `patch` the resolver accepted any executable — the selected binary must self-identify as Claude Code AND implement `claude plugin validate`; two shims are now proven refused
+  - `low` `patch` timeout/spawn failures omitted the discovered version — failures now name the binary and its version
+- notes: the auditor's own boundary is recorded — a shim that faithfully reimplements `plugin validate --strict --json` is indistinguishable from the real CLI at this interface; the version number is deliberately never pinned (a string equality would break on the next vendor release)
 
 ## Auto Run Result
 
@@ -163,10 +172,13 @@ regular non-symlink file, and is byte-identical across both packages and to the 
 refusal and byte-identity oracles retained verbatim). No production code changed — the packager
 was already correct; what was missing was its proof.
 
-**Verification performed:** `node --test` → 303/303, 0 skipped. Gate suite 9/9 in 3.6 s.
+**Verification performed:** `node --test` → 305/305, 0 skipped (303 before the luna audit). Gate suite 9/9 in 3.6 s.
 Independent hand check: `node scripts/package-release.mjs --out /tmp/ar-pkg` then
 `claude plugin validate /tmp/ar-pkg/agent-room-claude-code --strict` → "✔ Validation passed",
 exit 0. The negative case is covered by the test itself.
+
+**Follow-up (post-audit):** 305 tests after the luna patches; the containment guard is proven to
+bite by fault injection rather than asserted.
 
 **Residual risks:** the gate depends on the `claude` binary being present (overridable via
 `AGENT_ROOM_CLAUDE_BIN`, never a soft-skip switch — a missing validator fails the test). A
