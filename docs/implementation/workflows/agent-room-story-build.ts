@@ -293,21 +293,26 @@ async function assertScopedFinalState(
 // mid-epic requires committing it. Anything else still fails the run.
 const TOOLING_PREFIXES = ["docs/implementation/workflows/", "docs/implementation/reviews/"];
 
-async function assertBaselineHead(baseline: string): Promise<void> {
+// A mid-run commit is acceptable when every path it touches is either the
+// pipeline's own tooling or the story's OWN allowlisted surface (which a
+// finalize-style commit legitimately carries). Anything else — product code
+// the reviews never scoped — fails the run.
+async function assertBaselineHead(baseline: string, allowlist: Set<string>): Promise<void> {
   const head = (await world.run("git", ["rev-parse", "HEAD"])).stdout.trim();
   if (head === baseline) return;
   const moved = await world.run("git", ["diff", "--name-only", baseline, head]);
   if (moved.exitCode !== 0) throw new Error(`could not diff ${baseline}..${head}`);
   const paths = moved.stdout.split("\n").map(line => line.trim()).filter(Boolean);
-  const outside = paths.filter(path => !TOOLING_PREFIXES.some(prefix => path.startsWith(prefix)));
+  const outside = paths.filter(path =>
+    !TOOLING_PREFIXES.some(prefix => path.startsWith(prefix)) && !allowlist.has(path));
   if (outside.length > 0) {
     throw new Error(
-      `HEAD moved from baseline ${baseline} to ${head} with changes outside the pipeline's own ` +
-        `tooling: ${outside.join(", ")}. The review scope can no longer be trusted; do not commit ` +
-        `product code while a run is in flight.`,
+      `HEAD moved from baseline ${baseline} to ${head} with changes outside the story allowlist ` +
+        `and the pipeline's own tooling: ${outside.join(", ")}. The review scope can no longer be ` +
+        `trusted; do not commit unscoped code while a run is in flight.`,
     );
   }
-  log(`HEAD moved ${baseline.slice(0, 7)} → ${head.slice(0, 7)} (pipeline tooling only — scope intact)`);
+  log(`HEAD moved ${baseline.slice(0, 7)} → ${head.slice(0, 7)} (story surface + pipeline tooling only — scope intact)`);
 }
 
 async function hashPath(path: string): Promise<string> {
@@ -702,7 +707,10 @@ const resolvedBaseline = await world.run("git", ["rev-parse", "--verify", `${bas
 if (resolvedBaseline.exitCode !== 0 || resolvedBaseline.stdout.trim() !== baselineRevision) {
   throw new Error(`${plan.specPath}: baseline_revision ${baselineRevision} does not resolve to that exact commit`);
 }
-await assertBaselineHead(baselineRevision);
+// The story allowlist is needed by the baseline guard from here on, so it is
+// derived before the first gate rather than at the scope check.
+const allowlist = await implementationAllowlist(adoptedSpecText, plan.specPath, story);
+await assertBaselineHead(baselineRevision, allowlist);
 const preexistingUntracked = new Set(await untrackedPaths());
 // Tracked files already modified when the run started are pre-existing work,
 // not the story's: a run may begin on a dirty tree. They are snapshotted so the
@@ -712,7 +720,7 @@ const preexistingSnapshots = new Map<string, string>();
 for (const path of [...preexistingUntracked, ...preexistingModified]) {
   preexistingSnapshots.set(path, await hashPath(path));
 }
-const allowlist = await implementationAllowlist(adoptedSpecText, plan.specPath, story);
+// (allowlist already derived above, before the first baseline gate)
 for (const path of [...allowlist]) {
   if (path.startsWith("docs/implementation/workflows/")) allowlist.delete(path);
 }
@@ -730,7 +738,7 @@ await implementer.ask<ImplementResult>(
     `yourself — the pipeline runs it after you and sends you the failures; run only the story's own ` +
     `new test file if you want a fast signal.`,
 ).then(result => report({ story, step: "implemented", files: result.files }, "story"));
-await assertBaselineHead(baselineRevision);
+await assertBaselineHead(baselineRevision, allowlist);
 
 phase("รันชุดทดสอบจนเขียว");
 let verification = await runContractVerification(allowlist, baselineRevision);
@@ -749,7 +757,7 @@ while (verificationIsRed(verification) && fixRound < maxPatchRounds) {
       `and leave unrelated files alone. Details:\n${details}\nDo not edit the spec unless an explicit ` +
       `spec-amendment instruction names the exact change. Do not commit or move HEAD (${baselineRevision}).`,
   );
-  await assertBaselineHead(baselineRevision);
+  await assertBaselineHead(baselineRevision, allowlist);
   verification = await runContractVerification(allowlist, baselineRevision);
 }
 if (verificationIsRed(verification)) {
@@ -760,7 +768,7 @@ if (verificationIsRed(verification)) {
 }
 let suite = verification.full;
 log(`ชุดทดสอบเขียว: ${verification.focused.counts} · ${verification.full.counts}`);
-await assertBaselineHead(baselineRevision);
+await assertBaselineHead(baselineRevision, allowlist);
 
 phase("รวบรวมรายการไฟล์ที่เปลี่ยน");
 // The diff is assembled HERE, not by a subagent: a workflow subagent has no
@@ -898,7 +906,7 @@ if (lunaReview.findings.length > 0) {
 }
 log(`luna: ${lunaReview.verdict} (${lunaReview.findings.length} ข้อ)`);
 
-await assertBaselineHead(baselineRevision);
+await assertBaselineHead(baselineRevision, allowlist);
 
 const allFindings = [
   ...normalizedReviews.flatMap(review => review.findings),
@@ -940,7 +948,7 @@ for (const patch of triage.patches) {
   report({ story, patch }, "patches");
 }
 log(`patch ${triage.patches.length} · defer ${triage.deferred.length} · reject ${triage.rejected.length}`);
-await assertBaselineHead(baselineRevision);
+await assertBaselineHead(baselineRevision, allowlist);
 
 phase("ลง patch แล้วตรวจซ้ำ");
 await implementer.ask(
@@ -951,7 +959,7 @@ await implementer.ask(
     `the verdict says no amendment, this is a no-op. Do not edit anything the patches do not name. ` +
     `Do not commit or move HEAD (${baselineRevision}).`,
 );
-await assertBaselineHead(baselineRevision);
+await assertBaselineHead(baselineRevision, allowlist);
 verification = await runContractVerification(allowlist, baselineRevision);
 let remediationRound = 0;
 while (verificationIsRed(verification) && remediationRound < maxPatchRounds) {
@@ -965,7 +973,7 @@ while (verificationIsRed(verification) && remediationRound < maxPatchRounds) {
     `The post-triage contract verification is red. Fix the causes without reverting a correct ` +
       `patch, and do not commit or move HEAD (${baselineRevision}). Details:\n${details}`,
   );
-  await assertBaselineHead(baselineRevision);
+  await assertBaselineHead(baselineRevision, allowlist);
   verification = await runContractVerification(allowlist, baselineRevision);
 }
 if (verificationIsRed(verification)) {
@@ -975,7 +983,7 @@ if (verificationIsRed(verification)) {
   );
 }
 suite = verification.full;
-await assertBaselineHead(baselineRevision);
+await assertBaselineHead(baselineRevision, allowlist);
 await assertPreexistingUnrelated(preexistingSnapshots, allowlist, ephemeralPaths, "after triage remediation");
 const postTrackedPaths = await changedPathsFromBaseline(baselineRevision);
 const postUntracked = await untrackedPaths();
@@ -1002,7 +1010,7 @@ if (postNewPaths.length > 0) {
 log(`หลัง patch: ${verification.focused.counts} · ${verification.full.counts}`);
 
 phase("ปิดงานและ commit");
-await assertBaselineHead(baselineRevision);
+await assertBaselineHead(baselineRevision, allowlist);
 const finalAllowlist = [...allowlist].sort().join(" ");
 // The evidence marker the gate guard reads: how many stories this workflow has
 // closed unattended, taken from the live file (absent file means zero).
