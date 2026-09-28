@@ -230,10 +230,45 @@
 
   2.3:                       # The v0.1→v0.2 migration (one-time) (3 criteria)
     note: >-
-      TODO — not started.
+      Proves the one-time upgrade end to end against real hand-crafted v0.1
+      databases: a live v0.1 daemon (real child process holding the db,
+      answering the v0.1 /health shape, owning the v0.1 runtime record) is
+      stopped by SIGTERM before the stamp, a foreign responder on the recorded
+      port is refused coded and never signalled, dead-and-unreachable records
+      are reclaimed, and an unidentifiable live pid is left alone; one BEGIN
+      IMMEDIATE transaction re-sequences every room from 1 (global interleaved
+      sequences become room-local), remaps every reply_to_seq to the
+      room-local target, reshapes to the five v2 tables, mints the realm, and
+      stamps v2. The crash oracles are real: a mid-transaction failure leaves
+      the file byte-identical v1 with nothing partial (the transactional
+      version stamp proven, not assumed), a real SIGKILL mid-migration of a
+      180k-row migration resumes on the next boot to maps identical to a
+      reference migration, and a second completed run plus a second full
+      server boot is a no-op oracle (whole durable state deep-equal). Realm
+      preservation is proven across server boots, and reads/writes over
+      migrated data keep reply discipline, implicit broadcast membership,
+      contiguous appends, and idempotent replay of migrated rows. Does NOT
+      prove a v0.2-KEYED identity continuity (the migration derives
+      attribution fingerprints and grammar-mapped chat ids deterministically
+      and deliberately seeds no durable claims — live identity begins with
+      the v0.2 keypair on reconnect), DM continuity (v0.1 had no DMs; every
+      v0.1 room migrates as broadcast), any legacy cursor-file handling (the
+      reset is structural: the minted realm key takes pre-upgrade cursors out
+      of service, documented exactly once in migrate-v1.mjs), or the
+      randomized kill-drill under live traffic (Story 2.5).
     evidence:
-      - test: "TODO exact test name"
-        file: "tests/example.test.mjs"
+      - test: "a realistic v0.1 database migrates in place: room-local sequences from 1, reply threads remapped, realm minted, v2 stamped"
+        file: "tests/migration.test.mjs"
+      - test: "a live v0.1 daemon is stopped (SIGTERM) before the migration runs, and the migration then completes"
+        file: "tests/migration.test.mjs"
+      - test: "a mid-migration transaction failure rolls the file back to v1 — nothing partial persists — and a corrected rerun completes"
+        file: "tests/migration.test.mjs"
+      - test: "a real SIGKILL mid-migration leaves the file v1, and the next boot completes to the reference maps"
+        file: "tests/migration.test.mjs"
+      - test: "a second completed run is a no-op oracle: nothing is re-mapped, the realm is untouched, and another boot changes nothing"
+        file: "tests/migration.test.mjs"
+      - test: "a server boot migrates a v0.1 data dir; the realm survives further restarts untouched"
+        file: "tests/migration.test.mjs"
 
   2.4:                       # Endurance harness & connection-churn regression (2 criteria)
     note: >-

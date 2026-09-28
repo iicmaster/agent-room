@@ -254,6 +254,16 @@ export const STORE_OPEN_BUSY_BACKOFF_MS = 25
 // Entropy for opaque room ids: 16 random bytes → 22 base64url characters.
 export const ROOM_ID_ENTROPY_BYTES = 16
 
+// --- Story 2.3: the one-time v0.1→v0.2 migration (server/store/migrate-v1.mjs) -
+
+// How long a recorded live pid is given to answer GET /health before the
+// migration classifies the runtime record (the v0.1 daemon writes its record
+// only after its listeners are up, so a healthy daemon answers immediately;
+// the window exists for a daemon caught mid-start). The per-signal escalation
+// wait reuses SERVER_CHILD_REAP_TIMEOUT_MS — the same "how long a signalled
+// process is given to exit" semantic the bootstrap engine already declares.
+export const MIGRATION_DAEMON_SETTLE_MS = 2_000
+
 // --- Story 1.4: local bootstrap & session auth --------------------------------
 
 // Session tokens: the 12 h sliding TTL is provisional per DR-2 (spine Open

@@ -41,7 +41,11 @@
 // direct_members row names the Actor, in the store's deterministic
 // created-then-id order (identity from the token; pair keys embed member
 // fingerprints and titles, creators, and timestamps serve no discovery
-// purpose, so the projection never carries them).
+// purpose, so the projection never carries them), and the Story 2.3
+// one-time upgrade — startServer runs migrateV1InPlace before the store
+// opens: a live v0.1 daemon named by runtime.json is stopped first, then a
+// single BEGIN IMMEDIATE transaction reshapes the v0.1 file to schema v2 in
+// place (see server/store/migrate-v1.mjs for the full mapping decisions).
 // Liveness is one mechanism: the actor-class
 // auth stage's sliding TTL refresh and the presence touch are the same event
 // (touch with the 1.5 persist pattern on every authenticated request) — no
@@ -83,6 +87,7 @@ import {
   chatIdForms,
 } from '../constants.mjs'
 import { openRoomLog } from '../store/room-log.mjs'
+import { migrateV1InPlace } from '../store/migrate-v1.mjs'
 import { bootstrapRealm } from '../core/realm.mjs'
 import { createLiveSessionRegistry } from '../core/session-registry.mjs'
 import { fingerprintFromPublicKey } from '../keys.mjs'
@@ -797,6 +802,15 @@ export async function startServer({
   // Story 1.6: the process-default live registry receives the operator-tuned
   // presence TTL; an injected registry is the caller's to configure.
   const effectiveLiveRegistry = liveSessionRegistry ?? createLiveSessionRegistry({ presenceTtlMs })
+
+  // Story 2.3 (AR-4): the one-time v0.1→v0.2 migration is a startup step.
+  // A v0.1 data file is migrated in place here — absorb-or-stop the live
+  // v0.1 daemon named by runtime.json first, then one BEGIN IMMEDIATE
+  // transaction (detect user_version → per-room re-sequencing + reply_to_seq
+  // remap → stamp v2) — before the store opens. Anything that is not a v1
+  // file is a quick no-op; openRoomLog's refusal paths still guard every
+  // non-v1 foreign schema.
+  await migrateV1InPlace({ dataDir })
 
   const store = openRoomLog({ dataDir })
 

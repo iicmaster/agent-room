@@ -10,11 +10,15 @@
 //
 // The message log is append-only: no mutation verb of any kind ever touches a
 // committed message row. Reply targets resolve room-locally against
-// (room_id, seq). A v1 database file is refused, never migrated (Epic 2 owns
-// migration). Every error code is a member of PUBLIC_ERRORS or
-// INTERNAL_ERROR_CODES, both declared in ../constants.mjs: public codes for
-// caller-facing outcomes, internal codes for invariants that are not
-// wire-visible.
+// (room_id, seq). A v1 database file is refused on this raw store path —
+// probe-before-touch leaves it byte-for-byte untouched — because the one-time
+// v1→v2 migration is a server-startup step with its own absorb-or-stop
+// discipline (Story 2.3, ./migrate-v1.mjs); the raw store never mutates a
+// schema it does not own. The schema-v2 DDL builders below are exported for
+// that migration alone, so both paths build byte-identical tables. Every error
+// code is a member of PUBLIC_ERRORS or INTERNAL_ERROR_CODES, both declared in
+// ../constants.mjs: public codes for caller-facing outcomes, internal codes
+// for invariants that are not wire-visible.
 
 import {
   chmodSync,
@@ -325,11 +329,11 @@ function fingerprintCheck(column) {
 }
 
 // The rooms table DDL, parameterized by table name so the nullable-creator
-// convergence rebuild (ensureNullableRoomCreator) shares one definition with
-// createSchema. created_by_fingerprint is NULLABLE: the implicit Broadcast
-// Room exists before any Actor enrolls and must never carry a fabricated
-// creator identity.
-function roomsTableDdl(tableName) {
+// convergence rebuild (ensureNullableRoomCreator), the fresh-schema path, and
+// the v1→v2 migration (migrate-v1.mjs) share one definition. created_by_
+// fingerprint is NULLABLE: the implicit Broadcast Room exists before any Actor
+// enrolls and must never carry a fabricated creator identity.
+export function roomsTableDdl(tableName) {
   return `
     CREATE TABLE ${tableName} (
       id TEXT PRIMARY KEY,
@@ -348,6 +352,86 @@ function roomsTableDdl(tableName) {
   `
 }
 
+// The durable log DDL, parameterized by table name for the same three
+// consumers (fresh schema, nullable-creator rebuild, v1 migration). The
+// composite primary key is what makes reply targets room-local, and the
+// self-referential FK is why the migration must copy replies after (or in the
+// ordered company of) their targets.
+export function messagesTableDdl(tableName) {
+  return `
+    -- The durable log: keyed (room_id, seq), room-local contiguous
+    -- sequences from 1, and no mutation path of any kind.
+    CREATE TABLE ${tableName} (
+      room_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE RESTRICT,
+      seq INTEGER NOT NULL,
+      actor_fingerprint TEXT NOT NULL,
+      chat_id TEXT NOT NULL,
+      client_message_id TEXT NOT NULL,
+      text TEXT NOT NULL,
+      reply_to_seq INTEGER,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (room_id, seq),
+      UNIQUE (room_id, actor_fingerprint, client_message_id),
+      FOREIGN KEY (room_id, reply_to_seq)
+        REFERENCES messages(room_id, seq) ON DELETE RESTRICT,
+      CHECK (seq >= 1),
+      CHECK (reply_to_seq IS NULL OR reply_to_seq >= 1),
+      ${fingerprintCheck('actor_fingerprint')},
+      CHECK (length(chat_id) BETWEEN 1 AND ${CHAT_ID_MAX}),
+      CHECK (length(client_message_id) BETWEEN 1 AND ${CLIENT_MESSAGE_ID_MAX}),
+      CHECK (length(text) BETWEEN 1 AND ${MESSAGE_TEXT_MAX})
+    ) STRICT;
+  `
+}
+
+// Broadcast membership is implicit (AD-14), so this table holds rows ONLY for
+// direct rooms; broadcast append/read needs no membership row.
+export function directMembersTableDdl() {
+  return `
+    CREATE TABLE direct_members (
+      room_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE RESTRICT,
+      actor_fingerprint TEXT NOT NULL,
+      joined_at TEXT NOT NULL,
+      PRIMARY KEY (room_id, actor_fingerprint),
+      ${fingerprintCheck('actor_fingerprint')}
+    ) STRICT;
+  `
+}
+
+// The realms singleton DDL: at-most-one-realm invariant at the schema level
+// (AD-14: one process = one realm). The IF NOT EXISTS form belongs to the
+// additive open-path convergence (ensureRealmTable); the migration's
+// in-transaction creation uses the plain form so a squatter table of the same
+// name on a foreign file fails the migration instead of being adopted.
+export function realmsTableDdl({ ifNotExists = false } = {}) {
+  return `
+    CREATE TABLE ${ifNotExists ? 'IF NOT EXISTS ' : ''}realms (
+      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+      realm_id TEXT NOT NULL UNIQUE,
+      created_at TEXT NOT NULL
+    ) STRICT;
+  `
+}
+
+// The durable chat_id_claims index DDL (Story 1.5): one row per (normalized
+// chat id, actor fingerprint) pair. The IF NOT EXISTS flag follows the same
+// plain-for-migration / additive-for-open split as realmsTableDdl.
+export function chatIdClaimsTableDdl({ ifNotExists = false } = {}) {
+  return `
+    CREATE TABLE ${ifNotExists ? 'IF NOT EXISTS ' : ''}chat_id_claims (
+      chat_id_normalized TEXT NOT NULL,
+      actor_fingerprint TEXT NOT NULL,
+      chat_id_display TEXT NOT NULL,
+      last_seen_at TEXT NOT NULL,
+      PRIMARY KEY (chat_id_normalized, actor_fingerprint),
+      ${fingerprintCheck('actor_fingerprint')},
+      CHECK (length(chat_id_normalized) BETWEEN 1 AND ${CHAT_ID_MAX}),
+      CHECK (length(chat_id_display) BETWEEN 1 AND ${CHAT_ID_MAX}),
+      CHECK (chat_id_normalized = lower(chat_id_display))
+    ) STRICT;
+  `
+}
+
 function createSchema(database) {
   withImmediateTransaction(database, () => {
     // Re-read inside the write transaction: a concurrent opener may have
@@ -358,46 +442,16 @@ function createSchema(database) {
     if (current !== 0) {
       fail(
         'database_schema_unsupported',
-        `database schema ${current} is not supported; expected ${ROOM_LOG_SCHEMA_VERSION} (migration is not supported by this store)`,
+        `database schema ${current} is not supported; expected ${ROOM_LOG_SCHEMA_VERSION} (the one-time v1→v2 migration runs at server startup, never on this raw store path)`,
       )
     }
 
     database.exec(`
       ${roomsTableDdl('rooms')}
 
-      -- Membership rows exist ONLY for direct rooms; broadcast membership is
-      -- implicit (AD-14), so broadcast append/read needs no membership row.
-      CREATE TABLE direct_members (
-        room_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE RESTRICT,
-        actor_fingerprint TEXT NOT NULL,
-        joined_at TEXT NOT NULL,
-        PRIMARY KEY (room_id, actor_fingerprint),
-        ${fingerprintCheck('actor_fingerprint')}
-      ) STRICT;
+      ${directMembersTableDdl()}
 
-      -- The durable log: keyed (room_id, seq), room-local contiguous
-      -- sequences from 1, and no mutation path of any kind. The composite
-      -- primary key is what makes reply targets room-local.
-      CREATE TABLE messages (
-        room_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE RESTRICT,
-        seq INTEGER NOT NULL,
-        actor_fingerprint TEXT NOT NULL,
-        chat_id TEXT NOT NULL,
-        client_message_id TEXT NOT NULL,
-        text TEXT NOT NULL,
-        reply_to_seq INTEGER,
-        created_at TEXT NOT NULL,
-        PRIMARY KEY (room_id, seq),
-        UNIQUE (room_id, actor_fingerprint, client_message_id),
-        FOREIGN KEY (room_id, reply_to_seq)
-          REFERENCES messages(room_id, seq) ON DELETE RESTRICT,
-        CHECK (seq >= 1),
-        CHECK (reply_to_seq IS NULL OR reply_to_seq >= 1),
-        ${fingerprintCheck('actor_fingerprint')},
-        CHECK (length(chat_id) BETWEEN 1 AND ${CHAT_ID_MAX}),
-        CHECK (length(client_message_id) BETWEEN 1 AND ${CLIENT_MESSAGE_ID_MAX}),
-        CHECK (length(text) BETWEEN 1 AND ${MESSAGE_TEXT_MAX})
-      ) STRICT;
+      ${messagesTableDdl('messages')}
 
       PRAGMA user_version = ${ROOM_LOG_SCHEMA_VERSION};
     `)
@@ -431,7 +485,7 @@ function probeSchemaVersion(database) {
     if (version !== 0) {
       fail(
         'database_schema_unsupported',
-        `database schema ${version} is not supported; expected ${ROOM_LOG_SCHEMA_VERSION} (migration is not supported by this store)`,
+        `database schema ${version} is not supported; expected ${ROOM_LOG_SCHEMA_VERSION} (the one-time v1→v2 migration runs at server startup, never on this raw store path)`,
       )
     }
     let applicationTables
@@ -517,13 +571,7 @@ function verifyStrictTables(database) {
 // open, and the singleton PRIMARY KEY enforces the at-most-one-realm
 // invariant at the schema level (AD-14: one process = one realm).
 function ensureRealmTable(database) {
-  database.exec(`
-    CREATE TABLE IF NOT EXISTS realms (
-      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-      realm_id TEXT NOT NULL UNIQUE,
-      created_at TEXT NOT NULL
-    ) STRICT;
-  `)
+  database.exec(realmsTableDdl({ ifNotExists: true }))
 }
 
 // Story 1.3 review fix (additive, no schema-version bump): the implicit
@@ -575,19 +623,7 @@ function ensureNullableRoomCreator(database) {
 // normalized form is the ASCII-lowercased display form, which the grammar's
 // character class makes exact.
 function ensureChatIdClaimsTable(database) {
-  database.exec(`
-    CREATE TABLE IF NOT EXISTS chat_id_claims (
-      chat_id_normalized TEXT NOT NULL,
-      actor_fingerprint TEXT NOT NULL,
-      chat_id_display TEXT NOT NULL,
-      last_seen_at TEXT NOT NULL,
-      PRIMARY KEY (chat_id_normalized, actor_fingerprint),
-      ${fingerprintCheck('actor_fingerprint')},
-      CHECK (length(chat_id_normalized) BETWEEN 1 AND ${CHAT_ID_MAX}),
-      CHECK (length(chat_id_display) BETWEEN 1 AND ${CHAT_ID_MAX}),
-      CHECK (chat_id_normalized = lower(chat_id_display))
-    ) STRICT;
-  `)
+  database.exec(chatIdClaimsTableDdl({ ifNotExists: true }))
 }
 
 // Story 1.6 (additive, no schema-version bump): the offline-recently read

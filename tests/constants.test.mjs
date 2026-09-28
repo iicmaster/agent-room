@@ -25,6 +25,7 @@ import {
   KEYPAIR_FILE_MAX_BYTES,
   LOCAL_TOKEN_MAX_BYTES,
   MESSAGE_TEXT_MAX,
+  MIGRATION_DAEMON_SETTLE_MS,
   OFFLINE_RECENT_SECONDS,
   OFFLINE_RECENTLY_WINDOW_MS,
   PRESENCE_HEARTBEAT_JITTER,
@@ -394,6 +395,11 @@ test('schema-v2 store internals are declared once and distinct from reconnect ba
   assert.equal(STORE_OPEN_BUSY_RETRY_LIMIT, 8)
   assert.equal(STORE_OPEN_BUSY_BACKOFF_MS, 25)
   assert.equal(ROOM_ID_ENTROPY_BYTES, 16)
+  // Story 2.3: the migration's bounded settle window for a recorded live
+  // daemon's /health answer; the stop escalation reuses
+  // SERVER_CHILD_REAP_TIMEOUT_MS (identical wait-for-exit semantic).
+  assert.equal(MIGRATION_DAEMON_SETTLE_MS, 2_000)
+  assert.equal(MIGRATION_DAEMON_SETTLE_MS, SERVER_CHILD_REAP_TIMEOUT_MS)
   // Separate knobs from the public RECONNECT_BACKOFF_* pair: the store's
   // synchronous open retry and client reconnect backoff never share values.
   assert.notEqual(STORE_OPEN_BUSY_RETRY_LIMIT, RECONNECT_BACKOFF_MAX_SECONDS)
