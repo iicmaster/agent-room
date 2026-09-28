@@ -42,7 +42,13 @@ export const ROUTE_TABLE = Object.freeze([
   // claims index when include_offline is set (query allowlist: this one
   // boolean flag; anything else is rejected, never ignored).
   Object.freeze({ method: 'GET', path: '/api/presence', class: 'actor', implemented: true, requestFields: Object.freeze(['include_offline']) }),
-  Object.freeze({ method: 'GET', path: '/api/rooms', class: 'actor', requestFields: Object.freeze([]) }),
+  // Story 2.2: the enumeration read is live — one row per room the reading
+  // Actor belongs to: the Broadcast Room with its implicit AD-14 membership
+  // plus every Direct Room whose direct_members row names the Actor, in the
+  // store's deterministic created-then-id order, each projected to exactly
+  // {room_id, kind}. It takes no request fields at all: any query key is an
+  // unknown_field rejection.
+  Object.freeze({ method: 'GET', path: '/api/rooms', class: 'actor', implemented: true, requestFields: Object.freeze([]) }),
   // Story 1.7: the direct-open and conversation surface is live (handlers in
   // server.mjs). POST /api/rooms/direct resolves the chat id through the
   // durable claims index — zero claims answer chat_id_not_found, several
@@ -97,7 +103,9 @@ export const ROUTE_TABLE = Object.freeze([
 // presence row fields chat_id and client_type to the responses, and the
 // Story 1.7 amendment adds candidates to the responses (the optional
 // candidate list the ambiguous_chat_id error carries for target_fingerprint
-// disambiguation — never a guess).
+// disambiguation — never a guess), and the Story 2.2 amendment adds rooms
+// (the enumeration list GET /api/rooms returns — one row per room the reading
+// Actor belongs to, each carrying the room id and kind).
 export const REQUEST_FIELD_VOCABULARY = Object.freeze([
   'chat_id',
   'client_message_id',
@@ -136,6 +144,7 @@ export const RESPONSE_FIELD_VOCABULARY = Object.freeze([
   'chat_id',
   'client_type',
   'candidates',
+  'rooms',
 ])
 
 // Matching: specific patterns first, wildcard (`/viewer/` + static assets)

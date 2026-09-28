@@ -191,6 +191,33 @@ function implementationAllowlist(specText: string, specPath: string, story: stri
   allowlist.add(normalizeScopePath(specPath));
   allowlist.add(`docs/implementation/reviews/story-${story}-luna-brief.md`);
   allowlist.add(`docs/implementation/reviews/story-${story}-luna-gpt6.md`);
+  // Escalation addendum: when a blocked implementer escalates and the operator
+  // authorizes paths the spec's verification list omitted (a spec
+  // under-specification, e.g. pre-existing test pins that the mandated route
+  // retires), the authorization is recorded in
+  // .escalation-addendum-<story>.json — {"paths":[...],"reason":"..."} — and
+  // merged here. The record, not the operator's memory, is what the scope
+  // guard reads.
+  const addendumPath = `docs/implementation/workflows/.escalation-addendum-${story}.json`;
+  const addendumText = await files.read(addendumPath).catch(() => "");
+  if (addendumText.trim() !== "") {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(addendumText);
+    } catch {
+      throw new Error(`${addendumPath} is not valid JSON — fix or delete it before the scope check`);
+    }
+    const paths = (parsed as { paths?: unknown }).paths;
+    if (!Array.isArray(paths) || paths.some(path => typeof path !== "string")) {
+      throw new Error(`${addendumPath} must carry {"paths": ["<workspace-relative path>", ...]}`);
+    }
+    for (const path of paths) {
+      if (typeof path === "string" && path.startsWith("docs/implementation/workflows/")) {
+        throw new Error(`${addendumPath}: the pipeline's own files never need an escalation`);
+      }
+      if (typeof path === "string") allowlist.add(normalizeScopePath(path));
+    }
+  }
   return allowlist;
 }
 

@@ -24,6 +24,18 @@
 // a coded conflict — never a duplicate row. Any real HTTP response is a KNOWN
 // outcome and never retried.
 //
+// Reconnect discipline (Story 2.2, FR-12): a transport-unreachable
+// ECONNREFUSED (outcome unknown — the recorded server is gone) runs a bounded
+// backoff inside the same call. The first attempt stays immediate, so a
+// server that already came back (a restart on a new port, re-resolved
+// through runtime.json) recovers without any wait. On failure the waits
+// escalate 1 s→60 s with jitter; each wait is sliced by a read-only health
+// probe of the recorded server, and a detected agent-room answer permits an
+// immediate re-resolving, re-authenticating attempt. After the capped wait's
+// attempt fails, the last real error surfaces — the tool call always
+// terminates, and the session-level retry cadence emerges from the agent's
+// repeated tool calls.
+//
 // Coded errors surface as AgentRoomRuntimeError carrying the wire code (and,
 // for ambiguous_chat_id, the candidates list from the error envelope).
 
@@ -38,19 +50,59 @@ import {
   MCP_CLIENT_TYPE,
   PROTOCOL_HEADER,
   PROTOCOL_VERSION,
+  RECONNECT_BACKOFF_JITTER,
+  RECONNECT_BACKOFF_MAX_SECONDS,
+  RECONNECT_BACKOFF_MIN_SECONDS,
+  RECONNECT_RECOVERY_PROBE_MS,
   UNTRUSTED_ENVELOPE_VERSION,
 } from '../constants.mjs'
 import {
   AgentRoomRuntimeError,
   readJsonFile,
+  runtimeRecordPath,
   sharedDataDirectory,
   instanceDataDirectory,
 } from '../runtime.mjs'
 import { loadOrCreateKeypair } from '../keys.mjs'
 import { loadOrCreateLocalToken } from '../api/local-token.mjs'
-import { ensureServer } from './ensure-server.mjs'
+import { ensureServer, probeHealth } from './ensure-server.mjs'
 
 const OK_STATUS = 200
+
+const defaultReconnectSleep = ms => new Promise(resolvePromise => {
+  setTimeout(resolvePromise, ms)
+})
+
+// The reconnect schedule's base (FR-12): doubling from
+// RECONNECT_BACKOFF_MIN_SECONDS×1000, capped at
+// RECONNECT_BACKOFF_MAX_SECONDS×1000 — exactly [1, 2, 4, 8, 16, 32, 60]
+// seconds at the declared constants, then flat. Module-private: the exported
+// reconnectDelayMs jitters around it, and the client's reconnect loop derives
+// its bound from it (the loop stops when the schedule stops escalating), so
+// the shape is stated once.
+function reconnectBaseDelayMs(retry) {
+  return Math.min(
+    RECONNECT_BACKOFF_MIN_SECONDS * 1000 * 2 ** (retry - 1),
+    RECONNECT_BACKOFF_MAX_SECONDS * 1000,
+  )
+}
+
+// The pure reconnect backoff delay for one retry (1-based): the schedule's
+// base for that retry, uniformly jittered within
+// ±RECONNECT_BACKOFF_JITTER of the base and rounded to a whole millisecond.
+// `random` is injectable (the client factory's reconnectRandom seam):
+// () => 0 yields the low bound, () => 1 the high bound, () => 0.5 the bare
+// base.
+export function reconnectDelayMs(retry, { random = Math.random } = {}) {
+  if (!Number.isSafeInteger(retry) || retry < 1) {
+    throw new AgentRoomRuntimeError('invalid_argument', 'retry must be a positive safe integer')
+  }
+  if (typeof random !== 'function') {
+    throw new AgentRoomRuntimeError('invalid_argument', 'random must be a function')
+  }
+  const base = reconnectBaseDelayMs(retry)
+  return Math.round(base * (1 - RECONNECT_BACKOFF_JITTER) + random() * base * 2 * RECONNECT_BACKOFF_JITTER)
+}
 
 // The first-run configuration file (written by the one-time `agent-room
 // setup` command, Story 1.7c): a bounded regular file in PLUGIN_DATA holding
@@ -228,17 +280,33 @@ export function applyUntrustedEnvelope(page, localFingerprint) {
 
 // One installation's client. Options exist for tests: dataDir/pluginDataDir
 // override the shared and instance directories, waitMs bounds the bootstrap,
-// requestTimeoutMs the default round trip. No caller input ever carries a
-// credential or an identity: the token file, the keypair, and the configured
-// Chat ID all come from this installation's own state.
+// requestTimeoutMs the default round trip, and — Story 2.2 — the reconnect
+// loop's clock and probe are injectable seams (reconnectSleep, the awaited
+// ms-per-slice; reconnectRandom, the schedule's jitter source; reconnectProbe,
+// the async {reachable, agentRoom} recovery check), each defaulting to the
+// real behavior. No caller input ever carries a credential or an identity:
+// the token file, the keypair, and the configured Chat ID all come from this
+// installation's own state.
 export function createAgentRoomClient({
   dataDir = sharedDataDirectory(),
   pluginDataDir = instanceDataDirectory(),
   waitMs,
   requestTimeoutMs = CLIENT_REQUEST_TIMEOUT_MS,
+  reconnectSleep = defaultReconnectSleep,
+  reconnectRandom = Math.random,
+  reconnectProbe,
 } = {}) {
   if (!Number.isInteger(requestTimeoutMs) || requestTimeoutMs <= 0) {
     throw new AgentRoomRuntimeError('invalid_argument', 'requestTimeoutMs must be a positive integer')
+  }
+  if (typeof reconnectSleep !== 'function') {
+    throw new AgentRoomRuntimeError('invalid_argument', 'reconnectSleep must be a function')
+  }
+  if (typeof reconnectRandom !== 'function') {
+    throw new AgentRoomRuntimeError('invalid_argument', 'reconnectRandom must be a function')
+  }
+  if (reconnectProbe !== undefined && typeof reconnectProbe !== 'function') {
+    throw new AgentRoomRuntimeError('invalid_argument', 'reconnectProbe must be a function')
   }
 
   const config = loadChatIdConfig(pluginDataDir)
@@ -324,14 +392,101 @@ export function createAgentRoomClient({
     return response.body.result
   }
 
-  // The actor path: ensure the session, run the call, and recover exactly
-  // once from the two recoverable failures —
+  // The real recovery probe (the reconnectProbe seam's default): read-only,
+  // exactly the two inputs the substrate's staleness rules trust — the
+  // runtime record's recorded port and the bounded GET /health probe. An
+  // absent, unreadable, or malformed record is "not recovered", never a boot
+  // trigger: detection reads, it never writes, reclaims, or boots — booting
+  // stays ensureServer's job on the attempt itself. Only a genuine agent-room
+  // answer counts as detected recovery; reachable-but-foreign keeps waiting.
+  async function probeRecordedServer() {
+    let record = null
+    try {
+      record = readJsonFile(runtimeRecordPath(dataDir))
+    } catch {
+      return { reachable: false, agentRoom: false }
+    }
+    const recordedPort = record?.port
+    if (!Number.isInteger(recordedPort) || recordedPort <= 0 || recordedPort > 65535) {
+      return { reachable: false, agentRoom: false }
+    }
+    return probeHealth(recordedPort)
+  }
+
+  const recoveryProbe = reconnectProbe ?? probeRecordedServer
+
+  // One backoff wait, sliced at RECONNECT_RECOVERY_PROBE_MS: before each
+  // slice the recorded server's health is probed, and only a detected
+  // agent-room answer cuts the wait short so the next attempt fires
+  // immediately. A cancelled call stays cancelled: the abort signal ends the
+  // wait with the transport layer's cancellation shape.
+  async function reconnectWait(totalMs, signal) {
+    let remaining = totalMs
+    for (;;) {
+      if (signal?.aborted) throw unknownOutcomeError('request cancelled')
+      const probe = await recoveryProbe()
+      if (probe?.agentRoom === true) return true
+      if (remaining <= 0) return false
+      const slice = Math.min(RECONNECT_RECOVERY_PROBE_MS, remaining)
+      await reconnectSleep(slice)
+      remaining -= slice
+    }
+  }
+
+  // The bounded reconnect loop (Story 2.2, FR-12): the trigger is exactly the
+  // transport-unreachable ECONNREFUSED branch, and the FIRST attempt was the
+  // immediate one that just failed — no wait precedes it, so a server that
+  // already recovered still resolves on that attempt's semantics. Each wait
+  // escalates through the schedule (the delays double from
+  // RECONNECT_BACKOFF_MIN_SECONDS until they reach the
+  // RECONNECT_BACKOFF_MAX_SECONDS cap — seven waits at the declared constants
+  // — and the loop is bounded by the schedule itself: it stops when the base
+  // stops escalating). A detected recovery drops the cached attach so the
+  // next attempt re-resolves runtime.json and re-authenticates; an
+  // un-detected one retries the recorded server as-is, which keeps the port
+  // (and the store it names) untouched. Only another transport-unreachable
+  // ECONNREFUSED continues the loop — any other failure surfaces as-is — and
+  // after the capped wait's attempt fails, the last real error surfaces: the
+  // tool call always terminates, and the session-level retry cadence emerges
+  // from the agent's repeated tool calls.
+  async function reconnect(method, path, options, firstError) {
+    let lastError = firstError
+    for (let retry = 1, previousBase = 0; ; retry += 1) {
+      const base = reconnectBaseDelayMs(retry)
+      if (base === previousBase) throw lastError
+      previousBase = base
+      const recovered = await reconnectWait(
+        reconnectDelayMs(retry, { random: reconnectRandom }),
+        options.signal,
+      )
+      if (options.signal?.aborted) throw unknownOutcomeError('request cancelled')
+      if (recovered) {
+        port = null
+        sessionToken = null
+        ensurePromise = null
+      }
+      await ensure()
+      try {
+        return await rawRequest(method, path, options)
+      } catch (error) {
+        lastError = error
+        if (!(error instanceof AgentRoomRuntimeError)
+          || error.outcomeUnknown !== true
+          || error.transportCode !== 'ECONNREFUSED') {
+          throw error
+        }
+      }
+    }
+  }
+
+  // The actor path: ensure the session, run the call, and recover from the
+  // recoverable failures —
   //   401            → one single-flight re-auth (concurrent 401s coalesce
   //                    into one exchange) before one retry;
-  //   ECONNREFUSED   → the recorded server is gone (a restart on a new port):
-  //                    drop the cached port and token, re-resolve
-  //                    runtime.json through ensureServer, re-authenticate,
-  //                    and retry once.
+  //   ECONNREFUSED   → the recorded server is unreachable: the bounded
+  //                    reconnect loop above (first attempt immediate, then
+  //                    the 1 s→60 s schedule, probe-interruptible waits,
+  //                    last real error surfaced).
   // Any other failure surfaces as-is.
   async function request(method, path, options = {}) {
     await ensure()
@@ -340,11 +495,7 @@ export function createAgentRoomClient({
     } catch (error) {
       if (!(error instanceof AgentRoomRuntimeError)) throw error
       if (error.outcomeUnknown === true && error.transportCode === 'ECONNREFUSED') {
-        port = null
-        sessionToken = null
-        ensurePromise = null
-        await ensure()
-        return await rawRequest(method, path, options)
+        return reconnect(method, path, options, error)
       }
       if (error.code !== 'unauthorized') throw error
       reauthPromise ??= authenticate().finally(() => { reauthPromise = null })
@@ -380,6 +531,15 @@ export function createAgentRoomClient({
     // GET /api/presence — who is addressable (optionally offline-recently).
     presence({ includeOffline = false, signal } = {}) {
       return request('GET', `/api/presence${includeOffline ? '?include_offline=true' : ''}`, { signal })
+    },
+
+    // GET /api/rooms — the returning session's enumeration (Story 2.2): one
+    // row per room this Actor belongs to — the Broadcast Room implicitly plus
+    // every Direct Room whose membership row names it — so DMs opened in the
+    // client's absence are discovered without prior knowledge. Rows carry
+    // exactly {room_id, kind}.
+    listRooms({ signal } = {}) {
+      return request('GET', '/api/rooms', { signal })
     },
 
     // POST /api/rooms/direct — open-or-create the pair room; ambiguous_chat_id

@@ -38,8 +38,10 @@ import {
   PUBLIC_ERROR_STATUS,
   READ_HOLD_MAX_MS,
   READ_PAGE_MAX,
+  RECONNECT_BACKOFF_JITTER,
   RECONNECT_BACKOFF_MAX_SECONDS,
   RECONNECT_BACKOFF_MIN_SECONDS,
+  RECONNECT_RECOVERY_PROBE_MS,
   REQUEST_BUDGET_BURST,
   REQUEST_BUDGET_PER_MINUTE,
   ROOM_ID_ENTROPY_BYTES,
@@ -138,6 +140,11 @@ test('AD-9 limits are owned once with their ratified values', () => {
   assert.equal(STORAGE_REFUSE_FREE_BYTES, 256 * 1024 ** 2)
   assert.equal(RECONNECT_BACKOFF_MIN_SECONDS, 1)
   assert.equal(RECONNECT_BACKOFF_MAX_SECONDS, 60)
+  // Story 2.2: the schedule's jitter fraction and the recovery-probe cadence
+  // join the backoff pair they pace (FR-12's 1 s→60 s with jitter and the
+  // immediate attempt on detected recovery).
+  assert.equal(RECONNECT_BACKOFF_JITTER, 0.1)
+  assert.equal(RECONNECT_RECOVERY_PROBE_MS, 250)
   assert.equal(HELD_CACHE_MAX, 100)
   assert.equal(OFFLINE_RECENT_SECONDS, 24 * 60 * 60)
   assert.equal(VIEWER_FRESHNESS_SECONDS, 5)

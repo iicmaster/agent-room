@@ -562,7 +562,7 @@ test('readLocalToken maps every file failure to local_token_invalid and re-tight
   assert.equal(lstatSync(path).mode & 0o777, 0o600, 'the mode was re-tightened on the accepted read')
 })
 
-test('a session token authenticates actor routes; unregistered routes 404 after the gate', async t => {
+test('a session token authenticates actor routes; the anonymous request is refused', async t => {
   const dataDir = makeDataDir(t)
   const { waitReady, stop } = spawnServerChild(t, dataDir)
   const record = await waitReady()
@@ -570,15 +570,18 @@ test('a session token authenticates actor routes; unregistered routes 404 after 
   const auth = await exchange(record.port, installation(), localToken)
   const sessionToken = auth.json().result.session_token
 
-  // The real verifier accepts: the request passes the auth stage and reaches
-  // the (still unregistered) route position — 404 route_not_found, never 401.
-  // (GET /api/status went live in Story 1.6; the probe uses GET /api/rooms
-  // until its story lands.)
+  // The real verifier accepts: the request passes the auth stage and the
+  // route answers — 200, never 401. (Every actor-class route is live now —
+  // /api/status since Story 1.6 and /api/rooms since Story 2.2 — so the
+  // probe rides the live enumeration instead of a 404 unregistered probe.)
   const status = await request(record.port, 'GET', '/api/rooms', {
     headers: { [PROTOCOL_KEY]: '1', authorization: `Bearer ${sessionToken}` },
   })
-  assert.equal(status.status, 404)
-  assert.equal(status.json().error.code, 'route_not_found')
+  assert.equal(status.status, 200)
+  assert.equal(status.json().ok, true)
+  const rooms = status.json().result.rooms
+  assert.equal(rooms.length, 1, 'the fresh realm enumerates exactly the Broadcast Room')
+  assert.equal(rooms[0].kind, 'broadcast')
 
   // Contrast: without a credential the same route answers 401.
   const anonymous = await request(record.port, 'GET', '/api/rooms', {
@@ -663,13 +666,15 @@ test('an injected sessionRegistry and the default verifier stay one coherent pai
     assert.deepEqual(registry.verify(sessionToken), { actorFingerprint: identity.fingerprint })
 
     // ...and the default session verifier reads the same registry: the
-    // session authenticates an actor route (404 after the gate, never 401;
-    // GET /api/rooms is still unregistered — /api/status went live in 1.6).
+    // session authenticates an actor route — the enumeration answers 200
+    // (never 401; /api/status went live in 1.6 and /api/rooms in Story 2.2,
+    // when the last actor-class route stopped being an unregistered probe
+    // target).
     const { result: outcome, chunks } = await captureStderr(() => request(server.port, 'GET', '/api/rooms', {
       headers: { [PROTOCOL_KEY]: '1', authorization: `Bearer ${sessionToken}` },
     }))
-    assert.equal(outcome.status, 404)
-    assert.equal(outcome.json().error.code, 'route_not_found')
+    assert.equal(outcome.status, 200)
+    assert.equal(outcome.json().ok, true)
 
     // Nothing on stderr carries any credential.
     const stderr = chunks.join('')

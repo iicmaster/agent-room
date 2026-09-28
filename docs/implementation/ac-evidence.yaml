@@ -197,10 +197,52 @@
 
   2.2:                       # Reconnection & room discovery (3 criteria)
     note: >-
-      TODO — not started. The sweep fails on this entry until the story runs.
+      Proves the returning-session contract over real spawned servers and
+      real clients: the enumeration (GET /api/rooms, Story 2.2's spine
+      amendment) lists the Broadcast Room first and the Actor's Direct Rooms
+      in the store's deterministic created-then-id order, projected to exactly
+      {room_id, kind} and byte-matching the store's rows; a DM opened in the
+      client's absence is discovered with no prior knowledge and immediately
+      readable; third-party DMs never appear while a same-Actor DM does; the
+      reconnecting client re-authenticates through the local token exchange
+      and re-claims (or re-picks) its Chat ID across a real restart with the
+      durable claim row advancing, never backward; catch-up rides the real
+      MCP adapter's persisted cursor in bounded pages that tile
+      [cursor+1 … head] exactly once, absorb traffic arriving between pages,
+      and never let an explicit low page regress the durable cursor; and the
+      reconnect backoff escalates 1 s→60 s with jitter inside one call —
+      seven waits at the declared constants against a really-killed server,
+      surfacing the last real transport error — while a detected agent-room
+      recovery cuts a wait for an immediate re-authenticating attempt and the
+      Story 1.7 first-immediate-attempt recovery survives with zero backoff
+      waits. Does NOT prove the v0.1→v0.2 migration and its cursor reset
+      (Story 2.3), soak/FD endurance or the 100-cycle connection churn
+      (Story 2.4), in-flight send resolution under randomized kills
+      (Story 2.5), or remote Ed25519 re-authentication (Story 4.1). The
+      enumeration's privacy is proven at the wire for the tested rows, not by
+      an exhaustive ACL audit; the backoff waits are paced by injected seams,
+      so no test sleeps for real seconds.
     evidence:
-      - test: "TODO exact test name"
-        file: "tests/example.test.mjs"
+      - test: "enumeration: the returning session lists the Broadcast Room first, then its DMs in creation order, exactly {room_id, kind}"
+        file: "tests/reconnection.test.mjs"
+      - test: "enumeration: a DM opened while the client was away is discovered and immediately readable"
+        file: "tests/reconnection.test.mjs"
+      - test: "enumeration: third-party DMs never appear; the same-Actor DM does"
+        file: "tests/reconnection.test.mjs"
+      - test: "reconnection: after a restart the fresh client re-authenticates locally and re-claims the same Chat ID"
+        file: "tests/reconnection.test.mjs"
+      - test: "reconnection: re-picking binds the new name while the old durable claim row stays"
+        file: "tests/reconnection.test.mjs"
+      - test: "catch-up: bounded pages tile [cursor+1 … head] exactly once and stop at head-at-read-time"
+        file: "tests/reconnection.test.mjs"
+      - test: "cursor discipline: an explicit low page during catch-up re-reads history but never regresses the durable cursor"
+        file: "tests/reconnection.test.mjs"
+      - test: "backoff loop: a dead recorded connection escalates through the full schedule in one call and surfaces the last real error"
+        file: "tests/reconnection.test.mjs"
+      - test: "backoff loop: a detected agent-room recovery cuts the first wait and the immediate retry re-authenticates and succeeds"
+        file: "tests/reconnection.test.mjs"
+      - test: "existing single-recovery preserved: a restart on a new port recovers on the immediate first attempt with zero backoff waits"
+        file: "tests/reconnection.test.mjs"
 
   2.3:                       # The v0.1→v0.2 migration (one-time) (3 criteria)
     note: >-

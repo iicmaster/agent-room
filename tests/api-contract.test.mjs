@@ -221,15 +221,17 @@ test('the implemented mark covers exactly the live frozen routes', () => {
   // asserts every marked route has a registered handler and vice versa).
   // GET /health went live in Story 1.3, POST /api/auth/local in 1.4, the
   // session connect surface (POST/PATCH/DELETE /api/session) in 1.5, the
-  // presence + status reads (GET /api/presence, GET /api/status) in 1.6, and
-  // the conversation surface (POST /api/rooms/direct and the messages pair)
-  // in 1.7; 1.8 extends additively.
+  // presence + status reads (GET /api/presence, GET /api/status) in 1.6, the
+  // conversation surface (POST /api/rooms/direct and the messages pair) in
+  // 1.7, and the enumeration read (GET /api/rooms) in Story 2.2; later
+  // stories extend additively.
   const implemented = ROUTE_TABLE.filter(route => route.implemented === true)
   assert.deepEqual(implemented.map(routeKey), [
     'POST /api/session',
     'PATCH /api/session',
     'DELETE /api/session',
     'GET /api/presence',
+    'GET /api/rooms',
     'POST /api/rooms/direct',
     'GET /api/rooms/:id/messages',
     'POST /api/rooms/:id/messages',
@@ -254,6 +256,10 @@ test('the implemented mark covers exactly the live frozen routes', () => {
   const status = ROUTE_TABLE.find(route => routeKey(route) === 'GET /api/status')
   assert.deepEqual([...presence.requestFields], ['include_offline'])
   assert.deepEqual([...status.requestFields], [])
+  // Story 2.2: the enumeration read takes no request fields either — any
+  // query key is an unknown_field rejection, duplicate keys invalid_request.
+  const rooms = ROUTE_TABLE.find(route => routeKey(route) === 'GET /api/rooms')
+  assert.deepEqual([...rooms.requestFields], [])
 })
 
 test('the fixed pipeline order is the AD-7 order', () => {

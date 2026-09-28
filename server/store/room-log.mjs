@@ -1147,6 +1147,30 @@ export function openRoomLog({ dataDir } = {}) {
         return row ? plainRoom(row) : null
       },
 
+      // Story 2.2: the enumeration the returning session's GET /api/rooms
+      // rides. Membership truth is two-shaped by design (AD-14 plus the
+      // review-adversarial H-fix): the Broadcast Room belongs to every Actor
+      // implicitly — listed without consulting direct_members, which holds
+      // rows ONLY for direct rooms — while a Direct Room appears exactly
+      // through the caller's own membership rows, so a room the Actor does
+      // not belong to can never answer (privacy is the query, not a filter).
+      // A same-Actor Direct Room appears too: its single membership row names
+      // the Actor. The deterministic order is findBroadcastRoom's:
+      // created_at ASC, then id ASC. Rows are the store's full shape — the
+      // wire projection is the caller's.
+      listRoomsForActor(actorFingerprint) {
+        assertOpen()
+        const validFingerprint = requireFingerprint(actorFingerprint)
+        const rows = database.prepare(`
+          SELECT id, kind, title, pair_key, created_by_fingerprint, created_at
+          FROM rooms
+          WHERE kind = 'broadcast'
+             OR id IN (SELECT room_id FROM direct_members WHERE actor_fingerprint = ?)
+          ORDER BY created_at ASC, id ASC
+        `).all(validFingerprint)
+        return rows.map(plainRoom)
+      },
+
       // Durable chat id claims (Story 1.5, FR-5/FR-21): one row per
       // (normalized name, actor fingerprint) pair, written on connect and
       // rename and pruned at CLAIMS_TTL_MS. The row set is the

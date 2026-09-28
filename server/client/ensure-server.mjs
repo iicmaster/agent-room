@@ -124,7 +124,10 @@ function assertAttachableVersion(record) {
 // (nothing answered cleanly) from reachable-but-not-agent-room — only a
 // complete, valid, non-agent-room response proves the latter; mid-response
 // socket errors are unreachable (retryable), never proof of foreign.
-function probeHealth(port) {
+// Story 2.2: exported for the api-client's reconnect wait — recovery
+// detection reuses the exact bounded probe the staleness rules trust,
+// read-only (the record plus GET /health, never a boot or a write).
+export function probeHealth(port) {
   return new Promise(resolve => {
     let settled = false
     let overall = null

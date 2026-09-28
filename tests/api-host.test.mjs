@@ -1000,17 +1000,18 @@ test('startup enforces the implemented-flag contract in both directions', async 
   const dataDir = makeDataDir(t)
 
   // A registered handler on a route without the implemented mark fails
-  // startup — a live handler the wire contract does not promise. (GET
-  // /api/status went live in Story 1.6, so the probe uses the still
-  // unregistered GET /api/rooms.)
-  const removeRooms = registerHandler('GET /api/rooms', () => ({}))
+  // startup — a live handler the wire contract does not promise. (Every
+  // actor-class route is live now — /api/status since Story 1.6 and
+  // /api/rooms since Story 2.2 — so the probe rides the still unregistered
+  // POST /api/auth/enroll, which touches no live handler.)
+  const removeEnroll = registerHandler('POST /api/auth/enroll', () => ({}))
   try {
     await assert.rejects(
       () => startServer({ dataDir }),
       error => error?.code === 'invalid_argument' && /not marked implemented/.test(error.message),
     )
   } finally {
-    removeRooms()
+    removeEnroll()
   }
 
   // A marked route without a registered handler fails startup the other way.

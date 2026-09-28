@@ -353,3 +353,19 @@ export const CLIENT_CONFIG_MAX_BYTES = 4096
 // installation's). Same-Actor messages return plain. The schema is frozen
 // from this story forward: later changes are additive with a new version.
 export const UNTRUSTED_ENVELOPE_VERSION = '1'
+
+// --- Story 2.2: reconnection & room discovery ----------------------------------
+
+// FR-12's reconnect backoff completes here: RECONNECT_BACKOFF_MIN_SECONDS and
+// RECONNECT_BACKOFF_MAX_SECONDS (declared since the v0.1 seeding) are at last
+// consumed by the api-client's bounded reconnect schedule, whose base doubles
+// from the minimum and caps at the maximum. The two knobs below pace that
+// schedule. The jitter is the uniform ± fraction around each base delay a
+// return value may move — the schedule stays within
+// [base×(1−RECONNECT_BACKOFF_JITTER), base×(1+RECONNECT_BACKOFF_JITTER)],
+// rounded to whole milliseconds — and the probe cadence is how often a
+// backoff wait polls the recorded server's health (read-only) so a detected
+// agent-room answer cuts the wait and permits an immediate attempt. Declared
+// once here (AD-9); every consumer imports them by name.
+export const RECONNECT_BACKOFF_JITTER = 0.1
+export const RECONNECT_RECOVERY_PROBE_MS = 250

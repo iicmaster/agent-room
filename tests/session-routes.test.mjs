@@ -491,14 +491,16 @@ test('disconnect frees the name immediately while the durable claim row stays', 
   )
 
   // Documented choice: the token is left to expire naturally — it still
-  // authenticates (reaching an unregistered actor route — /api/rooms until
-  // its story lands — 404 after the auth gate, never 401; /api/status itself
-  // went live in Story 1.6), and connecting again re-claims a name.
+  // authenticates (the enumeration route answers 200, never 401; every
+  // actor-class route is live now — /api/status since Story 1.6 and
+  // /api/rooms since Story 2.2 — so the surviving-token probe rides the live
+  // route instead of a 404 unregistered one), and connecting again re-claims
+  // a name.
   const stillAuthenticates = await request(record.port, 'GET', '/api/rooms', {
     headers: { [PROTOCOL_KEY]: '1', authorization: `Bearer ${aliceSession.sessionToken}` },
   })
-  assert.equal(stillAuthenticates.status, 404)
-  assert.equal(stillAuthenticates.json().error.code, 'route_not_found')
+  assert.equal(stillAuthenticates.status, 200)
+  assert.equal(stillAuthenticates.json().ok, true)
   const reconnect = await sessionRequest(record.port, 'POST', aliceSession.sessionToken, { chat_id: 'bob' })
   assert.equal(reconnect.status, 200, reconnect.text)
 

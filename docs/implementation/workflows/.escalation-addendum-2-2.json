@@ -1,0 +1,9 @@
+{
+  "story": "2-2",
+  "authorized_by": "operator answer to escalation dwfq-34df201a-1",
+  "reason": "GET /api/rooms goes live in this story; three pre-existing test files pin it as unregistered 'until its story lands' (their own comments). Minimal purpose-preserving updates were authorized: local-auth (probe asserts 200 on the live route), api-host (implemented-flag probe moves to the still-unmarked POST /api/auth/enroll, fixing an orphan-server hang).",
+  "paths": [
+    "tests/local-auth.test.mjs",
+    "tests/api-host.test.mjs"
+  ]
+}

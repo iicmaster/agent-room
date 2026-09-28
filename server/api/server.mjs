@@ -34,7 +34,14 @@
 // possibly-empty page carrying next_after_seq and head_seq), and
 // POST /api/rooms/:id/messages appends idempotently (status committed, or
 // the coded client_message_id_conflict; the sender attribution always comes
-// from the session token's live Chat ID, never from the caller's hands).
+// from the session token's live Chat ID, never from the caller's hands); and
+// the Story 2.2 enumeration — GET /api/rooms answers {rooms: [{room_id,
+// kind}]}: every room the reading Actor belongs to, the Broadcast Room
+// through its implicit AD-14 membership plus every Direct Room whose
+// direct_members row names the Actor, in the store's deterministic
+// created-then-id order (identity from the token; pair keys embed member
+// fingerprints and titles, creators, and timestamps serve no discovery
+// purpose, so the projection never carries them).
 // Liveness is one mechanism: the actor-class
 // auth stage's sliding TTL refresh and the presence touch are the same event
 // (touch with the 1.5 persist pattern on every authenticated request) — no
@@ -354,6 +361,26 @@ registerHandler('GET /api/status', function status(context) {
     realm_id: context.store.getRealmId(),
     version: APP_VERSION,
     broadcast_room_id: broadcastRoom.id,
+  }
+}, 'actor')
+
+// Story 2.2 registers the frozen GET /api/rooms (actor class): the rooms the
+// reading Actor belongs to. The store's membership query owns both halves of
+// the truth — the Broadcast Room is listed for every Actor without consulting
+// direct_members (implicit AD-14 membership; the review-adversarial H-fix
+// pins that it is listed like any other room), and Direct Rooms appear only
+// through the caller's own membership rows, so a room the Actor does not
+// belong to can never answer. Identity comes only from the session token.
+// The wire projection is deliberately minimal ({room_id, kind}, the same
+// shape directOpen returns): pair_key embeds both member fingerprints, and
+// title, created_by_fingerprint, and created_at serve no discovery purpose —
+// they never leave the store layer.
+registerHandler('GET /api/rooms', function listRooms(context) {
+  const principal = sessionPrincipalOf(context)
+  if (principal.ok === false) return principal
+  const rooms = context.store.listRoomsForActor(principal.actorFingerprint)
+  return {
+    rooms: rooms.map(room => ({ room_id: room.id, kind: room.kind })),
   }
 }, 'actor')
 
