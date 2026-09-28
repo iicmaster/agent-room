@@ -321,10 +321,47 @@
       - test: "a self-sampled tracker run passes assertMemoryPass and refuses to evaluate before sampling"
         file: "tests/harness/leak-tracker.test.mjs"
 
-  2.5:                       # REL-2 kill-drill (blocking gate — ruling Q3)
+  2.5:                       # REL-2 continuity drill *(blocking epic gate — ruling Q3)* (2 criteria)
     note: >-
-      TODO — not started. This one is a blocking gate, so it also needs the
-      workflow's unattended proof before the automation will touch it.
+      Proves the REL-2 drill end to end over real processes, and it is Epic
+      2's exit gate — the epic is not done without it. An external recorder
+      (a separate Node process owning its own ack log under a 0600 file the
+      server never touches) collects every acknowledged
+      (room_id, seq, client_message_id) while two real mcp-stdio children
+      (alice, bob — distinct installations and keypairs) send continuously,
+      alternating the Broadcast Room and the pair DM, through three
+      kill/restore cycles whose kill moments are drawn from a seeded
+      mulberry32 PRNG inside each sampled traffic window (seed logged as a
+      diagnostic; AGENT_ROOM_REL2_SEED replays a failing run); each cycle
+      SIGKILLs the live server child, waits for the port to die, respawns a
+      fresh child on the same data directory, and lets traffic resume. The
+      last cycle is the strike: the server is SIGSTOPed for 250 ms before the
+      SIGKILL, so both clients' next sends hang with the outcome unknown and
+      the Story 1.7 outcome-unknown discipline is exercised by construction.
+      After the final cycle the drill proves: every acknowledged record
+      readable from the server, per-room sequences contiguous from 1 with no
+      gaps (measured runs: ~31k messages per room), the acked-set size equal
+      to the readable-set size (nothing lost, nothing phantom), zero
+      duplicated client_message_id or (room, seq) anywhere, byte-exact
+      payload round-trips in each reader's own view (the foreign side inside
+      the literal v1 untrusted envelope), persisted per-(realm, room) cursors
+      that never re-deliver and land exactly at head with a final empty
+      cursorless read, and every server instance held inside the Story 2.4
+      leak oracles for its whole sampled window (FD counts within ±2 measured
+      of the ±5 corridor, RSS slope −2.5 to +0.5 %/s measured of the 2 %
+      tolerance) after a stabilization warmup burst that keeps the cold
+      allocator's ramp out of the measurement. The drill exposed a real
+      api-client defect and drove its fix: with several calls in flight
+      across a kill, each recovering call reset the shared attach state and
+      re-authenticated, so concurrent binds of the same Chat ID raced on the
+      fresh server, the loser cleared the winner's session token, and the
+      client wedged on chat_id_taken for ~15 s per restart — recovery is now
+      coalesced per attach epoch with single-flight authentication
+      (server/client/api-client.mjs; the 45 reconnection and mcp-tools tests
+      stayed green unchanged). Does NOT prove remote/multi-machine
+      deployment (Epic 4), the multi-hour soak (Story 6.3's REL-3, which
+      reuses the same harness), held-message ingestion across kills
+      (Epic 3), or the rate gates across kills (Story 4.4 — not yet built).
     evidence:
-      - test: "TODO exact test name"
-        file: "tests/example.test.mjs"
+      - test: "REL-2 continuity drill: randomized SIGKILL/restore cycles under continuous traffic lose nothing, duplicate nothing, and keep sequences and cursors valid"
+        file: "tests/drills/rel2-kill-drill.test.mjs"

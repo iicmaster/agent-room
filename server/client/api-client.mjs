@@ -315,8 +315,18 @@ export function createAgentRoomClient({
 
   let port = null
   let sessionToken = null
+  let needsReresolve = false
   let ensurePromise = null
-  let reauthPromise = null
+  let ensureSettled = true
+  let authPromise = null
+  // Bumped every time a re-resolve + re-auth completes, so a call that was
+  // already in flight when the server died can tell whether a concurrent
+  // call has already recovered on its behalf (Story 2.5's drill: with
+  // several calls in flight across a kill, each recovering call must JOIN
+  // the first recovery, never run its own — a second reset would race a
+  // second bind of the same Chat ID against the fresh server, lose it to
+  // the live first session, and wedge the client on chat_id_taken).
+  let attachEpoch = 0
 
   function protocolHeaders(bearer) {
     return {
@@ -361,6 +371,15 @@ export function createAgentRoomClient({
       sessionToken = null
       throw error
     }
+  }
+
+  // One single-flight credential exchange + bind for the whole client: the
+  // ensure/bootstrap path and the 401 re-auth path share it, so two
+  // concurrent calls can never both bind the Chat ID (the loser would surface
+  // chat_id_taken and clear the winner's token).
+  function authenticateOnce() {
+    authPromise ??= authenticate().finally(() => { authPromise = null })
+    return authPromise
   }
 
   function assertCoded(response) {
@@ -452,7 +471,7 @@ export function createAgentRoomClient({
   // failure surfaces as-is, and after the capped wait's attempt fails, the
   // last real error surfaces: the tool call always terminates, and the
   // session-level retry cadence emerges from the agent's repeated tool calls.
-  async function reconnect(method, path, options, firstError) {
+  async function reconnect(method, path, options, firstError, epochAtStart) {
     let lastError = firstError
     for (let retry = 1, previousBase = 0; ; retry += 1) {
       const base = reconnectBaseDelayMs(retry)
@@ -463,10 +482,15 @@ export function createAgentRoomClient({
         options.signal,
       )
       if (options.signal?.aborted) throw unknownOutcomeError('request cancelled')
-      if (recovered) {
-        port = null
+      if (recovered && attachEpoch === epochAtStart) {
+        // This call is the one that owns the recovery: drop the stale attach
+        // so the ensure below re-resolves runtime.json and re-authenticates.
+        // A concurrent call that recovers first bumps attachEpoch; this call
+        // then skips the reset and simply retries on the fresh attach —
+        // never re-running the bind that the live first session already won.
+        needsReresolve = true
         sessionToken = null
-        ensurePromise = null
+        if (ensureSettled) ensurePromise = null
       }
       try {
         await ensure()
@@ -495,7 +519,7 @@ export function createAgentRoomClient({
   // stay immediate, and the schedule — if the first attempt ran it — has
   // already been paid once for this call.
   async function request(method, path, options = {}) {
-    await ensure()
+    const epochAtStart = await ensure()
     try {
       return await rawRequest(method, path, options)
     } catch (error) {
@@ -505,33 +529,47 @@ export function createAgentRoomClient({
         && error.transportCode === 'ECONNREFUSED'
         && options.reconnect !== false
       ) {
-        return reconnect(method, path, options, error)
+        return reconnect(method, path, options, error, epochAtStart)
       }
       if (error.code !== 'unauthorized') throw error
-      reauthPromise ??= authenticate().finally(() => { reauthPromise = null })
-      await reauthPromise
+      await authenticateOnce()
       return await rawRequest(method, path, options)
     }
   }
 
   // Attach-or-boot once per client; a settled failure is forgotten so the
   // next tool call can retry the bootstrap. A cleared token (a failed bind)
-  // re-runs only the authenticate step — the resolved port stays cached.
+  // re-runs only the authenticate step — the resolved port stays cached —
+  // and `needsReresolve` (set by a recovery that observed a fresh server)
+  // forces the next ensure to re-resolve runtime.json before authenticating.
+  // Both the re-resolve+re-auth work and the auth exchange itself are
+  // single-flight: concurrent callers join the one in flight.
   async function ensure() {
-    if (port !== null && sessionToken !== null) return
-    ensurePromise ??= (async () => {
-      if (port === null) {
-        const server = await ensureServer({ dataDir, ...(waitMs === undefined ? {} : { waitMs }) })
-        port = server.port
-      }
-      await authenticate()
-    })()
+    if (port !== null && sessionToken !== null && !needsReresolve) return attachEpoch
+    if (ensurePromise === null) {
+      ensureSettled = false
+      const inFlight = (async () => {
+        try {
+          if (port === null || needsReresolve) {
+            const server = await ensureServer({ dataDir, ...(waitMs === undefined ? {} : { waitMs }) })
+            port = server.port
+            needsReresolve = false
+          }
+          await authenticateOnce()
+          attachEpoch += 1
+        } finally {
+          ensureSettled = true
+        }
+      })()
+      inFlight.catch(() => { /* the joining await below surfaces it */ })
+      ensurePromise = inFlight
+    }
     try {
       await ensurePromise
-    } catch (error) {
-      ensurePromise = null
-      throw error
+    } finally {
+      if (ensureSettled) ensurePromise = null
     }
+    return attachEpoch
   }
 
   return {
