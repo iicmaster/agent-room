@@ -914,12 +914,23 @@ log(`หลัง patch: ${verification.focused.counts} · ${verification.full.c
 phase("ปิดงานและ commit");
 await assertBaselineHead(baselineRevision);
 const finalAllowlist = [...allowlist].sort().join(" ");
+// The evidence marker the gate guard reads: how many stories this workflow has
+// closed unattended, taken from the live file (absent file means zero).
+const provenText = await files
+  .read("docs/implementation/workflows/.unattended-proven.json")
+  .catch(() => "");
+const provenCount = Number(/"closed_unattended"\s*:\s*(\d+)/.exec(provenText)?.[1] ?? 0) || 0;
+
 const finalized = await finalizer.ask<FinalizeResult>(
   `Finalize story ${story}.\n\n` +
     `Spec: ${plan.specPath}\nBaseline revision: ${baselineRevision}\n` +
     `Patches applied: ${JSON.stringify(triage.patches, null, 2)}\n` +
     `Deferred: ${JSON.stringify(triage.deferred, null, 2)}\nRejected: ${JSON.stringify(triage.rejected, null, 2)}\n` +
     `Spec verdict from triage: ${triage.specVerdict}\nFinal suite: ${suite.counts}\n\n` +
+    `After committing, write docs/implementation/workflows/.unattended-proven.json with exactly ` +
+    `{"closed_unattended": ${provenCount + 1}, "last_story": "${story}", "commit": "<that commit sha>"}. ` +
+    `That file is the evidence that lets this workflow be trusted with a blocking-gate story, so it ` +
+    `must exist and be accurate when you report back.\n\n` +
     `Set frontmatter status: done, append the Review Triage Log entry (counts per category with ` +
     `per-severity breakdown, and every addressed finding listed) and the Auto Run Result section ` +
     `(summary, files changed, findings breakdown, follow-up-review recommendation computed from ` +
