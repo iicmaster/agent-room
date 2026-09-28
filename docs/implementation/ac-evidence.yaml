@@ -172,11 +172,20 @@
 
   2.1:                       # Ordinary restart survival (2 criteria)
     note: >-
-      TODO — the story is in flight. Record what the kill -9 evidence does not
-      prove once it lands.
+      Proves the kill -9 boundary with real processes: acknowledged broadcast
+      and DM traffic (including a reply link) survives a real SIGKILL of the
+      live server child byte-exact through the recovering MCP clients, and a
+      second server on the same data dir finds sequences continuing at 3
+      without reuse or gaps, realm_id and the Broadcast Room stable, the pair
+      room re-opening to the same id, durable claims resolving an offline
+      Actor, the DM ACL still denying a third Actor, and client cursors
+      resuming with no re-delivery, no reset, and no backward write. Does NOT
+      prove in-flight send resolution (Story 2.5's drill), the one-time
+      v0.1→v0.2 migration and its cursor reset (Story 2.3), soak/FD endurance
+      (Story 2.4), or invite/ban persistence (Stories 4.2/4.5).
     evidence:
-      - test: "TODO exact test name"
-        file: "tests/example.test.mjs"
+      - test: "restart survival: acknowledged traffic, sequences, reply links, claims, rooms, and cursors survive a real SIGKILL and restart"
+        file: "tests/integration/restart-survival.test.mjs"
 
   2.2:                       # Reconnection & room discovery (3 criteria)
     note: >-

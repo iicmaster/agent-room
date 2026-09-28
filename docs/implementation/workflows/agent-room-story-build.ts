@@ -775,7 +775,14 @@ for (const [index, review] of normalizedReviews.entries()) {
 
 phase("ฟังความเห็นจาก codex-advisor[luna]");
 const lunaTaskId = `story-${story}-audit-luna`;
-const lunaDispatchStartedAt = Date.now();
+// Wall-clock is unavailable inside a workflow (runs must be replayable), so
+// luna's outbox freshness is decided by a file that CAN be compared: the
+// coordinator writes its dispatch timestamp into the receipt, and the reader
+// compares mtimes through world.run instead of the script calling Date.now().
+const lunaDispatchStartedAt = (await world.run("node", [
+  "-e",
+  "process.stdout.write(String(Date.now()))",
+])).stdout.trim();
 const removedOutbox = await world.run("rm", ["-f", LUNA_OUTBOX]);
 if (removedOutbox.exitCode !== 0) throw new Error(`could not remove prior Luna outbox: ${removedOutbox.stderr}`);
 const coordinatorReceipt = await agent("ผู้ประสานงาน lane ของ luna").ask<CoordinatorReceipt>(
