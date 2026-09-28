@@ -462,6 +462,9 @@ const TIER_DEPTH: Record<"full" | "standard" | "light", number> = {
 }
 
 
+// F8 preconditions. (Retry posture: a run that dies on a provider error leaves
+// the tree untouched — verified after each failure — so the correct retry is a
+// fresh run from the same clean state, not a rescue of the dead run.)
 // F8 preconditions. Epic 1's evidence: this workflow failed six runs on one
 // story, every failure a bug in the script or a tree I edited underneath it,
 // and a blocking-gate story was then finished by hand because the automation
