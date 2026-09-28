@@ -272,10 +272,54 @@
 
   2.4:                       # Endurance harness & connection-churn regression (2 criteria)
     note: >-
-      TODO — not started.
+      Proves the harness and both numeric oracles: tests/harness/leak-tracker.mjs
+      samples RSS and FD counts through real OS inventories only (self via
+      process.memoryUsage + /dev/fd or /proc; any other pid from OUTSIDE via
+      ps/lsof on macOS and /proc on Linux — the macOS external path is proven
+      against a real spawned child), its least-squares regression and pass rule
+      are checked against hand-computed literal slopes, and its FD sampler is
+      proven against real descriptor events (open three files → exactly +3).
+      The tracker pins THE memory pass rule: least-squares slope of RSS as a
+      percent of starting RSS PER SECOND at or below the tolerance (default 2),
+      so the rule is a rate and survives time compression — a test chooses its
+      own sampling interval, the rule carries. The churn regression drives 100
+      real connect → authenticate → bind → disconnect cycles (four real sockets
+      per cycle, Connection: close) through a real spawned server child and
+      then asserts NUMBERS, not stability: every cycle's wire answer, every FD
+      sample within ±5 of the post-warmup baseline (sampled from outside
+      through the harness), a TCP inventory of the server process reduced to
+      exactly the one LISTEN socket (zero leaked sockets), zero leaked live
+      sessions in presence, and a healthy server after. The memory row runs a
+      hard unpaced warmup (driving the runtime's allocator to its steady-state
+      working set for this allocation rate — measured allocator ramp-up is
+      several %/s for the first seconds of hot traffic and would otherwise
+      masquerade as a leak) and then a paced, time-bounded window under the
+      tracker (measured slopes: −0.17 to +0.27 %/s against the 2% tolerance).
+      Reused unchanged by Stories 2.5, 4.8, and 6.2 via the documented exports.
+      Does NOT prove a multi-hour soak — a bounded window cannot, and that is
+      Story 6.3's REL-3 — nor behaviour beyond this single sequential client
+      (no concurrent multi-client churn), nor kernel-level socket state outside
+      the process inventory (TIME_WAIT holds no process descriptor), nor GC /
+      allocator behaviour of hosts other than Node 24 on this platform.
     evidence:
-      - test: "TODO exact test name"
-        file: "tests/example.test.mjs"
+      - test: "connection churn: 100 connect/authenticate/bind/disconnect cycles all succeed, hold the server at its post-warmup FD baseline (±5), and leak zero sockets"
+        file: "tests/churn.test.mjs"
+      - test: "memory pass: a bounded churn workload under the leak tracker holds the least-squares RSS slope at or below 2% of starting RSS"
+        file: "tests/churn.test.mjs"
+      - test: "least-squares regression recovers the exact synthetic slope and the pass rule fails a 4%/s leak"
+        file: "tests/harness/leak-tracker.test.mjs"
+      - test: "flat and declining series pass the rule: the slope may be zero or negative, never above the tolerance"
+        file: "tests/harness/leak-tracker.test.mjs"
+      - test: "the regression refuses too few samples and a degenerate single-timestamp window"
+        file: "tests/harness/leak-tracker.test.mjs"
+      - test: "sampleFdCount counts this process exactly: three opened files raise the count by three, closing restores it"
+        file: "tests/harness/leak-tracker.test.mjs"
+      - test: "sampleRssBytes reports this process in the same region as its own memoryUsage"
+        file: "tests/harness/leak-tracker.test.mjs"
+      - test: "external sampling reads a real spawned child from outside, and a tracker can ride that pid"
+        file: "tests/harness/leak-tracker.test.mjs"
+      - test: "a self-sampled tracker run passes assertMemoryPass and refuses to evaluate before sampling"
+        file: "tests/harness/leak-tracker.test.mjs"
 
   2.5:                       # REL-2 kill-drill (blocking gate — ruling Q3)
     note: >-
