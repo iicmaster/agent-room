@@ -163,3 +163,46 @@
         file: "tests/package.test.mjs"
       - test: "release packaging refuses existing, relative, and unsafe output paths"
         file: "tests/package.test.mjs"
+
+# --- Epic 2 (Nothing Is Lost) -------------------------------------------------
+# Seeded, not yet filled: the sweep fails loudly on every story below until each
+# one carries real evidence. That is the intended state while the epic runs —
+# an epic is not swept until it is finished, and a finished epic cannot pass
+# this file with a TODO in it.
+
+  2.1:                       # Ordinary restart survival (2 criteria)
+    note: >-
+      TODO — the story is in flight. Record what the kill -9 evidence does not
+      prove once it lands.
+    evidence:
+      - test: "TODO exact test name"
+        file: "tests/example.test.mjs"
+
+  2.2:                       # Reconnection & room discovery (3 criteria)
+    note: >-
+      TODO — not started. The sweep fails on this entry until the story runs.
+    evidence:
+      - test: "TODO exact test name"
+        file: "tests/example.test.mjs"
+
+  2.3:                       # The v0.1→v0.2 migration (one-time) (3 criteria)
+    note: >-
+      TODO — not started.
+    evidence:
+      - test: "TODO exact test name"
+        file: "tests/example.test.mjs"
+
+  2.4:                       # Endurance harness & connection-churn regression (2 criteria)
+    note: >-
+      TODO — not started.
+    evidence:
+      - test: "TODO exact test name"
+        file: "tests/example.test.mjs"
+
+  2.5:                       # REL-2 kill-drill (blocking gate — ruling Q3)
+    note: >-
+      TODO — not started. This one is a blocking gate, so it also needs the
+      workflow's unattended proof before the automation will touch it.
+    evidence:
+      - test: "TODO exact test name"
+        file: "tests/example.test.mjs"
