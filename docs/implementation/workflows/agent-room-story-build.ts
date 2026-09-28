@@ -175,7 +175,7 @@ function normalizeScopePath(value: string): string {
   return value.replace(/:\d+(?:-\d+)?$/, "").replace(/^\.\//, "");
 }
 
-function implementationAllowlist(specText: string, specPath: string, story: string): Set<string> {
+async function implementationAllowlist(specText: string, specPath: string, story: string): Promise<Set<string>> {
   const taskBlock = specText.split(/^## Tasks & Acceptance\s*$/m)[1]?.split(/^## /m)[0] ?? "";
   const taskSection = taskBlock.split(/\*\*Acceptance Criteria/)[0] ?? "";
   const allowlist = new Set<string>();
@@ -710,7 +710,7 @@ const preexistingSnapshots = new Map<string, string>();
 for (const path of [...preexistingUntracked, ...preexistingModified]) {
   preexistingSnapshots.set(path, await hashPath(path));
 }
-const allowlist = implementationAllowlist(adoptedSpecText, plan.specPath, story);
+const allowlist = await implementationAllowlist(adoptedSpecText, plan.specPath, story);
 for (const path of [...allowlist]) {
   if (path.startsWith("docs/implementation/workflows/")) allowlist.delete(path);
 }
