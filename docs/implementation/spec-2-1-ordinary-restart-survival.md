@@ -2,7 +2,7 @@
 title: 'Ordinary restart survival'
 type: 'test'
 created: '2026-09-28'
-status: 'ready-for-dev'
+status: 'done'
 baseline_revision: '80cd417109e619649492d2ce686711092a78543b'
 context:
   - 'project context: Node >=24.15, native ESM, node:sqlite STRICT WAL with synchronous=FULL, zero external runtime dependencies, and real-child node:test gates'
@@ -146,3 +146,31 @@ Findings all addressed in the same pass (see the review amendment above for the 
 - `grep -nE "\.only\(|\.skip\(|todo:" tests/integration/restart-survival.test.mjs` — expected: no matches; the survival gate carries no skip, no focus filter, and no bypass.
 - `node scripts/ac-sweep.mjs --epic 2` — expected: 2.1 no longer reported (its note is real and its cited test exists in the suite) while 2.2–2.5 are still reported as TODO gaps — the epic is not done, and the verdict stays `gaps` until they land.
 - `git diff --check` — expected: no whitespace errors.
+
+## Auto Run Result
+
+Status: done
+
+**Summary:** Restart survival is proven with real processes: acknowledged broadcast and DM traffic
+(including a reply link) survives a real SIGKILL of the live server child byte-identical (raw UTF-8
+with combining marks and astral code points), the SIGKILL lands immediately after the final
+acknowledged send, the durable snapshot is read from the CRASHED file before any restart (the
+crashed file holds DM seqs [1,2] — exactly where an ack-before-commit regression would show), a
+second server on the same data dir continues sequences at 3 without reuse or gaps, realm_id and the
+Broadcast Room are stable, durable claims resolve an offline Actor whose absence from live presence
+is asserted first, the DM ACL still denies a third Actor, and client cursors resume with no
+re-delivery and no reset.
+
+**Files changed:** `tests/integration/restart-survival.test.mjs` (new, 1592 lines), spec (adopted
+ordering amendment + triage log), `docs/implementation/ac-evidence.yaml` (2.1 entry).
+
+**Review findings breakdown:** 10 findings from 4 internal reviewers + luna (independent), deduped
+to 6; all applied — 1 high (SIGKILL adjacency, found independently by both model families),
+1 medium (failure diagnostics), 3 low (cursor monotonicity observability, offline-claims premise,
+reconnection wording), 1 spec-contradiction resolution (Task 2 vs matrix row 4 ordering).
+
+**Verification performed:** survival test 3× green; full suite 311/311, 0 skipped; AC sweep reports
+2.1 evidenced (2.2–2.5 remain TODO by design).
+
+**Residual risks:** in-flight send resolution is Story 2.5's drill; the v0.1→v0.2 migration and its
+cursor reset is Story 2.3; soak/FD endurance is Story 2.4.
