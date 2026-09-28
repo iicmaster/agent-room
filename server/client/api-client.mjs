@@ -21,8 +21,9 @@
 // the attempt and immediately retries ONCE with the identical
 // client_message_id; the server's idempotency tuple (Actor, room,
 // client_message_id) resolves the retry to the original committed message or
-// a coded conflict — never a duplicate row. Any real HTTP response is a KNOWN
-// outcome and never retried.
+// a coded conflict — never a duplicate row. That one retry never re-enters
+// the reconnect schedule below (one send never blocks for two schedules);
+// any real HTTP response is a KNOWN outcome and never retried.
 //
 // Reconnect discipline (Story 2.2, FR-12): a transport-unreachable
 // ECONNREFUSED (outcome unknown — the recorded server is gone) runs a bounded
@@ -444,11 +445,13 @@ export function createAgentRoomClient({
   // stops escalating). A detected recovery drops the cached attach so the
   // next attempt re-resolves runtime.json and re-authenticates; an
   // un-detected one retries the recorded server as-is, which keeps the port
-  // (and the store it names) untouched. Only another transport-unreachable
-  // ECONNREFUSED continues the loop — any other failure surfaces as-is — and
-  // after the capped wait's attempt fails, the last real error surfaces: the
-  // tool call always terminates, and the session-level retry cadence emerges
-  // from the agent's repeated tool calls.
+  // (and the store it names) untouched. Both phases of an attempt — the
+  // ensure/bootstrap (whose authenticate exchange can hit a refused
+  // connection) and the raw request — are inside ONE discrimination: only
+  // another transport-unreachable ECONNREFUSED continues the loop, any other
+  // failure surfaces as-is, and after the capped wait's attempt fails, the
+  // last real error surfaces: the tool call always terminates, and the
+  // session-level retry cadence emerges from the agent's repeated tool calls.
   async function reconnect(method, path, options, firstError) {
     let lastError = firstError
     for (let retry = 1, previousBase = 0; ; retry += 1) {
@@ -465,8 +468,8 @@ export function createAgentRoomClient({
         sessionToken = null
         ensurePromise = null
       }
-      await ensure()
       try {
+        await ensure()
         return await rawRequest(method, path, options)
       } catch (error) {
         lastError = error
@@ -487,14 +490,21 @@ export function createAgentRoomClient({
   //                    reconnect loop above (first attempt immediate, then
   //                    the 1 s→60 s schedule, probe-interruptible waits,
   //                    last real error surfaced).
-  // Any other failure surfaces as-is.
+  // Any other failure surfaces as-is. The internal `reconnect: false` option
+  // (sendMessage's outcome-unknown retry) skips the loop: that retry must
+  // stay immediate, and the schedule — if the first attempt ran it — has
+  // already been paid once for this call.
   async function request(method, path, options = {}) {
     await ensure()
     try {
       return await rawRequest(method, path, options)
     } catch (error) {
       if (!(error instanceof AgentRoomRuntimeError)) throw error
-      if (error.outcomeUnknown === true && error.transportCode === 'ECONNREFUSED') {
+      if (
+        error.outcomeUnknown === true
+        && error.transportCode === 'ECONNREFUSED'
+        && options.reconnect !== false
+      ) {
         return reconnect(method, path, options, error)
       }
       if (error.code !== 'unauthorized') throw error
@@ -577,7 +587,17 @@ export function createAgentRoomClient({
         if (signal?.aborted) throw error
         // Unknown outcome: the first attempt may have committed. One immediate
         // retry with the identical tuple resolves it — original or conflict.
-        return await request('POST', `/api/rooms/${encodeURIComponent(attempt.roomId)}/messages`, { body: attempt.body, signal })
+        // `reconnect: false` keeps the retry immediate: when the first attempt
+        // already ran the reconnect schedule (its ECONNREFUSED branch), a bare
+        // re-entry would run the whole schedule a second time and one send
+        // would block for two schedules. A server that is genuinely gone
+        // surfaces its transport error now; the session-level retry cadence
+        // stays with the agent's next tool call.
+        return await request('POST', `/api/rooms/${encodeURIComponent(attempt.roomId)}/messages`, {
+          body: attempt.body,
+          signal,
+          reconnect: false,
+        })
       }
     },
 

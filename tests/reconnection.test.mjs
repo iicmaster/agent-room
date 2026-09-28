@@ -34,7 +34,7 @@ import { createAgentRoomClient, reconnectDelayMs } from '../server/client/api-cl
 import { createMcpServer } from '../server/mcp-stdio.mjs'
 import { loadOrCreateLocalToken } from '../server/api/local-token.mjs'
 import { loadOrCreateKeypair } from '../server/keys.mjs'
-import { atomicWriteJson } from '../server/runtime.mjs'
+import { APP_VERSION, atomicWriteJson } from '../server/runtime.mjs'
 import { ROOM_LOG_DATABASE_FILENAME } from '../server/store/room-log.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -929,4 +929,265 @@ test('existing single-recovery preserved: a restart on a new port recovers on th
   assert.equal(again.realm_id, warm.realm_id)
   assert.deepEqual(sleeps, [])
   await second.stop()
+})
+
+// --- Review patches: the loop's fine print -------------------------------------------
+
+// Rebuilds one wait's probe-cadence slices from its scheduled delay (every
+// scheduled delay is a multiple of the 250 ms cadence).
+const waitSlices = delay => {
+  const slices = []
+  for (let remaining = delay; remaining > 0; remaining -= 250) slices.push(Math.min(250, remaining))
+  return slices
+}
+const SCHEDULE = [1000, 2000, 4000, 8000, 16000, 32000, 60000]
+
+// Kills whatever process the runtime record names at teardown — insurance so
+// a mutated loop that boots a server for a cancelled or foreign call cannot
+// leave a detached orphan behind. In the correct code path the record still
+// names the already-killed child and the kill is a harmless no-op.
+function reapRecordedPid(t, dataDir) {
+  t.after(() => {
+    try {
+      const record = JSON.parse(readFileSync(join(dataDir, RUNTIME_RECORD_FILENAME), 'utf8'))
+      if (Number.isInteger(record.pid) && record.pid !== process.pid) process.kill(record.pid, 'SIGKILL')
+    } catch {
+      // No record or the holder is already gone.
+    }
+  })
+}
+
+test('backoff loop: an outcome-unknown send retry never re-runs the schedule — one send blocks for at most one schedule', async t => {
+  const dataDir = makeDataDir(t)
+  const { child, waitReady } = spawnServerChild(t, dataDir)
+  await waitReady()
+  const pluginData = makePluginDir(t, 'Alice')
+  const sleeps = []
+  const client = createAgentRoomClient({
+    dataDir,
+    pluginDataDir: pluginData,
+    reconnectSleep: async ms => { sleeps.push(ms) },
+    reconnectRandom: () => 0.5,
+  })
+  await withDeadline(client.status(), 'the warm-up status')
+
+  // The server child is really killed and stays dead: the send's first
+  // attempt runs the full schedule and surfaces outcome-unknown, and the
+  // idempotent immediate retry that follows must stay immediate.
+  child.kill('SIGKILL')
+  await once(child, 'exit')
+
+  const started = Date.now()
+  await assert.rejects(
+    () => withDeadline(client.sendMessage({ roomId: 'room-1', clientMessageId: 'm-1', text: 'x' }), 'the dead-server send'),
+    error => error?.outcomeUnknown === true && error?.transportCode === 'ECONNREFUSED',
+    'the send surfaces the real transport error',
+  )
+  assert.ok(Date.now() - started < 5_000, `the send must not sleep for real (took ${Date.now() - started}ms)`)
+
+  // EXACTLY one schedule's worth of waits: the outcome-unknown retry did not
+  // re-enter the reconnect loop for a second schedule (the old defect made
+  // this deepEqual see the schedule twice — ~246 scheduled seconds per send).
+  assert.deepEqual(
+    sleeps,
+    SCHEDULE.flatMap(waitSlices),
+    'one send pays the schedule at most once',
+  )
+})
+
+test('backoff loop: an ECONNREFUSED from the ensure/authenticate phase continues the schedule like an attempt failure', async t => {
+  const dataDir = makeDataDir(t)
+  const { child, waitReady } = spawnServerChild(t, dataDir)
+  const record = await waitReady()
+  const pluginData = makePluginDir(t, 'Alice')
+  const sleeps = []
+  const client = createAgentRoomClient({
+    dataDir,
+    pluginDataDir: pluginData,
+    reconnectSleep: async ms => { sleeps.push(ms) },
+    reconnectRandom: () => 0.5,
+  })
+  await withDeadline(client.status(), 'the warm-up status')
+  child.kill('SIGKILL')
+  await once(child, 'exit')
+
+  // A stand-in recorded server that answers the health probe exactly twice —
+  // the client's recovery probe and ensureServer's attach probe — and then
+  // closes its listener. The attach therefore succeeds while the credential
+  // exchange that immediately follows it hits a refused connection: an
+  // ensure/authenticate-phase ECONNREFUSED, the same error class the attempt
+  // phase produces. A real agent-room server cannot be killed inside that
+  // sub-millisecond window deterministically; this fixture reproduces the one
+  // observable that matters (a genuinely agent-room /health answer, then a
+  // refused port) over real loopback TCP — it fakes no store, route, or
+  // envelope.
+  let healthHits = 0
+  const standIn = http.createServer((_request, response) => {
+    healthHits += 1
+    response.writeHead(200, { 'content-type': 'application/json' })
+    response.end(JSON.stringify({ ok: true, result: { version: APP_VERSION } }))
+    if (healthHits >= 2) standIn.close()
+  })
+  await new Promise(resolvePromise => standIn.listen(0, '127.0.0.1', resolvePromise))
+  const standInPort = standIn.address().port
+  t.after(() => new Promise(resolvePromise => {
+    standIn.closeAllConnections?.()
+    standIn.close(() => resolvePromise())
+  }))
+
+  // The record names the stand-in with a provably live pid, so ensureServer
+  // attaches to it without a boot.
+  atomicWriteJson(join(dataDir, RUNTIME_RECORD_FILENAME), {
+    pid: process.pid,
+    port: standInPort,
+    version: APP_VERSION,
+  })
+
+  await assert.rejects(
+    () => withDeadline(client.status(), 'the ensure-phase-failure call'),
+    error => error?.outcomeUnknown === true && error?.transportCode === 'ECONNREFUSED',
+    'the last real transport error surfaces after the capped wait',
+  )
+  assert.equal(healthHits, 2, 'the stand-in answered exactly the recovery probe and the attach probe')
+
+  // The loop did NOT exit at the ensure-phase ECONNREFUSED: the first wait
+  // was cut at zero slices by the detected recovery, and every later wait ran
+  // to its full scheduled length before the next re-authenticate attempt.
+  // (Without the fix the loop exits inside the first iteration — this
+  // deepEqual would see zero sleeps.)
+  assert.deepEqual(
+    sleeps,
+    SCHEDULE.slice(1).flatMap(waitSlices),
+    'every wait after the detected recovery ran its full scheduled length',
+  )
+  void record
+})
+
+test('backoff loop: a reachable-but-foreign probe answer is never recovery — the full schedule runs and no re-resolve happens', async t => {
+  const dataDir = makeDataDir(t)
+  const { child, waitReady } = spawnServerChild(t, dataDir)
+  const record = await waitReady()
+  const pluginData = makePluginDir(t, 'Alice')
+  const sleeps = []
+  let probes = 0
+  const client = createAgentRoomClient({
+    dataDir,
+    pluginDataDir: pluginData,
+    reconnectSleep: async ms => { sleeps.push(ms) },
+    reconnectRandom: () => 0.5,
+    // Reachable but NOT agent-room, every single time: a foreign occupant of
+    // the recorded port must keep the loop waiting, never cut it short.
+    reconnectProbe: async () => {
+      probes += 1
+      return { reachable: true, agentRoom: false }
+    },
+  })
+  await withDeadline(client.status(), 'the warm-up status')
+  child.kill('SIGKILL')
+  await once(child, 'exit')
+  reapRecordedPid(t, dataDir)
+
+  await assert.rejects(
+    () => withDeadline(client.status(), 'the foreign-responder call'),
+    error => error?.outcomeUnknown === true && error?.transportCode === 'ECONNREFUSED',
+    'the last real transport error surfaces after the capped wait',
+  )
+
+  // Every wait ran to its full scheduled length — no probe answer ever cut
+  // one short — and the runtime record still names the killed child: the
+  // foreign answer never dropped the cached attach, never re-resolved
+  // runtime.json, and never booted anything.
+  assert.deepEqual(sleeps, SCHEDULE.flatMap(waitSlices), 'the whole schedule ran')
+  assert.equal(probes, SCHEDULE.flatMap(waitSlices).length + SCHEDULE.length, 'the probe rode every slice boundary')
+  const after = JSON.parse(readFileSync(join(dataDir, RUNTIME_RECORD_FILENAME), 'utf8'))
+  assert.equal(after.pid, record.pid, 'the record was never re-resolved behind a foreign answer')
+  assert.equal(after.port, record.port, 'the record was never re-resolved behind a foreign answer')
+})
+
+test('backoff loop: aborting during a backoff wait cancels promptly — no further waits or probes', async t => {
+  const dataDir = makeDataDir(t)
+  const { child, waitReady } = spawnServerChild(t, dataDir)
+  await waitReady()
+  const pluginData = makePluginDir(t, 'Alice')
+  const sleeps = []
+  let probes = 0
+  const controller = new AbortController()
+  const client = createAgentRoomClient({
+    dataDir,
+    pluginDataDir: pluginData,
+    // The caller aborts during the very first slice of the very first wait.
+    reconnectSleep: async ms => {
+      sleeps.push(ms)
+      controller.abort()
+    },
+    // Seeded jitter: the waits are exactly their base delays.
+    reconnectRandom: () => 0.5,
+    reconnectProbe: async () => {
+      probes += 1
+      return { reachable: false, agentRoom: false }
+    },
+  })
+  await withDeadline(client.status(), 'the warm-up status')
+  child.kill('SIGKILL')
+  await once(child, 'exit')
+
+  const started = Date.now()
+  await assert.rejects(
+    () => withDeadline(client.status({ signal: controller.signal }), 'the aborted call'),
+    error => error?.outcomeUnknown === true
+      && error?.message === 'request cancelled'
+      && error?.code === 'request_failed',
+    'a cancelled call stays cancelled',
+  )
+  assert.ok(Date.now() - started < 2_000, `the cancellation was prompt (took ${Date.now() - started}ms)`)
+  assert.deepEqual(sleeps, [250], 'exactly one slice elapsed — no further waits')
+  assert.equal(probes, 1, 'the loop stopped scheduling the moment the call was cancelled')
+})
+
+test('backoff loop: an abort landing as a wait completes still cancels before any attempt — and boots nothing', async t => {
+  const dataDir = makeDataDir(t)
+  const { child, waitReady } = spawnServerChild(t, dataDir)
+  const record = await waitReady()
+  const pluginData = makePluginDir(t, 'Alice')
+  const sleeps = []
+  let probes = 0
+  const controller = new AbortController()
+  const client = createAgentRoomClient({
+    dataDir,
+    pluginDataDir: pluginData,
+    reconnectSleep: async ms => { sleeps.push(ms) },
+    // Seeded at the jitter midpoint so the first wait is exactly 1000 ms and
+    // its slices reconstruct as four literal 250s.
+    reconnectRandom: () => 0.5,
+    // The caller aborts during the wait's final probe — and that probe
+    // reports detected recovery, so the wait returns normally while the
+    // signal is already aborted. The loop must cancel before acting on it.
+    reconnectProbe: async () => {
+      probes += 1
+      if (probes === 5) controller.abort()
+      return { reachable: probes < 5, agentRoom: probes === 5 }
+    },
+  })
+  await withDeadline(client.status(), 'the warm-up status')
+  child.kill('SIGKILL')
+  await once(child, 'exit')
+  reapRecordedPid(t, dataDir)
+
+  await assert.rejects(
+    () => withDeadline(client.status({ signal: controller.signal }), 'the abort-at-wait-end call'),
+    error => error?.outcomeUnknown === true
+      && error?.message === 'request cancelled'
+      && error?.code === 'request_failed',
+    'a cancelled call stays cancelled',
+  )
+  assert.deepEqual(sleeps, [250, 250, 250, 250], 'the four slices of the first wait, nothing more')
+  assert.equal(probes, 5, 'no probe ran after the cancellation')
+
+  // Nothing was attempted for the cancelled call: the detected recovery was
+  // never acted on, so the runtime record still names the killed child — no
+  // re-resolve, no re-authenticate, and no server booted for a call the
+  // caller had already cancelled.
+  const after = JSON.parse(readFileSync(join(dataDir, RUNTIME_RECORD_FILENAME), 'utf8'))
+  assert.equal(after.pid, record.pid, 'a cancelled call booted nothing and re-resolved nothing')
+  assert.equal(after.port, record.port, 'a cancelled call booted nothing and re-resolved nothing')
 })
