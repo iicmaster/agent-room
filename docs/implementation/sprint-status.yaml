@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 09-21-2026 08:52
-last_updated: 09-26-2026 15:08
+last_updated: 09-28-2026 13:45
 project: agent-room
 project_key: NOKEY
 tracking_system: file-system
@@ -53,7 +53,7 @@ development_status:
   2-3-the-v0-1-v0-2-migration-one-time: backlog
   2-4-endurance-harness-connection-churn-regression: backlog
   2-5-rel-2-continuity-drill-blocking-epic-gate: backlog
-  epic-2-retrospective: optional
+  epic-2-retrospective: done
 
   epic-3: backlog
   3-1-untrusted-marking-at-full-rigor: backlog
@@ -131,3 +131,23 @@ action_items:
     owner: "orchestrator"
     status: done
     ref: "docs/implementation/epic-1-retro-2026-09-26.md"
+  - id: "epic-2-retro-item-7-park-the-story-build-workflow-for-gate-s"
+    epic: 2
+    action: "Park the story-build workflow for gate stories until it closes a full
+      story unattended on a clean tree; keep hand-loop review discipline for 2.3-2.5"
+    owner: "orchestrator"
+    status: open
+    ref: "docs/implementation/epic-2-completion-audit.md"
+  - id: "epic-2-retro-item-8-record-the-rel-2-drill-found-production"
+    epic: 2
+    action: "Record the REL-2 drill found production bug (multi-call recovery double-bind)
+      as evidence the gate design works"
+    owner: "none - evidence recorded"
+    status: open
+    ref: "docs/implementation/epic-2-completion-audit.md"
+  - id: "epic-2-retro-item-9-carry-the-drill-harness-forward-stories"
+    epic: 2
+    action: "Carry the drill harness forward: Stories 2.5, 4.8, 6.2 reuse tests/harness/leak-tracker.mjs"
+    owner: "Stories 4.8 and 6.2"
+    status: open
+    ref: "docs/implementation/epic-2-completion-audit.md"
