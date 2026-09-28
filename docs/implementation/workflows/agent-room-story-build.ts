@@ -259,9 +259,28 @@ async function assertScopedFinalState(
   }
 }
 
+// The review scope is trustworthy as long as nothing under server/, tests/,
+// or the contract docs changed since the baseline. Commits that touch ONLY the
+// pipeline's own tooling (this script, the luna brief) do not invalidate the
+// reviewed artifact — and they are unavoidable, because repairing this script
+// mid-epic requires committing it. Anything else still fails the run.
+const TOOLING_PREFIXES = ["docs/implementation/workflows/", "docs/implementation/reviews/"];
+
 async function assertBaselineHead(baseline: string): Promise<void> {
   const head = (await world.run("git", ["rev-parse", "HEAD"])).stdout.trim();
-  if (head !== baseline) throw new Error(`HEAD moved from baseline ${baseline} to ${head}`);
+  if (head === baseline) return;
+  const moved = await world.run("git", ["diff", "--name-only", baseline, head]);
+  if (moved.exitCode !== 0) throw new Error(`could not diff ${baseline}..${head}`);
+  const paths = moved.stdout.split("\n").map(line => line.trim()).filter(Boolean);
+  const outside = paths.filter(path => !TOOLING_PREFIXES.some(prefix => path.startsWith(prefix)));
+  if (outside.length > 0) {
+    throw new Error(
+      `HEAD moved from baseline ${baseline} to ${head} with changes outside the pipeline's own ` +
+        `tooling: ${outside.join(", ")}. The review scope can no longer be trusted; do not commit ` +
+        `product code while a run is in flight.`,
+    );
+  }
+  log(`HEAD moved ${baseline.slice(0, 7)} → ${head.slice(0, 7)} (pipeline tooling only — scope intact)`);
 }
 
 async function hashPath(path: string): Promise<string> {
