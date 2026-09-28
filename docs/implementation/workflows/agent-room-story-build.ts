@@ -344,6 +344,16 @@ async function readLunaReport(taskId: string, outboxPath: string, dispatchedAt: 
     throw new Error(`Luna verdict must be exactly SHIP or FIX-FIRST`);
   }
   const findings: ReviewFinding[] = [];
+  // Luna's severity vocabulary has varied across lanes (blocker/warning/nit on
+  // early stories, high/medium/low later) and its body format varies between a
+  // one-line em-dash form and an indented Evidence/Why block. The parser
+  // accepts both rather than re-teaching the auditor its old format.
+  const severityOf = (word: string): "high" | "medium" | "low" | null => {
+    if (word === "blocker" || word === "high") return "high"
+    if (word === "warning" || word === "medium") return "medium"
+    if (word === "nit" || word === "low") return "low"
+    return null
+  }
   let index = findingsIndex + 1;
   let findingNumber = 0;
   while (index < checksIndex) {
@@ -352,25 +362,47 @@ async function readLunaReport(taskId: string, outboxPath: string, dispatchedAt: 
       index += 1;
       continue;
     }
-    const header = /^- \[(high|medium|low)\] (.+)$/.exec(line);
+    const header = /^- \[(high|medium|low|blocker|warning|nit)\] (.+)$/.exec(line);
     if (!header) throw new Error(`Luna finding is malformed near line ${index + 1}: ${line}`);
-    const evidenceLine = lines[index + 1]?.trim() ?? "";
-    const whyLine = lines[index + 2]?.trim() ?? "";
-    if (!evidenceLine.startsWith("Evidence: ") || !whyLine.startsWith("Why it matters / what to change: ")) {
-      throw new Error(`Luna finding ${header[2]} lacks the required Evidence/Why format`);
+    const severity = severityOf(header[1] ?? "");
+    if (severity === null) throw new Error(`Luna finding has an unknown severity: ${header[1]}`);
+    // Collect the indented body lines that follow the header (Evidence:, Why:,
+    // continuation lines) until the next finding header or a blank-line-then-
+    // non-indented line.
+    const bodyLines: string[] = [];
+    let cursor = index + 1;
+    while (cursor < checksIndex) {
+      const next = lines[cursor] ?? "";
+      if (/^- \[(high|medium|low|blocker|warning|nit)\] /.test(next.trim())) break;
+      if (next.trim() === "") {
+        // A blank line ends the block unless the next non-blank line is indented.
+        const upcoming = lines.slice(cursor + 1, checksIndex).find(candidate => candidate.trim() !== "");
+        if (upcoming === undefined || !/^\s/.test(upcoming)) break;
+        cursor += 1;
+        continue;
+      }
+      if (!/^\s/.test(next)) break;
+      bodyLines.push(next.trim());
+      cursor += 1;
     }
     findingNumber += 1;
-    const evidence = evidenceLine.slice("Evidence: ".length);
-    const impact = whyLine.slice("Why it matters / what to change: ".length);
-    const where = /((?:docs|server|tests)\/[A-Za-z0-9._/-]+:\d+)/.exec(evidence)?.[1] ?? evidence;
+    const evidence = bodyLines
+      .filter(candidate => candidate.startsWith("Evidence:"))
+      .map(candidate => candidate.slice("Evidence:".length).trim())
+      .join(" ");
+    const why = bodyLines
+      .filter(candidate => candidate.startsWith("Why"))
+      .map(candidate => candidate.slice(candidate.indexOf(":") + 1).trim())
+      .join(" ");
+    const where = /((?:docs|server|tests)\/[A-Za-z0-9._/-]+:\d+)/.exec(evidence || why)?.[1] ?? "";
     findings.push({
       id: `luna-${findingNumber}`,
       where,
       what: header[2] ?? "",
-      impact,
-      severity: header[1] as "high" | "medium" | "low",
+      impact: [evidence, why].filter(Boolean).join(" — ") || bodyLines.join(" "),
+      severity,
     });
-    index += 3;
+    index = cursor > index ? cursor : index + 1;
   }
   if (verdictLines[0] === "FIX-FIRST" && findings.length === 0) {
     throw new Error(`Luna FIX-FIRST report contains no parseable findings`);
@@ -810,7 +842,7 @@ const coordinatorReceipt = await agent("ผู้ประสานงาน lan
     `A chat answer without the outbox is a failure.`,
 );
 validateCoordinatorReceipt(coordinatorReceipt, lunaTaskId, LUNA_OUTBOX);
-const lunaReview = await readLunaReport(lunaTaskId, LUNA_OUTBOX, lunaDispatchStartedAt);
+const lunaReview = await readLunaReport(lunaTaskId, LUNA_OUTBOX, Number(lunaDispatchStartedAt));
 if (lunaReview.findings.length > 0) {
   for (const finding of lunaReview.findings) {
     report({ story, reviewer: "codex-advisor[luna]", ...finding }, "findings");
