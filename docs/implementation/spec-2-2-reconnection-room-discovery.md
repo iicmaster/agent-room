@@ -2,7 +2,7 @@
 title: 'Reconnection & room discovery'
 type: 'feature'
 created: '2026-09-28'
-status: 'ready-for-dev'
+status: 'done'
 baseline_revision: '26f2a2cfcdc47b39ecc2b0da95bcb948d0225975'
 context:
   - 'project context: Node >=24.15, native ESM, node:sqlite STRICT WAL with synchronous=FULL, zero external runtime dependencies, and real-child node:test gates'
@@ -129,3 +129,33 @@ _No implementation review has run for this story yet. This section is reserved f
 - `grep -nE "\.only\(|\.skip\(|todo:" tests/reconnection.test.mjs` — expected: no matches.
 - `node scripts/ac-sweep.mjs --epic 2` — expected: 2.1 and 2.2 no longer reported (real notes, cited tests in the live suite) while 2.3–2.5 remain reported TODO gaps — the epic is not done, and the verdict stays `gaps` until they land.
 - `git diff --check` — expected: no whitespace errors.
+
+## Review Triage Log
+
+### 2026-09-26 — Review pass (5 internal lenses + codex-advisor[gpt-6-luna]; 22 findings deduped)
+- intent_gap: 0
+- bad_spec: 0
+- patch: 21: (high 0, medium 4, low 17)
+- defer: 1: (low)
+- reject: 0
+- addressed_findings (the load-bearing ones):
+  - `medium` `patch` sendMessage's outcome-unknown retry re-entered the full 1s→60s reconnect schedule (a dead server cost ~246 s inside one tool call) — the retry now pays at most one schedule, pinned by test
+  - `medium` `patch` foreign-responder discrimination was untestable as shipped (no test presented {reachable:true, agentRoom:false}; a mutation accepting any reachable port passed 14/14) — discriminating test added
+  - `medium` `patch` abort-signal threading through the reconnect loop was untested (mutation-verified) — two tests added: abort mid-wait rejects promptly; abort landing as a wait completes cancels before acting
+  - `low` `patch` ensure()-phase ECONNREFUSED exited the schedule while the attempt-phase error continued — now consistent, pinned
+  - `low` `patch` failure wording, scope records (the pipeline-tooling commits riding the delta), and the spec's reconnection-row wording scoped to the observable contract
+- notes: luna and the internal verification-gap lens independently flagged the same send-path composition gap; the final patch pass re-derived lost findings via mutation testing (14 mutations, zero survivors — every mutation is killed by a named test)
+
+## Auto Run Result
+
+Status: done
+
+**Summary:** Reconnection and room discovery are proven over real servers: the client reconnects through the full bounded 1s→60s schedule (single-schedule per call including the outcome-unknown send retry; ensure-phase and attempt-phase errors treated consistently), a foreign responder on the recorded port is never mistaken for recovery, aborts cancel promptly at any point in the schedule, `GET /api/rooms` is live (the last actor-class frozen route), and every row survives mutation testing.
+
+**Files changed:** `server/client/api-client.mjs`, `server/api/server.mjs`, `server/api/routes.mjs`, `server/store/room-log.mjs`, `server/constants.mjs`, `server/client/ensure-server.mjs`, `tests/reconnection.test.mjs` (new), three pre-existing suites whose route-pin probes this story retired, spine amendment, `docs/implementation/ac-evidence.yaml` (2.2 entry).
+
+**Review findings breakdown:** 22 findings → 21 patched, 1 deferred, 0 rejected, 0 intent gaps, 0 bad_spec.
+
+**Verification performed:** full suite 330/330, 0 skipped; mutation testing on the reconnect loop (14 mutations, zero survivors); every spec verification command run by the reviewers themselves at review time (325/325 then).
+
+**Residual risks:** the reconnect schedule's total wall time (~113 s nominal) is bounded but long — a host tool timeout shorter than that surfaces as a host-level failure on a dead server (by design: the agent sees the real error on its next call); room discovery's discovery surface is `GET /api/rooms` only (Epic 4 adds invites).

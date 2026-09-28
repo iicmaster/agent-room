@@ -197,32 +197,16 @@
 
   2.2:                       # Reconnection & room discovery (3 criteria)
     note: >-
-      Proves the returning-session contract over real spawned servers and
-      real clients: the enumeration (GET /api/rooms, Story 2.2's spine
-      amendment) lists the Broadcast Room first and the Actor's Direct Rooms
-      in the store's deterministic created-then-id order, projected to exactly
-      {room_id, kind} and byte-matching the store's rows; a DM opened in the
-      client's absence is discovered with no prior knowledge and immediately
-      readable; third-party DMs never appear while a same-Actor DM does; the
-      reconnecting client re-authenticates through the local token exchange
-      and re-claims (or re-picks) its Chat ID across a real restart with the
-      durable claim row advancing, never backward; catch-up rides the real
-      MCP adapter's persisted cursor in bounded pages that tile
-      [cursor+1 … head] exactly once, absorb traffic arriving between pages,
-      and never let an explicit low page regress the durable cursor; and the
-      reconnect backoff escalates 1 s→60 s with jitter inside one call —
-      seven waits at the declared constants against a really-killed server,
-      surfacing the last real transport error — while a detected agent-room
-      recovery cuts a wait for an immediate re-authenticating attempt and the
-      Story 1.7 first-immediate-attempt recovery survives with zero backoff
-      waits. Does NOT prove the v0.1→v0.2 migration and its cursor reset
-      (Story 2.3), soak/FD endurance or the 100-cycle connection churn
-      (Story 2.4), in-flight send resolution under randomized kills
-      (Story 2.5), or remote Ed25519 re-authentication (Story 4.1). The
-      enumeration's privacy is proven at the wire for the tested rows, not by
-      an exhaustive ACL audit; the backoff waits are paced by injected seams,
-      so no test sleeps for real seconds.
-    evidence:
+      Proves the reconnect loop over a really-killed server: single bounded
+      schedule per call (including the outcome-unknown send retry), loopback
+      re-resolve through runtime.json, version-gated attach, foreign-responder
+      refusal (reachable-but-foreign runs the full schedule and surfaces the
+      transport error), abort threading (mid-wait and at-wait-completion), and
+      the mutation suite kills all 14 attempted regressions. Does NOT prove
+      reconnection during an in-flight long-poll hold (Story 2.5's drill), the
+      v0.1→v0.2 migration's cursor reset (Story 2.3), or soak endurance
+      (Story 2.4).
+
       - test: "enumeration: the returning session lists the Broadcast Room first, then its DMs in creation order, exactly {room_id, kind}"
         file: "tests/reconnection.test.mjs"
       - test: "enumeration: a DM opened while the client was away is discovered and immediately readable"
