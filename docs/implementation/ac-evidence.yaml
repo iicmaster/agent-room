@@ -172,17 +172,25 @@
 
   2.1:                       # Ordinary restart survival (2 criteria)
     note: >-
-      Proves the kill -9 boundary with real processes: acknowledged broadcast
-      and DM traffic (including a reply link) survives a real SIGKILL of the
-      live server child byte-exact through the recovering MCP clients, and a
-      second server on the same data dir finds sequences continuing at 3
-      without reuse or gaps, realm_id and the Broadcast Room stable, the pair
-      room re-opening to the same id, durable claims resolving an offline
-      Actor, the DM ACL still denying a third Actor, and client cursors
-      resuming with no re-delivery, no reset, and no backward write. Does NOT
-      prove in-flight send resolution (Story 2.5's drill), the one-time
-      v0.1→v0.2 migration and its cursor reset (Story 2.3), soak/FD endurance
-      (Story 2.4), or invite/ban persistence (Stories 4.2/4.5).
+      Proves the kill -9 boundary with real processes: the SIGKILL lands
+      immediately after the final acknowledged send with nothing in between,
+      the durable snapshot is read back from the crashed file before any
+      restart, and acknowledged broadcast and DM traffic (including a reply
+      link) survives a real SIGKILL of the live server child byte-identical
+      through the recovering MCP clients — raw UTF-8 bytes with combining
+      marks and astral code points intact, no NFC or envelope drift. A second
+      server on the same data dir finds sequences continuing at 3 without
+      reuse or gaps, realm_id and the Broadcast Room stable, the pair room
+      re-opening to the same id, durable claims resolving an offline Actor
+      (whose absence from the live presence registry is asserted first), the
+      DM ACL still denying a third Actor, and client cursors resuming with no
+      re-delivery and no reset. Does NOT prove the cursor writer's
+      monotonic-merge/backward-write discipline (asserted in
+      tests/mcp-tools.test.mjs, which also owns the client recovery chain's
+      internal steps and wrong-token/stale-credential rejection), in-flight
+      send resolution (Story 2.5's drill), the one-time v0.1→v0.2 migration
+      and its cursor reset (Story 2.3), soak/FD endurance (Story 2.4), or
+      invite/ban persistence (Stories 4.2/4.5).
     evidence:
       - test: "restart survival: acknowledged traffic, sequences, reply links, claims, rooms, and cursors survive a real SIGKILL and restart"
         file: "tests/integration/restart-survival.test.mjs"

@@ -8,10 +8,22 @@
 // room-local sequences continue at 3 (no reuse, no gaps); the realm and
 // Broadcast Room stay stable; the pair room re-opens to the same id; durable
 // claims resolve an offline Actor; the DM ACL still denies a third Actor; and
-// client cursors resume without re-delivery or reset. The kill lands
-// immediately after the final acknowledged send — the sharpest edge for
-// durability: `synchronous=FULL` fsyncs the WAL on every commit before the
-// ack returns, and this story refuses to take that implication on faith.
+// client cursors resume without re-delivery or reset.
+//
+// The kill point is the shipped ordering, and it is the sharpest edge for
+// durability: every cursor-advancing read, permission check, and capture runs
+// BEFORE the final send, so the final acknowledged send (bob's DM reply) and
+// the SIGKILL are adjacent with nothing in between — zero-idle time in which a
+// hypothetical ack-before-commit could complete undetected. `synchronous=FULL`
+// fsyncs the WAL on every commit before the ack returns, and this story
+// refuses to take that implication on faith: the durable snapshot is taken
+// READ-ONLY FROM THE CRASHED FILE AFTER THE KILL (a read-only connection can
+// open the recovered-but-unrepaired WAL file, and can never checkpoint or tidy
+// it), so if an acknowledgment ever preceded its COMMIT, the missing row shows
+// here — not in a pre-kill snapshot taken through the live server, which would
+// prove only that a later commit landed. A durability failure in the
+// post-restart phase halts with the failing assertion AND the full SQLite rows
+// of every durable table.
 //
 // No stubs, doubles, or fakes of any kind. Alice, Bob, and Eaves drive every
 // behavior through line-delimited MCP JSON-RPC into the real server
@@ -150,6 +162,38 @@ function withReadOnlyDatabase(databasePath, label, operation) {
     return operation(inspector)
   } finally {
     inspector.close()
+  }
+}
+
+// Block-If discipline: a durability failure must halt with the failing
+// assertion AND the SQLite rows. The post-restart survival phase runs under
+// this wrapper: any failure is re-thrown with the FULL raw rows of every
+// durable table (the query results themselves, not derived arrays) appended
+// to the message — a read-only inspection of the store exactly as it stands
+// at the moment of failure.
+const durableRowJson = (_key, value) => (typeof value === 'bigint' ? String(value) : value)
+
+async function assertSurvivalWithDiagnostics(databasePath, phaseLabel, run) {
+  try {
+    await run()
+  } catch (error) {
+    let durableRows = null
+    let dumpFailure = null
+    try {
+      durableRows = withReadOnlyDatabase(databasePath, `${phaseLabel} diagnostics`, inspector => ({
+        messages: inspector.prepare('SELECT * FROM messages ORDER BY room_id, seq').all(),
+        rooms: inspector.prepare('SELECT * FROM rooms ORDER BY id').all(),
+        realms: inspector.prepare('SELECT * FROM realms').all(),
+        chat_id_claims: inspector.prepare('SELECT * FROM chat_id_claims ORDER BY actor_fingerprint').all(),
+      }))
+    } catch (dumpError) {
+      dumpFailure = dumpError
+    }
+    const dump = durableRows === null
+      ? `unavailable: ${dumpFailure?.message ?? 'the diagnostic dump failed for an unknown reason'}`
+      : JSON.stringify(durableRows, durableRowJson, 2)
+    error.message = `${error.message}\n${phaseLabel}: the durable SQLite rows at the moment of failure:\n${dump}`
+    throw error
   }
 }
 
@@ -943,21 +987,21 @@ test('restart survival: acknowledged traffic, sequences, reply links, claims, ro
   assert.equal(aliceToBobRoomId, bobToAliceRoomId, 'both sides converge on one pair room')
   const pairRoomId = aliceToBobRoomId
 
-  // One DM send (seq 1) and one DM reply with reply_to_seq 1 (seq 2).
+  // One DM send (seq 1). The DM reply (seq 2) is the FINAL acknowledged send
+  // and is issued in the kill section below — deliberately after every read,
+  // capture, and permission check this phase needs, so that nothing at all
+  // runs between the final acknowledgment and the SIGKILL.
   await sendExpect(alice, 'alice DM 1', {
     room_id: pairRoomId,
     client_message_id: 'alice-dm-1',
     text: DM_ALICE_TEXT,
   }, 1, pairRoomId)
-  await sendExpect(bob, 'bob DM reply 1', {
-    room_id: pairRoomId,
-    client_message_id: 'bob-dm-reply-1',
-    text: DM_BOB_REPLY_TEXT,
-    reply_to_seq: 1,
-  }, 2, pairRoomId)
 
   // Reads advance the cursors the no-reset row will resume from: alice reads
-  // broadcast and DM; bob reads DM; eaves reads nothing.
+  // broadcast [1, 2] and DM [1]; bob reads DM [1]; eaves reads nothing. Every
+  // read happens BEFORE the final send: a read issued after the final ack
+  // would be a masking window in which a hypothetical ack-before-commit could
+  // complete undetected.
   const readPage = async (participant, readLabel, args) => {
     const result = await participant.tool('message_read', args)
     assert.equal(result.isError, undefined, `${readLabel}: ${JSON.stringify(result.structuredContent)}`)
@@ -971,83 +1015,12 @@ test('restart survival: acknowledged traffic, sequences, reply links, claims, ro
   assert.equal(aliceBroadcastPage.next_after_seq, 2, "alice's broadcast cursor is 2")
   assert.equal(aliceBroadcastPage.head_seq, 2, 'the broadcast head is 2')
   const aliceDmPage = await readPage(alice, 'pre-kill alice DM read', { room_id: pairRoomId })
-  assert.deepEqual(aliceDmPage.messages.map(message => message.seq), [1, 2], 'alice catches up to [1, 2] in the DM room')
-  assert.equal(aliceDmPage.next_after_seq, 2, "alice's DM cursor is 2")
+  assert.deepEqual(aliceDmPage.messages.map(message => message.seq), [1], 'alice catches up to [1] in the DM room')
+  assert.equal(aliceDmPage.next_after_seq, 1, "alice's DM cursor is 1 — the final send has not run yet")
+  assert.equal(aliceDmPage.head_seq, 1, 'the DM head is 1')
   const bobDmPage = await readPage(bob, 'pre-kill bob DM read', { room_id: pairRoomId })
-  assert.deepEqual(bobDmPage.messages.map(message => message.seq), [1, 2], 'bob catches up to [1, 2] in the DM room')
-  assert.equal(bobDmPage.next_after_seq, 2, "bob's DM cursor is 2")
-
-  // --- Pre-kill durable snapshot (read-only SQLite) --------------------------------
-
-  const databaseIdentityPreKill = fileIdentity(world.databasePath)
-  const MESSAGE_PROJECTION = `
-    SELECT seq, room_id, actor_fingerprint, chat_id, client_message_id, text, reply_to_seq, created_at
-    FROM messages
-    WHERE room_id = ?
-    ORDER BY seq
-  `
-  const ROOM_PROJECTION = `
-    SELECT id, kind, title, pair_key, created_by_fingerprint, created_at
-    FROM rooms
-    WHERE id = ?
-  `
-  const preKillSnapshot = withReadOnlyDatabase(world.databasePath, 'pre-kill snapshot', inspector => {
-    const broadcastRows = inspector.prepare(MESSAGE_PROJECTION).all(broadcastRoomId)
-    const dmRows = inspector.prepare(MESSAGE_PROJECTION).all(pairRoomId)
-    const realmRows = inspector.prepare('SELECT singleton, realm_id, created_at FROM realms').all()
-    const broadcastKindRows = inspector.prepare(`
-      SELECT id, kind, title, pair_key, created_by_fingerprint, created_at
-      FROM rooms
-      WHERE kind = 'broadcast'
-    `).all()
-    const broadcastRoomRow = inspector.prepare(ROOM_PROJECTION).get(broadcastRoomId)
-    const pairRoomRow = inspector.prepare(ROOM_PROJECTION).get(pairRoomId)
-    const claimRows = inspector.prepare(`
-      SELECT chat_id_normalized, actor_fingerprint, chat_id_display, last_seen_at
-      FROM chat_id_claims
-      ORDER BY actor_fingerprint
-    `).all()
-    return { broadcastRows, dmRows, realmRows, broadcastKindRows, broadcastRoomRow, pairRoomRow, claimRows }
-  })
-  assertSameFileIdentity(world.databasePath, databaseIdentityPreKill, 'the database after the read-only pre-kill snapshot')
-
-  assert.deepEqual(
-    preKillSnapshot.broadcastRows.map(row => Number(row.seq)),
-    [1, 2],
-    'the pre-kill Broadcast Room holds exactly seqs [1, 2]',
-  )
-  assertUtf8Bytes(preKillSnapshot.broadcastRows[0].text, BROADCAST_TEXT_1_BYTES, 'pre-kill broadcast seq 1 raw bytes')
-  assertUtf8Bytes(preKillSnapshot.broadcastRows[1].text, BROADCAST_TEXT_2_BYTES, 'pre-kill broadcast seq 2 raw bytes')
-  assert.equal(preKillSnapshot.broadcastRows[0].actor_fingerprint, alicePre.fingerprint, 'broadcast seq 1 is alice raw (no envelope in the store)')
-  assert.deepEqual(
-    preKillSnapshot.dmRows.map(row => Number(row.seq)),
-    [1, 2],
-    'the pre-kill DM room holds exactly seqs [1, 2]',
-  )
-  assert.equal(preKillSnapshot.dmRows[0].reply_to_seq, null, 'DM seq 1 is not a reply')
-  assert.equal(preKillSnapshot.dmRows[1].reply_to_seq, 1, "DM seq 2's reply_to_seq is 1")
-  assertUtf8Bytes(preKillSnapshot.dmRows[0].text, DM_ALICE_TEXT_BYTES, 'pre-kill DM seq 1 raw bytes')
-  assertUtf8Bytes(preKillSnapshot.dmRows[1].text, DM_BOB_REPLY_TEXT_BYTES, 'pre-kill DM seq 2 raw bytes')
-
-  assert.equal(preKillSnapshot.realmRows.length, 1, 'exactly one realms singleton row exists pre-kill')
-  assert.equal(preKillSnapshot.realmRows[0].realm_id, realmId, 'the realms singleton holds realm R')
-  assert.equal(preKillSnapshot.broadcastKindRows.length, 1, 'exactly one broadcast-kind room exists pre-kill')
-  assert.equal(preKillSnapshot.broadcastKindRows[0].id, broadcastRoomId, 'the broadcast-kind room is Broadcast Room B')
-  const [pairMin, pairMax] = [alicePre.fingerprint, bobPre.fingerprint].sort()
-  assert.equal(preKillSnapshot.pairRoomRow.pair_key, `direct:${pairMin}:${pairMax}`, 'the pair room carries the canonical sorted pair key')
-
-  const preKillClaimsByFingerprint = new Map(
-    preKillSnapshot.claimRows.map(row => [row.actor_fingerprint, row]),
-  )
-  for (const [chatId, fingerprint] of [
-    ['alice', alicePre.fingerprint],
-    ['bob', bobPre.fingerprint],
-    ['eaves', eavesPre.fingerprint],
-  ]) {
-    const row = preKillClaimsByFingerprint.get(fingerprint)
-    assert.ok(row, `${chatId}: a durable claim row exists pre-kill`)
-    assert.equal(row.chat_id_normalized, chatId, `${chatId}: the claim row is keyed by the normalized chat id`)
-  }
+  assert.deepEqual(bobDmPage.messages.map(message => message.seq), [1], 'bob catches up to [1] in the DM room')
+  assert.equal(bobDmPage.next_after_seq, 1, "bob's DM cursor is 1 — the final send has not run yet")
 
   // --- Pre-kill cursor state --------------------------------------------------------
 
@@ -1068,11 +1041,12 @@ test('restart survival: acknowledged traffic, sequences, reply links, claims, ro
   assert.deepEqual(keysOf(aliceCursorsPre.cursors), [broadcastRoomId, pairRoomId].sort(), 'alice holds exactly the two room entries')
   for (const roomId of [broadcastRoomId, pairRoomId]) {
     assert.deepEqual(keysOf(aliceCursorsPre.cursors[roomId]), ['after_seq', 'updated_at'], `alice ${roomId}: the cursor entry carries exactly after_seq and updated_at`)
-    assert.equal(aliceCursorsPre.cursors[roomId].after_seq, 2, `alice ${roomId}: the pre-kill cursor is 2`)
   }
+  assert.equal(aliceCursorsPre.cursors[broadcastRoomId].after_seq, 2, "alice's pre-kill broadcast cursor is 2")
+  assert.equal(aliceCursorsPre.cursors[pairRoomId].after_seq, 1, "alice's pre-kill DM cursor is 1 — the final send has not run yet")
   const bobCursorsPre = readCursorDoc(cursorPathOf(world.installations.bob))
   assert.deepEqual(keysOf(bobCursorsPre.cursors), [pairRoomId], 'bob holds exactly the DM entry')
-  assert.equal(bobCursorsPre.cursors[pairRoomId].after_seq, 2, "bob's pre-kill DM cursor is 2")
+  assert.equal(bobCursorsPre.cursors[pairRoomId].after_seq, 1, "bob's pre-kill DM cursor is 1 — the final send has not run yet")
   assert.equal(existsSync(cursorPathOf(world.installations.eaves)), false, 'eaves has no cursors.json — it read nothing')
 
   const cursorsBeforeKill = new Map([
@@ -1080,11 +1054,25 @@ test('restart survival: acknowledged traffic, sequences, reply links, claims, ro
     ['bob', captureCursor(cursorPathOf(world.installations.bob))],
   ])
 
-  // --- The SIGKILL ------------------------------------------------------------------
+  // The database file's identity is captured BEFORE the kill: the post-kill
+  // snapshot and the restart below must both be proven to touch the same file.
+  const databaseIdentityPreKill = fileIdentity(world.databasePath)
+
+  // --- The final acknowledged send, then the SIGKILL --------------------------------
   //
-  // Immediately after the acknowledged traffic, snapshot, and cursor captures
-  // — zero idle time is introduced on purpose. The kill is uncatchable: no
+  // The DM reply (seq 2, reply_to_seq 1) is the last send of the traffic
+  // batch, and the kill is issued with NOTHING in between — no read, no
+  // snapshot, no capture. Any statement between the final acknowledgment and
+  // the kill would be a masking window in which a hypothetical
+  // ack-before-commit could complete undetected. The kill is uncatchable: no
   // shutdown handler, no runtime.json unlink, no clean WAL close.
+
+  await sendExpect(bob, 'bob DM reply 1', {
+    room_id: pairRoomId,
+    client_message_id: 'bob-dm-reply-1',
+    text: DM_BOB_REPLY_TEXT,
+    reply_to_seq: 1,
+  }, 2, pairRoomId)
 
   const s1ExitPromise = awaitExit(s1.exited, 'S1 SIGKILL', CHILD_REAP_GRACE_MS + 500)
   process.kill(s1.child.pid, 'SIGKILL')
@@ -1101,6 +1089,86 @@ test('restart survival: acknowledged traffic, sequences, reply links, claims, ro
     assert.equal(existsSync(`${world.databasePath}${suffix}`), true, `${suffix === '' ? 'the database file' : `the ${suffix} sidecar`} survives the crash`)
   }
 
+  // --- The durable snapshot, read-only from the crashed file ------------------------
+  //
+  // The database file is readable read-only immediately after SIGKILL — the
+  // final commit completed, so the WAL index the crash left behind is valid —
+  // and a read-only connection can never recover, checkpoint, or otherwise
+  // tidy what the crash left. Every row the traffic acknowledged must already
+  // be HERE: this snapshot, taken from the crashed file and not through the
+  // live server, is the oracle that fails if an acknowledgment ever preceded
+  // its COMMIT. The sharpest assertion is the DM room's seq 2 — bob's reply,
+  // whose ack was adjacent to the kill.
+
+  const MESSAGE_PROJECTION = `
+    SELECT seq, room_id, actor_fingerprint, chat_id, client_message_id, text, reply_to_seq, created_at
+    FROM messages
+    WHERE room_id = ?
+    ORDER BY seq
+  `
+  const ROOM_PROJECTION = `
+    SELECT id, kind, title, pair_key, created_by_fingerprint, created_at
+    FROM rooms
+    WHERE id = ?
+  `
+  const preKillSnapshot = withReadOnlyDatabase(world.databasePath, 'post-kill snapshot of the crashed file', inspector => {
+    const broadcastRows = inspector.prepare(MESSAGE_PROJECTION).all(broadcastRoomId)
+    const dmRows = inspector.prepare(MESSAGE_PROJECTION).all(pairRoomId)
+    const realmRows = inspector.prepare('SELECT singleton, realm_id, created_at FROM realms').all()
+    const broadcastKindRows = inspector.prepare(`
+      SELECT id, kind, title, pair_key, created_by_fingerprint, created_at
+      FROM rooms
+      WHERE kind = 'broadcast'
+    `).all()
+    const broadcastRoomRow = inspector.prepare(ROOM_PROJECTION).get(broadcastRoomId)
+    const pairRoomRow = inspector.prepare(ROOM_PROJECTION).get(pairRoomId)
+    const claimRows = inspector.prepare(`
+      SELECT chat_id_normalized, actor_fingerprint, chat_id_display, last_seen_at
+      FROM chat_id_claims
+      ORDER BY actor_fingerprint
+    `).all()
+    return { broadcastRows, dmRows, realmRows, broadcastKindRows, broadcastRoomRow, pairRoomRow, claimRows }
+  })
+  assertSameFileIdentity(world.databasePath, databaseIdentityPreKill, 'the database file after the read-only post-kill snapshot')
+
+  assert.deepEqual(
+    preKillSnapshot.broadcastRows.map(row => Number(row.seq)),
+    [1, 2],
+    'the crashed file holds the Broadcast Room at exactly seqs [1, 2]',
+  )
+  assertUtf8Bytes(preKillSnapshot.broadcastRows[0].text, BROADCAST_TEXT_1_BYTES, 'crashed-file broadcast seq 1 raw bytes')
+  assertUtf8Bytes(preKillSnapshot.broadcastRows[1].text, BROADCAST_TEXT_2_BYTES, 'crashed-file broadcast seq 2 raw bytes')
+  assert.equal(preKillSnapshot.broadcastRows[0].actor_fingerprint, alicePre.fingerprint, 'broadcast seq 1 is alice raw (no envelope in the store)')
+  assert.deepEqual(
+    preKillSnapshot.dmRows.map(row => Number(row.seq)),
+    [1, 2],
+    'the crashed file holds the DM room at exactly seqs [1, 2] — the final ack did not precede its COMMIT',
+  )
+  assert.equal(preKillSnapshot.dmRows[0].reply_to_seq, null, 'DM seq 1 is not a reply')
+  assert.equal(preKillSnapshot.dmRows[1].reply_to_seq, 1, "DM seq 2's reply_to_seq is 1")
+  assertUtf8Bytes(preKillSnapshot.dmRows[0].text, DM_ALICE_TEXT_BYTES, 'crashed-file DM seq 1 raw bytes')
+  assertUtf8Bytes(preKillSnapshot.dmRows[1].text, DM_BOB_REPLY_TEXT_BYTES, 'crashed-file DM seq 2 raw bytes')
+
+  assert.equal(preKillSnapshot.realmRows.length, 1, 'exactly one realms singleton row exists in the crashed file')
+  assert.equal(preKillSnapshot.realmRows[0].realm_id, realmId, 'the realms singleton holds realm R')
+  assert.equal(preKillSnapshot.broadcastKindRows.length, 1, 'exactly one broadcast-kind room exists in the crashed file')
+  assert.equal(preKillSnapshot.broadcastKindRows[0].id, broadcastRoomId, 'the broadcast-kind room is Broadcast Room B')
+  const [pairMin, pairMax] = [alicePre.fingerprint, bobPre.fingerprint].sort()
+  assert.equal(preKillSnapshot.pairRoomRow.pair_key, `direct:${pairMin}:${pairMax}`, 'the pair room carries the canonical sorted pair key')
+
+  const preKillClaimsByFingerprint = new Map(
+    preKillSnapshot.claimRows.map(row => [row.actor_fingerprint, row]),
+  )
+  for (const [chatId, fingerprint] of [
+    ['alice', alicePre.fingerprint],
+    ['bob', bobPre.fingerprint],
+    ['eaves', eavesPre.fingerprint],
+  ]) {
+    const row = preKillClaimsByFingerprint.get(fingerprint)
+    assert.ok(row, `${chatId}: a durable claim row exists in the crashed file`)
+    assert.equal(row.chat_id_normalized, chatId, `${chatId}: the claim row is keyed by the normalized chat id`)
+  }
+
   // Cursor state captured while the server is dead: the files must carry
   // across the restart untouched until a real read advances them.
   const cursorsWhileDead = new Map()
@@ -1115,7 +1183,10 @@ test('restart survival: acknowledged traffic, sequences, reply links, claims, ro
   // S2 is spawned by the harness and its runtime record is polled BY PID
   // before any client call: ensureServer must find a live pid with a healthy
   // probe (the `ready` path), never S1's stale record (which would boot a
-  // detached sibling).
+  // detached sibling). S1 was SIGKILLed, so nothing shut down gracefully and
+  // readiness never waits for one — the stale record naming S1's dead pid is
+  // the EXPECTED state when S2 starts, and readiness is declared only by a
+  // record naming S2's own pid with a valid port.
 
   const s2 = world.spawnServerChild('S2')
   const runtimeRecord2 = await world.waitReady(s2)
@@ -1137,282 +1208,352 @@ test('restart survival: acknowledged traffic, sequences, reply links, claims, ro
     assert.deepEqual(readFileSync(path), cursorsWhileDead.get(label).bytes, `${label}: cursor bytes unchanged up to the first post-restart read`)
   }
 
-  // --- Reconnection through the real client path ------------------------------------
+  // --- Post-restart survival ----------------------------------------------------------
   //
-  // Alice's first post-restart call runs her cached port (S1's dead port)
-  // into ECONNREFUSED, drops the cached port and token, re-resolves
-  // runtime.json through ensureServer, re-authenticates, re-binds the same
-  // Chat ID, and retries once — the recovery chain, verbatim.
+  // Every post-restart survival assertion runs under the durability-diagnostics
+  // wrapper: a failure here is a durability defect, and it must halt with the
+  // failing assertion AND the full SQLite rows of every durable table.
 
-  const alicePost = await statusOf(alice, runtimeRecord2.version, 'post-restart alice')
-  assert.equal(alicePost.realm_id, realmId, 'the surviving child re-attached to the SAME realm R')
-  assert.equal(alicePost.broadcast_room_id, broadcastRoomId, 'the surviving child sees the SAME Broadcast Room B')
-  assert.equal(alicePost.chat_id, alicePre.chat_id, 'the re-bind restored the same Chat ID')
-  assert.equal(alicePost.fingerprint, alicePre.fingerprint, 'the same installation identity re-bound')
+  await assertSurvivalWithDiagnostics(world.databasePath, 'post-restart survival', async () => {
 
-  await assertOnlyExpectedServer(world, 'after the surviving child reattached — no detached sibling was booted')
+    // --- Reconnection through the real client path ------------------------------------
+    //
+    // Alice's first post-restart call runs her cached port (S1's dead port) and
+    // succeeds via the client's real recovery path, re-binding the same Chat ID.
+    // The chain's INTERNAL steps (ECONNREFUSED handling, token drop, re-resolve,
+    // re-auth, single retry) run inside the MCP child and are unobservable under
+    // this test's zero-mock rule — they are asserted step-by-step in
+    // tests/mcp-tools.test.mjs. What is observable here is the chain's contract:
+    // the call succeeds, the identity re-binds unchanged, and exactly one server
+    // (S2) ends up bound to the database and its port.
 
-  // --- Post-restart sends: sequences continue ---------------------------------------
+    const alicePost = await statusOf(alice, runtimeRecord2.version, 'post-restart alice')
+    assert.equal(alicePost.realm_id, realmId, 'the surviving child re-attached to the SAME realm R')
+    assert.equal(alicePost.broadcast_room_id, broadcastRoomId, 'the surviving child sees the SAME Broadcast Room B')
+    assert.equal(alicePost.chat_id, alicePre.chat_id, 'the re-bind restored the same Chat ID')
+    assert.equal(alicePost.fingerprint, alicePre.fingerprint, 'the same installation identity re-bound')
 
-  await sendExpect(alice, 'post-restart alice broadcast', {
-    room_id: broadcastRoomId,
-    client_message_id: 'alice-broadcast-3',
-    text: POST_BROADCAST_TEXT,
-  }, 3, broadcastRoomId)
-  await sendExpect(alice, 'post-restart alice DM', {
-    room_id: pairRoomId,
-    client_message_id: 'alice-dm-3',
-    text: POST_DM_TEXT,
-  }, 3, pairRoomId)
-  await sendExpect(bob, 'post-restart bob DM reply', {
-    room_id: pairRoomId,
-    client_message_id: 'bob-dm-reply-2',
-    text: POST_DM_REPLY_TEXT,
-    reply_to_seq: 1,
-  }, 4, pairRoomId)
+    await assertOnlyExpectedServer(world, 'after the surviving child reattached — no detached sibling was booted')
 
-  const broadcastFixtureBySeq = new Map([
-    [1, { text: BROADCAST_TEXT_1, bytes: BROADCAST_TEXT_1_BYTES, clientMessageId: 'alice-broadcast-1', sender: 'alice', senderFingerprint: alicePre.fingerprint }],
-    [2, { text: BROADCAST_TEXT_2, bytes: BROADCAST_TEXT_2_BYTES, clientMessageId: 'alice-broadcast-2', sender: 'alice', senderFingerprint: alicePre.fingerprint }],
-    [3, { text: POST_BROADCAST_TEXT, bytes: POST_BROADCAST_TEXT_BYTES, clientMessageId: 'alice-broadcast-3', sender: 'alice', senderFingerprint: alicePre.fingerprint }],
-  ])
-  const dmFixtureBySeq = new Map([
-    [1, { text: DM_ALICE_TEXT, bytes: DM_ALICE_TEXT_BYTES, clientMessageId: 'alice-dm-1', sender: 'alice', senderFingerprint: alicePre.fingerprint }],
-    [2, { text: DM_BOB_REPLY_TEXT, bytes: DM_BOB_REPLY_TEXT_BYTES, clientMessageId: 'bob-dm-reply-1', sender: 'bob', senderFingerprint: bobPre.fingerprint, replyToSeq: 1 }],
-    [3, { text: POST_DM_TEXT, bytes: POST_DM_TEXT_BYTES, clientMessageId: 'alice-dm-3', sender: 'alice', senderFingerprint: alicePre.fingerprint }],
-    [4, { text: POST_DM_REPLY_TEXT, bytes: POST_DM_REPLY_TEXT_BYTES, clientMessageId: 'bob-dm-reply-2', sender: 'bob', senderFingerprint: bobPre.fingerprint, replyToSeq: 1 }],
-  ])
+    // --- Post-restart sends: sequences continue ---------------------------------------
 
-  const assertForeignEnvelope = (message, fixture, viewerLabel) => {
-    const envelope = literalForeignEnvelope({
-      senderChatId: fixture.sender,
-      senderFingerprint: fixture.senderFingerprint,
-      text: fixture.text,
-    })
-    assert.equal(message.text, envelope, `${viewerLabel}: the message carries the literal v1 envelope around the exact payload`)
-    const bodyOffset = message.text.indexOf(fixture.text)
-    assert.notEqual(bodyOffset, -1, `${viewerLabel}: the exact payload occurs inside the foreign envelope`)
-    assertUtf8Bytes(
-      message.text.slice(bodyOffset, bodyOffset + fixture.text.length),
-      fixture.bytes,
-      `${viewerLabel}: the wrapped payload is byte-equal to the fixture`,
-    )
-  }
+    await sendExpect(alice, 'post-restart alice broadcast', {
+      room_id: broadcastRoomId,
+      client_message_id: 'alice-broadcast-3',
+      text: POST_BROADCAST_TEXT,
+    }, 3, broadcastRoomId)
+    await sendExpect(alice, 'post-restart alice DM', {
+      room_id: pairRoomId,
+      client_message_id: 'alice-dm-3',
+      text: POST_DM_TEXT,
+    }, 3, pairRoomId)
+    await sendExpect(bob, 'post-restart bob DM reply', {
+      room_id: pairRoomId,
+      client_message_id: 'bob-dm-reply-2',
+      text: POST_DM_REPLY_TEXT,
+      reply_to_seq: 1,
+    }, 4, pairRoomId)
 
-  // Bob's full Broadcast Room view: every one of alice's messages — the two
-  // acknowledged pre-kill sends and the post-restart send — rides the frozen
-  // v1 untrusted envelope around the exact payload.
-  const bobBroadcastPage = await readPage(bob, 'post-restart bob broadcast read', { room_id: broadcastRoomId })
-  assert.deepEqual(bobBroadcastPage.messages.map(message => message.seq), [1, 2, 3], 'bob reads the whole Broadcast Room log [1, 2, 3]')
-  assert.equal(bobBroadcastPage.next_after_seq, 3, "bob's fresh broadcast cursor lands at 3")
-  assert.equal(bobBroadcastPage.head_seq, 3, 'the broadcast head is 3')
-  for (const message of bobBroadcastPage.messages) {
-    const fixture = broadcastFixtureBySeq.get(message.seq)
-    assert.deepEqual(keysOf(message), MESSAGE_KEYS, `broadcast seq ${message.seq}: exactly the eight stored fields`)
-    assert.equal(message.actor_fingerprint, alicePre.fingerprint, `broadcast seq ${message.seq}: alice is the sender`)
-    assert.equal(message.chat_id, 'alice', `broadcast seq ${message.seq}: attribution keeps the send-time chat id`)
-    assert.equal(message.client_message_id, fixture.clientMessageId, `broadcast seq ${message.seq}: the acked client_message_id round-trips`)
-    assert.equal(message.reply_to_seq, null, `broadcast seq ${message.seq}: a non-reply carries reply_to_seq null`)
-    assert.equal(Number.isFinite(Date.parse(message.created_at)), true, `broadcast seq ${message.seq}: created_at is an ISO timestamp`)
-    assertForeignEnvelope(message, fixture, `bob's view of broadcast seq ${message.seq}`)
-  }
+    const broadcastFixtureBySeq = new Map([
+      [1, { text: BROADCAST_TEXT_1, bytes: BROADCAST_TEXT_1_BYTES, clientMessageId: 'alice-broadcast-1', sender: 'alice', senderFingerprint: alicePre.fingerprint }],
+      [2, { text: BROADCAST_TEXT_2, bytes: BROADCAST_TEXT_2_BYTES, clientMessageId: 'alice-broadcast-2', sender: 'alice', senderFingerprint: alicePre.fingerprint }],
+      [3, { text: POST_BROADCAST_TEXT, bytes: POST_BROADCAST_TEXT_BYTES, clientMessageId: 'alice-broadcast-3', sender: 'alice', senderFingerprint: alicePre.fingerprint }],
+    ])
+    const dmFixtureBySeq = new Map([
+      [1, { text: DM_ALICE_TEXT, bytes: DM_ALICE_TEXT_BYTES, clientMessageId: 'alice-dm-1', sender: 'alice', senderFingerprint: alicePre.fingerprint }],
+      [2, { text: DM_BOB_REPLY_TEXT, bytes: DM_BOB_REPLY_TEXT_BYTES, clientMessageId: 'bob-dm-reply-1', sender: 'bob', senderFingerprint: bobPre.fingerprint, replyToSeq: 1 }],
+      [3, { text: POST_DM_TEXT, bytes: POST_DM_TEXT_BYTES, clientMessageId: 'alice-dm-3', sender: 'alice', senderFingerprint: alicePre.fingerprint }],
+      [4, { text: POST_DM_REPLY_TEXT, bytes: POST_DM_REPLY_TEXT_BYTES, clientMessageId: 'bob-dm-reply-2', sender: 'bob', senderFingerprint: bobPre.fingerprint, replyToSeq: 1 }],
+    ])
 
-  // --- Cursors remain valid — no reset ----------------------------------------------
-  //
-  // Post-restart reads with after_seq omitted resume from the persisted
-  // cursor: alice's broadcast read returns exactly [seq 3], never a
-  // re-delivery of [1, 2, 3]; the DM reads resume at the persisted cursors.
-
-  const aliceBroadcastResume = await readPage(alice, 'post-restart alice broadcast resume', { room_id: broadcastRoomId })
-  assert.deepEqual(
-    aliceBroadcastResume.messages.map(message => message.seq),
-    [3],
-    "alice's broadcast read resumes at exactly [seq 3] — no re-delivery of [1, 2, 3]",
-  )
-  assert.equal(aliceBroadcastResume.next_after_seq, 3, "alice's broadcast cursor advanced to 3")
-  const aliceDmResume = await readPage(alice, 'post-restart alice DM resume', { room_id: pairRoomId })
-  assert.deepEqual(
-    aliceDmResume.messages.map(message => message.seq),
-    [3, 4],
-    "alice's DM read resumes at her persisted cursor",
-  )
-  assert.equal(aliceDmResume.next_after_seq, 4, "alice's DM cursor advanced to 4")
-  assert.equal(aliceDmResume.head_seq, 4, 'the DM head is 4')
-  const bobDmResume = await readPage(bob, 'post-restart bob DM resume', { room_id: pairRoomId })
-  assert.deepEqual(
-    bobDmResume.messages.map(message => message.seq),
-    [3, 4],
-    "bob's DM read resumes at his persisted cursor",
-  )
-  assert.equal(bobDmResume.next_after_seq, 4, "bob's DM cursor advanced to 4")
-
-  // --- Acknowledged messages survive byte-exact through the real MCP path ----------
-  //
-  // Explicit catch-up reads (after_seq 0) re-consume history WITHOUT
-  // regressing the durable cursor: alice's own words come back plain and
-  // byte-equal; bob's words ride the literal envelope; the pre-kill reply
-  // link is intact in the returned page.
-
-  const aliceBroadcastFull = await readPage(alice, 'post-restart alice broadcast catch-up', { room_id: broadcastRoomId, after_seq: 0 })
-  assert.deepEqual(aliceBroadcastFull.messages.map(message => message.seq), [1, 2, 3], 'the full broadcast log reads back post-restart')
-  assert.equal(aliceBroadcastFull.next_after_seq, 3, 'the catch-up page ends at 3')
-  for (const message of aliceBroadcastFull.messages) {
-    const fixture = broadcastFixtureBySeq.get(message.seq)
-    assert.equal(message.actor_fingerprint, alicePre.fingerprint, `broadcast seq ${message.seq}: alice's own message`)
-    assert.equal(message.text, fixture.text, `broadcast seq ${message.seq}: alice's own message returns plain`)
-    assertUtf8Bytes(message.text, fixture.bytes, `broadcast seq ${message.seq}: byte-equal to the acknowledged fixture`)
-  }
-
-  const aliceDmFull = await readPage(alice, 'post-restart alice DM catch-up', { room_id: pairRoomId, after_seq: 0 })
-  assert.deepEqual(aliceDmFull.messages.map(message => message.seq), [1, 2, 3, 4], 'the full DM log reads back post-restart')
-  assert.equal(aliceDmFull.next_after_seq, 4, 'the DM catch-up page ends at 4')
-  assert.deepEqual(
-    aliceDmFull.messages.map(message => message.reply_to_seq),
-    [null, 1, null, 1],
-    'reply links survive the restart in both directions; non-replies carry null',
-  )
-  for (const message of aliceDmFull.messages) {
-    const fixture = dmFixtureBySeq.get(message.seq)
-    assert.deepEqual(keysOf(message), MESSAGE_KEYS, `DM seq ${message.seq}: exactly the eight stored fields`)
-    assert.equal(message.client_message_id, fixture.clientMessageId, `DM seq ${message.seq}: the acked client_message_id round-trips`)
-    if (fixture.sender === 'alice') {
-      assert.equal(message.text, fixture.text, `DM seq ${message.seq}: alice's own message returns plain`)
-      assertUtf8Bytes(message.text, fixture.bytes, `DM seq ${message.seq}: byte-equal to the acknowledged fixture`)
-    } else {
-      assertForeignEnvelope(message, fixture, `alice's view of DM seq ${message.seq}`)
+    const assertForeignEnvelope = (message, fixture, viewerLabel) => {
+      const envelope = literalForeignEnvelope({
+        senderChatId: fixture.sender,
+        senderFingerprint: fixture.senderFingerprint,
+        text: fixture.text,
+      })
+      assert.equal(message.text, envelope, `${viewerLabel}: the message carries the literal v1 envelope around the exact payload`)
+      const bodyOffset = message.text.indexOf(fixture.text)
+      assert.notEqual(bodyOffset, -1, `${viewerLabel}: the exact payload occurs inside the foreign envelope`)
+      assertUtf8Bytes(
+        message.text.slice(bodyOffset, bodyOffset + fixture.text.length),
+        fixture.bytes,
+        `${viewerLabel}: the wrapped payload is byte-equal to the fixture`,
+      )
     }
-  }
 
-  // --- Realm / Broadcast Room stability, pair-room re-open, durable claims ---------
-
-  const reopenedPairRoomId = await openExpect(alice, 'alice re-opens bob after the restart', 'bob')
-  assert.equal(reopenedPairRoomId, pairRoomId, 'the pair room re-opens to the SAME id across the restart (pair-key idempotency)')
-
-  // Eaves sat idle across the restart: no live session anywhere. The open
-  // resolves through the DURABLE claims index — offline discovery works.
-  const openedToEavesRoomId = await openExpect(alice, 'alice opens the offline eaves', 'eaves')
-  assert.notEqual(openedToEavesRoomId, pairRoomId, 'the alice↔eaves open is a distinct pair room')
-
-  // --- The DM ACL persists ----------------------------------------------------------
-
-  // Eaves' first post-restart call is the denied read: the recovery chain
-  // re-authenticates and re-binds it, and the store still denies a non-member.
-  const eavesDeniedResult = await eaves.tool('message_read', { room_id: pairRoomId })
-  assert.equal(eavesDeniedResult.isError, true, `eaves' read is an error result: ${JSON.stringify(eavesDeniedResult.structuredContent)}`)
-  assert.deepEqual(keysOf(eavesDeniedResult.structuredContent), ['error', 'ok'], "eaves' denial envelope is exactly {ok: false, error}")
-  assert.equal(eavesDeniedResult.structuredContent.ok, false, "eaves' denial envelope carries ok: false")
-  assert.deepEqual(keysOf(eavesDeniedResult.structuredContent.error), ['code', 'message'], "eaves' denial error carries exactly code and message")
-  assert.equal(eavesDeniedResult.structuredContent.error.code, 'actor_not_member', "eaves' read is denied with actor_not_member across the restart")
-  assert.ok(eavesDeniedResult.structuredContent.error.message.length > 0, "eaves' denial message is non-empty")
-  const eavesDenialJson = JSON.stringify(eavesDeniedResult.structuredContent)
-  for (const [fixtureLabel, fixtureText] of [
-    ['pre-kill alice DM', DM_ALICE_TEXT],
-    ['pre-kill bob reply', DM_BOB_REPLY_TEXT],
-    ['post-restart alice DM', POST_DM_TEXT],
-    ['post-restart bob reply', POST_DM_REPLY_TEXT],
-  ]) {
-    assert.equal(eavesDenialJson.includes(fixtureText), false, `eaves' denial leaks no ${fixtureLabel} payload`)
-  }
-  assert.equal(existsSync(cursorPathOf(world.installations.eaves)), false, "the denial writes no cursor for eaves")
-
-  // --- Cursor files after the reads -------------------------------------------------
-
-  const assertRealmDirectorySingular = (label, installation) => {
-    assert.deepEqual(readdirSync(realmsDirOf(installation)), [realmId], `${label}: exactly the realm directory R remains — no new or renamed realm directory`)
-  }
-  for (const [label, installation] of [['alice', world.installations.alice], ['bob', world.installations.bob]]) {
-    assert.equal(modeOf(realmsDirOf(installation), 'directory'), 0o700, `${label}: the realms directory is still 0700`)
-    assert.equal(modeOf(realmDirOf(installation), 'directory'), 0o700, `${label}: the realm directory R is still 0700`)
-    assert.equal(modeOf(cursorPathOf(installation), 'file'), 0o600, `${label}: cursors.json is still 0600`)
-    assertRealmDirectorySingular(label, installation)
-  }
-  const aliceCursorsPost = readCursorDoc(cursorPathOf(world.installations.alice))
-  assert.deepEqual(keysOf(aliceCursorsPost.cursors), [broadcastRoomId, pairRoomId].sort(), 'alice still holds exactly the two room entries')
-  assert.equal(aliceCursorsPost.cursors[broadcastRoomId].after_seq, 3, "alice's broadcast cursor advanced 2 → 3 (strictly forward)")
-  assert.equal(aliceCursorsPost.cursors[pairRoomId].after_seq, 4, "alice's DM cursor advanced 2 → 4; the explicit low read never moved it backward")
-  const bobCursorsPost = readCursorDoc(cursorPathOf(world.installations.bob))
-  assert.deepEqual(keysOf(bobCursorsPost.cursors), [broadcastRoomId, pairRoomId].sort(), 'bob holds exactly the rooms he read (the DM pre-kill, the Broadcast Room post-restart)')
-  assert.equal(bobCursorsPost.cursors[pairRoomId].after_seq, 4, "bob's DM cursor advanced 2 → 4 (strictly forward)")
-  assert.equal(bobCursorsPost.cursors[broadcastRoomId].after_seq, 3, "bob's fresh broadcast cursor landed at 3 (strictly forward)")
-
-  // --- Post-restart SQLite cross-checks ----------------------------------------------
-
-  withReadOnlyDatabase(world.databasePath, 'post-restart inspection', inspector => {
-    const broadcastRows = inspector.prepare(MESSAGE_PROJECTION).all(broadcastRoomId)
-    assert.deepEqual(
-      broadcastRows.map(row => Number(row.seq)),
-      [1, 2, 3],
-      'Broadcast Room seqs are exactly [1, 2, 3] — contiguous from 1, no reuse, no gap at the kill boundary',
-    )
-    for (const row of broadcastRows) {
-      const fixture = broadcastFixtureBySeq.get(Number(row.seq))
-      assert.equal(row.actor_fingerprint, alicePre.fingerprint, `broadcast seq ${row.seq}: stored under alice's fingerprint`)
-      assertUtf8Bytes(row.text, fixture.bytes, `broadcast seq ${row.seq}: raw bytes equal to the acknowledged fixture`)
+    // Bob's full Broadcast Room view: every one of alice's messages — the two
+    // acknowledged pre-kill sends and the post-restart send — rides the frozen
+    // v1 untrusted envelope around the exact payload.
+    const bobBroadcastPage = await readPage(bob, 'post-restart bob broadcast read', { room_id: broadcastRoomId })
+    assert.deepEqual(bobBroadcastPage.messages.map(message => message.seq), [1, 2, 3], 'bob reads the whole Broadcast Room log [1, 2, 3]')
+    assert.equal(bobBroadcastPage.next_after_seq, 3, "bob's fresh broadcast cursor lands at 3")
+    assert.equal(bobBroadcastPage.head_seq, 3, 'the broadcast head is 3')
+    for (const message of bobBroadcastPage.messages) {
+      const fixture = broadcastFixtureBySeq.get(message.seq)
+      assert.deepEqual(keysOf(message), MESSAGE_KEYS, `broadcast seq ${message.seq}: exactly the eight stored fields`)
+      assert.equal(message.actor_fingerprint, alicePre.fingerprint, `broadcast seq ${message.seq}: alice is the sender`)
+      assert.equal(message.chat_id, 'alice', `broadcast seq ${message.seq}: attribution keeps the send-time chat id`)
+      assert.equal(message.client_message_id, fixture.clientMessageId, `broadcast seq ${message.seq}: the acked client_message_id round-trips`)
+      assert.equal(message.reply_to_seq, null, `broadcast seq ${message.seq}: a non-reply carries reply_to_seq null`)
+      assert.equal(Number.isFinite(Date.parse(message.created_at)), true, `broadcast seq ${message.seq}: created_at is an ISO timestamp`)
+      assertForeignEnvelope(message, fixture, `bob's view of broadcast seq ${message.seq}`)
     }
-    const dmRows = inspector.prepare(MESSAGE_PROJECTION).all(pairRoomId)
+
+    // --- Cursors remain valid — no reset ----------------------------------------------
+    //
+    // Post-restart reads with after_seq omitted resume from the persisted
+    // cursor: alice's broadcast read returns exactly [seq 3], never a
+    // re-delivery of [1, 2, 3]; the DM reads resume at the persisted cursors
+    // (both persisted at 1 before the kill, so seq 1 is never re-delivered).
+
+    const aliceBroadcastResume = await readPage(alice, 'post-restart alice broadcast resume', { room_id: broadcastRoomId })
     assert.deepEqual(
-      dmRows.map(row => Number(row.seq)),
-      [1, 2, 3, 4],
-      'DM seqs are exactly [1, 2, 3, 4] — contiguous from 1, no reuse, no gap at the kill boundary',
+      aliceBroadcastResume.messages.map(message => message.seq),
+      [3],
+      "alice's broadcast read resumes at exactly [seq 3] — no re-delivery of [1, 2, 3]",
     )
+    assert.equal(aliceBroadcastResume.next_after_seq, 3, "alice's broadcast cursor advanced to 3")
+
+    // Cursor monotonicity is OBSERVABLE, not just presumed: an explicit page
+    // that ends strictly BELOW the persisted cursor must leave the durable
+    // cursor file holding the higher value, and the next cursorless read must
+    // resume from that value — not from the low page's end.
+    const aliceBroadcastLowPage = await readPage(alice, 'explicit low broadcast page', { room_id: broadcastRoomId, after_seq: 0, limit: 1 })
     assert.deepEqual(
-      dmRows.map(row => (row.reply_to_seq === null ? null : Number(row.reply_to_seq))),
+      aliceBroadcastLowPage.messages.map(message => message.seq),
+      [1],
+      'the explicit low page returns exactly [seq 1]',
+    )
+    assert.equal(
+      aliceBroadcastLowPage.next_after_seq,
+      1,
+      "the low page ends at next_after_seq 1 — strictly below the persisted broadcast cursor 3",
+    )
+    const aliceCursorsAfterLowRead = readCursorDoc(cursorPathOf(world.installations.alice))
+    assert.equal(
+      aliceCursorsAfterLowRead.cursors[broadcastRoomId].after_seq,
+      3,
+      'the durable broadcast cursor still holds 3 after the low page — the persisted value was not pulled down',
+    )
+    const aliceBroadcastAfterLow = await readPage(alice, 'cursorless broadcast read after the low page', { room_id: broadcastRoomId })
+    assert.deepEqual(
+      aliceBroadcastAfterLow.messages.map(message => message.seq),
+      [],
+      'the next cursorless read resumed from the persisted cursor 3 — an empty page, no re-delivery',
+    )
+    assert.equal(aliceBroadcastAfterLow.next_after_seq, 3, 'the cursorless read after the low page ends at 3, the persisted cursor')
+
+    const aliceDmResume = await readPage(alice, 'post-restart alice DM resume', { room_id: pairRoomId })
+    assert.deepEqual(
+      aliceDmResume.messages.map(message => message.seq),
+      [2, 3, 4],
+      "alice's DM read resumes at her persisted cursor 1 — seq 1 is not re-delivered",
+    )
+    assert.equal(aliceDmResume.next_after_seq, 4, "alice's DM cursor advanced to 4")
+    assert.equal(aliceDmResume.head_seq, 4, 'the DM head is 4')
+    const bobDmResume = await readPage(bob, 'post-restart bob DM resume', { room_id: pairRoomId })
+    assert.deepEqual(
+      bobDmResume.messages.map(message => message.seq),
+      [2, 3, 4],
+      "bob's DM read resumes at his persisted cursor 1 — seq 1 is not re-delivered",
+    )
+    assert.equal(bobDmResume.next_after_seq, 4, "bob's DM cursor advanced to 4")
+
+    // --- Acknowledged messages survive byte-exact through the real MCP path ----------
+    //
+    // Explicit catch-up reads (after_seq 0) re-consume history WITHOUT
+    // regressing the durable cursor: alice's own words come back plain and
+    // byte-equal; bob's words ride the literal envelope; the pre-kill reply
+    // link is intact in the returned page.
+
+    const aliceBroadcastFull = await readPage(alice, 'post-restart alice broadcast catch-up', { room_id: broadcastRoomId, after_seq: 0 })
+    assert.deepEqual(aliceBroadcastFull.messages.map(message => message.seq), [1, 2, 3], 'the full broadcast log reads back post-restart')
+    assert.equal(aliceBroadcastFull.next_after_seq, 3, 'the catch-up page ends at 3')
+    for (const message of aliceBroadcastFull.messages) {
+      const fixture = broadcastFixtureBySeq.get(message.seq)
+      assert.equal(message.actor_fingerprint, alicePre.fingerprint, `broadcast seq ${message.seq}: alice's own message`)
+      assert.equal(message.text, fixture.text, `broadcast seq ${message.seq}: alice's own message returns plain`)
+      assertUtf8Bytes(message.text, fixture.bytes, `broadcast seq ${message.seq}: byte-equal to the acknowledged fixture`)
+    }
+
+    const aliceDmFull = await readPage(alice, 'post-restart alice DM catch-up', { room_id: pairRoomId, after_seq: 0 })
+    assert.deepEqual(aliceDmFull.messages.map(message => message.seq), [1, 2, 3, 4], 'the full DM log reads back post-restart')
+    assert.equal(aliceDmFull.next_after_seq, 4, 'the DM catch-up page ends at 4')
+    assert.deepEqual(
+      aliceDmFull.messages.map(message => message.reply_to_seq),
       [null, 1, null, 1],
-      'the reply FK column survived for both replies, room-local',
+      'reply links survive the restart in both directions; non-replies carry null',
     )
-    for (const row of dmRows) {
-      const fixture = dmFixtureBySeq.get(Number(row.seq))
-      assert.equal(row.actor_fingerprint, fixture.senderFingerprint, `DM seq ${row.seq}: stored under the sender's fingerprint`)
-      assertUtf8Bytes(row.text, fixture.bytes, `DM seq ${row.seq}: raw bytes equal to the acknowledged fixture`)
+    for (const message of aliceDmFull.messages) {
+      const fixture = dmFixtureBySeq.get(message.seq)
+      assert.deepEqual(keysOf(message), MESSAGE_KEYS, `DM seq ${message.seq}: exactly the eight stored fields`)
+      assert.equal(message.client_message_id, fixture.clientMessageId, `DM seq ${message.seq}: the acked client_message_id round-trips`)
+      if (fixture.sender === 'alice') {
+        assert.equal(message.text, fixture.text, `DM seq ${message.seq}: alice's own message returns plain`)
+        assertUtf8Bytes(message.text, fixture.bytes, `DM seq ${message.seq}: byte-equal to the acknowledged fixture`)
+      } else {
+        assertForeignEnvelope(message, fixture, `alice's view of DM seq ${message.seq}`)
+      }
     }
 
-    const realmRows = inspector.prepare('SELECT singleton, realm_id, created_at FROM realms').all()
-    assert.equal(realmRows.length, 1, 'exactly one realms singleton row exists after the restart')
-    assert.equal(realmRows[0].realm_id, realmId, 'the realms singleton still holds realm R — no re-minted realm')
+    // --- Realm / Broadcast Room stability, pair-room re-open, durable claims ---------
 
-    const broadcastKindRows = inspector.prepare(`
-      SELECT id, kind, title, pair_key, created_by_fingerprint, created_at
-      FROM rooms
-      WHERE kind = 'broadcast'
-    `).all()
-    assert.equal(broadcastKindRows.length, 1, 'exactly one broadcast-kind room exists after the restart')
-    assert.equal(broadcastKindRows[0].id, broadcastRoomId, 'the broadcast-kind room is still Broadcast Room B')
-    assert.deepEqual(
-      inspector.prepare(ROOM_PROJECTION).get(broadcastRoomId),
-      preKillSnapshot.broadcastRoomRow,
-      'the Broadcast Room row is byte-identical across the restart',
-    )
-    assert.deepEqual(
-      inspector.prepare(ROOM_PROJECTION).get(pairRoomId),
-      preKillSnapshot.pairRoomRow,
-      'the pair room row is byte-identical across the restart',
-    )
-    const aliceEavesRow = inspector.prepare(ROOM_PROJECTION).get(openedToEavesRoomId)
-    assert.equal(aliceEavesRow.kind, 'direct', 'the offline-resolved open is stored as a Direct Room')
-    const [aliceEavesMin, aliceEavesMax] = [alicePre.fingerprint, eavesPre.fingerprint].sort()
-    assert.equal(aliceEavesRow.pair_key, `direct:${aliceEavesMin}:${aliceEavesMax}`, 'the alice↔eaves room carries the canonical pair key')
+    const reopenedPairRoomId = await openExpect(alice, 'alice re-opens bob after the restart', 'bob')
+    assert.equal(reopenedPairRoomId, pairRoomId, 'the pair room re-opens to the SAME id across the restart (pair-key idempotency)')
 
-    const claimRows = inspector.prepare(`
-      SELECT chat_id_normalized, actor_fingerprint, chat_id_display, last_seen_at
-      FROM chat_id_claims
-      ORDER BY actor_fingerprint
-    `).all()
-    const claimsByFingerprint = new Map(claimRows.map(row => [row.actor_fingerprint, row]))
-    for (const [chatId, fingerprint] of [
-      ['alice', alicePre.fingerprint],
-      ['bob', bobPre.fingerprint],
-      ['eaves', eavesPre.fingerprint],
+    // The offline-claims PREMISE, verified before it is relied on: eaves sat
+    // idle across the restart, so the live session registry must not name it.
+    // Alice and bob have both reconnected (each made a post-restart call), so a
+    // live registry that returned nothing would make this check vacuous — the
+    // absence of eaves alongside the presence of alice and bob is what proves
+    // the open below resolves through the DURABLE claims index, not the live
+    // registry.
+    const presenceBeforeOfflineOpen = await alice.tool('room_presence')
+    assert.equal(presenceBeforeOfflineOpen.isError, undefined, `premise room_presence: ${JSON.stringify(presenceBeforeOfflineOpen.structuredContent)}`)
+    const presencePremise = presenceBeforeOfflineOpen.structuredContent
+    assert.deepEqual(keysOf(presencePremise), ['offline_recently', 'online'], 'premise: room_presence returns exactly the two groups')
+    const onlineChatIds = presencePremise.online.map(row => row.chat_id)
+    assert.deepEqual(
+      [onlineChatIds.includes('alice'), onlineChatIds.includes('bob')],
+      [true, true],
+      'premise: alice and bob are live sessions — the presence registry is live, not empty',
+    )
+    for (const [groupName, rows] of [['online', presencePremise.online], ['offline_recently', presencePremise.offline_recently]]) {
+      assert.equal(
+        rows.some(row => row.chat_id === 'eaves'),
+        false,
+        `premise: eaves is in no presence group (${groupName}) — it has no live session`,
+      )
+    }
+
+    // Eaves sat idle across the restart: no live session anywhere (asserted
+    // above). The open resolves through the DURABLE claims index — offline
+    // discovery works.
+    const openedToEavesRoomId = await openExpect(alice, 'alice opens the offline eaves', 'eaves')
+    assert.notEqual(openedToEavesRoomId, pairRoomId, 'the alice↔eaves open is a distinct pair room')
+
+    // --- The DM ACL persists ----------------------------------------------------------
+
+    // Eaves' first post-restart call is the denied read: the recovery chain
+    // re-authenticates and re-binds it, and the store still denies a non-member.
+    const eavesDeniedResult = await eaves.tool('message_read', { room_id: pairRoomId })
+    assert.equal(eavesDeniedResult.isError, true, `eaves' read is an error result: ${JSON.stringify(eavesDeniedResult.structuredContent)}`)
+    assert.deepEqual(keysOf(eavesDeniedResult.structuredContent), ['error', 'ok'], "eaves' denial envelope is exactly {ok: false, error}")
+    assert.equal(eavesDeniedResult.structuredContent.ok, false, "eaves' denial envelope carries ok: false")
+    assert.deepEqual(keysOf(eavesDeniedResult.structuredContent.error), ['code', 'message'], "eaves' denial error carries exactly code and message")
+    assert.equal(eavesDeniedResult.structuredContent.error.code, 'actor_not_member', "eaves' read is denied with actor_not_member across the restart")
+    assert.ok(eavesDeniedResult.structuredContent.error.message.length > 0, "eaves' denial message is non-empty")
+    const eavesDenialJson = JSON.stringify(eavesDeniedResult.structuredContent)
+    for (const [fixtureLabel, fixtureText] of [
+      ['pre-kill alice DM', DM_ALICE_TEXT],
+      ['pre-kill bob reply', DM_BOB_REPLY_TEXT],
+      ['post-restart alice DM', POST_DM_TEXT],
+      ['post-restart bob reply', POST_DM_REPLY_TEXT],
     ]) {
-      const row = claimsByFingerprint.get(fingerprint)
-      assert.ok(row, `${chatId}: the durable claim row survived the restart`)
-      assert.equal(row.chat_id_normalized, chatId, `${chatId}: the claim row kept its normalized key`)
-      const beforeMs = Date.parse(preKillClaimsByFingerprint.get(fingerprint).last_seen_at)
-      const afterMs = Date.parse(row.last_seen_at)
-      assert.equal(Number.isFinite(beforeMs) && Number.isFinite(afterMs), true, `${chatId}: both claim timestamps are valid ISO instants`)
-      assert.ok(afterMs >= beforeMs, `${chatId}: last_seen_at never moved backward across the restart`)
+      assert.equal(eavesDenialJson.includes(fixtureText), false, `eaves' denial leaks no ${fixtureLabel} payload`)
     }
-  })
-  assertSameFileIdentity(world.databasePath, databaseIdentityPreKill, 'the database identity is still unchanged after the post-restart inspection')
+    assert.equal(existsSync(cursorPathOf(world.installations.eaves)), false, "the denial writes no cursor for eaves")
+
+    // --- Cursor files after the reads -------------------------------------------------
+
+    const assertRealmDirectorySingular = (label, installation) => {
+      assert.deepEqual(readdirSync(realmsDirOf(installation)), [realmId], `${label}: exactly the realm directory R remains — no new or renamed realm directory`)
+    }
+    for (const [label, installation] of [['alice', world.installations.alice], ['bob', world.installations.bob]]) {
+      assert.equal(modeOf(realmsDirOf(installation), 'directory'), 0o700, `${label}: the realms directory is still 0700`)
+      assert.equal(modeOf(realmDirOf(installation), 'directory'), 0o700, `${label}: the realm directory R is still 0700`)
+      assert.equal(modeOf(cursorPathOf(installation), 'file'), 0o600, `${label}: cursors.json is still 0600`)
+      assertRealmDirectorySingular(label, installation)
+    }
+    const aliceCursorsPost = readCursorDoc(cursorPathOf(world.installations.alice))
+    assert.deepEqual(keysOf(aliceCursorsPost.cursors), [broadcastRoomId, pairRoomId].sort(), 'alice still holds exactly the two room entries')
+    assert.equal(aliceCursorsPost.cursors[broadcastRoomId].after_seq, 3, "alice's broadcast cursor advanced 2 → 3 (strictly forward); the low page never pulled it down")
+    assert.equal(aliceCursorsPost.cursors[pairRoomId].after_seq, 4, "alice's DM cursor advanced 1 → 4 (strictly forward); the explicit low read never moved it backward")
+    const bobCursorsPost = readCursorDoc(cursorPathOf(world.installations.bob))
+    assert.deepEqual(keysOf(bobCursorsPost.cursors), [broadcastRoomId, pairRoomId].sort(), 'bob holds exactly the rooms he read (the DM pre-kill, the Broadcast Room post-restart)')
+    assert.equal(bobCursorsPost.cursors[pairRoomId].after_seq, 4, "bob's DM cursor advanced 1 → 4 (strictly forward)")
+    assert.equal(bobCursorsPost.cursors[broadcastRoomId].after_seq, 3, "bob's fresh broadcast cursor landed at 3 (strictly forward)")
+
+    // --- Post-restart SQLite cross-checks ----------------------------------------------
+
+    withReadOnlyDatabase(world.databasePath, 'post-restart inspection', inspector => {
+      const broadcastRows = inspector.prepare(MESSAGE_PROJECTION).all(broadcastRoomId)
+      assert.deepEqual(
+        broadcastRows.map(row => Number(row.seq)),
+        [1, 2, 3],
+        'Broadcast Room seqs are exactly [1, 2, 3] — contiguous from 1, no reuse, no gap at the kill boundary',
+      )
+      for (const row of broadcastRows) {
+        const fixture = broadcastFixtureBySeq.get(Number(row.seq))
+        assert.equal(row.actor_fingerprint, alicePre.fingerprint, `broadcast seq ${row.seq}: stored under alice's fingerprint`)
+        assertUtf8Bytes(row.text, fixture.bytes, `broadcast seq ${row.seq}: raw bytes equal to the acknowledged fixture`)
+      }
+      const dmRows = inspector.prepare(MESSAGE_PROJECTION).all(pairRoomId)
+      assert.deepEqual(
+        dmRows.map(row => Number(row.seq)),
+        [1, 2, 3, 4],
+        'DM seqs are exactly [1, 2, 3, 4] — contiguous from 1, no reuse, no gap at the kill boundary',
+      )
+      assert.deepEqual(
+        dmRows.map(row => (row.reply_to_seq === null ? null : Number(row.reply_to_seq))),
+        [null, 1, null, 1],
+        'the reply FK column survived for both replies, room-local',
+      )
+      for (const row of dmRows) {
+        const fixture = dmFixtureBySeq.get(Number(row.seq))
+        assert.equal(row.actor_fingerprint, fixture.senderFingerprint, `DM seq ${row.seq}: stored under the sender's fingerprint`)
+        assertUtf8Bytes(row.text, fixture.bytes, `DM seq ${row.seq}: raw bytes equal to the acknowledged fixture`)
+      }
+
+      const realmRows = inspector.prepare('SELECT singleton, realm_id, created_at FROM realms').all()
+      assert.equal(realmRows.length, 1, 'exactly one realms singleton row exists after the restart')
+      assert.equal(realmRows[0].realm_id, realmId, 'the realms singleton still holds realm R — no re-minted realm')
+
+      const broadcastKindRows = inspector.prepare(`
+        SELECT id, kind, title, pair_key, created_by_fingerprint, created_at
+        FROM rooms
+        WHERE kind = 'broadcast'
+      `).all()
+      assert.equal(broadcastKindRows.length, 1, 'exactly one broadcast-kind room exists after the restart')
+      assert.equal(broadcastKindRows[0].id, broadcastRoomId, 'the broadcast-kind room is still Broadcast Room B')
+      assert.deepEqual(
+        inspector.prepare(ROOM_PROJECTION).get(broadcastRoomId),
+        preKillSnapshot.broadcastRoomRow,
+        'the Broadcast Room row is byte-identical across the restart',
+      )
+      assert.deepEqual(
+        inspector.prepare(ROOM_PROJECTION).get(pairRoomId),
+        preKillSnapshot.pairRoomRow,
+        'the pair room row is byte-identical across the restart',
+      )
+      const aliceEavesRow = inspector.prepare(ROOM_PROJECTION).get(openedToEavesRoomId)
+      assert.equal(aliceEavesRow.kind, 'direct', 'the offline-resolved open is stored as a Direct Room')
+      const [aliceEavesMin, aliceEavesMax] = [alicePre.fingerprint, eavesPre.fingerprint].sort()
+      assert.equal(aliceEavesRow.pair_key, `direct:${aliceEavesMin}:${aliceEavesMax}`, 'the alice↔eaves room carries the canonical pair key')
+
+      const claimRows = inspector.prepare(`
+        SELECT chat_id_normalized, actor_fingerprint, chat_id_display, last_seen_at
+        FROM chat_id_claims
+        ORDER BY actor_fingerprint
+      `).all()
+      const claimsByFingerprint = new Map(claimRows.map(row => [row.actor_fingerprint, row]))
+      for (const [chatId, fingerprint] of [
+        ['alice', alicePre.fingerprint],
+        ['bob', bobPre.fingerprint],
+        ['eaves', eavesPre.fingerprint],
+      ]) {
+        const row = claimsByFingerprint.get(fingerprint)
+        assert.ok(row, `${chatId}: the durable claim row survived the restart`)
+        assert.equal(row.chat_id_normalized, chatId, `${chatId}: the claim row kept its normalized key`)
+        const beforeMs = Date.parse(preKillClaimsByFingerprint.get(fingerprint).last_seen_at)
+        const afterMs = Date.parse(row.last_seen_at)
+        assert.equal(Number.isFinite(beforeMs) && Number.isFinite(afterMs), true, `${chatId}: both claim timestamps are valid ISO instants`)
+        assert.ok(afterMs >= beforeMs, `${chatId}: last_seen_at never moved backward across the restart`)
+      }
+    })
+    assertSameFileIdentity(world.databasePath, databaseIdentityPreKill, 'the database identity is still unchanged after the post-restart inspection')
+  }) // end assertSurvivalWithDiagnostics — post-restart survival phase
 
   // --- Hygiene and permissions across the restart ------------------------------------
 
