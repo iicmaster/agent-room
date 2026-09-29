@@ -813,10 +813,12 @@ if (outsidePaths.length > 0) {
   log(`คำเตือน: ${outsidePaths.length} path อยู่นอก allowlist ของสเปก — ขยาย review scope และให้ triage ตัดสิน: ${outsidePaths.join(", ")}`);
 }
 await assertPreexistingUnrelated(preexistingSnapshots, allowlist, ephemeralPaths, "after implementation");
+// The review scope includes the advisory outside paths: nothing the
+// implementation changed may hide from the reviewers — triage judges them.
 const changedPaths = [...new Set([
   ...trackedPaths,
-  ...currentUntracked.filter(path => allowlist.has(path)),
-])].filter(path => path !== "" && !path.includes(".mailbox-out") && !path.includes(".tmux-teams"));
+  ...currentUntracked.filter(path => !path.includes(".mailbox-out") && !path.includes(".tmux-teams")),
+])].filter(path => path !== "");
 log(`ไฟล์ที่เปลี่ยน ${changedPaths.length} ไฟล์`);
 const scope = changedPaths.join("\n");
 
