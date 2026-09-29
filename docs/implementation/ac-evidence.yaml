@@ -367,8 +367,7 @@
         file: "tests/drills/rel2-kill-drill.test.mjs"
 
 # --- Epic 3 (Trust) -------------------------------------------------------------
-# Seeded, not yet filled: the sweep fails loudly on every story below until each
-# one carries real evidence. Stories 3.1-3.4 are filled; 3.5 remains TODO.
+# All five stories filled: the sweep reports Epic 3 as evidenced end-to-end.
 
   3.1:                       # Untrusted marking at full rigor (2 criteria)
     note: >-
@@ -652,3 +651,69 @@
         file: "tests/cli-surface.test.mjs"
       - test: "the CLI point-read seam emits exactly the pinned HTTP query (after_seq = seq − 1, limit = 1) and applies the untrusted envelope to the raw page"
         file: "tests/cli-surface.test.mjs"
+
+  3.5:                       # End-to-end trust test (1 criterion)
+    note: >-
+      Proves the CHAIN — hold, cursor, recovery, release, and removal cannot
+      each pass in isolation while the chain fails. One drill
+      (tests/integration/trust-chain.test.mjs) runs the real MCP response
+      path with zero mocks: one real spawned server child, two real mcp-stdio
+      children on distinct PLUGIN_DATA installations with distinct Ed25519
+      keypairs (receiver "Local", foreign sender "Stranger", both sessions
+      bound with the closed-set client_type 'mcp' and pinned through
+      presence), and the human CLI through the real in-process dispatch. The
+      six links, in order: (1) a stranger send lands HELD in the local
+      child's message_read result — the frozen row shape additively extended
+      by held/held_reason, text equal to a literal marker oracle naming
+      sender chat id, fingerprint, and reason — with ZERO body bytes proven
+      by counted scans of the full serialized tool results (message_read,
+      room_held_list filtered, room_held_count) against three newline-free
+      body fragments, and the room_held_list metadata whitelist enumerated
+      key by key (realm, chat id, fingerprint, room, seq, time, size, reason;
+      no text field exists at all; size = the withheld artifact's byte
+      length); (2) cursors.json persists after_seq 1 under (installation,
+      realm, room) at 0600 while held.json stays a separate 0600 file in the
+      same 0700 realm directory, the held seq is consumed like any other (a
+      cursorless re-read re-delivers nothing — FR-20 observable); (3)
+      HELD_CACHE_MAX+2 further foreign sends in the Broadcast Room, read
+      through the same real path, fill the cache past its cap — held.json
+      byte-inspection shows every record surviving, exactly 100 cached body
+      copies, the original record metadata-complete with its body copy and
+      cached_at evicted — and the HUMAN surface (agent-room held list with a
+      literal line oracle, then held show) recovers the body by point read
+      (the provenance line names the serving path), the pipe-stripped body
+      block BYTE-MATCHING the v1 envelope rebuilt in the test around the
+      text read directly from the SQLite durable log (read-only connection,
+      Buffer compare); (4) allow Stranger persists the fingerprint entry
+      (note chat_id=Stranger, accept_all untouched) and releases all
+      HELD_CACHE_MAX+3 records of that key (held.json empties,
+      room_held_count 0), after which the follow-up foreign send arrives
+      DELIVERED — the frozen row shape with no held fields, the body present
+      inside the literal untrusted envelope (positive fragment scans), on
+      the allowlisted lane that the stored entry grounds for a remote
+      transport; (5) allow Stranger --remove removes the entry and the next
+      foreign send is HELD again (marker, zero body bytes) while the past is
+      untouched — the delivered seq never re-enters held state and the
+      durable log keeps all three DM rows' raw bytes (Buffer compares); (6)
+      cursors.json snapshots after every chain step are monotonic per room,
+      and every CLI invocation is proven never to move the agent's cursor
+      (byte-identical cursors.json across held list, held show, allow, and
+      allow --remove, re-baselined after the agent reads that legitimately
+      advance it). The chain's ONE declared input, stated in the test header
+      and the spec: the receiving installation declares its connection mode
+      remote through the shipped, strictly fail-closed
+      AGENT_ROOM_CONNECTION_MODE=remote seam (server/client/api-client.mjs —
+      exact-match declaration, every other value inert, 'local' never
+      declarable), the trust matrix's remote-lane transport input that Epic
+      4's challenge-authenticated client will carry naturally; the
+      declaration can only withhold deliveries the local lane would grant,
+      never the reverse. Does NOT prove a literal cross-machine wire (no
+      challenge authentication, no remote enrollment — Epic 4), a non-local
+      credential (the declared installation still authenticates with the
+      only v0.2 credential, the local token — the drill proves the trust
+      BEHAVIOR the transport input drives, which is the boundary H3 named),
+      or exotic eviction interleavings under concurrent registration
+      (tests/held.test.mjs's dedicated rows).
+    evidence:
+      - test: "trust chain end-to-end: stranger hold with zero body bytes, cursor persistence past the held seq, evicted-body recovery byte-matching the durable log, allow release, --remove re-hold, and monotonic cursors"
+        file: "tests/integration/trust-chain.test.mjs"

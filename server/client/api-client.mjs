@@ -67,8 +67,27 @@ import {
 import { loadOrCreateKeypair } from '../keys.mjs'
 import { loadOrCreateLocalToken } from '../api/local-token.mjs'
 import { ensureServer, probeHealth } from './ensure-server.mjs'
+import { REMOTE_TRANSPORT } from './trust.mjs'
 
 const OK_STATUS = 200
+
+// The environment declaration of this installation's connection mode (Story
+// 3.5's seam, Story 4.1/4.3's input): an installation whose host knows its
+// session reaches the server ACROSS the OS-user boundary — no shared local
+// token file between the agent host and the server host — declares
+// AGENT_ROOM_CONNECTION_MODE=remote, and the trust matrix then evaluates
+// every non-own sender by the remote lane (allowlisted delivers, everything
+// else is held). The declaration is strictly fail-closed: it can only
+// withhold bodies the Local-Mode lane would have delivered, never deliver a
+// body any lane would withhold. The exact match is the whole contract — any
+// other value (absent, 'local', a typo) is ignored and the earned mode
+// applies: 'local' is only ever recorded by the local token exchange itself,
+// never declared.
+export const CONNECTION_MODE_ENV = 'AGENT_ROOM_CONNECTION_MODE'
+
+export function declaredConnectionMode(env = process.env) {
+  return env[CONNECTION_MODE_ENV] === REMOTE_TRANSPORT ? REMOTE_TRANSPORT : undefined
+}
 
 const defaultReconnectSleep = ms => new Promise(resolvePromise => {
   setTimeout(resolvePromise, ms)
@@ -296,9 +315,16 @@ export function createAgentRoomClient({
   reconnectSleep = defaultReconnectSleep,
   reconnectRandom = Math.random,
   reconnectProbe,
+  connectionMode = declaredConnectionMode(),
 } = {}) {
   if (!Number.isInteger(requestTimeoutMs) || requestTimeoutMs <= 0) {
     throw new AgentRoomRuntimeError('invalid_argument', 'requestTimeoutMs must be a positive integer')
+  }
+  if (connectionMode !== undefined && connectionMode !== REMOTE_TRANSPORT) {
+    throw new AgentRoomRuntimeError(
+      'invalid_argument',
+      "connectionMode must be undefined or 'remote': 'local' is earned by the local token exchange, never declared",
+    )
   }
   if (typeof reconnectSleep !== 'function') {
     throw new AgentRoomRuntimeError('invalid_argument', 'reconnectSleep must be a function')
@@ -318,9 +344,11 @@ export function createAgentRoomClient({
   // The receiving installation's own connection mode (Story 3.2's trust
   // matrix input): how the LIVE session authenticated. The local token file
   // exchange is the Local Mode path ('local'); the remote challenge path
-  // (Epic 4) will mark 'remote'. The trust matrix fail-closes toward hold,
-  // so an unauthenticated client (null) never reads as local.
-  let transportMode = null
+  // (Epic 4) will mark 'remote'. A declared remote mode (Story 3.5's
+  // AGENT_ROOM_CONNECTION_MODE seam) pins 'remote' for the client's lifetime
+  // — the matrix fail-closes toward hold, so an unauthenticated client (null,
+  // or a pre-auth declared client) never reads as local.
+  let transportMode = connectionMode ?? null
   let needsReresolve = false
   let ensurePromise = null
   let ensureSettled = true
@@ -361,8 +389,11 @@ export function createAgentRoomClient({
     // The credential that just authenticated this session is the shared data
     // dir's local token file — the Local Mode connection mode. Recorded for
     // the trust matrix: the messages this session receives came through the
-    // OS-user boundary that token file enforces.
-    transportMode = 'local'
+    // OS-user boundary that token file enforces. A declared remote mode
+    // (Story 3.5's seam) outranks the credential path: the installation has
+    // declared that its boundary is not the OS user, so the matrix keeps
+    // evaluating the remote lane.
+    transportMode = connectionMode ?? 'local'
     const token = exchange.body?.result?.session_token
     if (typeof token !== 'string' || token.length === 0) {
       throw new AgentRoomRuntimeError('request_failed', 'agent-room credential exchange returned no session token')
@@ -588,7 +619,9 @@ export function createAgentRoomClient({
     get fingerprint() { return keypair.fingerprint },
     // This installation's own connection mode ('local' once the live session
     // authenticated through the local token path, null before any
-    // authentication) — the trust matrix's transport input (Story 3.2).
+    // authentication, 'remote' when declared via AGENT_ROOM_CONNECTION_MODE
+    // or — from Epic 4 — earned through the challenge path) — the trust
+    // matrix's transport input (Story 3.2).
     get transport() { return transportMode },
 
     // GET /api/presence — who is addressable (optionally offline-recently).

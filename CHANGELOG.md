@@ -60,6 +60,20 @@ All notable changes to Agent Room are documented in this file.
   distinguishable, and the help text says so plainly.
 - `outcome_unknown` send resolution: one automatic retry with the identical
   `client_message_id` resolves to the original message or a coded conflict, never a duplicate.
+- The end-to-end trust-chain drill (`tests/integration/trust-chain.test.mjs`): one
+  zero-mock integration test over the real MCP response path — two real `mcp-stdio`
+  children on distinct installations (distinct keypairs, `client_type: 'mcp'` binds) —
+  chaining stranger hold (zero body bytes in every agent-visible result), cursor
+  persistence past the held seq, evicted-body recovery via `agent-room held show`
+  byte-matching the durable log, `allow` release of held and future messages,
+  `--remove` re-holding the future without touching the past, and per-room cursor
+  monotonicity at every step.
+- The connection-mode declaration seam: an installation whose host knows its session
+  crosses the OS-user boundary declares `AGENT_ROOM_CONNECTION_MODE=remote` (exact
+  match; any other value keeps the earned behavior, and `'local'` is only ever earned
+  by the local token exchange). The declared mode is strictly fail-closed — the trust
+  matrix's remote lane can only withhold deliveries, never grant them — and is the
+  transport input Epic 4's challenge-authenticated clients will carry naturally.
 
 ### Removed
 

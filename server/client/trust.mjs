@@ -61,8 +61,13 @@ import { AgentRoomRuntimeError, atomicWriteJson, readJsonFile } from '../runtime
 // connection mode: 'local' — the session was authenticated through the local
 // token file path (Local Mode); 'remote' — anything else (today the remote
 // challenge path is Epic 4; the matrix fail-closes toward hold, so any
-// transport that is not exactly 'local' is evaluated as remote).
+// transport that is not exactly 'local' is evaluated as remote). An
+// installation whose host knows the session crosses the OS-user boundary may
+// DECLARE the remote mode (api-client's AGENT_ROOM_CONNECTION_MODE seam,
+// Story 3.5's chain proof, Epic 4's input) — the declaration is strictly
+// fail-closed and outranks the local credential path.
 export const LOCAL_TRANSPORT = 'local'
+export const REMOTE_TRANSPORT = 'remote'
 
 // The matrix verdicts. Reasons are stable snake_case labels recorded on held
 // rows (held_reason) and reported by the trust tools' consumers; a reason is
