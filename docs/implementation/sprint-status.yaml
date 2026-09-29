@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 09-21-2026 08:52
-last_updated: 09-28-2026 13:45
+last_updated: 09-29-2026 10:05
 project: agent-room
 project_key: NOKEY
 tracking_system: file-system
@@ -48,11 +48,11 @@ development_status:
   epic-1-retrospective: done
 
   epic-2: backlog
-  2-1-ordinary-restart-survival: backlog
-  2-2-reconnection-room-discovery: backlog
-  2-3-the-v0-1-v0-2-migration-one-time: backlog
-  2-4-endurance-harness-connection-churn-regression: backlog
-  2-5-rel-2-continuity-drill-blocking-epic-gate: backlog
+  2-1-ordinary-restart-survival: done
+  2-2-reconnection-room-discovery: done
+  2-3-the-v0-1-v0-2-migration-one-time: done
+  2-4-endurance-harness-connection-churn-regression: done
+  2-5-rel-2-continuity-drill-blocking-epic-gate: done
   epic-2-retrospective: done
 
   epic-3: backlog
