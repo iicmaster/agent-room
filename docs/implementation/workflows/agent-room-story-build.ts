@@ -889,9 +889,19 @@ const lunaDispatchStartedAt = (await world.run("node", [
   "-e",
   "process.stdout.write(String(Date.now()))",
 ])).stdout.trim();
-const removedOutbox = await world.run("rm", ["-f", LUNA_OUTBOX]);
-if (removedOutbox.exitCode !== 0) throw new Error(`could not remove prior Luna outbox: ${removedOutbox.stderr}`);
-const coordinatorReceipt = await agent("ผู้ประสานงาน lane ของ luna").ask<CoordinatorReceipt>(
+// Idempotent audit: if a completed outbox for THIS task id already exists
+// (terminal TEAM_DONE marker), reuse it instead of re-dispatching. Deleting
+// the prior outbox here cost a full re-audit on every retry and created the
+// race where the parser ran against a mid-write outbox.
+const priorOutbox = await world.run("test", ["-f", LUNA_OUTBOX]);
+const priorText = priorOutbox.exitCode === 0 ? await files.read(LUNA_OUTBOX).catch(() => "") : "";
+const priorComplete = priorText.includes(`TEAM_DONE ${lunaTaskId}`);
+if (priorComplete) {
+  log(`ใช้ผล audit ของ luna ที่มีอยู่แล้ว (${LUNA_OUTBOX})`);
+}
+const coordinatorReceipt = priorComplete
+  ? ({ task_id: lunaTaskId, effective_identity: "gpt-6-luna[max]", dispatch_confirmed: true, outbox_path: LUNA_OUTBOX } as CoordinatorReceipt)
+  : await agent("ผู้ประสานงาน lane ของ luna").ask<CoordinatorReceipt>(
   `Run the codex-advisor[luna] external audit lane for story ${story} and wait for it.\n\n` +
     `Working directory: /Users/ngs/agent-skills/plugins/agent-room\n` +
     `Task id: ${lunaTaskId} (letters, digits and dashes ONLY — a dot is rejected)\n` +
