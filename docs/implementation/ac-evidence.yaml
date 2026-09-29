@@ -894,3 +894,69 @@
         file: "tests/invites.test.mjs"
       - test: "the operator family is the established CLI host: in-process store access with no HTTP session, documented in the shared help, and later operator stories extend this dispatch"
         file: "tests/invites.test.mjs"
+
+  4.3:                       # Remote client & transport policy (2 criteria)
+    note: >-
+      Proves the client half of AD-10's Remote Mode deltas over the real
+      modules, real TLS servers, and a real journey child. AC-1 (the
+      configured URL and its transport policy): the ONE validator refuses
+      every non-https scheme with a coded error NAMING the refused scheme
+      (http named explicitly), refuses non-origin URLs (path, query,
+      fragment, credentials) with their reasons, and normalizes passing URLs
+      to the origin; the config persists at PLUGIN_DATA/remote-config.json —
+      regular file, 0600, atomic, exactly {server_url, set_at} — and holds
+      exactly ONE origin: a re-set REPLACES (the CLI receipt reports
+      previous_server_url) while the replaced server's per-realm state under
+      realms/<old_realm_id>/ is pinned byte-identical on disk — inert by
+      AD-14 (a different server is a different realm), never deleted; every
+      read RE-VALIDATES, so a hand-edited plaintext file refuses the client's
+      construction before any wire work and a corrupt file refuses with
+      actionable guidance instead of silently falling back to Local Mode;
+      HTTPS with NORMAL verification is enforced by Node's default stack —
+      a real self-signed-certificate server (SAN matching) is refused with a
+      TLS transport code, ZERO answered requests, no reconnect loop, and the
+      transport never reading local, with a structural scan pinning that no
+      verification bypass flag exists anywhere in the client tree; the CLI
+      family (remote set/show/clear on the shared dispatch, invite-family
+      JSON-lines grammar) writes the 0600 file, reports the replacement,
+      refuses plaintext exit 1 storing nothing, answers usage exit 2, and
+      carries the grammar in the help; and without configuration the client
+      stays on the untouched Local Mode path (ensureServer, local exchange,
+      transport local — FR-1). AC-2 (an enrolled key reconnects with no
+      invite): the journey child runs real server code behind a real TLS
+      front (loopback terminator to the loopback plaintext backend — AD-11's
+      permitted shape) with the test root added through Node's own
+      NODE_EXTRA_CA_CERTS mechanism — verification strictness untouched, as
+      the self-signed row proves from the other side — and shows the
+      enrollment happening EXACTLY ONCE (the real 4.2 route, pre-client),
+      then three authentications (first connect, a fresh-client reconnect
+      after a restart, and the 401 re-auth when the server restarts behind
+      the SAME URL — which re-binds the Chat ID) all riding the challenge
+      lane with ZERO enroll requests, ZERO invite_token bytes, and ZERO
+      local-token requests counted across BOTH wire legs (client-to-front
+      and the loopback proxy hop), the realm id stable across restarts
+      (durable enrollment), and a never-enrolled stranger on the same origin
+      answered by the coded, actionable not_enrolled refusal naming the
+      operator's invite flow — the client never auto-enrolls. Does NOT prove
+      a literal cross-machine wire (the journey's TLS leg is loopback with a
+      test root — Story 4.8's dress rehearsal owns that), the full 1s→60s
+      remote backoff escalation at scale (the FR-12 machinery is unchanged
+      from 2.2; only the probe target is new), or subpath reverse-proxy
+      mounts (refused by the origin-only URL rule, documented in the spec).
+    evidence:
+      - test: "the transport policy: https with a hostname is required, plaintext and non-origin URLs are refused naming the scheme"
+        file: "tests/remote-client.test.mjs"
+      - test: "the persisted config is one active server: atomic 0600 file, replacement, re-validation on read, and inert realm state"
+        file: "tests/remote-client.test.mjs"
+      - test: "a self-signed certificate is refused by default verification: no request is ever answered and no bypass flag exists"
+        file: "tests/remote-client.test.mjs"
+      - test: "plaintext remote is refused before any wire work: the option form throws and a hand-set http config refuses the client"
+        file: "tests/remote-client.test.mjs"
+      - test: "an explicit serverUrl option wins over a persisted config for that instance"
+        file: "tests/remote-client.test.mjs"
+      - test: "remote set/show/clear: JSON lines, coded plaintext refusal, usage arity, and the help grammar"
+        file: "tests/remote-client.test.mjs"
+      - test: "an enrolled key reconnects with no invite over verified TLS: client restarts and a server restart behind the same URL both re-auth through the challenge lane"
+        file: "tests/remote-client.test.mjs"
+      - test: "without a remote config the client stays on the Local Mode loopback path"
+        file: "tests/remote-client.test.mjs"

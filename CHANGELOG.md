@@ -110,6 +110,32 @@ All notable changes to Agent Room are documented in this file.
   fixed-window counter; `X-Forwarded-For` is trusted only from an explicitly
   configured `trustedProxy`. New public codes: `invite_invalid` (403),
   `invite_exhausted` (409), `invite_not_found` (404), `rate_limited` (429).
+- The remote client and the transport policy (Story 4.3): an installation can
+  now point at a remote agent-room server. `agent-room remote set <https-url>`
+  persists the ONE active server origin at `PLUGIN_DATA/remote-config.json`
+  (0600, atomic; setting again replaces and reports the previous origin,
+  while the replaced server's per-realm state stays on disk under its realm
+  id, inert — a different server is a different realm with fresh trust);
+  `remote show` reports the configured origin or Local Mode; `remote clear`
+  returns the installation to the Local Mode default. The transport policy is
+  enforced at every surface through one validator: the URL must be an https
+  origin with a hostname — plaintext (http://) remote is refused with a coded
+  error naming the scheme at set time, at load time (hand-edited files are
+  re-validated, never trusted), and at client-construction time, and a
+  corrupt config refuses with guidance instead of silently falling back to
+  local. A configured client skips the loopback bootstrap entirely — no
+  local server, no runtime record, no local token on any path — and speaks
+  to the configured origin over `node:https` with Node's DEFAULT certificate
+  and hostname verification (no bypass exists in the client tree; a
+  self-signed certificate is refused with zero answered requests and no
+  reconnect loop). Authentication is the challenge lane; an enrolled key's
+  reconnect needs no invite (a fresh client, or a 401 after the server
+  restarts behind the same URL, re-authenticates and re-binds through
+  challenge-answer, with zero enroll requests and zero invite tokens on the
+  wire), while a not-enrolled key surfaces a coded, actionable `not_enrolled`
+  naming the operator's invite flow — the client never enrolls itself. The
+  `remote` family joins the CLI host's JSON-lines grammar (0 ok, 1 refusal,
+  2 usage).
 
 ### Removed
 

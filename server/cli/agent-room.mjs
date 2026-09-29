@@ -45,6 +45,16 @@
 //                         grammar begins here). Bodies in
 //                         ./invite-commands.mjs.
 //
+//   remote (Story 4.3)    the installation's Remote Mode configuration:
+//                         `remote set <https-url>` (https required — a
+//                         plaintext http:// URL is refused with the coded
+//                         transport-policy error and stored never),
+//                         `remote show` (the one active server, or local)
+//                         and `remote clear` (back to the Local Mode
+//                         default). Writes PLUGIN_DATA/remote-config.json —
+//                         the same JSON-lines grammar and exit codes as the
+//                         invite family. Bodies in ./remote-commands.mjs.
+//
 // stdin discipline: prompting happens ONLY when stdin is a TTY. A non-TTY
 // stdin (pipes, the MCP host, CI) exits with guidance and touches nothing —
 // a command that needs a human answer can never be driven programmatically
@@ -87,6 +97,7 @@ import {
   runAllowAll,
 } from './held-commands.mjs'
 import { runInviteFamilyCommand } from './invite-commands.mjs'
+import { runRemoteFamilyCommand } from './remote-commands.mjs'
 
 const OK_STATUS = 200
 // The collision status is owned by the constants table (chat_id_taken), never restated.
@@ -311,6 +322,23 @@ Commands:
       are untouched. A prefix matching several invites is refused with the
       candidates, never guessed.
 
+  agent-room remote set <https-url>
+      Point this installation at a remote agent-room server (Remote Mode).
+      The URL must be https:// with a hostname — plaintext (http://) remote
+      connections are refused, and normal certificate/hostname verification
+      applies on every connection. One server is active at a time: setting a
+      new URL replaces the old one. Per-realm trust state this installation
+      kept for the old server stays on disk under its realm id but is inert —
+      a different server is a different realm and starts with fresh trust.
+
+  agent-room remote show
+      Show the configured remote server (one active at a time), or "local"
+      when none is set.
+
+  agent-room remote clear
+      Remove the remote configuration and return this installation to Local
+      Mode (the default loopback server).
+
   agent-room help
       Show this help.
 
@@ -472,12 +500,16 @@ export async function main(argv = process.argv.slice(2), {
     output.write(`${outcome.lines.join('\n')}\n`)
     return outcome
   }
-  // Story 4.2: the operator invite family — the CLI host later operator
-  // stories extend. Success prints one JSON object per line on stdout and
-  // exits 0; a refusal or usage error prints ONE JSON object on stderr and
-  // exits 1 or 2 (the HCI-3 grammar: stable codes, machine-readable lines).
-  if (command === 'invite') {
-    const outcome = await runInviteFamilyCommand(subcommand, argv.slice(2), deps)
+  // Stories 4.2 and 4.3: the machine-readable families (HCI-3's grammar).
+  // Success prints one JSON object per line on stdout and exits 0; a refusal
+  // or usage error prints ONE JSON object on stderr and exits 1 or 2. The
+  // invite family is the operator store surface; the remote family is the
+  // installation's Remote Mode configuration — both later stories' families
+  // extend this dispatch and this printer.
+  if (command === 'invite' || command === 'remote') {
+    const outcome = command === 'invite'
+      ? await runInviteFamilyCommand(subcommand, argv.slice(2), deps)
+      : await runRemoteFamilyCommand(subcommand, argv.slice(2), deps)
     if (outcome.status === 'ok') {
       for (const line of outcome.lines) output.write(`${line}\n`)
       return outcome

@@ -20,6 +20,20 @@
 //   POST /api/session            — bind the configured Chat ID with
 //                                  client_type 'mcp' (the closed-set bind)
 //
+// Remote Mode (Story 4.3, AD-10's "configured URL, TLS required, challenge
+// auth, invite-gated enrollment"): when the installation carries a persisted
+// remote configuration (PLUGIN_DATA/remote-config.json — `agent-room remote
+// set`) or the factory is given a `serverUrl` directly, the loopback
+// bootstrap is skipped ENTIRELY — no ensureServer, no runtime record, no
+// local token file — and every request goes to the configured https origin
+// over Node's DEFAULT TLS verification (normal certificate and hostname
+// checks; no override exists in this module). The credential lane is the
+// challenge lane; an enrolled key's reconnect IS that lane (no invite, no
+// re-enrollment), and a not_enrolled answer surfaces as a coded, actionable
+// error — enrollment is the operator's invite flow (Story 4.2), never an
+// automatic client step. The default without configuration is unchanged:
+// Local Mode via ensureServer (FR-1).
+//
 // After that every actor call is a session-token bearer request with the
 // Agent-Room-Protocol header. Auth discipline: the token lives only in this
 // module's closure, a 401 triggers ONE single-flight re-auth (concurrent
@@ -52,6 +66,7 @@
 // for ambiguous_chat_id, the candidates list from the error envelope).
 
 import http from 'node:http'
+import https from 'node:https'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -66,6 +81,7 @@ import {
   RECONNECT_BACKOFF_MAX_SECONDS,
   RECONNECT_BACKOFF_MIN_SECONDS,
   RECONNECT_RECOVERY_PROBE_MS,
+  SERVER_HEALTH_PROBE_TIMEOUT_MS,
   UNTRUSTED_ENVELOPE_VERSION,
 } from '../constants.mjs'
 import {
@@ -78,6 +94,7 @@ import {
 import { loadOrCreateKeypair, signWithInstallationKey } from '../keys.mjs'
 import { loadOrCreateLocalToken } from '../api/local-token.mjs'
 import { ensureServer, probeHealth } from './ensure-server.mjs'
+import { loadRemoteConfig, validateRemoteServerUrl } from './remote-config.mjs'
 import { REMOTE_TRANSPORT } from './trust.mjs'
 
 const OK_STATUS = 200
@@ -174,17 +191,24 @@ export function loadChatIdConfig(pluginDataDir) {
 // idle timer and destroys the request on expiry, so a server that accepts
 // and then never answers cannot hang a tool call. agent:false keeps every
 // call on its own connection, so a held long-poll never pins a pooled socket.
-function httpRequest({ port, method, path, headers, body, timeoutMs, signal }) {
+//
+// Two target shapes (Story 4.3): `{ port }` is the loopback Local Mode
+// target; `{ url }` is a full https URL — the remote target, where the URL
+// carries scheme, host, port, and path, and Node's DEFAULT TLS verification
+// applies (normal certificate and hostname checks; this module overrides
+// nothing, so an untrusted certificate refuses exactly as the platform
+// refuses it — a TLS refusal is a transport error whose code is never
+// ECONNREFUSED, so it surfaces immediately instead of entering the
+// reconnect schedule).
+function httpRequest({ port, url, method, path, headers, body, timeoutMs, signal }) {
   return new Promise((resolvePromise, rejectPromise) => {
-    const request = http.request(
-      {
-        host: '127.0.0.1',
-        port,
-        method,
-        path,
-        headers,
-        agent: false,
-      },
+    const request = (url === undefined ? http.request : https.request)(
+      // With a URL target the request options must not restate the path —
+      // the absolute URL owns routing; with the loopback target the explicit
+      // options carry it.
+      ...(url === undefined
+        ? [{ host: '127.0.0.1', port, method, path, headers, agent: false }]
+        : [url, { method, headers, agent: false }]),
       response => {
         const chunks = []
         response.on('data', chunk => chunks.push(chunk))
@@ -315,12 +339,15 @@ export function applyUntrustedEnvelope(page, localFingerprint) {
 // loop's clock and probe are injectable seams (reconnectSleep, the awaited
 // ms-per-slice; reconnectRandom, the schedule's jitter source; reconnectProbe,
 // the async {reachable, agentRoom} recovery check), each defaulting to the
-// real behavior. No caller input ever carries a credential or an identity:
-// the token file, the keypair, and the configured Chat ID all come from this
-// installation's own state.
+// real behavior. Story 4.3 adds `serverUrl`: a direct Remote Mode declaration
+// for this instance, which (like a persisted remote configuration) must
+// validate as https before anything else happens. No caller input ever
+// carries a credential or an identity: the token file, the keypair, and the
+// configured Chat ID all come from this installation's own state.
 export function createAgentRoomClient({
   dataDir = sharedDataDirectory(),
   pluginDataDir = instanceDataDirectory(),
+  serverUrl,
   waitMs,
   requestTimeoutMs = CLIENT_REQUEST_TIMEOUT_MS,
   reconnectSleep = defaultReconnectSleep,
@@ -347,6 +374,25 @@ export function createAgentRoomClient({
     throw new AgentRoomRuntimeError('invalid_argument', 'reconnectProbe must be a function')
   }
 
+  // Story 4.3 — the Remote Mode resolution, decided once per client before
+  // any wire work. An explicit `serverUrl` argument wins for this instance
+  // (the direct declaration; tests and embedding hosts use it); otherwise a
+  // persisted remote configuration (`agent-room remote set`) makes this
+  // installation a remote client. Both run through the same validator:
+  // https only, hostname required — plaintext is refused here, before any
+  // request exists. null means the default: Local Mode via ensureServer,
+  // byte-for-byte the FR-1 path.
+  let remoteOrigin = null
+  if (serverUrl !== undefined) {
+    remoteOrigin = validateRemoteServerUrl(serverUrl)
+  } else {
+    const remoteConfig = loadRemoteConfig(pluginDataDir)
+    if (remoteConfig !== null) remoteOrigin = remoteConfig.serverUrl
+  }
+  // The origin as a URL object: every remote request joins its API path onto
+  // this base. Immutable after construction — one client, one server.
+  const remoteBase = remoteOrigin === null ? null : new URL(remoteOrigin)
+
   const config = loadChatIdConfig(pluginDataDir)
   // Mutable by design (Story 4.1 review triage): the identity is reloaded
   // from disk when the challenge lane proves the cached key stale — a
@@ -364,8 +410,11 @@ export function createAgentRoomClient({
   // authentication the declared mode (Story 3.5's AGENT_ROOM_CONNECTION_MODE
   // seam) pins 'remote' — the matrix fail-closes toward hold, so an
   // unauthenticated client (null, or a pre-auth declared client) never reads
-  // as local.
-  let transportMode = connectionMode ?? null
+  // as local. A configured remote origin (Story 4.3) is a declaration of the
+  // same kind — talking to a server across the network IS the remote lane —
+  // so it pins 'remote' before authentication exactly as the env declaration
+  // does, and the exchange earns it after.
+  let transportMode = connectionMode ?? (remoteBase !== null ? REMOTE_TRANSPORT : null)
   let needsReresolve = false
   let ensurePromise = null
   let ensureSettled = true
@@ -378,6 +427,13 @@ export function createAgentRoomClient({
   // second bind of the same Chat ID against the fresh server, lose it to
   // the live first session, and wedge the client on chat_id_taken).
   let attachEpoch = 0
+
+  // The wire target for one request: the loopback port on the local path
+  // (resolved fresh each call — ensureServer fills it in), or the configured
+  // https origin with the API path joined on (the remote path).
+  function wireTarget(path) {
+    return remoteBase === null ? { port } : { url: new URL(path, remoteBase) }
+  }
 
   function protocolHeaders(bearer) {
     return {
@@ -413,10 +469,11 @@ export function createAgentRoomClient({
   // identity's public key, the raw nonce is signed with the key file's
   // CURRENT contents (the signer re-reads it every call), and the answer
   // must verify against the key the nonce was issued to. Returns the issued
-  // session token; the transport mark is earned only on success.
+  // session token; the transport mark is earned only on success. The target
+  // is this client's wire target (loopback or the configured https origin).
   async function challengeExchange() {
     const challenge = await httpRequest({
-      port,
+      ...wireTarget('/api/auth/challenge'),
       method: 'POST',
       path: '/api/auth/challenge',
       headers: protocolHeaders(),
@@ -434,14 +491,32 @@ export function createAgentRoomClient({
     // server verifies against the key the nonce was issued to.
     const signature = signWithInstallationKey(pluginDataDir, Buffer.from(nonce, 'base64url')).toString('base64url')
     const answer = await httpRequest({
-      port,
+      ...wireTarget('/api/auth/answer'),
       method: 'POST',
       path: '/api/auth/answer',
       headers: protocolHeaders(),
       body: JSON.stringify({ nonce, signature }),
       timeoutMs: requestTimeoutMs,
     })
-    assertCoded(answer)
+    try {
+      assertCoded(answer)
+    } catch (error) {
+      // Story 4.3's actionable gate: not_enrolled is the server saying this
+      // installation's key has no enrollment row on that realm. The client
+      // NEVER auto-enrolls — enrollment is the operator's invite flow
+      // (Story 4.2, AR-13) — so the coded error surfaces with the one human
+      // action that resolves it. An enrolled key never sees this: for it the
+      // reconnect IS this challenge lane, no invite required.
+      if (error instanceof AgentRoomRuntimeError && error.code === 'not_enrolled') {
+        throw new AgentRoomRuntimeError(
+          'not_enrolled',
+          `This installation's key (fingerprint ${keypair.fingerprint}) is not enrolled on the agent-room server at ${remoteBase?.host ?? 'the configured server'}. ` +
+          'Enrollment happens once, by invite: ask the server\'s operator to mint one ("agent-room invite mint" on the server host) and enroll this installation\'s key with it. ' +
+          'After enrollment no invite is needed again — reconnecting is automatic. The client never enrolls itself.',
+        )
+      }
+      throw error
+    }
     // The transport mark is EARNED here: recorded only after the challenge
     // exchange succeeded, never before and never by declaration alone.
     transportMode = REMOTE_TRANSPORT
@@ -452,19 +527,22 @@ export function createAgentRoomClient({
     return token
   }
 
-  // The credential exchange plus bind. The installation's DECLARED connection
-  // mode (Story 3.5's seam) is the auth-path switch (Story 4.1): a declared
-  // remote installation runs the challenge lane — challenge, sign the raw
-  // nonce with this installation's own keypair, answer — and NEVER touches
-  // the local token file, because the declaration means exactly that the
-  // OS-user boundary is not this installation's own; presenting the shared
-  // token would contradict the declaration and silently widen the
+  // The credential exchange plus bind. The auth-path switch has two remote
+  // triggers (Story 4.1 + Story 4.3): a DECLARED connection mode
+  // (AGENT_ROOM_CONNECTION_MODE) or a CONFIGURED remote origin — a client
+  // pointing at a remote https server is a remote client by construction.
+  // Either way the installation runs the challenge lane — challenge, sign
+  // the raw nonce with this installation's own keypair, answer — and NEVER
+  // touches the local token file, because both triggers mean exactly that
+  // the OS-user boundary is not this installation's own; presenting the
+  // shared token would contradict the declaration and silently widen the
   // credential's reach. There is no fallback: a coded challenge-path failure
-  // (not_enrolled, challenge_invalid) surfaces as-is and the next call
-  // re-authenticates. The undeclared default keeps the local exchange
+  // (not_enrolled, challenge_invalid) surfaces as-is (not_enrolled with the
+  // actionable enrollment guidance) and the next call re-authenticates. The
+  // undeclared, unconfigured default keeps the local exchange
   // byte-for-byte.
   async function authenticate() {
-    if (connectionMode === REMOTE_TRANSPORT) {
+    if (connectionMode === REMOTE_TRANSPORT || remoteBase !== null) {
       let token
       try {
         token = await challengeExchange()
@@ -489,7 +567,7 @@ export function createAgentRoomClient({
     }
     const localToken = loadOrCreateLocalToken(dataDir)
     const exchange = await httpRequest({
-      port,
+      ...wireTarget('/api/auth/local'),
       method: 'POST',
       path: '/api/auth/local',
       headers: protocolHeaders(localToken),
@@ -537,7 +615,7 @@ export function createAgentRoomClient({
   // is bounded even when the caller passes only a signal.
   async function rawRequest(method, path, { body, timeoutMs = requestTimeoutMs, signal, bearer } = {}) {
     const response = await httpRequest({
-      port,
+      ...wireTarget(path),
       method,
       path,
       headers: protocolHeaders(bearer === undefined ? sessionToken : bearer),
@@ -570,7 +648,31 @@ export function createAgentRoomClient({
     return probeHealth(recordedPort)
   }
 
-  const recoveryProbe = reconnectProbe ?? probeRecordedServer
+  // The remote recovery probe (Story 4.3): the same bounded read-only shape
+  // as probeRecordedServer, aimed at the CONFIGURED origin — reconnect
+  // recovery on a remote realm is detected on the server this client talks
+  // to, never on the local machine's runtime record (which a remote
+  // installation has no business reading).
+  async function probeConfiguredServer() {
+    try {
+      const response = await httpRequest({
+        url: new URL('/health', remoteBase),
+        method: 'GET',
+        headers: {},
+        timeoutMs: SERVER_HEALTH_PROBE_TIMEOUT_MS,
+      })
+      return {
+        reachable: true,
+        agentRoom: response.status === OK_STATUS
+          && response.body?.ok === true
+          && typeof response.body?.result?.version === 'string',
+      }
+    } catch {
+      return { reachable: false, agentRoom: false }
+    }
+  }
+
+  const recoveryProbe = reconnectProbe ?? (remoteBase === null ? probeRecordedServer : probeConfiguredServer)
 
   // One backoff wait, sliced at RECONNECT_RECOVERY_PROBE_MS: before each
   // slice the recorded server's health is probed, and only a detected
@@ -678,16 +780,25 @@ export function createAgentRoomClient({
   // next tool call can retry the bootstrap. A cleared token (a failed bind)
   // re-runs only the authenticate step — the resolved port stays cached —
   // and `needsReresolve` (set by a recovery that observed a fresh server)
-  // forces the next ensure to re-resolve runtime.json before authenticating.
+  // forces the next ensure to re-resolve before authenticating.
   // Both the re-resolve+re-auth work and the auth exchange itself are
   // single-flight: concurrent callers join the one in flight.
+  //
+  // The remote branch (Story 4.3) has no bootstrap step at all: the
+  // configured https origin IS the resolution — no local runtime record is
+  // read, no local server is booted, and no local token file is touched.
+  // The whole attach is the challenge-lane authentication below; needsReresolve
+  // there only forces the re-auth (nothing to re-resolve).
   async function ensure() {
-    if (port !== null && sessionToken !== null && !needsReresolve) return attachEpoch
+    const attached = remoteBase !== null || port !== null
+    if (attached && sessionToken !== null && !needsReresolve) return attachEpoch
     if (ensurePromise === null) {
       ensureSettled = false
       const inFlight = (async () => {
         try {
-          if (port === null || needsReresolve) {
+          if (remoteBase !== null) {
+            needsReresolve = false
+          } else if (port === null || needsReresolve) {
             // The declared connection mode crosses into the bootstrap engine
             // (Story 4.1 review triage): a declared-remote attach never
             // reads or creates the shared local token file, and its
