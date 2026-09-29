@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 09-21-2026 08:52
-last_updated: 09-29-2026 10:20
+last_updated: 09-29-2026 11:35
 project: agent-room
 project_key: NOKEY
 tracking_system: file-system
@@ -56,12 +56,12 @@ development_status:
   epic-2-retrospective: done
 
   epic-3: backlog
-  3-1-untrusted-marking-at-full-rigor: backlog
-  3-2-per-realm-allowlist-trust-matrix: backlog
-  3-3-held-pipeline-metadata-only-recoverable: backlog
-  3-4-the-human-cli-surface-hci-2: backlog
-  3-5-end-to-end-trust-test: backlog
-  epic-3-retrospective: optional
+  3-1-untrusted-marking-at-full-rigor: done
+  3-2-per-realm-allowlist-trust-matrix: done
+  3-3-held-pipeline-metadata-only-recoverable: done
+  3-4-the-human-cli-surface-hci-2: done
+  3-5-end-to-end-trust-test: done
+  epic-3-retrospective: done
 
   epic-4: backlog
   4-1-remote-challenge-authentication-keypair-born-in-story-1-1: backlog
@@ -179,3 +179,25 @@ action_items:
     owner: "orchestrator"
     status: open
     ref: "docs/implementation/epic-2-retro-2026-09-29.md"
+  - id: "epic-3-retro-item-14-epic-4-must-exercise-the-agent_room_conn"
+    epic: 3
+    action: "Epic 4 must exercise the AGENT_ROOM_CONNECTION_MODE=remote seam with
+      real challenge-authenticated traffic — the first production use of the remote
+      lane"
+    owner: "Epic 4"
+    status: open
+    ref: "docs/implementation/epic-3-completion-audit.md"
+  - id: "epic-3-retro-item-15-workflow-unattended-proof-phases-1-6-una"
+    epic: 3
+    action: "Workflow unattended proof: phases 1-6 unattended on 3-4; phases 8-10
+      hand-finished on provider errors — complete the proof on the next non-gate story"
+    owner: "orchestrator"
+    status: open
+    ref: "docs/implementation/epic-3-completion-audit.md"
+  - id: "epic-3-retro-item-16-cli-session-lifetime-at-sessions_max-und"
+    epic: 3
+    action: "CLI session lifetime at SESSIONS_MAX under automation-paced invocation
+      — revisit if automation drives the CLI"
+    owner: "Epic 4/6"
+    status: open
+    ref: "docs/implementation/epic-3-completion-audit.md"
