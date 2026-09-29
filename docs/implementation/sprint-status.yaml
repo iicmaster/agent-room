@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 09-21-2026 08:52
-last_updated: 09-29-2026 10:05
+last_updated: 09-29-2026 10:20
 project: agent-room
 project_key: NOKEY
 tracking_system: file-system
@@ -151,3 +151,31 @@ action_items:
     owner: "Stories 4.8 and 6.2"
     status: open
     ref: "docs/implementation/epic-2-completion-audit.md"
+  - id: "epic-2-retro-item-10-give-the-story-build-workflow-its-unatte"
+    epic: 2
+    action: "Give the story-build workflow its unattended proof before Epic 4: run
+      it on a non-gate story with no orchestrator interference on a clean tree, closing
+      the story end-to-end including the proof marker"
+    owner: "orchestrator"
+    status: open
+    ref: "docs/implementation/epic-2-retro-2026-09-29.md"
+  - id: "epic-2-retro-item-11-run-whole-epic-bmad-review-over-the-epic"
+    epic: 2
+    action: "Run whole-epic bmad-review over the Epic 2 diff (carried twice now)"
+    owner: "next retro or on demand"
+    status: open
+    ref: "docs/implementation/epic-2-retro-2026-09-29.md"
+  - id: "epic-2-retro-item-12-epic-5-viewer-decides-the-retired-v0-1-d"
+    epic: 2
+    action: "Epic 5 (viewer) decides the retired v0.1 daemon fate: migration exists,
+      MCP surface replaced, only the legacy viewer route remains"
+    owner: "Epic 5"
+    status: open
+    ref: "docs/implementation/epic-2-retro-2026-09-29.md"
+  - id: "epic-2-retro-item-13-record-in-the-workflow-preamble-that-esc"
+    epic: 2
+    action: "Record in the workflow preamble that escalations are expected and an
+      addendum file is the sanctioned resolution"
+    owner: "orchestrator"
+    status: open
+    ref: "docs/implementation/epic-2-retro-2026-09-29.md"
