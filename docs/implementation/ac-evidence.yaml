@@ -368,7 +368,7 @@
 
 # --- Epic 3 (Trust) -------------------------------------------------------------
 # Seeded, not yet filled: the sweep fails loudly on every story below until each
-# one carries real evidence. Stories 3.1 and 3.2 are filled; 3.3-3.5 remain TODO.
+# one carries real evidence. Stories 3.1-3.3 are filled; 3.4-3.5 remain TODO.
 
   3.1:                       # Untrusted marking at full rigor (2 criteria)
     note: >-
@@ -478,3 +478,71 @@
         file: "tests/trust.test.mjs"
       - test: "the allowlist binds the fingerprint, not the Chat ID that was live when it was added: a different key taking the same name gains nothing (real claim swap)"
         file: "tests/trust.test.mjs"
+
+  3.3:                       # Held pipeline — metadata-only & recoverable (3 criteria)
+    note: >-
+      Proves the held pipeline: the per-realm held cache, the metadata-only
+      agent surface, the bounded body cache with point-read recovery, release,
+      durability, and the FR-20 cursor separation. AC-1 (metadata only): the
+      agent-visible held row is a fixed whitelist projection enumerated key by
+      key (realm_id, room_id, seq, chat_id, actor_fingerprint, created_at,
+      size, held_reason) — body text, envelope fragments, and caching
+      bookkeeping are structurally absent, proven against hostile content
+      including an actual envelope-wrapped artifact with a terminator attack
+      inside, and the projection carries zero body bytes even for records
+      whose bodies are still cached, already evicted, or RECOVERED mid-test
+      (the recovery output lands only in the test's human-stand-in variable,
+      never in a tool result); no agent-reachable body accessor exists — the
+      tools list is pinned to exactly nine names and the adapter's source is
+      scanned to prove it never imports the human-only body-recovery and
+      release functions. AC-2 (eviction + recovery): HELD_CACHE_MAX+5 records
+      from a real foreign installation leave the held LIST showing every
+      record while the file keeps at most 100 body copies, dropped
+      oldest-first by caching time, every surviving record metadata-complete
+      (eviction never deletes, approves, or skips); an evicted body recovers
+      by a point read whose recorded arguments are exactly
+      {after_seq: seq − 1, limit: 1}, through the REAL api-client against a
+      REAL spawned server, byte-matching the artifact the pipeline withheld;
+      a cached body never triggers a read; a released (cleared) record is
+      never recoverable and its preview reference is gone for good. AC-3
+      (cursor independence): held.json and cursors.json are separate files —
+      registration leaves the cursor file byte-identical and a cursor advance
+      leaves every held record intact — and over the real tool surface a held
+      seq is consumed by the cursor like any other (cursorless re-read
+      re-delivers nothing, the durable cursor stays put, an explicit low read
+      never regresses it, real local deliveries register nothing new, and the
+      held list still shows all records). Restart durability: a fresh MCP
+      child (after both the client process AND the server restarted) lists
+      byte-identical held records at 0600 in the 0700 realm directory.
+      Degradation: missing/corrupt/hand-mangled held.json degrades to the
+      empty default without blocking reads, a read never creates state, and
+      malformed rows are dropped instead of surfaced (an orphaned body copy
+      degrades to a recoverable metadata record). Does NOT prove an
+      end-to-end HELD row through a real v0.2 connection — impossible by
+      construction, since the only v0.2 transport is the local token path and
+      the matrix delivers every sender on a local realm; the hold-producing
+      half is proven at the composed layer (the REAL applyTrustMatrix driven
+      with transport 'remote' over REAL server reads from a real foreign
+      keypair, exactly as Story 3.2's evidence), and the full zero-mock chain
+      is Story 3.5's with Epic 4's remote connections. Also does not prove
+      the human CLI surface itself (Story 3.4 — held show/allow over this
+      pipeline) or any persuasion-resistance property.
+    evidence:
+      - test: "held registration and the metadata-only projection: every agent-visible field is enumerated, the body artifact (even an envelope-wrapped one) never appears, and re-registration is idempotent per (room, seq)"
+        file: "tests/held.test.mjs"
+      - test: "eviction past 100 entries: cached body copies drop oldest-first, every held record survives, and eviction never deletes, approves, or skips"
+        file: "tests/held.test.mjs"
+      - test: "recovery by point read: an evicted body is fetched with exactly after_seq = seq − 1 and limit = 1, a cached body never triggers a read, and a released record is never recoverable"
+        file: "tests/held.test.mjs"
+      - test: "recovery through the real api-client against a real server: 105 foreign messages register held, the cache keeps at most 100 copies, and an evicted body point-reads back byte-for-byte as the artifact the pipeline withheld"
+        file: "tests/held.test.mjs"
+      - test: "the held cache and the read cursor are separate files: registration never touches the cursor, and a cursor advance never loses held state"
+        file: "tests/held.test.mjs"
+      - test: "cursor independence over the real surface: a held seq is consumed by the cursor, a cursorless re-read never re-delivers, the held list still shows the records, and real local deliveries register nothing"
+        file: "tests/held.test.mjs"
+      - test: "the held tools over the real surface: room_held_list carries exactly the metadata whitelist (zero body bytes, even after eviction and recovery), room_held_count counts, and no agent-reachable path reaches a held body"
+        file: "tests/held.test.mjs"
+      - test: "the held marker survives restart: a fresh MCP child on the same PLUGIN_DATA lists the same held records, and the state file keeps its owner-only permissions"
+        file: "tests/held.test.mjs"
+      - test: "held storage degrades safely: a missing or corrupt file is the empty default, a read never creates state, malformed rows are dropped instead of surfaced, and the next write replaces the file"
+        file: "tests/held.test.mjs"

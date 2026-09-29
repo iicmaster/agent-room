@@ -2,9 +2,11 @@
 // room_direct_open, message_send, message_read, room_status) over real
 // mcp-stdio child processes against a real spawned loopback server — zero
 // mocks on the wire. Story 3.2 additively joined the two trust tools
-// (room_trust_list, room_trust_set) to the same surface; their behavior lives
-// in tests/trust.test.mjs, and the counts below pin the seven-tool surface.
-// The rows cover the tools list (exactly seven, "list agents" phrasing, no
+// (room_trust_list, room_trust_set) and Story 3.3 the two held tools
+// (room_held_list, room_held_count) to the same surface; their behavior lives
+// in tests/trust.test.mjs and tests/held.test.mjs, and the counts below pin
+// the nine-tool surface.
+// The rows cover the tools list (exactly nine, "list agents" phrasing, no
 // native-named aliases, closed schemas), the end-to-end conversation (status,
 // direct open, committed send, peer round-trip, long-poll read, presence with
 // the 'mcp' client type), the ambiguity round-trip through the tool surface,
@@ -404,7 +406,7 @@ function startDropProxy(t, targetPort, { drop = 'response', matches } = {}) {
 
 // --- Matrix rows ---------------------------------------------------------------
 
-test('tools list: exactly the seven tools (five conversation tools plus the Story 3.2 trust pair), "list agents" phrasing, no native-named aliases, closed schemas', async t => {
+test('tools list: exactly the nine tools (five conversation tools plus the Story 3.2 trust pair and the Story 3.3 held pair), "list agents" phrasing, no native-named aliases, closed schemas', async t => {
   const world = makeWorld(t)
   await world.waitReady()
   const mcp = startMcpChild(t, world)
@@ -421,6 +423,8 @@ test('tools list: exactly the seven tools (five conversation tools plus the Stor
     'room_status',
     'room_trust_list',
     'room_trust_set',
+    'room_held_list',
+    'room_held_count',
   ])
   // No native-named aliases and no join verbs: the retired surface is gone.
   for (const name of names) {
@@ -765,7 +769,7 @@ test('stdin purity: JSON-RPC only, parse errors and oversized frames answered, n
 
   // The channel still works: a follow-up tools/list answers normally.
   const listed = await mcp.request('tools/list')
-  assert.equal(listed.result.tools.length, 7)
+  assert.equal(listed.result.tools.length, 9)
 
   assert.equal(mcp.stderr, '')
   await mcp.close()
@@ -786,7 +790,7 @@ test('first run: no configured Chat ID fails with coded guidance and the process
 
   // The process stays alive and answers JSON-RPC afterwards.
   const listed = await mcp.request('tools/list')
-  assert.equal(listed.result.tools.length, 7)
+  assert.equal(listed.result.tools.length, 9)
 
   await mcp.close()
 })
@@ -917,7 +921,7 @@ test('NFR-3 schema-level negatives: every schema is closed, carries no identity-
   const denyList = [
     'actor_id', 'actor', 'display_name', 'fingerprint', 'sender', 'sender_fingerprint', 'sender_chat_id', 'client_type',
   ]
-  assert.equal(TOOL_DESCRIPTORS.length, 7)
+  assert.equal(TOOL_DESCRIPTORS.length, 9)
   for (const tool of TOOL_DESCRIPTORS) {
     assert.equal(tool.inputSchema.additionalProperties, false, `${tool.name} must close its argument set`)
     const properties = Object.keys(tool.inputSchema.properties ?? {})

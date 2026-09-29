@@ -319,6 +319,18 @@ export const SERVER_HEALTH_PROBE_MAX_BYTES = 64 * 1024
 export const STATE_FILE_MAX_BYTES = 64 * 1024
 export const SERVER_CHILD_REAP_TIMEOUT_MS = 2_000
 
+// --- Story 3.3: the held pipeline ----------------------------------------------
+
+// The held state file's read bound, derived (AD-9) from the bounds it carries:
+// the bounded body cache holds at most HELD_CACHE_MAX body copies, each an
+// untrusted-envelope-wrapped text of at most MESSAGE_TEXT_MAX characters
+// (×2 headroom for the wrapper text and terminator neutralization), plus
+// wrapper slack per entry and the shared private-state-file ceiling for the
+// unreleased metadata records that survive body eviction. The bound is a read
+// ceiling, never a retention rule: eviction drops only cached body copies.
+export const HELD_STATE_MAX_BYTES
+  = HELD_CACHE_MAX * (MESSAGE_TEXT_MAX * 2 + 1024) + STATE_FILE_MAX_BYTES
+
 // --- Story 1.6: presence — online & offline-recently --------------------------
 
 // Millisecond forms of the ratified presence windows, derived from the

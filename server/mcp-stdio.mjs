@@ -3,9 +3,10 @@
 // The MCP stdio adapter (Story 1.7): five conversation tools over the HTTP
 // api-client — room_presence, room_direct_open, message_send, message_read,
 // room_status — plus Story 3.2's two trust tools (room_trust_list,
-// room_trust_set) over the per-realm allowlist. The v0.1 unix-socket daemon
-// surface (with its create/join verbs, retired per AD-14) is gone; nothing
-// here spawns or speaks to it.
+// room_trust_set) over the per-realm allowlist and Story 3.3's two held tools
+// (room_held_list, room_held_count) over the per-realm held pipeline. The
+// v0.1 unix-socket daemon surface (with its create/join verbs, retired per
+// AD-14) is gone; nothing here spawns or speaks to it.
 //
 // Identity discipline (NFR-3): the session is bound from this installation's
 // own state — the local token file, the installation keypair, and the Chat ID
@@ -30,6 +31,22 @@
 // (0600, atomic writes) and binds key fingerprints, never Chat IDs. The
 // accept-all flag exists in that file but is settable only by a human through
 // the CLI (Story 3.4) — no tool below can set it.
+//
+// Held discipline (Story 3.3, FR-10/FR-20): every held row a read produces
+// registers into the per-realm held pipeline at
+// PLUGIN_DATA/realms/<realm_id>/held.json (0600, atomic) — metadata (realm,
+// sender Chat ID, fingerprint, room, seq, time, size, reason) plus a bounded
+// body cache (HELD_CACHE_MAX, drop-oldest) whose copies serve only the HUMAN
+// approval surface; recovery after eviction is a point read through the
+// api-client (after_seq = seq − 1, limit = 1). Registration happens AFTER the
+// cursor persists: the held seqs were consumed by the cursor like any other
+// (FR-20 — held state is separate, keyed (realm, room, seq)), so a held
+// message never stalls the cursor and a cursor failure never loses the held
+// record. Two additive tools join the surface — room_held_list (metadata
+// only, never a body) and room_held_count — and the held pipeline's
+// body-recovery and release functions are human-surface code the tool layer
+// never imports or calls: the agent can never retrieve or release a held
+// body; that is the human CLI's surface (Story 3.4).
 //
 // Outcome discipline: message_send relies on the api-client's
 // outcome_unknown retry (one immediate resend with the identical
@@ -73,6 +90,11 @@ import {
   loadAllowlist,
   setAllowlistEntry,
 } from './client/trust.mjs'
+import {
+  heldCount,
+  heldList,
+  registerHeldMessages,
+} from './client/held.mjs'
 
 // Run the runtime gate before any other work. Direct launches report one
 // diagnosable line and exit 1 with no stack trace; importers get a catchable
@@ -187,6 +209,26 @@ const TOOL_DESCRIPTORS = Object.freeze([
       },
     },
   },
+  {
+    name: 'room_held_list',
+    description: 'List the messages this installation has HELD in the current Agent Room realm — senders the trust matrix does not deliver. Metadata only, never body text: sender chat id, key fingerprint, room, sequence, time, byte size, and the realm\'s held count. Bodies stay withheld until a human releases the sender with the agent-room CLI; list agents with room_presence, then use this to tell the human what awaits their trust decision.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        room_id: { type: 'string', minLength: 1, maxLength: IDENTIFIER_MAX, description: 'Only list held messages for this room; omit for every room in the realm.' },
+      },
+    },
+  },
+  {
+    name: 'room_held_count',
+    description: 'Count the messages this installation has HELD in the current Agent Room realm, waiting for a human trust decision. Metadata only — no held body text exists on any tool; use room_held_list for the per-message metadata.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {},
+    },
+  },
 ])
 const TOOL_NAMES = new Set(TOOL_DESCRIPTORS.map(tool => tool.name))
 
@@ -201,6 +243,8 @@ export const TOOL_ARGUMENT_FIELDS = Object.freeze(new Map([
   ['room_status', Object.freeze(new Set([]))],
   ['room_trust_list', Object.freeze(new Set([]))],
   ['room_trust_set', Object.freeze(new Set(['target_fingerprint', 'allowed']))],
+  ['room_held_list', Object.freeze(new Set(['room_id']))],
+  ['room_held_count', Object.freeze(new Set([]))],
 ]))
 
 function rpcError(id, code, message, data) {
@@ -271,6 +315,12 @@ function validateArguments(name, args) {
     if (typeof args.target_fingerprint !== 'string') return 'target_fingerprint must be a string'
     if (!FINGERPRINT_PATTERN.test(args.target_fingerprint)) return 'target_fingerprint must be sha256: followed by 64 lowercase hex characters'
     if (typeof args.allowed !== 'boolean') return 'allowed must be a boolean'
+  }
+  if (name === 'room_held_list') {
+    if (args.room_id !== undefined) {
+      if (typeof args.room_id !== 'string') return 'room_id must be a string'
+      if (args.room_id.length < 1 || args.room_id.length > IDENTIFIER_MAX) return `room_id must contain 1 to ${IDENTIFIER_MAX} characters`
+    }
   }
   return null
 }
@@ -477,8 +527,7 @@ export function createMcpServer({
         // envelope already applied client-side for foreign senders); held
         // rows keep their metadata but their text becomes the held marker —
         // the body never reaches the tool result — with the matrix reason
-        // recorded. The cursor advances regardless: ingestion and trust are
-        // independent (FR-20).
+        // recorded.
         const page = applyTrustMatrix(
           {
             messages: result.messages,
@@ -491,16 +540,48 @@ export function createMcpServer({
             allowlist: loadAllowlist(pluginData, realm),
           },
         )
+        // Held discipline (Story 3.3): collect this page's held rows for the
+        // held pipeline. The matrix output is index-aligned with the raw read
+        // result, so a held row's RAW text is exactly the body artifact the
+        // tool result withheld — the only form the pipeline caches and the
+        // recovery point read re-serves.
+        const heldRows = []
+        for (let index = 0; index < page.messages.length; index += 1) {
+          const row = page.messages[index]
+          if (row && typeof row === 'object' && row.held === true) {
+            const raw = result.messages[index]
+            if (raw && typeof raw === 'object' && typeof raw.text === 'string') {
+              heldRows.push({ ...raw, held_reason: row.held_reason })
+            }
+          }
+        }
+        // Cursor discipline (FR-20): the cursor advances FIRST and
+        // independently of ingestion — a held message's seq is consumed like
+        // any other (held-ness only changes what the agent SEES). Held
+        // registration happens after persistence, into separate state keyed
+        // (realm, room, seq), so a held message never stalls the cursor, a
+        // registration failure can never block the consumed page, and a
+        // cursor failure can never lose the held record.
+        let cursorPersisted = true
+        const notes = []
         try {
           await queueCursorPersist(pluginData, realm, args.room_id, result.next_after_seq)
-          return toolResult(page)
         } catch (error) {
-          return toolResult({
-            ...page,
-            cursor_persisted: false,
-            note: `cursor not persisted: ${error?.code ?? 'write_failed'}`,
-          })
+          cursorPersisted = false
+          notes.push(`cursor not persisted: ${error?.code ?? 'write_failed'}`)
         }
+        if (heldRows.length > 0) {
+          try {
+            await registerHeldMessages(pluginData, realm, args.room_id, heldRows)
+          } catch (error) {
+            notes.push(`held registration failed: ${error?.code ?? 'write_failed'}`)
+          }
+        }
+        const resultPage = notes.length === 0
+          ? page
+          : { ...page, note: notes.join('; ') }
+        if (!cursorPersisted) resultPage.cursor_persisted = false
+        return toolResult(resultPage)
       }
       if (name === 'room_status') {
         const status = await readyClient.status({ signal })
@@ -537,6 +618,28 @@ export function createMcpServer({
           target_fingerprint: args.target_fingerprint,
           allowed: args.allowed,
           entry,
+        })
+      }
+      if (name === 'room_held_list') {
+        // Plugin-local state only, and METADATA ONLY: heldList projects every
+        // row through a fixed whitelist (realm, sender chat id, fingerprint,
+        // room, seq, time, size, reason), so no body byte can reach this
+        // result — the pipeline's body-recovery and release functions are
+        // human-surface code this adapter never imports. held_count is the
+        // realm-wide total, independent of the room filter.
+        const realm = await realmIdOf()
+        const messages = heldList(pluginData, realm, args.room_id === undefined ? {} : { roomId: args.room_id })
+        return toolResult({
+          realm_id: realm,
+          held_count: heldCount(pluginData, realm),
+          messages,
+        })
+      }
+      if (name === 'room_held_count') {
+        const realm = await realmIdOf()
+        return toolResult({
+          realm_id: realm,
+          held_count: heldCount(pluginData, realm),
         })
       }
       return toolResult({ code: 'tool_not_found', message: 'tool was not found' }, true)

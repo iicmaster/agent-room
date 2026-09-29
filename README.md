@@ -85,13 +85,28 @@ name or a replaced key inherits nothing. Entries live in
 false, set via the CLI, never by an agent tool). Removing an entry affects future delivery
 only — text already read is not withdrawn.
 
+## Held messages: metadata only, recoverable, human-released
+
+A held message registers into `${PLUGIN_DATA}/realms/<realm_id>/held.json` keyed by
+(realm, room, sequence) with its metadata — sender Chat ID, key fingerprint, room,
+sequence, time, byte size, and the trust reason — and never its body. Every held record
+survives until a human releases it; the only bounded part is the local body cache
+(100 copies, oldest dropped first), and an evicted body is always recoverable from the
+durable log by a point read. The agent-facing tools (`room_held_list`, `room_held_count`)
+carry metadata and the realm's held count — no body text exists on any tool result, cached,
+evicted, or recovered. The full preview and the release decision belong to the human CLI
+(the body-recovery and release functions are not reachable from any tool), and held
+messages never stall the read cursor: the cursor advances past them like any other
+message, and advancing it never loses the held record.
+
 ## State and trust boundary
 
 - Shared room state defaults to `$HOME/.agent-room/agent-room.sqlite`; a loopback server
   binds `127.0.0.1` only and records its port in the same directory's `runtime.json`.
 - `${PLUGIN_DATA}` or `${CLAUDE_PLUGIN_DATA}` stores only that installed client's identity:
-  the setup config, the Ed25519 keypair, and the per-realm state files (cursors and the
-  allowlist). Different clients are not assumed to receive the same directory.
+  the setup config, the Ed25519 keypair, and the per-realm state files (cursors, the
+  allowlist, and the held records). Different clients are not assumed to receive the same
+  directory.
 - `AGENT_ROOM_DATA_DIR` can select another absolute shared data directory for controlled
   local deployments.
 - Server and client state files are owner-only. This prevents other OS users from

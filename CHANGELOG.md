@@ -26,6 +26,17 @@ All notable changes to Agent Room are documented in this file.
   fingerprints, never Chat IDs. Two additive MCP tools — `room_trust_list` and
   `room_trust_set` — inspect and add/remove fingerprint entries; accept-all is a
   per-realm human CLI opt-in (default false) that no agent tool can set.
+- The held pipeline (metadata-only and recoverable): every held message registers into
+  `PLUGIN_DATA/realms/<realm_id>/held.json` (0600, atomic) keyed (realm, room, seq) with
+  realm, sender Chat ID, fingerprint, room, sequence, time, byte size, and the trust
+  reason, plus a body cache bounded at 100 copies (drop-oldest) — eviction drops only
+  the cached body copy and never deletes, approves, or skips a record, and an evicted
+  body recovers by a point read (`after_seq = seq − 1`, `limit = 1`) through the
+  api-client. Two additive MCP tools — `room_held_list` (metadata only, never a body)
+  and `room_held_count` — surface the held state to the agent; the body-recovery and
+  release functions are reachable only from the human CLI, so no tool result can ever
+  carry a held body. Held registration happens after the read cursor persists: a held
+  message never stalls the cursor and a cursor advance never loses held state.
 - `outcome_unknown` send resolution: one automatic retry with the identical
   `client_message_id` resolves to the original message or a coded conflict, never a duplicate.
 
