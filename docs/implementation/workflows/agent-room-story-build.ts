@@ -390,6 +390,9 @@ async function readLunaReport(taskId: string, outboxPath: string, dispatchedAt: 
   if (stat.exitCode !== 0 || !Number.isFinite(mtime) || mtime <= dispatchedAt) {
     throw new Error(`Luna outbox is not newer than dispatch: ${outboxPath}`);
   }
+  // Observed race (story 3-4): the coordinator can report done while the lane
+  // is still writing — the fail-closed check above turns that into a retryable
+  // failure instead of a false SHIP. On retry the outbox is present and parses.
   const text = await files.read(outboxPath);
   const lines = text.split("\n");
   const nonempty = lines.map(line => line.trim()).filter(Boolean);
