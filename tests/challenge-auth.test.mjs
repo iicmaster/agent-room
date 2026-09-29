@@ -1,28 +1,39 @@
 // Story 4.1 acceptance: remote challenge authentication. Registry rows run
 // in-process (issue/consume pair, 60 s expiry, bounded pending set — injectable
-// clock); the matrix rows spawn the real server child (node:test with real
-// child processes) and exercise POST /api/auth/challenge and POST
+// clock); the live-server rows run the real HTTP host, the real SQLite store,
+// and the real api-client two ways — spawned server children (node:test with
+// real child processes) where the process boundary is the evidence, and
+// in-process startServer harnesses (the same real server code in the test
+// process) where a registry seam or client wiring is what's under test.
+// Either way the suite exercises POST /api/auth/challenge and POST
 // /api/auth/answer and the real api-client's declared-remote lane end to end:
 // single-use nonces with identity bound at challenge time, consume-before-
 // verify (no grinding), replay resistance, the durable enrolled_actors gate
 // seeded by the local lane's success path, FR-3's deletion rule, NFR-3's
 // negatives mirrored at the wire, and the private key never traveling.
 //
-// Matrix row → test map (the spec's I/O & Edge-Case Matrix):
-//    row 1  'POST /api/auth/challenge issues a fresh single-use nonce...'
-//    row 2  'POST /api/auth/answer commits a session for an enrolled key...'
-//    row 3  'a replayed answer request yields no token and changes no state'
-//    row 4  'identity binds at challenge: a foreign key cannot answer'
-//    row 5  'challenge expiry lands at the declared 60 s bound (injectable clock)'
-//    row 6  'consume-before-verify: a failed answer burns the nonce'
-//    row 7  'an unenrolled key is admitted at challenge, gated at answer'
-//    row 8  'enrollment seeds durably from the local lane and survives restart'
-//    row 9  'the pending set is bounded: oldest-pending eviction at capacity'
-//    row 10 'the declared-remote client runs the challenge lane end to end'
-//    row 11 'counted scans: zero key material anywhere on the wire or stderr'
-//    row 12 'plugin-data deletion creates a new, unrelated Actor (FR-3)'
-//    row 13 'NFR-3 mirrored at the wire: no identity field is honored'
-//    row 14 'one mechanism, two issuance paths: sliding TTL, capacity, revoke'
+// Matrix row → test map (the spec's I/O & Edge-Case Matrix; harness shown per
+// row — registry = in-process registry unit, in-process = startServer harness
+// over the real host and store, spawned = real server child):
+//    row 1  (spawned)     'POST /api/auth/challenge issues a fresh single-use nonce...'
+//    row 2  (in-process)  'POST /api/auth/answer commits a session for an enrolled key...'
+//    row 3  (in-process)  'a replayed answer request yields no token and changes no state'
+//    row 4  (in-process)  'identity binds at challenge: a foreign key cannot answer'
+//    row 5  (registry)    'challenge expiry lands at the declared 60 s bound (injectable clock)'
+//    row 6  (in-process)  'consume-before-verify: a failed answer burns the nonce'
+//    row 7  (in-process)  'an unenrolled key is admitted at challenge, gated at answer'
+//    row 8  (spawned)     'enrollment seeds durably from the local lane and survives restart'
+//    row 9  (registry)    'the pending set is bounded: oldest-pending eviction at capacity'
+//    row 10 (spawned)     'the declared-remote client runs the challenge lane end to end'
+//    row 11 (scan)        'counted scans: zero key material anywhere on the wire or stderr'
+//    row 12 (spawned)     'plugin-data deletion creates a new, unrelated Actor (FR-3)'
+//    row 13 (in-process)  'NFR-3 mirrored at the wire: no identity field is honored'
+//    row 14 (in-process)  'one mechanism, two issuance paths: sliding TTL, capacity, revoke'
+//
+// Post-implementation review tests (no matrix row; named for their triage
+// source): the declared-remote attach wire-scan, the challengeRegistry
+// injection seam, the canonical-signature gate, the four bounds' literal
+// oracles, and the mid-flight identity replacement.
 
 import assert from 'node:assert/strict'
 import { createHash, createPublicKey, createPrivateKey, generateKeyPairSync } from 'node:crypto'
@@ -56,6 +67,7 @@ import { loadOrCreateLocalToken, localTokenPath } from '../server/api/local-toke
 import { startServer } from '../server/api/server.mjs'
 import { ROOM_LOG_DATABASE_FILENAME } from '../server/store/room-log.mjs'
 import { CONNECTION_MODE_ENV, createAgentRoomClient } from '../server/client/api-client.mjs'
+import { ensureServer } from '../server/client/ensure-server.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const SERVER_ENTRY = join(ROOT, 'server', 'api', 'server.mjs')
@@ -180,6 +192,15 @@ function spawnServerChild(t, dataDir) {
   })
 
   return { child, waitReady, stop, stderrText }
+}
+
+// A pid proven dead: spawn a child that exits immediately and reap it (the
+// ensure-server harness's pattern) — the half-stale record fixtures below
+// need one.
+async function deadPid() {
+  const child = spawn(process.execPath, ['-e', 'process.exit(0)'])
+  await once(child, 'exit')
+  return child.pid
 }
 
 // Small direct HTTP client: no keep-alive, so killed children never leave
@@ -398,6 +419,45 @@ test('createChallengeRegistry validates its wiring and its recorded identities',
   const registry = createChallengeRegistry({ now: () => 0 })
   assert.throws(() => registry.issue('not-bytes'), /32-byte/)
   assert.throws(() => registry.issue(new Uint8Array(31)), /32-byte/)
+})
+
+test('the four challenge bounds hold at their literal values (independent oracles, review triage)', () => {
+  // The suites above derive their expectations from the imported constants,
+  // so they would adapt silently to a drifted bound. These oracles check the
+  // LITERAL values instead: a bound that moves fails here.
+
+  // Bound 1 — nonce width, literal: 32 random bytes mint exactly 43
+  // base64url characters; AD-7's floor of 16 bytes is asserted literally too.
+  let now = 0
+  const registry = createChallengeRegistry({ now: () => now })
+  const nonce = registry.issue(new Uint8Array(32).fill(9))
+  assert.equal(nonce.length, 43, 'literal: 32 random bytes are exactly 43 base64url characters')
+  assert.equal(Buffer.from(nonce, 'base64url').length, 32, 'literal: the nonce carries 32 bytes (AD-7 floor: 16)')
+  registry.consume(nonce)
+
+  // Bound 2 — the 60 s life, literal clock offsets against the injected
+  // clock: alive at 59_999 ms, expired at exactly 60_000 ms.
+  let clock = 0
+  const literal = createChallengeRegistry({ now: () => clock })
+  const alive = literal.issue(new Uint8Array(32).fill(3))
+  const expired = literal.issue(new Uint8Array(32).fill(4))
+  clock = 59_999
+  assert.notEqual(literal.consume(alive), null, 'alive at 59_999 ms — one millisecond inside the literal 60_000 ms bound')
+  clock = 60_000
+  assert.equal(literal.consume(expired), null, 'expired at exactly 60_000 ms')
+
+  // Bound 3 — single use, unconditional: the slot empties on the first
+  // consume and never resurrects.
+  const singleUse = createChallengeRegistry({ now: () => 0 })
+  const once = singleUse.issue(new Uint8Array(32).fill(5))
+  assert.notEqual(singleUse.consume(once), null)
+  assert.equal(singleUse.consume(once), null, 'the second consume finds nothing')
+  assert.equal(singleUse.consume(once), null, 'nor the third')
+
+  // Bound 4 — the canonical signature shape, literal: a 64-byte Ed25519
+  // signature is exactly 86 base64url characters.
+  const canonicalForm = Buffer.alloc(64, 7).toString('base64url')
+  assert.equal(canonicalForm.length, 86, 'literal: 64 bytes are exactly 86 base64url characters')
 })
 
 test('the keys helpers sign with the installation key and verify against a raw key', t => {
@@ -671,6 +731,42 @@ test('missing and malformed answer fields are shape rejections naming the field'
   }
 })
 
+test('the answer route honors only the canonical signature form — decorated spellings are refused (review triage)', async t => {
+  const home = makeDataDir(t)
+  const dataDir = makeDataDir(t)
+  const server = await startServer({ dataDir })
+  try {
+    const identity = makeInstallation(home, 'inst', 'Decorator')
+    assert.equal((await localExchange(server.port, dataDir, identity.publicKey)).status, 200)
+
+    const before = hashState(dataDir)
+    // Every decorated spelling below decodes to the SAME 64 bytes the
+    // canonical form carries — the base64url decoder skips every '#' — so
+    // without the canonical-form gate these would verify and mint a session.
+    const decorations = [
+      canonical => `${canonical}###`,
+      canonical => `${canonical.slice(0, 43)}###${canonical.slice(43)}`,
+      canonical => `##${canonical}`,
+    ]
+    for (const decorate of decorations) {
+      const nonce = (await challenge(server.port, identity.publicKey)).json().result.nonce
+      const refused = await answer(server.port, nonce, decorate(identity.sign(Buffer.from(nonce, 'base64url'))))
+      assert.equal(refused.status, 401, 'a non-canonical spelling is a signature refusal')
+      assert.equal(refused.json().error.code, 'signature_invalid')
+      // The refusal consumed the attempt (no grinding): the correct answer
+      // finds an empty slot.
+      const burned = await answer(server.port, nonce, identity.sign(Buffer.from(nonce, 'base64url')))
+      assert.equal(burned.status, 401, 'the refused spelling burned the nonce')
+      assert.equal(burned.json().error.code, 'challenge_invalid')
+    }
+
+    assert.equal(hashState(dataDir), before, 'the refusals wrote no durable state')
+    stderrCaptures.push('')
+  } finally {
+    await server.close()
+  }
+})
+
 test('enrollment seeds durably from the local lane and survives a restart while nonces do not (row 8)', async t => {
   const home = makeDataDir(t)
   const dataDir = makeDataDir(t)
@@ -694,18 +790,26 @@ test('enrollment seeds durably from the local lane and survives a restart while 
   assert.equal(rows.length, 1, 're-presentation adds no row')
   assert.equal(rows[0].enrolled_at, firstEnrolledAt, 'the first registration sticks')
 
-  // A rejected local exchange writes no enrollment row: a wrong token is a
-  // 401 and the table is untouched.
+  // A rejected local exchange writes no enrollment row — and the proof is
+  // made with a key that has NO row yet: for an already-enrolled key the
+  // idempotent INSERT would mask an enrollment that ran before the credential
+  // check (review triage: the ordering assertion must be able to fail).
+  // Credential validation strictly precedes any durable write.
+  const stranger = makeInstallation(home, 'rejected-stranger', 'NeverEnrolled')
   const rejected = await request(firstRecord.port, 'POST', '/api/auth/local', {
     headers: {
       [PROTOCOL_KEY]: '1',
       authorization: `Bearer ${'w'.repeat(43)}`,
       'content-type': 'application/json; charset=utf-8',
     },
-    body: JSON.stringify({ public_key: identity.publicKey }),
+    body: JSON.stringify({ public_key: stranger.publicKey }),
   })
   assert.equal(rejected.status, 401)
-  assert.equal(enrollmentRows(dataDir).length, 1)
+  assert.deepEqual(
+    enrollmentRows(dataDir).map(row => row.actor_fingerprint),
+    [identity.fingerprint],
+    'the rejected exchange enrolled nothing: no row for the presented key, no extra row at all',
+  )
 
   // The token-free challenge-answer authenticates — no Bearer header, no
   // local token anywhere in the exchange.
@@ -815,6 +919,97 @@ test('one mechanism, two issuance paths: sliding TTL, capacity, and revoke behav
     stderrCaptures.push('')
   } finally {
     await smallServer.close()
+  }
+})
+
+test('startServer honors the challengeRegistry injection and refuses a malformed one (review triage)', async t => {
+  const home = makeDataDir(t)
+  const dataDir = makeDataDir(t)
+  // A distinguishable registry: capacity 1, so the SECOND live challenge
+  // evicts the first — observable through the real wire. A severed injection
+  // (the option falling back to the process default) would keep both
+  // nonces answerable and fail this row.
+  const challengeRegistry = createChallengeRegistry({ maxPending: 1 })
+  const server = await startServer({ dataDir, challengeRegistry })
+  try {
+    const identity = makeInstallation(home, 'inst', 'Injector')
+    assert.equal((await localExchange(server.port, dataDir, identity.publicKey)).status, 200)
+
+    const first = (await challenge(server.port, identity.publicKey)).json().result.nonce
+    const second = (await challenge(server.port, identity.publicKey)).json().result.nonce
+    assert.notEqual(first, second)
+
+    const evicted = await answer(server.port, first, identity.sign(Buffer.from(first, 'base64url')))
+    assert.equal(evicted.status, 401, 'the injected bound evicted the oldest pending nonce')
+    assert.equal(evicted.json().error.code, 'challenge_invalid')
+    const survived = await answer(server.port, second, identity.sign(Buffer.from(second, 'base64url')))
+    assert.equal(survived.status, 200, 'the second nonce answers: the injected registry is the live one')
+
+    stderrCaptures.push('')
+  } finally {
+    await server.close()
+  }
+
+  // Malformed wiring fails at startup with the coded shape error, never
+  // per-request.
+  await assert.rejects(
+    () => startServer({ dataDir: makeDataDir(t), challengeRegistry: {} }),
+    error => error instanceof AgentRoomRuntimeError
+      && error.code === 'invalid_argument'
+      && /challengeRegistry/.test(error.message),
+  )
+})
+
+test('the four bounds refuse on the wire at their literal values (independent oracles, review triage)', async t => {
+  const home = makeDataDir(t)
+  const dataDir = makeDataDir(t)
+  // The challenge registry's clock is injectable through startServer, so the
+  // 60 s bound is exercised against literal clock offsets over real HTTP.
+  let clock = 0
+  const challengeRegistry = createChallengeRegistry({ now: () => clock })
+  const server = await startServer({ dataDir, challengeRegistry })
+  try {
+    const identity = makeInstallation(home, 'inst', 'Oracle')
+    assert.equal((await localExchange(server.port, dataDir, identity.publicKey)).status, 200)
+
+    // Bound 1 on the wire: the nonce is exactly 43 characters of exactly
+    // 32 bytes.
+    const issued = (await challenge(server.port, identity.publicKey)).json().result.nonce
+    assert.equal(issued.length, 43)
+    assert.equal(Buffer.from(issued, 'base64url').length, 32)
+
+    // Bound 2 on the wire: at the literal 60_000 ms bound the answer is
+    // refused, and 59_999 ms after issue it is still accepted.
+    clock = 60_000
+    const late = await answer(server.port, issued, identity.sign(Buffer.from(issued, 'base64url')))
+    assert.equal(late.status, 401, 'expired at exactly the literal 60_000 ms bound')
+    assert.equal(late.json().error.code, 'challenge_invalid')
+
+    clock = 100_000
+    const inside = (await challenge(server.port, identity.publicKey)).json().result.nonce
+    clock = 159_999 // exactly 59_999 ms after issue
+    const justInside = await answer(server.port, inside, identity.sign(Buffer.from(inside, 'base64url')))
+    assert.equal(justInside.status, 200, 'a challenge answered 59_999 ms after issue is alive')
+
+    // Bound 3 on the wire: the exact replay of a successful answer yields no
+    // second token.
+    const replayed = await answer(server.port, inside, identity.sign(Buffer.from(inside, 'base64url')))
+    assert.equal(replayed.status, 401)
+    assert.equal(replayed.json().error.code, 'challenge_invalid')
+
+    // Bound 4 on the wire: a decorated spelling of a real signature is
+    // refused as a signature failure.
+    clock = 200_000
+    const nonce = (await challenge(server.port, identity.publicKey)).json().result.nonce
+    const canonical = identity.sign(Buffer.from(nonce, 'base64url'))
+    assert.equal(canonical.length, 86, 'the shipped signer emits the canonical 86-character form')
+    const decorated = await answer(server.port, nonce, `${canonical}###`)
+    assert.equal(decorated.status, 401)
+    assert.equal(decorated.json().error.code, 'signature_invalid')
+
+    stderrCaptures.push('')
+  } finally {
+    await server.close()
   }
 })
 
@@ -942,6 +1137,168 @@ test('the declared-remote client runs the challenge lane end to end; the local l
 
   stderrCaptures.push(stderrText())
   await stop()
+})
+
+test('a declared-remote client attaches with no local-token request on any path, half-stale reuse included (row 10, review triage)', async t => {
+  const parent = makeDataDir(t, 'agent-room-challenge-attach-')
+  const sharedData = join(parent, 'shared')
+  mkdirSync(sharedData, { recursive: true, mode: 0o700 })
+  // Never enrolled: the attach itself must succeed on the health+version
+  // proof alone, and the honest coded refusal proves the challenge lane ran
+  // (an attach that fell back to a local exchange would 200 instead).
+  const identity = makeInstallation(parent, 'remote', 'Attacher')
+
+  const { waitReady, stop, stderrText } = spawnServerChild(t, sharedData)
+  const record = await waitReady()
+  // A fresh shared dir: no client has run here, so no local credential
+  // exists — and none may appear from a declared-remote bootstrap.
+  assert.equal(existsSync(localTokenPath(sharedData)), false)
+
+  captureRequests(t)
+
+  // Leg 1 — the healthy-record attach (live pid): no credential proof exists
+  // on this path at all, and the bootstrap must not create the token file.
+  const healthyLegStart = wireCaptures.length
+  const healthyClient = createAgentRoomClient({
+    dataDir: sharedData,
+    pluginDataDir: identity.pluginData,
+    connectionMode: 'remote',
+  })
+  await assert.rejects(
+    () => healthyClient.presence(),
+    error => error instanceof AgentRoomRuntimeError && error.code === 'not_enrolled',
+  )
+  assert.equal(healthyClient.transport, 'remote')
+  let authTraffic = wireCaptures.slice(healthyLegStart).filter(entry => entry.path.startsWith('/api/auth/'))
+  assert.equal(authTraffic.filter(entry => entry.path === '/api/auth/local').length, 0,
+    'the healthy attach presented no local token')
+  assert.equal(authTraffic.filter(entry => entry.path === '/api/auth/challenge').length, 1)
+  assert.equal(authTraffic.filter(entry => entry.path === '/api/auth/answer').length, 1)
+  assert.equal(existsSync(localTokenPath(sharedData)), false, 'no local token file was created')
+
+  // Leg 2 — the half-stale reuse attach (dead pid, live port): the local-mode
+  // bootstrap proves reuse with a POST /api/auth/local carrying the shared
+  // token; the declared-remote bootstrap must skip it entirely — the reuse
+  // proof is the health+version check only.
+  const staleLegStart = wireCaptures.length
+  atomicWriteJson(join(sharedData, RUNTIME_RECORD_FILENAME), {
+    pid: await deadPid(),
+    port: record.port,
+    version: record.version,
+  })
+  const staleClient = createAgentRoomClient({
+    dataDir: sharedData,
+    pluginDataDir: identity.pluginData,
+    connectionMode: 'remote',
+  })
+  await assert.rejects(
+    () => staleClient.presence(),
+    error => error instanceof AgentRoomRuntimeError && error.code === 'not_enrolled',
+  )
+  authTraffic = wireCaptures.slice(staleLegStart).filter(entry => entry.path.startsWith('/api/auth/'))
+  assert.equal(authTraffic.filter(entry => entry.path === '/api/auth/local').length, 0,
+    'the half-stale reuse presented no local token — no credential on any attach path')
+  assert.equal(authTraffic.filter(entry => entry.path === '/api/auth/challenge').length, 1)
+  assert.equal(authTraffic.filter(entry => entry.path === '/api/auth/answer').length, 1)
+  assert.equal(existsSync(localTokenPath(sharedData)), false, 'still no local token file')
+
+  // The bootstrap engine itself refuses a declared 'local': only 'remote' is
+  // declarable — 'local' is earned by the local exchange, never declared.
+  await assert.rejects(
+    () => ensureServer({ dataDir: makeDataDir(t), connectionMode: 'local' }),
+    error => error instanceof AgentRoomRuntimeError && error.code === 'invalid_argument',
+  )
+
+  stderrCaptures.push(stderrText())
+  await stop()
+})
+
+test('a keypair replaced mid-flight recovers with the fresh identity instead of wedging (review triage)', async t => {
+  const home = makeDataDir(t)
+  const dataDir = makeDataDir(t)
+  const identity = makeInstallation(home, 'inst', 'Replaced')
+  let server = await startServer({ dataDir })
+  // Whatever the assertions do from here, the running server must not keep
+  // the event loop alive (close is idempotent; the test body also closes).
+  t.after(async () => { try { await server.close() } catch { /* already closed */ } })
+  assert.equal((await localExchange(server.port, dataDir, identity.publicKey)).status, 200)
+  const client = createAgentRoomClient({
+    dataDir,
+    pluginDataDir: identity.pluginData,
+    connectionMode: 'remote',
+  })
+  const first = await client.presence()
+  assert.ok(Array.isArray(first.online), 'the client is live')
+
+  // The identity key is replaced while the client is live, and the fresh key
+  // enrolls: the client must recover as the NEW Actor. Before the review fix
+  // this exact sequence wedged forever — the challenge rode the cached OLD
+  // key while the signature came from the NEW key file, so every re-auth
+  // failed signature_invalid.
+  const replacement = generateKeyPairSync('ed25519')
+  const replacementPem = replacement.privateKey.export({ type: 'pkcs8', format: 'pem' })
+  writeFileSync(identity.keyPath, replacementPem, { mode: 0o600 })
+  knownPrivatePems.push(replacementPem)
+  const replacementSpki = replacement.publicKey.export({ type: 'spki', format: 'der' })
+  const freshRaw = replacementSpki.subarray(replacementSpki.length - 32)
+  const freshFingerprint = fingerprintFromPublicKey(freshRaw)
+  assert.notEqual(freshFingerprint, identity.fingerprint, 'a genuinely new Actor')
+  assert.equal((await localExchange(server.port, dataDir, freshRaw.toString('base64url'))).status, 200)
+
+  // Every live session dies with the server process; the next client call
+  // must re-authenticate — and recover on the fresh identity.
+  await server.close()
+  server = await startServer({ dataDir })
+  try {
+    const recovered = await client.presence()
+    assert.ok(Array.isArray(recovered.online), 'the client recovered after the identity change')
+    assert.equal(client.fingerprint, freshFingerprint, 'the client now carries the fresh identity')
+    const online = recovered.online.find(row => row.chat_id === identity.chatId)
+    assert.ok(online, 'the fresh Actor is present')
+    assert.equal(online.fingerprint, freshFingerprint)
+    stderrCaptures.push('')
+  } finally {
+    await server.close()
+  }
+})
+
+test('a keypair replaced mid-flight without enrollment surfaces the coded gate and terminates (review triage)', async t => {
+  const home = makeDataDir(t)
+  const dataDir = makeDataDir(t)
+  const identity = makeInstallation(home, 'inst', 'Unenrolled')
+  let server = await startServer({ dataDir })
+  // Whatever the assertions do from here, the running server must not keep
+  // the event loop alive (close is idempotent; the test body also closes).
+  t.after(async () => { try { await server.close() } catch { /* already closed */ } })
+  assert.equal((await localExchange(server.port, dataDir, identity.publicKey)).status, 200)
+  const client = createAgentRoomClient({
+    dataDir,
+    pluginDataDir: identity.pluginData,
+    connectionMode: 'remote',
+  })
+  await client.presence()
+
+  // Replace the identity and enroll NOTHING: the fresh Actor's honest coded
+  // refusal must surface — and the call must terminate, never loop.
+  const replacement = generateKeyPairSync('ed25519')
+  const replacementPem = replacement.privateKey.export({ type: 'pkcs8', format: 'pem' })
+  writeFileSync(identity.keyPath, replacementPem, { mode: 0o600 })
+  knownPrivatePems.push(replacementPem)
+  const replacementSpki = replacement.publicKey.export({ type: 'spki', format: 'der' })
+  const freshFingerprint = fingerprintFromPublicKey(replacementSpki.subarray(replacementSpki.length - 32))
+
+  await server.close()
+  server = await startServer({ dataDir })
+  try {
+    await assert.rejects(
+      () => client.presence(),
+      error => error instanceof AgentRoomRuntimeError && error.code === 'not_enrolled',
+    )
+    assert.equal(client.fingerprint, freshFingerprint, 'the surfaced identity is the fresh one')
+    stderrCaptures.push('')
+  } finally {
+    await server.close()
+  }
 })
 
 test('plugin-data deletion creates a new, unrelated Actor with no inherited rooms or trust (row 12, FR-3)', async t => {

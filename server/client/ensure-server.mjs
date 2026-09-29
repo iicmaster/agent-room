@@ -16,6 +16,18 @@
 // foreign realm's server can never attach — and a port that cleanly answers
 // non-agent-room is refused immediately, never signalled.
 //
+// Declared-remote bootstrap (Story 4.1 review triage): a caller that passes
+// connectionMode 'remote' — the api-client's declared
+// AGENT_ROOM_CONNECTION_MODE installation — attaches under a different
+// credential discipline. The declaration means exactly that the OS-user
+// boundary (and its shared local token file) is not this installation's own,
+// so this engine never reads or creates the local token file on its behalf,
+// and the half-stale reuse proof is the health+version check alone. Every
+// credential is presented after attach, on the challenge lane, where the
+// answer route gates on the durable enrollment record — a foreign realm's
+// server surfaces its refusal there as a coded error instead of being
+// screened with a credential this installation must never present.
+//
 // Failure discipline: a boot that fails after spawning (spawn error, early
 // exit, readiness timeout) terminates and reaps the child it owns before the
 // lock is released — a failed boot never orphans a half-started server.
@@ -66,6 +78,7 @@ import {
 } from '../runtime.mjs'
 import { loadOrCreateKeypair } from '../keys.mjs'
 import { loadOrCreateLocalToken, readLocalToken } from '../api/local-token.mjs'
+import { REMOTE_TRANSPORT } from './trust.mjs'
 
 const DEFAULT_SERVER_PATH = fileURLToPath(new URL('../api/server.mjs', import.meta.url))
 const OK_STATUS = 200
@@ -247,7 +260,7 @@ async function proveReuse(directory, port) {
 // A port that cleanly answers non-agent-room refuses with a coded error
 // regardless of the recorded pid's liveness — the foreign process is never
 // signalled.
-async function inspectRuntimeRecord(directory) {
+async function inspectRuntimeRecord(directory, { connectionMode } = {}) {
   for (;;) {
     const record = readRuntimeRecord(directory)
     if (!record) return { state: 'absent' }
@@ -255,6 +268,13 @@ async function inspectRuntimeRecord(directory) {
     if (probe.agentRoom) {
       assertAttachableVersion(record)
       if (pidAlive(record.pid)) return { state: 'ready', record }
+      // Declared-remote: the reuse proof stops at the health+version check —
+      // the credential proof happens after attach, on the challenge lane.
+      // proveReuse below would present the shared local token, which a
+      // declared-remote installation must never do (the declaration means
+      // the OS-user boundary is not its own); a foreign realm's server is
+      // refused there instead, as the challenge path's coded error.
+      if (connectionMode === REMOTE_TRANSPORT) return { state: 'ready', record }
       await proveReuse(directory, record.port)
       return { state: 'ready', record }
     }
@@ -407,9 +427,12 @@ function acquireServerLock(path) {
 // Every successful return guarantees the local credential exists beside the
 // record (boot verification contract: runtime.json plus the 0600 token file).
 // A tampered credential file surfaces here as a coded error even though the
-// server itself is up — the local path cannot proceed without it.
-function returnRecord(directory, record, spawned) {
-  loadOrCreateLocalToken(directory)
+// server itself is up — the local path cannot proceed without it. The
+// declared-remote mode is the exception by contract: the shared local token
+// is not that installation's credential, so nothing is read or created here
+// and the challenge lane owns every credential from attach onward.
+function returnRecord(directory, record, spawned, { connectionMode } = {}) {
+  if (connectionMode !== REMOTE_TRANSPORT) loadOrCreateLocalToken(directory)
   return Object.freeze({
     port: record.port,
     record: Object.freeze({ pid: record.pid, port: record.port, version: record.version }),
@@ -420,16 +443,26 @@ function returnRecord(directory, record, spawned) {
 // Race-safe auto-start + attach. Returns { port, record, spawned } — spawned
 // tells the adapter which path happened (boot vs attach). Options exist for
 // harnesses: dataDir overrides the shared dir (tests), serverPath overrides
-// the spawned binary (tests), waitMs bounds every wait. No caller input ever
+// the spawned binary (tests), waitMs bounds every wait, and connectionMode
+// ('remote', Story 4.1) attaches under the declared-remote credential
+// discipline described in the header — no local-token read or creation, and
+// a health+version-only half-stale reuse proof. No caller input ever
 // carries a server location, a credential, or a room name — the local path
 // discovers everything from the shared data dir.
 export async function ensureServer({
   dataDir = sharedDataDirectory(),
   serverPath = DEFAULT_SERVER_PATH,
   waitMs = SERVER_STARTUP_WAIT_MS,
+  connectionMode,
 } = {}) {
   if (typeof serverPath !== 'string' || serverPath.length === 0) {
     throw new AgentRoomRuntimeError('invalid_argument', 'serverPath must be a non-empty path')
+  }
+  if (connectionMode !== undefined && connectionMode !== REMOTE_TRANSPORT) {
+    throw new AgentRoomRuntimeError(
+      'invalid_argument',
+      "connectionMode must be undefined or 'remote': 'local' is earned by the local token exchange, never declared",
+    )
   }
   if (!Number.isInteger(waitMs) || waitMs <= 0) {
     throw new AgentRoomRuntimeError('invalid_argument', 'waitMs must be a positive integer')
@@ -451,13 +484,13 @@ export async function ensureServer({
   const deadline = Date.now() + waitMs
 
   // Phase 1: attach to a healthy recorded server, or prove the record stale.
-  let inspection = await inspectRuntimeRecord(directory)
-  if (inspection.state === 'ready') return returnRecord(directory, inspection.record, false)
+  let inspection = await inspectRuntimeRecord(directory, { connectionMode })
+  if (inspection.state === 'ready') return returnRecord(directory, inspection.record, false, { connectionMode })
   if (inspection.state === 'pending') {
     while (Date.now() < deadline) {
       await delay(SERVER_ATTACH_POLL_MS)
-      inspection = await inspectRuntimeRecord(directory)
-      if (inspection.state === 'ready') return returnRecord(directory, inspection.record, false)
+      inspection = await inspectRuntimeRecord(directory, { connectionMode })
+      if (inspection.state === 'ready') return returnRecord(directory, inspection.record, false, { connectionMode })
       if (inspection.state !== 'pending') break
     }
     if (inspection.state === 'pending') {
@@ -474,8 +507,8 @@ export async function ensureServer({
     lockToken = acquireServerLock(lockPath)
     if (lockToken) break
     await delay(SERVER_ATTACH_POLL_MS)
-    inspection = await inspectRuntimeRecord(directory)
-    if (inspection.state === 'ready') return returnRecord(directory, inspection.record, false)
+    inspection = await inspectRuntimeRecord(directory, { connectionMode })
+    if (inspection.state === 'ready') return returnRecord(directory, inspection.record, false, { connectionMode })
   }
   if (!lockToken) {
     throw new AgentRoomRuntimeError('server_start_busy', 'another agent-room server start did not finish')
@@ -484,8 +517,8 @@ export async function ensureServer({
   try {
     // Lock granted: one final re-check, because a previous starter may have
     // published a healthy record between our last probe and the grant.
-    inspection = await inspectRuntimeRecord(directory)
-    if (inspection.state === 'ready') return returnRecord(directory, inspection.record, false)
+    inspection = await inspectRuntimeRecord(directory, { connectionMode })
+    if (inspection.state === 'ready') return returnRecord(directory, inspection.record, false, { connectionMode })
     if (inspection.state === 'pending') {
       // A live recorded server owns this realm; it is never shadowed.
       throw new AgentRoomRuntimeError('server_start_failed', 'agent-room server did not become ready')
@@ -544,7 +577,7 @@ export async function ensureServer({
         const record = readRuntimeRecord(directory)
         if (record && record.pid === child.pid) {
           const probe = await probeHealth(record.port)
-          if (probe.agentRoom) return returnRecord(directory, record, true)
+          if (probe.agentRoom) return returnRecord(directory, record, true, { connectionMode })
         }
       }
       throw new AgentRoomRuntimeError('server_start_failed', 'agent-room server did not become ready')

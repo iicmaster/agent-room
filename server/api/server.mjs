@@ -82,6 +82,7 @@ import {
 } from '../runtime.mjs'
 import {
   CHALLENGE_SIGNATURE_MAX_CHARS,
+  CHALLENGE_SIGNATURE_PATTERN,
   CHAT_ID_INVALID_MESSAGE,
   CLAIMS_TTL_MS,
   CLIENT_TYPES,
@@ -295,6 +296,16 @@ registerHandler('POST /api/auth/answer', function answerChallenge(context) {
   const registry = context.challengeRegistry ?? CHALLENGE_REGISTRY
   const rawKey = registry.consume(nonce)
   if (rawKey === null) return reject('challenge_invalid')
+  // Canonical-form gate BEFORE decode (Story 4.1 review triage): the base64url
+  // decoder silently skips interspersed invalid characters, so a decorated
+  // spelling of the canonical 86 characters — which the length bound above
+  // tolerates — would decode to the very bytes a canonical spelling carries
+  // and verify. Only the exact canonical form is honored; anything else is a
+  // signature rejection like any failed verification. The gate runs after the
+  // consume (a presented answer burns its nonce whatever its outcome — the
+  // no-grinding discipline), so a refused spelling cannot be retried against
+  // the same challenge.
+  if (!CHALLENGE_SIGNATURE_PATTERN.test(signature)) return reject('signature_invalid')
   // Verify over the raw nonce bytes — the decoded 32 random bytes the nonce
   // string carries — against the key the challenge was issued to.
   if (!verifyWithRawPublicKey(rawKey, Buffer.from(nonce, 'base64url'), Buffer.from(signature, 'base64url'))) {

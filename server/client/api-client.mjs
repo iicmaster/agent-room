@@ -2,7 +2,11 @@
 // through — typed methods over the frozen wire contract, replacing the
 // retired unix-socket daemon surface. Lifecycle per installation:
 //
-//   ensureServer(sharedDataDir)  — Local Mode bootstrap (attach or boot)
+//   ensureServer(sharedDataDir)  — bootstrap (attach or boot); a declared-
+//                                  remote installation attaches under the
+//                                  declared-remote discipline (no local-token
+//                                  read or creation, health+version-only
+//                                  half-stale reuse proof)
 //   POST /api/auth/local         — the shared-data-dir local token plus this
 //                                  installation's raw public key exchange for
 //                                  a session token (auto-enrollment) — OR,
@@ -344,7 +348,12 @@ export function createAgentRoomClient({
   }
 
   const config = loadChatIdConfig(pluginDataDir)
-  const keypair = loadOrCreateKeypair(pluginDataDir)
+  // Mutable by design (Story 4.1 review triage): the identity is reloaded
+  // from disk when the challenge lane proves the cached key stale — a
+  // keypair replaced while this client was live. Everything that reads the
+  // identity (the fingerprint getter, the untrusted envelope's own-sender
+  // comparison) reads whatever is current.
+  let keypair = loadOrCreateKeypair(pluginDataDir)
 
   let port = null
   let sessionToken = null
@@ -400,6 +409,49 @@ export function createAgentRoomClient({
     }
   }
 
+  // One challenge-lane attempt: the challenge is requested with the current
+  // identity's public key, the raw nonce is signed with the key file's
+  // CURRENT contents (the signer re-reads it every call), and the answer
+  // must verify against the key the nonce was issued to. Returns the issued
+  // session token; the transport mark is earned only on success.
+  async function challengeExchange() {
+    const challenge = await httpRequest({
+      port,
+      method: 'POST',
+      path: '/api/auth/challenge',
+      headers: protocolHeaders(),
+      body: JSON.stringify({ public_key: keypair.publicKey.toString('base64url') }),
+      timeoutMs: requestTimeoutMs,
+    })
+    assertCoded(challenge)
+    const nonce = challenge.body?.result?.nonce
+    if (typeof nonce !== 'string' || nonce.length === 0) {
+      throw new AgentRoomRuntimeError('request_failed', 'agent-room challenge returned no nonce')
+    }
+    // Sign the RAW nonce bytes — the 32 decoded random bytes — with this
+    // installation's private key; only the signature travels. Identity
+    // binds at challenge time: the answer carries no key field, so the
+    // server verifies against the key the nonce was issued to.
+    const signature = signWithInstallationKey(pluginDataDir, Buffer.from(nonce, 'base64url')).toString('base64url')
+    const answer = await httpRequest({
+      port,
+      method: 'POST',
+      path: '/api/auth/answer',
+      headers: protocolHeaders(),
+      body: JSON.stringify({ nonce, signature }),
+      timeoutMs: requestTimeoutMs,
+    })
+    assertCoded(answer)
+    // The transport mark is EARNED here: recorded only after the challenge
+    // exchange succeeded, never before and never by declaration alone.
+    transportMode = REMOTE_TRANSPORT
+    const token = answer.body?.result?.session_token
+    if (typeof token !== 'string' || token.length === 0) {
+      throw new AgentRoomRuntimeError('request_failed', 'agent-room challenge answer returned no session token')
+    }
+    return token
+  }
+
   // The credential exchange plus bind. The installation's DECLARED connection
   // mode (Story 3.5's seam) is the auth-path switch (Story 4.1): a declared
   // remote installation runs the challenge lane — challenge, sign the raw
@@ -413,39 +465,25 @@ export function createAgentRoomClient({
   // byte-for-byte.
   async function authenticate() {
     if (connectionMode === REMOTE_TRANSPORT) {
-      const challenge = await httpRequest({
-        port,
-        method: 'POST',
-        path: '/api/auth/challenge',
-        headers: protocolHeaders(),
-        body: JSON.stringify({ public_key: keypair.publicKey.toString('base64url') }),
-        timeoutMs: requestTimeoutMs,
-      })
-      assertCoded(challenge)
-      const nonce = challenge.body?.result?.nonce
-      if (typeof nonce !== 'string' || nonce.length === 0) {
-        throw new AgentRoomRuntimeError('request_failed', 'agent-room challenge returned no nonce')
-      }
-      // Sign the RAW nonce bytes — the 32 decoded random bytes — with this
-      // installation's private key; only the signature travels. Identity
-      // binds at challenge time: the answer carries no key field, so the
-      // server verifies against the key the nonce was issued to.
-      const signature = signWithInstallationKey(pluginDataDir, Buffer.from(nonce, 'base64url')).toString('base64url')
-      const answer = await httpRequest({
-        port,
-        method: 'POST',
-        path: '/api/auth/answer',
-        headers: protocolHeaders(),
-        body: JSON.stringify({ nonce, signature }),
-        timeoutMs: requestTimeoutMs,
-      })
-      assertCoded(answer)
-      // The transport mark is EARNED here: recorded only after the challenge
-      // exchange succeeded, never before and never by declaration alone.
-      transportMode = REMOTE_TRANSPORT
-      const token = answer.body?.result?.session_token
-      if (typeof token !== 'string' || token.length === 0) {
-        throw new AgentRoomRuntimeError('request_failed', 'agent-room challenge answer returned no session token')
+      let token
+      try {
+        token = await challengeExchange()
+      } catch (error) {
+        if (!(error instanceof AgentRoomRuntimeError) || error.code !== 'signature_invalid') throw error
+        // Liveness repair (Story 4.1 review triage): the challenge above was
+        // issued to the CACHED identity's key, but the signature always comes
+        // from the key file's current contents — an identity.key replaced
+        // while this client was live would otherwise fail every future
+        // exchange (the cached key can never verify the fresh key's
+        // signature) and wedge the client on an endless 401 loop. Reload the
+        // keypair exactly once: an unchanged fingerprint means the refusal is
+        // real (rethrow as-is); a changed one re-runs the exchange with the
+        // fresh identity, whose outcome — recovery, or an honest coded
+        // refusal for the new Actor — surfaces as-is instead.
+        const fresh = loadOrCreateKeypair(pluginDataDir)
+        if (fresh.fingerprint === keypair.fingerprint) throw error
+        keypair = fresh
+        token = await challengeExchange()
       }
       return bindWithToken(token)
     }
@@ -650,7 +688,16 @@ export function createAgentRoomClient({
       const inFlight = (async () => {
         try {
           if (port === null || needsReresolve) {
-            const server = await ensureServer({ dataDir, ...(waitMs === undefined ? {} : { waitMs }) })
+            // The declared connection mode crosses into the bootstrap engine
+            // (Story 4.1 review triage): a declared-remote attach never
+            // reads or creates the shared local token file, and its
+            // half-stale reuse proof is the health+version check only —
+            // every credential is presented later, on the challenge lane.
+            const server = await ensureServer({
+              dataDir,
+              ...(waitMs === undefined ? {} : { waitMs }),
+              ...(connectionMode === REMOTE_TRANSPORT ? { connectionMode } : {}),
+            })
             port = server.port
             needsReresolve = false
           }

@@ -48,6 +48,19 @@ export const CHALLENGE_NONCE_BYTES = 32
 export const CHALLENGE_NONCE_TTL_MS = 60_000
 export const CHALLENGE_NONCES_MAX = 1000
 export const CHALLENGE_SIGNATURE_MAX_CHARS = 256
+// Story 4.1 review triage: the canonical base64url wire form of a 64-byte
+// Ed25519 signature — 86 characters of the base64url alphabet, unpadded. The
+// base64url decoder silently SKIPS interspersed invalid characters, so a
+// decorated spelling (the canonical 86 characters plus any junk the length
+// bound above tolerates) would decode to the very bytes a canonical spelling
+// carries. The answer route gates on this exact shape before decoding, so
+// only canonical credentials are ever honored. The shape is stated once here
+// (AD-9) beside the bounds it gates, derived from nothing else — 64 bytes is
+// Ed25519's signature size, and 4/3 of it minus padding is 86.
+export const CHALLENGE_SIGNATURE_CHARS = 86
+export const CHALLENGE_SIGNATURE_PATTERN = new RegExp(
+  `^[A-Za-z0-9_-]{${CHALLENGE_SIGNATURE_CHARS}}$`,
+)
 
 // Duplicate gate and reconnect backoff.
 export const DUPLICATE_WINDOW_MS = 5_000

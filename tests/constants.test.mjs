@@ -5,6 +5,12 @@ import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
 import {
+  CHALLENGE_NONCES_MAX,
+  CHALLENGE_NONCE_BYTES,
+  CHALLENGE_NONCE_TTL_MS,
+  CHALLENGE_SIGNATURE_CHARS,
+  CHALLENGE_SIGNATURE_MAX_CHARS,
+  CHALLENGE_SIGNATURE_PATTERN,
   CHAT_ID_INVALID_MESSAGE,
   CHAT_ID_MAX,
   CHAT_ID_PATTERN,
@@ -174,6 +180,30 @@ test('story 1.4 session and local-token limits derive from the declared values',
   assert.equal(SESSION_TOKEN_MAX_CHARS, 256)
   assert.equal(SESSIONS_MAX, 1000)
   assert.equal(LOCAL_TOKEN_MAX_BYTES, 4096)
+})
+
+test('story 4.1 challenge bounds and the canonical signature shape are pinned with their ratified values', () => {
+  // The remote challenge path's four bounds (AD-5/AD-7), pinned literally so
+  // a drift in the constants module fails here and not only in suites that
+  // import the drifted value. AD-7: at least 16 nonce bytes, at most 60 s of
+  // nonce life; the declared width is stricter (32), the declared life exact.
+  assert.equal(CHALLENGE_NONCE_BYTES, 32)
+  assert.ok(CHALLENGE_NONCE_BYTES >= 16, 'AD-7: nonce entropy of at least 16 random bytes')
+  assert.equal(CHALLENGE_NONCE_TTL_MS, 60_000)
+  assert.ok(CHALLENGE_NONCE_TTL_MS <= 60_000, 'AD-7: a challenge lives at most 60 seconds')
+  assert.equal(CHALLENGE_NONCES_MAX, 1000)
+  assert.equal(CHALLENGE_SIGNATURE_MAX_CHARS, 256)
+  // The canonical base64url form of a 64-byte Ed25519 signature: 86
+  // characters of the base64url alphabet, unpadded — the shape the answer
+  // route gates on before decoding (the decoder would silently skip
+  // interspersed invalid characters).
+  assert.equal(CHALLENGE_SIGNATURE_CHARS, 86)
+  assert.equal(CHALLENGE_SIGNATURE_PATTERN.source, '^[A-Za-z0-9_-]{86}$')
+  assert.equal(Buffer.alloc(64).toString('base64url').length, CHALLENGE_SIGNATURE_CHARS)
+  assert.ok(CHALLENGE_SIGNATURE_PATTERN.test(Buffer.alloc(64).toString('base64url')))
+  assert.equal(CHALLENGE_SIGNATURE_PATTERN.test('x'.repeat(85)), false)
+  assert.equal(CHALLENGE_SIGNATURE_PATTERN.test('x'.repeat(87)), false)
+  assert.equal(CHALLENGE_SIGNATURE_PATTERN.test(`${'x'.repeat(43)}###${'x'.repeat(43)}`), false, 'interspersed junk is not canonical')
 })
 
 test('story 1.4 bootstrap limits are pinned with their ratified values', () => {
