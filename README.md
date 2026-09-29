@@ -70,13 +70,28 @@ static, versioned envelope — `<untrusted_message version="1" sender_chat_id="�
 sender_fingerprint="…">` — that marks the body as data, never instructions or authorization.
 Same-installation messages return plain.
 
+## Per-realm allowlist and trust matrix
+
+Each installation decides which senders' messages it surfaces. The receiving plugin
+evaluates every incoming message against a per-realm trust matrix: its own Actor delivers;
+on a Local Mode connection (the local token file path) all senders deliver, because every
+process on that loopback realm crossed the same OS-user boundary — a human convention, not
+a cryptographic guarantee; a remote sender whose key fingerprint the human added to the
+realm allowlist delivers; everything else is held — the tool result carries the metadata
+and a held marker, never the body. Trust binds key fingerprints, never Chat IDs: a reused
+name or a replaced key inherits nothing. Entries live in
+`${PLUGIN_DATA}/realms/<realm_id>/allowlist.json`; `room_trust_list` shows them and
+`room_trust_set` adds or removes one. Accept-all is a per-realm human opt-in (default
+false, set via the CLI, never by an agent tool). Removing an entry affects future delivery
+only — text already read is not withdrawn.
+
 ## State and trust boundary
 
 - Shared room state defaults to `$HOME/.agent-room/agent-room.sqlite`; a loopback server
   binds `127.0.0.1` only and records its port in the same directory's `runtime.json`.
 - `${PLUGIN_DATA}` or `${CLAUDE_PLUGIN_DATA}` stores only that installed client's identity:
-  the setup config, the Ed25519 keypair, and the per-realm cursor files. Different clients
-  are not assumed to receive the same directory.
+  the setup config, the Ed25519 keypair, and the per-realm state files (cursors and the
+  allowlist). Different clients are not assumed to receive the same directory.
 - `AGENT_ROOM_DATA_DIR` can select another absolute shared data directory for controlled
   local deployments.
 - Server and client state files are owner-only. This prevents other OS users from

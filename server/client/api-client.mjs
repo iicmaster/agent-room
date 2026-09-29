@@ -315,6 +315,12 @@ export function createAgentRoomClient({
 
   let port = null
   let sessionToken = null
+  // The receiving installation's own connection mode (Story 3.2's trust
+  // matrix input): how the LIVE session authenticated. The local token file
+  // exchange is the Local Mode path ('local'); the remote challenge path
+  // (Epic 4) will mark 'remote'. The trust matrix fail-closes toward hold,
+  // so an unauthenticated client (null) never reads as local.
+  let transportMode = null
   let needsReresolve = false
   let ensurePromise = null
   let ensureSettled = true
@@ -352,6 +358,11 @@ export function createAgentRoomClient({
       timeoutMs: requestTimeoutMs,
     })
     assertCoded(exchange)
+    // The credential that just authenticated this session is the shared data
+    // dir's local token file — the Local Mode connection mode. Recorded for
+    // the trust matrix: the messages this session receives came through the
+    // OS-user boundary that token file enforces.
+    transportMode = 'local'
     const token = exchange.body?.result?.session_token
     if (typeof token !== 'string' || token.length === 0) {
       throw new AgentRoomRuntimeError('request_failed', 'agent-room credential exchange returned no session token')
@@ -575,6 +586,10 @@ export function createAgentRoomClient({
   return {
     get chatId() { return config.chatId },
     get fingerprint() { return keypair.fingerprint },
+    // This installation's own connection mode ('local' once the live session
+    // authenticated through the local token path, null before any
+    // authentication) — the trust matrix's transport input (Story 3.2).
+    get transport() { return transportMode },
 
     // GET /api/presence — who is addressable (optionally offline-recently).
     presence({ includeOffline = false, signal } = {}) {

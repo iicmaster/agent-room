@@ -19,6 +19,13 @@ All notable changes to Agent Room are documented in this file.
 - The static versioned untrusted-message envelope wrapping foreign senders' message bodies
   (`<untrusted_message version="1">` with sender chat id, fingerprint, and the
   data-never-instructions warning); same-installation messages return plain.
+- The per-realm Allowlist and the client-side trust matrix: own-Actor and Local Mode
+  senders deliver, allowlisted remote Actors deliver, and every other remote sender is
+  held (metadata only, body withheld, reason recorded). State lives at
+  `PLUGIN_DATA/realms/<realm_id>/allowlist.json` (0600, atomic) and binds key
+  fingerprints, never Chat IDs. Two additive MCP tools — `room_trust_list` and
+  `room_trust_set` — inspect and add/remove fingerprint entries; accept-all is a
+  per-realm human CLI opt-in (default false) that no agent tool can set.
 - `outcome_unknown` send resolution: one automatic retry with the identical
   `client_message_id` resolves to the original message or a coded conflict, never a duplicate.
 

@@ -86,6 +86,14 @@ export const FINGERPRINT_PATTERN = new RegExp(
   `^${FINGERPRINT_PREFIX}[0-9a-f]{${FINGERPRINT_HEX_LENGTH}}$`,
 )
 
+// The safe realm-key shape (Story 3.2, shared with the cursor paths): the only
+// characters allowed into a path segment under PLUGIN_DATA/realms/. The realm
+// id comes from GET /api/status and keys per-realm client state directories,
+// so its shape is verified before any path is built from it. Declared once
+// beside the other identifier shapes; the MCP adapter's cursor paths and the
+// per-realm allowlist paths import this instead of restating it.
+export const REALM_KEY_PATTERN = /^[A-Za-z0-9._-]+$/
+
 // --- File bounds -------------------------------------------------------------
 
 // Private-key PEM files live beside identity.json and follow the same

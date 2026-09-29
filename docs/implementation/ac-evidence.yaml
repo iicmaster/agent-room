@@ -368,7 +368,7 @@
 
 # --- Epic 3 (Trust) -------------------------------------------------------------
 # Seeded, not yet filled: the sweep fails loudly on every story below until each
-# one carries real evidence. Story 3.1 is filled; 3.2-3.5 remain TODO.
+# one carries real evidence. Stories 3.1 and 3.2 are filled; 3.3-3.5 remain TODO.
 
   3.1:                       # Untrusted marking at full rigor (2 criteria)
     note: >-
@@ -411,3 +411,70 @@
         file: "tests/mcp-tools.test.mjs"
       - test: "untrusted marking end-to-end at full rigor: every foreign row in every tool-result page across two rooms is wrapped — zero unwrapped, counted"
         file: "tests/mcp-tools.test.mjs"
+
+  3.2:                       # Per-realm Allowlist & trust matrix (3 criteria)
+    note: >-
+      Proves the plugin-side trust matrix, its per-realm storage, and its
+      agent-facing surface. AC-1 (the matrix): evaluateSender's every cell is
+      asserted — own-Actor delivers (enforced, exact fingerprint equality,
+      both transports), local-transport foreign senders deliver (honestly
+      labeled Instructed — the OS-user boundary is a human convention),
+      allowlisted-remote senders deliver (enforced — the stored entry binds
+      the exact fingerprint), accept-all delivers (Instructed — blanket human
+      opt-in, no per-sender verification) but ONLY when a human set it (the
+      default is hold for non-allowlisted remote senders, proven on the
+      missing flag, the empty state, a non-boolean stored value, and through
+      the real room_trust_list tool on a fresh realm), and every other remote
+      sender is HELD — including one whose Chat ID claims same-machine, a
+      fail-closed row with no fingerprint, and any transport that is not
+      exactly the local token path (unknown transports never read as local).
+      AC-2 (removal): a removed entry re-holds future delivery evaluations
+      over a REAL allowlist file while the already-ingested page object keeps
+      its body (the matrix evaluates at delivery time, never rewrites what an
+      earlier delivery returned, and never touches the durable log — the
+      real-server row re-reads the log directly and finds the bodies intact).
+      AC-3 (D13): the matrix binds fingerprints, never names — two rows
+      sharing one Chat ID split deliver/hold purely by fingerprint, a
+      different key taking the allowlisted Actor's name gains nothing (real
+      claim swap through the real server and tools), the stored file contains
+      no Chat ID at all, and removal re-holds even a previously-delivered
+      name. Real-child rows prove the plugin surface end-to-end:
+      room_trust_list/room_trust_set round-trips over real JSON-RPC (0600
+      allowlist.json beside the cursors in a 0700 realm dir, idempotent
+      re-add preserving the original added_at, coded refusals for malformed
+      fingerprints, and the accept-all flag unreachable from any agent tool —
+      smuggling it as an argument is an invalid_arguments refusal that
+      changes nothing), and message_read through the real MCP child delivers
+      own-Actor rows plain and local-transport foreign rows inside the
+      byte-pinned untrusted envelope with no held fields, while held-row
+      shaping is proven by the delivery-time application driven with
+      transport 'remote': body bytes never appear, the literal marker oracle
+      carries sender metadata and the recorded reason, held/held_reason join
+      the row additively, and delivered rows keep the frozen 1.7 row shape
+      untouched. Does NOT prove an end-to-end HELD row through a real v0.2
+      connection — impossible by construction, since v0.2 has only the local
+      token path and every sender on a local realm is same-OS-user; the
+      remote-lane holds are proven at the matrix and application layers over
+      the REAL stored files, and the full zero-mock hold chain (held cache,
+      recovery, cursor separation, release) is Stories 3.3-3.5 with Epic 4's
+      remote connections. Also does not prove the human CLI surface
+      (Story 3.4) or any persuasion-resistance property.
+    evidence:
+      - test: "trust matrix: own-Actor, same-OS-user local, and allowlisted-remote deliver; every other remote sender is held; the lanes are labeled honestly"
+        file: "tests/trust.test.mjs"
+      - test: "trust matrix: accept-all is a per-realm human opt-in — default false everywhere, and when set it delivers with the Instructed lane"
+        file: "tests/trust.test.mjs"
+      - test: "trust matrix binds fingerprints, never names (D13): a reused Chat ID or a replaced key inherits nothing, over a real allowlist file"
+        file: "tests/trust.test.mjs"
+      - test: "held rows withhold bodies: the marker carries metadata and the reason, never a byte of the body; delivered rows keep the frozen shape"
+        file: "tests/trust.test.mjs"
+      - test: "removal affects future delivery only: the entry re-holds future evaluations while already-ingested text and the durable log stay untouched"
+        file: "tests/trust.test.mjs"
+      - test: "allowlist storage: 0600 file in a 0700 realm directory, defaults on missing or corrupt state, and refuses malformed fingerprints and unsafe realm keys"
+        file: "tests/trust.test.mjs"
+      - test: "trust tools over the real surface: room_trust_list defaults to accept-all false with no entries; room_trust_set adds, preserves the original grant, removes; the agent can never set accept-all"
+        file: "tests/trust.test.mjs"
+      - test: "message_read over the real surface evaluates the matrix: own-Actor plain, same-OS-user foreign delivered inside the envelope, no held fields on a local realm, and the durable log untouched by trust"
+        file: "tests/trust.test.mjs"
+      - test: "the allowlist binds the fingerprint, not the Chat ID that was live when it was added: a different key taking the same name gains nothing (real claim swap)"
+        file: "tests/trust.test.mjs"

@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 
-// The MCP stdio adapter (Story 1.7): five tools over the HTTP api-client —
-// room_presence, room_direct_open, message_send, message_read, room_status.
-// The v0.1 unix-socket daemon surface (with its create/join verbs, retired
-// per AD-14) is gone; nothing here spawns or speaks to it.
+// The MCP stdio adapter (Story 1.7): five conversation tools over the HTTP
+// api-client — room_presence, room_direct_open, message_send, message_read,
+// room_status — plus Story 3.2's two trust tools (room_trust_list,
+// room_trust_set) over the per-realm allowlist. The v0.1 unix-socket daemon
+// surface (with its create/join verbs, retired per AD-14) is gone; nothing
+// here spawns or speaks to it.
 //
 // Identity discipline (NFR-3): the session is bound from this installation's
 // own state — the local token file, the installation keypair, and the Chat ID
@@ -17,6 +19,17 @@
 // advances it to the response's next_after_seq on every successful read,
 // durably stored at PLUGIN_DATA/realms/<realm_id>/cursors.json (0600, atomic
 // writes). The server holds no per-client delivery state.
+//
+// Trust discipline (Story 3.2, FR-10, AD-12): every message row of a
+// message_read result is evaluated by the client-side trust matrix before the
+// tool result is built — own-Actor and local-transport (Local Mode's OS-user
+// boundary) senders deliver, allowlisted remote senders deliver, every other
+// remote sender is HELD: its row keeps the metadata, its text becomes the
+// held marker (no body), and the matrix reason is recorded. Allowlist state
+// lives beside the cursors at PLUGIN_DATA/realms/<realm_id>/allowlist.json
+// (0600, atomic writes) and binds key fingerprints, never Chat IDs. The
+// accept-all flag exists in that file but is settable only by a human through
+// the CLI (Story 3.4) — no tool below can set it.
 //
 // Outcome discipline: message_send relies on the api-client's
 // outcome_unknown retry (one immediate resend with the identical
@@ -43,6 +56,7 @@ import {
   READ_HOLD_MAX_MS,
   READ_PAGE_DEFAULT,
   READ_PAGE_MAX,
+  REALM_KEY_PATTERN,
 } from './constants.mjs'
 import {
   APP_VERSION,
@@ -54,6 +68,11 @@ import {
   sharedDataDirectory,
 } from './runtime.mjs'
 import { createAgentRoomClient } from './client/api-client.mjs'
+import {
+  applyTrustMatrix,
+  loadAllowlist,
+  setAllowlistEntry,
+} from './client/trust.mjs'
 
 // Run the runtime gate before any other work. Direct launches report one
 // diagnosable line and exit 1 with no stack trace; importers get a catchable
@@ -146,6 +165,28 @@ const TOOL_DESCRIPTORS = Object.freeze([
       properties: {},
     },
   },
+  {
+    name: 'room_trust_list',
+    description: 'List this installation\'s trust state for the current Agent Room realm: the per-realm allowlist of sender key fingerprints whose messages deliver directly, and whether the human has set accept-all. Trust binds key fingerprints, never Chat IDs. Use it to inspect this Agent Room realm\'s trust state — for example to see why a sender\'s messages arrive held (metadata only, body withheld).',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {},
+    },
+  },
+  {
+    name: 'room_trust_set',
+    description: 'Allow or disallow one sender key fingerprint on this installation\'s per-realm allowlist for the current Agent Room realm. allowed=true adds the fingerprint, so that sender\'s future messages in this Agent Room realm deliver; allowed=false removes it, so they are held again (metadata only, body withheld) — already-read messages are not withdrawn. Trust binds key fingerprints, never Chat ID names: a reused name or a replaced key inherits nothing. Accept-all is a human CLI decision and cannot be set here.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['target_fingerprint', 'allowed'],
+      properties: {
+        target_fingerprint: { type: 'string', pattern: FINGERPRINT_SCHEMA_PATTERN, description: 'The sender key fingerprint to allow or disallow for this realm — never a Chat ID.' },
+        allowed: { type: 'boolean', description: 'true adds the fingerprint to the realm allowlist; false removes it.' },
+      },
+    },
+  },
 ])
 const TOOL_NAMES = new Set(TOOL_DESCRIPTORS.map(tool => tool.name))
 
@@ -158,6 +199,8 @@ export const TOOL_ARGUMENT_FIELDS = Object.freeze(new Map([
   ['message_send', Object.freeze(new Set(['room_id', 'client_message_id', 'text', 'reply_to_seq']))],
   ['message_read', Object.freeze(new Set(['room_id', 'after_seq', 'limit', 'wait_ms']))],
   ['room_status', Object.freeze(new Set([]))],
+  ['room_trust_list', Object.freeze(new Set([]))],
+  ['room_trust_set', Object.freeze(new Set(['target_fingerprint', 'allowed']))],
 ]))
 
 function rpcError(id, code, message, data) {
@@ -224,6 +267,11 @@ function validateArguments(name, args) {
     if (args.limit !== undefined && (!Number.isSafeInteger(args.limit) || args.limit < 1 || args.limit > READ_PAGE_MAX)) return `limit must be between 1 and ${READ_PAGE_MAX}`
     if (args.wait_ms !== undefined && (!Number.isSafeInteger(args.wait_ms) || args.wait_ms < 0 || args.wait_ms > READ_HOLD_MAX_MS)) return `wait_ms must be between 0 and ${READ_HOLD_MAX_MS}`
   }
+  if (name === 'room_trust_set') {
+    if (typeof args.target_fingerprint !== 'string') return 'target_fingerprint must be a string'
+    if (!FINGERPRINT_PATTERN.test(args.target_fingerprint)) return 'target_fingerprint must be sha256: followed by 64 lowercase hex characters'
+    if (typeof args.allowed !== 'boolean') return 'allowed must be a boolean'
+  }
   return null
 }
 
@@ -249,12 +297,12 @@ function validateArguments(name, args) {
 //     (cursor_persisted: false plus a coded note) — the consumed page is
 //     never discarded because the disk write failed.
 
-// Safe cursor-key shape for a realm id: the only characters allowed into a
-// path segment under PLUGIN_DATA/realms/.
-const CURSOR_KEY_PATTERN = /^[A-Za-z0-9._-]+$/
+// Safe cursor-key shape for a realm id (shared with the allowlist paths):
+// REALM_KEY_PATTERN from the constants module is the only shape allowed into
+// a path segment under PLUGIN_DATA/realms/.
 
 function assertCursorKeyRealm(realmId) {
-  if (typeof realmId !== 'string' || !CURSOR_KEY_PATTERN.test(realmId)) {
+  if (typeof realmId !== 'string' || !REALM_KEY_PATTERN.test(realmId)) {
     throw new AgentRoomRuntimeError(
       'invalid_request',
       'the agent-room realm id is not a safe cursor key; refusing to build a cursor path from it',
@@ -371,7 +419,7 @@ export function createMcpServer({
     const status = await readyClient.status()
     // Path-escape guard: the realm id keys directories under PLUGIN_DATA, so
     // its shape is verified before any cursor path is built from it.
-    if (typeof status.realm_id !== 'string' || !/^[A-Za-z0-9._-]+$/.test(status.realm_id)) {
+    if (typeof status.realm_id !== 'string' || !REALM_KEY_PATTERN.test(status.realm_id)) {
       throw new AgentRoomRuntimeError(
         'invalid_request',
         'the agent-room realm id is not a safe cursor key; refusing to build a cursor path from it',
@@ -423,11 +471,26 @@ export function createMcpServer({
           waitMs: args.wait_ms ?? 0,
           signal,
         })
-        const page = {
-          messages: result.messages,
-          next_after_seq: result.next_after_seq,
-          head_seq: result.head_seq,
-        }
+        // Trust discipline (Story 3.2): every row is evaluated by the
+        // client-side trust matrix against this realm's allowlist before the
+        // tool result exists. Delivered rows pass through (the untrusted
+        // envelope already applied client-side for foreign senders); held
+        // rows keep their metadata but their text becomes the held marker —
+        // the body never reaches the tool result — with the matrix reason
+        // recorded. The cursor advances regardless: ingestion and trust are
+        // independent (FR-20).
+        const page = applyTrustMatrix(
+          {
+            messages: result.messages,
+            next_after_seq: result.next_after_seq,
+            head_seq: result.head_seq,
+          },
+          {
+            ownFingerprint: readyClient.fingerprint,
+            transport: readyClient.transport,
+            allowlist: loadAllowlist(pluginData, realm),
+          },
+        )
         try {
           await queueCursorPersist(pluginData, realm, args.room_id, result.next_after_seq)
           return toolResult(page)
@@ -447,6 +510,33 @@ export function createMcpServer({
           version: status.version,
           chat_id: readyClient.chatId,
           fingerprint: readyClient.fingerprint,
+        })
+      }
+      if (name === 'room_trust_list') {
+        // Plugin-local state only: the realm keys the allowlist file, and the
+        // result is read straight from this installation's own PLUGIN_DATA.
+        const realm = await realmIdOf()
+        const state = loadAllowlist(pluginData, realm)
+        return toolResult({
+          realm_id: realm,
+          accept_all: state.accept_all,
+          entries: state.entries,
+        })
+      }
+      if (name === 'room_trust_set') {
+        // Add or remove one fingerprint entry on this realm's allowlist.
+        // Accept-all is deliberately unreachable from here: the schema closes
+        // without it, and the storage API that flips it belongs to the human
+        // CLI (Story 3.4). Removal affects future delivery only — already-
+        // ingested text is never retroactively withdrawn.
+        const realm = await realmIdOf()
+        const state = setAllowlistEntry(pluginData, realm, args.target_fingerprint, args.allowed)
+        const entry = state.entries.find(item => item.fingerprint === args.target_fingerprint) ?? null
+        return toolResult({
+          realm_id: realm,
+          target_fingerprint: args.target_fingerprint,
+          allowed: args.allowed,
+          entry,
         })
       }
       return toolResult({ code: 'tool_not_found', message: 'tool was not found' }, true)

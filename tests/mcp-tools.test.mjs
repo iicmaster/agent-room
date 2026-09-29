@@ -1,7 +1,10 @@
-// Story 1.7 acceptance: the five MCP tools (room_presence, room_direct_open,
-// message_send, message_read, room_status) over real mcp-stdio child
-// processes against a real spawned loopback server — zero mocks on the wire.
-// The rows cover the tools list (exactly five, "list agents" phrasing, no
+// Story 1.7 acceptance: the five conversation MCP tools (room_presence,
+// room_direct_open, message_send, message_read, room_status) over real
+// mcp-stdio child processes against a real spawned loopback server — zero
+// mocks on the wire. Story 3.2 additively joined the two trust tools
+// (room_trust_list, room_trust_set) to the same surface; their behavior lives
+// in tests/trust.test.mjs, and the counts below pin the seven-tool surface.
+// The rows cover the tools list (exactly seven, "list agents" phrasing, no
 // native-named aliases, closed schemas), the end-to-end conversation (status,
 // direct open, committed send, peer round-trip, long-poll read, presence with
 // the 'mcp' client type), the ambiguity round-trip through the tool surface,
@@ -401,7 +404,7 @@ function startDropProxy(t, targetPort, { drop = 'response', matches } = {}) {
 
 // --- Matrix rows ---------------------------------------------------------------
 
-test('tools list: exactly the five tools, "list agents" phrasing, no native-named aliases, closed schemas', async t => {
+test('tools list: exactly the seven tools (five conversation tools plus the Story 3.2 trust pair), "list agents" phrasing, no native-named aliases, closed schemas', async t => {
   const world = makeWorld(t)
   await world.waitReady()
   const mcp = startMcpChild(t, world)
@@ -416,6 +419,8 @@ test('tools list: exactly the five tools, "list agents" phrasing, no native-name
     'message_send',
     'message_read',
     'room_status',
+    'room_trust_list',
+    'room_trust_set',
   ])
   // No native-named aliases and no join verbs: the retired surface is gone.
   for (const name of names) {
@@ -760,7 +765,7 @@ test('stdin purity: JSON-RPC only, parse errors and oversized frames answered, n
 
   // The channel still works: a follow-up tools/list answers normally.
   const listed = await mcp.request('tools/list')
-  assert.equal(listed.result.tools.length, 5)
+  assert.equal(listed.result.tools.length, 7)
 
   assert.equal(mcp.stderr, '')
   await mcp.close()
@@ -781,7 +786,7 @@ test('first run: no configured Chat ID fails with coded guidance and the process
 
   // The process stays alive and answers JSON-RPC afterwards.
   const listed = await mcp.request('tools/list')
-  assert.equal(listed.result.tools.length, 5)
+  assert.equal(listed.result.tools.length, 7)
 
   await mcp.close()
 })
@@ -912,7 +917,7 @@ test('NFR-3 schema-level negatives: every schema is closed, carries no identity-
   const denyList = [
     'actor_id', 'actor', 'display_name', 'fingerprint', 'sender', 'sender_fingerprint', 'sender_chat_id', 'client_type',
   ]
-  assert.equal(TOOL_DESCRIPTORS.length, 5)
+  assert.equal(TOOL_DESCRIPTORS.length, 7)
   for (const tool of TOOL_DESCRIPTORS) {
     assert.equal(tool.inputSchema.additionalProperties, false, `${tool.name} must close its argument set`)
     const properties = Object.keys(tool.inputSchema.properties ?? {})
@@ -926,11 +931,16 @@ test('NFR-3 schema-level negatives: every schema is closed, carries no identity-
       `${tool.name}: schema properties and validator allowlist must match exactly`,
     )
   }
-  // target_fingerprint is a disambiguator, never sender identity: it is
-  // allowed on room_direct_open alone.
+  // target_fingerprint is never sender identity: it is the disambiguator on
+  // room_direct_open and the trust operation's target on room_trust_set —
+  // on no other tool.
   for (const tool of TOOL_DESCRIPTORS) {
     const has = Object.hasOwn(tool.inputSchema.properties ?? {}, 'target_fingerprint')
-    assert.equal(has, tool.name === 'room_direct_open', `${tool.name}: target_fingerprint placement`)
+    assert.equal(
+      has,
+      ['room_direct_open', 'room_trust_set'].includes(tool.name),
+      `${tool.name}: target_fingerprint placement`,
+    )
   }
 })
 
