@@ -37,6 +37,24 @@ All notable changes to Agent Room are documented in this file.
   release functions are reachable only from the human CLI, so no tool result can ever
   carry a held body. Held registration happens after the read cursor persists: a held
   message never stalls the cursor and a cursor advance never loses held state.
+- The human CLI surface over the held pipeline and the per-realm allowlist (the
+  `agent-room` bin's command family): `held list` (metadata only — id, chat id,
+  fingerprint, room, sequence, time, size, reason, with an optional `--room`
+  filter), `held show <room_id>:<seq>` (the full preview of the exact artifact
+  the pipeline withheld, by cached copy or point-read recovery — the only
+  surface where held body text appears), `allow <chat-id>` (resolves the name
+  to its key fingerprint from this realm's held records and presence,
+  case-insensitively and merged by fingerprint — never a silent guess;
+  `--fingerprint` disambiguates a reused name; reports realm + fingerprint;
+  saves the allowlist entry and releases that key's held records; `--remove`
+  affects future ingestion only), and `allow-all` (the per-realm accept-all
+  flip behind an explicit interactive y/N confirmation; `--remove` switches it
+  off without one). The commands' session is unbound — the local token and the
+  installation key are exchanged for a session token and no Chat ID is ever
+  claimed — so they run collision-free while the live MCP session holds the
+  configured name and leave no presence or claim footprint. Approval is a
+  human convention (Instructed): same-user processes are not cryptographically
+  distinguishable, and the help text says so plainly.
 - `outcome_unknown` send resolution: one automatic retry with the identical
   `client_message_id` resolves to the original message or a coded conflict, never a duplicate.
 

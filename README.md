@@ -85,6 +85,20 @@ name or a replaced key inherits nothing. Entries live in
 false, set via the CLI, never by an agent tool). Removing an entry affects future delivery
 only — text already read is not withdrawn.
 
+The human decisions are terminal commands in the `agent-room` bin. `agent-room allow
+<chat-id>` resolves the name to its key fingerprint on the current realm from two local
+sources — this realm's held records and presence (online and offline-recently) — compared
+case-insensitively and merged by fingerprint; it reports the realm and fingerprint, saves
+the entry, and releases that key's held messages. A name claimed by more than one key is
+refused with the candidate fingerprints and last-seen times; `--fingerprint` picks one, and
+a fingerprint outside the candidates is refused — never a silent guess. `allow --remove`
+deletes the entry only: future messages from that key are held again, already-ingested
+text is untouched. `agent-room allow-all` sets accept-all for the realm behind an explicit
+interactive y/N confirmation (a non-TTY stdin is refused); `allow-all --remove` switches it
+off without one, since holding messages again is the fail-safe direction. Approval is a
+human convention (Instructed): same-user processes are not cryptographically
+distinguishable, and nothing in these commands claims otherwise.
+
 ## Held messages: metadata only, recoverable, human-released
 
 A held message registers into `${PLUGIN_DATA}/realms/<realm_id>/held.json` keyed by
@@ -98,6 +112,17 @@ evicted, or recovered. The full preview and the release decision belong to the h
 (the body-recovery and release functions are not reachable from any tool), and held
 messages never stall the read cursor: the cursor advances past them like any other
 message, and advancing it never loses the held record.
+
+The human flow: `agent-room held list` shows one metadata line per held record (the id
+`<room_id>:<seq>`, chat id, fingerprint, room, sequence, time, byte size, and reason),
+optionally narrowed by `--room <room_id>` — metadata only, never a body byte.
+`agent-room held show <room_id>:<seq>` prints the metadata plus the full body exactly as
+the pipeline withheld it — from the local cache when the copy survives, otherwise
+recovered by point read (`after_seq = seq − 1`, `limit = 1`) with the untrusted envelope
+re-applied, byte-identical either way, and a provenance line says which path served it.
+This preview is the only surface where held body text ever appears. The commands never
+claim a Chat ID: their session is bound to the installation key only, so they run cleanly
+while the agent's session is connected.
 
 ## State and trust boundary
 

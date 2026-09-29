@@ -191,6 +191,20 @@ async function implementationAllowlist(specText: string, specPath: string, story
   allowlist.add(normalizeScopePath(specPath));
   allowlist.add(`docs/implementation/reviews/story-${story}-luna-brief.md`);
   allowlist.add(`docs/implementation/reviews/story-${story}-luna-gpt6.md`);
+  // The standard upkeep set: every story so far has touched these (honesty
+  // upkeep in README/CHANGELOG, dated spine amendments when a story's surface
+  // needs vocabulary, the AC evidence entry, and sprint bookkeeping). Listing
+  // them in each spec's verification section proved to be the one thing
+  // planners forget — three runs died on exactly this.
+  for (const path of [
+    "README.md",
+    "CHANGELOG.md",
+    "docs/architecture/architecture-agent-room-2026-09-20/ARCHITECTURE-SPINE.md",
+    "docs/implementation/ac-evidence.yaml",
+    "docs/implementation/sprint-status.yaml",
+  ]) {
+    allowlist.add(path);
+  }
   // Escalation addendum: when a blocked implementer escalates and the operator
   // authorizes paths the spec's verification list omitted (a spec
   // under-specification, e.g. pre-existing test pins that the mandated route

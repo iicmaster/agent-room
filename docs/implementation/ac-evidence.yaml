@@ -368,7 +368,7 @@
 
 # --- Epic 3 (Trust) -------------------------------------------------------------
 # Seeded, not yet filled: the sweep fails loudly on every story below until each
-# one carries real evidence. Stories 3.1-3.3 are filled; 3.4-3.5 remain TODO.
+# one carries real evidence. Stories 3.1-3.4 are filled; 3.5 remains TODO.
 
   3.1:                       # Untrusted marking at full rigor (2 criteria)
     note: >-
@@ -546,3 +546,77 @@
         file: "tests/held.test.mjs"
       - test: "held storage degrades safely: a missing or corrupt file is the empty default, a read never creates state, malformed rows are dropped instead of surfaced, and the next write replaces the file"
         file: "tests/held.test.mjs"
+
+  3.4:                       # The human CLI surface (HCI-2) (4 criteria)
+    note: >-
+      Proves the terminal trust surface over the finished pipeline. AC-1
+      (held list / held show): `agent-room held list` names the realm, prints
+      one metadata line per record (id `<room_id>:<seq>`, chat id,
+      fingerprint, room, seq, time, size, reason) sorted by (room, seq) —
+      zero body bytes over envelope-wrapped hostile artifacts, in the empty
+      realm, the seeded realm (Broadcast Room plus a real pair DM), and the
+      `--room`-filtered listing, with a non-room-id shape refused coded — and
+      `held show` is the ONLY surface where held body text appears: the
+      metadata block plus the exact withheld artifact between delimiters,
+      byte-matched for the cached copy, and for an evicted record recovered
+      by point read (`after_seq = seq − 1`, `limit = 1`) through the REAL
+      server with the untrusted envelope re-applied by the CLI's seam
+      (105 foreign sends past the cache cap; the recovery result is provably
+      not re-cached and the provenance line names the serving path); unknown
+      and malformed ids exit non-zero naming the id and the expected form,
+      and a released record is never shown again. AC-2 (allow / --remove):
+      the name resolves on the current realm from this realm's held records
+      and from a live foreign installation's presence row, realm +
+      fingerprint are reported, the entry is persisted at 0600 (original
+      added_at preserved on re-allow), and release goes through the
+      pipeline's own heldClear per (room, seq) matched by actor_fingerprint —
+      other keys' records untouched; an ambiguous name (one name, two keys —
+      one in held records, one live in presence) refuses with the candidates
+      one per line and NOTHING persisted, --fingerprint disambiguates to
+      exactly that key, a well-formed fingerprint outside the candidates is
+      refused with the candidate list, an unknown name names both sources it
+      searched, and a grammatically invalid name quotes CHAT_ID_INVALID_MESSAGE
+      verbatim; --remove deletes only the entry (held records of every key
+      untouched) and a real re-read through the REAL matrix holds the sender
+      again while the durable log keeps every message. AC-3 (help honesty):
+      the help text lists every command with its grammar and states plainly
+      that approval is a human convention (Instructed) — same-user processes
+      are not cryptographically distinguishable — while the phrase "never
+      agent-invocable" appears nowhere in the shipped output, and no-args /
+      unknown-command exit non-zero with usage plus the honesty statement on
+      stderr. AC-4 (actionable coded errors): every CLI refusal exits
+      non-zero with one `agent-room <command> failed: <code>: <message>`
+      line naming the failing input. The unbound-session discipline is
+      proven against a live MCP child holding the installation's Chat ID:
+      held list, held show, allow, and allow-all --remove all succeed — no
+      chat_id_taken, no new durable claim row, no presence change, the
+      child's session and claim unchanged — and the command module's source
+      never contains the session-bind route. Does NOT prove a hold produced
+      end-to-end by a real remote connection — impossible until Epic 4 (the
+      hold-producing half is the composed-layer stand-in of Stories 3.2/3.3:
+      real foreign sends and reads registered through the REAL pipeline with
+      the REAL matrix's reason) — and Story 3.5 chains hold, cursor,
+      recovery, release, and removal together in one zero-mock drill. Also
+      does not prove any persuasion-resistance property: the Instructed lane
+      is a human convention, honestly labeled as such.
+    evidence:
+      - test: "held list: an empty realm names itself with no held messages and creates no state, a seeded realm lists one metadata line per record sorted by (room, seq) with zero body bytes, and the --room filter narrows the listing while a non-room-id shape is refused coded"
+        file: "tests/cli-surface.test.mjs"
+      - test: "held show of a cached record: the metadata block then the full body verbatim between delimiters byte-matching the cached artifact, with the provenance line naming the local cache"
+        file: "tests/cli-surface.test.mjs"
+      - test: "held show of an evicted record: the body is recovered by point read through the real server, byte-identical to the withheld artifact, and the recovery result is not re-cached"
+        file: "tests/cli-surface.test.mjs"
+      - test: "held show refusals: an unknown id names the id and says it is not held (a released record is never shown again), and a malformed id names the input and the expected <room_id>:<seq> form"
+        file: "tests/cli-surface.test.mjs"
+      - test: "allow resolves the name from the held records of the realm, reports realm + fingerprint, persists the entry at 0600 (the original added_at preserved on re-allow), and releases every held record of that fingerprint"
+        file: "tests/cli-surface.test.mjs"
+      - test: "allow resolves an offline-records-absent name from presence, refuses an ambiguous name with the candidate list and nothing persisted, disambiguates with --fingerprint, and refuses a fingerprint outside the candidates"
+        file: "tests/cli-surface.test.mjs"
+      - test: "allow refuses an unknown name with both sources it searched and an invalid name with the verbatim grammar message — never a bare invalid"
+        file: "tests/cli-surface.test.mjs"
+      - test: "allow --remove deletes the entry only: held records of every key are untouched, a real re-read through the matrix holds the sender again, and the durable log is untouched"
+        file: "tests/cli-surface.test.mjs"
+      - test: "allow-all: a non-TTY stdin is refused with guidance and nothing changed, a TTY y sets accept_all with the Instructed honesty, and --remove switches it off without any confirmation"
+        file: "tests/cli-surface.test.mjs"
+      - test: "help and usage carry the verbatim Instructed honesty and never the overclaim; and with a live MCP child holding the Chat ID every command succeeds with zero session footprint"
+        file: "tests/cli-surface.test.mjs"

@@ -1,19 +1,38 @@
 #!/usr/bin/env node
 
-// The one-time `agent-room setup` command (Story 1.7): the only place where a
-// human chooses this installation's Chat ID. The MCP adapter never asks the
-// human anything — its stdin is the JSON-RPC channel and must stay pure — so
-// first-run Chat ID selection lives here, in the user's own terminal:
+// The `agent-room` bin — the human side of this installation (the MCP adapter
+// never asks the human anything: its stdin is the JSON-RPC channel and must
+// stay pure). Two command families share this one entrypoint:
 //
-//   collect chat_id → validate the DR-1 grammar (chatIdForms) → ensureServer
-//   + local auth → POST /api/session probe (a live collision answers 409 and
-//   re-prompts; success is immediately released with DELETE /api/session, so
-//   the name is verified claimable and then freed) → store
-//   PLUGIN_DATA/config.json at 0600 (atomic write).
+//   setup (Story 1.7)     the one-time Chat ID choice: collect chat_id →
+//                         validate the DR-1 grammar (chatIdForms) →
+//                         ensureServer + local auth → POST /api/session probe
+//                         (a live collision answers 409 and re-prompts;
+//                         success is immediately released with
+//                         DELETE /api/session, so the name is verified
+//                         claimable and then freed) → store
+//                         PLUGIN_DATA/config.json at 0600 (atomic write).
+//
+//   held/allow (Story 3.4) the human trust surface over the held pipeline and
+//                         the per-realm allowlist: `held list` (metadata
+//                         only), `held show <room_id>:<seq>` (the ONLY surface
+//                         where held body text appears), `allow <chat-id>`
+//                         (resolve the key fingerprint from this realm's held
+//                         records and presence, save the allowlist entry,
+//                         release that key's held records) and `allow-all`
+//                         (the accept-all flip, interactively confirmed).
+//                         Their bodies live in ./held-commands.mjs; the
+//                         session they use is UNBOUND — the local token plus
+//                         the installation public key are exchanged for a
+//                         session token and no Chat ID is ever claimed, so
+//                         the commands run collision-free while the live MCP
+//                         session holds the name and leave zero presence or
+//                         durable-claim footprint.
 //
 // stdin discipline: prompting happens ONLY when stdin is a TTY. A non-TTY
 // stdin (pipes, the MCP host, CI) exits with guidance and touches nothing —
-// the command can never be driven programmatically into storing a name.
+// a command that needs a human answer can never be driven programmatically
+// into one.
 //
 // No name is ever stored unless it passed the grammar gate AND the live
 // probe; a refused probe writes no config, so a half-finished setup leaves
@@ -21,7 +40,6 @@
 // the human confirms the replacement interactively.
 
 import { createInterface } from 'node:readline'
-import http from 'node:http'
 import { existsSync, realpathSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -31,9 +49,7 @@ import {
   CHAT_ID_MAX,
   CLIENT_CONFIG_MAX_BYTES,
   CLIENT_REQUEST_TIMEOUT_MS,
-  PROTOCOL_HEADER,
   PUBLIC_ERROR_STATUS,
-  PROTOCOL_VERSION,
   chatIdForms,
 } from '../constants.mjs'
 import {
@@ -47,44 +63,18 @@ import { assertSupportedRuntime } from '../runtime.mjs'
 import { loadOrCreateKeypair } from '../keys.mjs'
 import { loadOrCreateLocalToken } from '../api/local-token.mjs'
 import { ensureServer } from '../client/ensure-server.mjs'
+import { cliHttpJson, cliBearerHeaders } from './http.mjs'
+import {
+  runHeldList,
+  runHeldShow,
+  runAllow,
+  runAllowAll,
+} from './held-commands.mjs'
 
 const OK_STATUS = 200
 // The collision status is owned by the constants table (chat_id_taken), never restated.
 const CONFLICT_STATUS = PUBLIC_ERROR_STATUS.chat_id_taken
 export const SETUP_REQUIRES_TTY_MESSAGE = 'agent-room setup asks a human to choose the Chat ID, so it needs an interactive terminal (a TTY). Run it in your own terminal: agent-room setup'
-
-function httpJson(port, method, path, headers, body, timeoutMs = CLIENT_REQUEST_TIMEOUT_MS) {
-  return new Promise((resolvePromise, rejectPromise) => {
-    const request = http.request(
-      { host: '127.0.0.1', port, method, path, headers, agent: false },
-      response => {
-        const chunks = []
-        response.on('data', chunk => chunks.push(chunk))
-        response.on('error', rejectPromise)
-        response.on('end', () => {
-          const text = Buffer.concat(chunks).toString('utf8')
-          let parsed = null
-          try { parsed = JSON.parse(text) } catch { parsed = null }
-          resolvePromise({ status: response.statusCode, body: parsed })
-        })
-      },
-    )
-    // Every probe round trip is bounded: a server that accepts and stalls
-    // cannot hang the interactive command.
-    request.setTimeout(timeoutMs, () => request.destroy(new AgentRoomRuntimeError('request_failed', 'request timed out')))
-    request.on('error', rejectPromise)
-    if (body !== undefined) request.write(JSON.stringify(body))
-    request.end()
-  })
-}
-
-function bearerHeaders(token) {
-  return {
-    [PROTOCOL_HEADER]: PROTOCOL_VERSION,
-    authorization: `Bearer ${token}`,
-    'content-type': 'application/json; charset=utf-8',
-  }
-}
 
 // One claim probe with a fresh session: bind the candidate name, and on
 // success release it — the name is verified claimable and then freed for the
@@ -93,7 +83,7 @@ function bearerHeaders(token) {
 // live-claimed until its session lease expires. A live collision is the
 // caller's signal to re-prompt; any other coded answer is a real failure.
 async function probeClaim({ port, localToken, publicKey, chatId, timeoutMs = CLIENT_REQUEST_TIMEOUT_MS }) {
-  const exchange = await httpJson(port, 'POST', '/api/auth/local', bearerHeaders(localToken), {
+  const exchange = await cliHttpJson(port, 'POST', '/api/auth/local', cliBearerHeaders(localToken), {
     public_key: publicKey,
   }, timeoutMs)
   if (exchange.status !== OK_STATUS || exchange.body?.result?.session_token === undefined) {
@@ -106,13 +96,13 @@ async function probeClaim({ port, localToken, publicKey, chatId, timeoutMs = CLI
   let released = true
   let bind
   try {
-    bind = await httpJson(port, 'POST', '/api/session', bearerHeaders(sessionToken), {
+    bind = await cliHttpJson(port, 'POST', '/api/session', cliBearerHeaders(sessionToken), {
       chat_id: chatId,
       client_type: 'cli',
     }, timeoutMs)
   } finally {
     try {
-      const releasedResponse = await httpJson(port, 'DELETE', '/api/session', bearerHeaders(sessionToken), undefined, timeoutMs)
+      const releasedResponse = await cliHttpJson(port, 'DELETE', '/api/session', cliBearerHeaders(sessionToken), undefined, timeoutMs)
       released = releasedResponse.status === OK_STATUS
     } catch {
       released = false
@@ -252,22 +242,195 @@ function launchedDirectly() {
   try { return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url)) } catch { return false }
 }
 
-export async function main(argv = process.argv.slice(2)) {
-  if (argv[0] !== 'setup') {
-    process.stderr.write('Usage: agent-room setup — choose this installation\'s Chat ID (one-time, interactive)\n')
-    process.exitCode = 1
-    return
+// The help text is the single home of the command grammar AND the honesty
+// statement; tests/cli-surface.test.mjs pins both as literals and checks the
+// AC's negative against this text verbatim.
+const HELP_TEXT = `agent-room — the human side of your Agent Room installation.
+
+Commands:
+
+  agent-room setup
+      Choose this installation's Chat ID (one-time, interactive).
+
+  agent-room held list [--room <room_id>]
+      List held messages — metadata only (id, chat id, key fingerprint, room,
+      sequence, time, byte size, reason). Held body text appears nowhere here.
+
+  agent-room held show <room_id>:<seq>
+      Preview one held message's full body, exactly the artifact the pipeline
+      withheld. This is the only surface where held body text appears. The id
+      is printed by "agent-room held list".
+
+  agent-room allow <chat-id> [--fingerprint <fingerprint>] [--remove]
+      Allow a sender by Chat ID: the name is resolved to its key fingerprint
+      from this realm's held records and presence (case-insensitive, merged by
+      fingerprint); when several keys claim the name, disambiguate with
+      --fingerprint. Saves the allowlist entry and releases that key's held
+      messages. With --remove the entry is removed instead: future messages
+      from that key are held again; already-ingested text is untouched.
+
+  agent-room allow-all [--remove]
+      Allow every future sender in this realm (accept-all). Asks for an
+      interactive y/N confirmation; --remove switches it off without one
+      (holding messages again is the fail-safe direction).
+
+  agent-room help
+      Show this help.
+
+Approval is a human convention (Instructed) — same-user processes are not
+cryptographically distinguishable, so an allowlist entry or accept-all is your
+decision about processes running as your own user, never a cryptographic
+guarantee. The untrusted envelope stays on every delivered foreign body.
+`
+
+// The family's uniform failure outcome: one coded line (plus optional detail
+// lines, e.g. the ambiguity candidates) printed by the dispatch's single
+// coded-error printer.
+function failure(command, code, message, lines) {
+  return { ok: false, command, code, message, ...(lines === undefined ? {} : { lines }) }
+}
+
+// Strict argv tokens for one command: the flags this command family declares,
+// everything else positional; any other --token is refused.
+function parseTokens(tokens, { booleanFlags = [], valueFlags = [] } = {}) {
+  const positional = []
+  const options = {}
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index]
+    if (booleanFlags.includes(token)) {
+      options[token] = true
+      continue
+    }
+    if (valueFlags.includes(token)) {
+      const value = tokens[index + 1]
+      if (value === undefined) return { error: `${token} needs a value` }
+      options[token] = value
+      index += 1
+      continue
+    }
+    if (token.startsWith('--')) return { error: `unknown option "${token}"` }
+    positional.push(token)
   }
-  const outcome = await runSetup()
-  if (outcome.status === 'not-a-tty') {
-    process.stderr.write(`${outcome.message}\n`)
-    process.exitCode = 1
-    return
+  return { positional, options }
+}
+
+// The held/allow command family (Story 3.4). Returns null for an unrecognized
+// command shape so the dispatch falls through to the usage error.
+async function runHeldFamilyCommand(command, subcommand, tokens, deps) {
+  if (command === 'held') {
+    if (subcommand === 'list') {
+      const parsed = parseTokens(tokens, { valueFlags: ['--room'] })
+      if (parsed.error) return failure('held list', 'invalid_request', `${parsed.error}; see "agent-room help"`)
+      if (parsed.positional.length > 0) {
+        return failure('held list', 'invalid_request', `unexpected argument "${parsed.positional[0]}"; see "agent-room help"`)
+      }
+      return runHeldList(deps, { roomId: parsed.options['--room'] })
+    }
+    if (subcommand === 'show') {
+      const parsed = parseTokens(tokens)
+      if (parsed.error) return failure('held show', 'invalid_request', `${parsed.error}; see "agent-room help"`)
+      if (parsed.positional.length !== 1) {
+        return failure(
+          'held show',
+          'invalid_request',
+          'expected exactly one held-message id: agent-room held show <room_id>:<seq> — the id as printed by "agent-room held list"',
+        )
+      }
+      return runHeldShow(deps, parsed.positional[0])
+    }
+    return null
   }
-  if (outcome.status === 'aborted') {
-    process.stderr.write(`${outcome.message}\n`)
-    process.exitCode = 1
+  if (command === 'allow') {
+    const parsed = parseTokens(tokens, { booleanFlags: ['--remove'], valueFlags: ['--fingerprint'] })
+    if (parsed.error) return failure('allow', 'invalid_request', `${parsed.error}; see "agent-room help"`)
+    if (parsed.positional.length !== 1) {
+      return failure('allow', 'invalid_request', 'expected exactly one Chat ID: agent-room allow <chat-id> [--fingerprint <fingerprint>] [--remove]')
+    }
+    return runAllow(deps, parsed.positional[0], {
+      remove: parsed.options['--remove'] === true,
+      ...(parsed.options['--fingerprint'] === undefined ? {} : { fingerprint: parsed.options['--fingerprint'] }),
+    })
   }
+  if (command === 'allow-all') {
+    const parsed = parseTokens(tokens, { booleanFlags: ['--remove'] })
+    if (parsed.error) return failure('allow-all', 'invalid_request', `${parsed.error}; see "agent-room help"`)
+    if (parsed.positional.length > 0) {
+      return failure('allow-all', 'invalid_request', `unexpected argument "${parsed.positional[0]}"; see "agent-room help"`)
+    }
+    return runAllowAll(deps, { remove: parsed.options['--remove'] === true })
+  }
+  return null
+}
+
+export async function main(argv = process.argv.slice(2), {
+  input = process.stdin,
+  output = process.stdout,
+  errorOutput = process.stderr,
+  sharedDataDir = sharedDataDirectory(),
+  pluginDataDir = instanceDataDirectory(),
+} = {}) {
+  const [command, subcommand] = argv
+  if (command === 'help' || command === '--help' || command === '-h') {
+    output.write(HELP_TEXT)
+    return { status: 'help' }
+  }
+  const deps = { input, output, sharedDataDir, pluginDataDir }
+  if (command === 'setup') {
+    const outcome = await runSetup({ input, output, sharedDataDir, pluginDataDir })
+    if (outcome.status === 'not-a-tty' || outcome.status === 'aborted') {
+      errorOutput.write(`${outcome.message}\n`)
+      process.exitCode = 1
+    }
+    return outcome
+  }
+  if (command === 'held' || command === 'allow' || command === 'allow-all') {
+    let outcome = null
+    try {
+      outcome = await runHeldFamilyCommand(
+        command,
+        subcommand,
+        command === 'held' ? argv.slice(2) : argv.slice(1),
+        deps,
+      )
+    } catch (error) {
+      // The family's one coded-error printer: a thrown or rejected refusal
+      // (the mutators reject, never throw past an await) surfaces as the
+      // command's coded error, never a bare "invalid" or a stack trace.
+      outcome = failure(
+        command === 'held' ? `held ${subcommand ?? ''}`.trimEnd() : command,
+        error?.code ?? 'request_failed',
+        error?.message ?? String(error),
+      )
+    }
+    if (outcome === null) {
+      errorOutput.write(HELP_TEXT)
+      process.exitCode = 1
+      return { status: 'usage' }
+    }
+    if (outcome.ok === false) {
+      if (outcome.aborted === true) {
+        // The human answered the prompt "no" (or the input ended): the setup
+        // command's established abort discipline — the message, exit 1,
+        // nothing changed.
+        errorOutput.write(`${outcome.message}\n`)
+      } else {
+        errorOutput.write(`agent-room ${outcome.command} failed: ${outcome.code}: ${outcome.message}\n`)
+        for (const line of outcome.lines ?? []) errorOutput.write(`${line}\n`)
+      }
+      process.exitCode = 1
+      return outcome
+    }
+    output.write(`${outcome.lines.join('\n')}\n`)
+    return outcome
+  }
+  // No args or an unknown command: usage plus the honesty statement on
+  // stderr, exit 1, no state touched.
+  if (command !== undefined) {
+    errorOutput.write(`agent-room: unknown command "${command}"\n`)
+  }
+  errorOutput.write(HELP_TEXT)
+  process.exitCode = 1
+  return { status: 'usage' }
 }
 
 // Story 1.1's contract gates EVERY entrypoint. This one was added later (the
