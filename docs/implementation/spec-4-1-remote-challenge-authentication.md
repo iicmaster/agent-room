@@ -2,7 +2,7 @@
 title: 'Remote challenge authentication'
 type: 'feature'
 created: '2026-09-29'
-status: 'ready-for-dev'
+status: 'done'
 baseline_revision: 'c47141d04c5daafdcd45fad0a9e649f6acb28d7a'
 context:
   - 'project context: Node >=24.15, native ESM, node:sqlite STRICT WAL with synchronous=FULL, zero external runtime dependencies, and real-child node:test gates'
