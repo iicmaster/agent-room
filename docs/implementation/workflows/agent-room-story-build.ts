@@ -562,6 +562,10 @@ const TIER_DEPTH: Record<"full" | "standard" | "light", number> = {
 }
 
 
+// F8 preconditions. (PARKED-for-gates note, Epic 2 retro item 1: this workflow
+// has not yet closed a story fully unattended — 4-1 reached phases 1-5 unattended
+// but the orchestrator's mid-run commits tripped the baseline guard. Do NOT let
+// it carry a blocking-gate story until that proof exists.)
 // F8 preconditions. (Retry posture: a run that dies on a provider error leaves
 // the tree untouched — verified after each failure — so the correct retry is a
 // fresh run from the same clean state, not a rescue of the dead run.
