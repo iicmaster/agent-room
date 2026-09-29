@@ -432,6 +432,22 @@ export function chatIdClaimsTableDdl({ ifNotExists = false } = {}) {
   `
 }
 
+// The durable enrollment registry DDL (Story 4.1, AD-5): one row per enrolled
+// Actor — the key registered once, which the challenge-answer route gates on
+// (reconnects re-prove possession instead of re-enrolling, FR-3/FR-12). The
+// IF NOT EXISTS flag follows the same plain-for-migration /
+// additive-for-open split as realmsTableDdl; like chat_id_claims the table
+// joins through open-path convergence with NO user_version bump.
+export function enrolledActorsTableDdl({ ifNotExists = false } = {}) {
+  return `
+    CREATE TABLE ${ifNotExists ? 'IF NOT EXISTS ' : ''}enrolled_actors (
+      actor_fingerprint TEXT PRIMARY KEY,
+      enrolled_at TEXT NOT NULL,
+      ${fingerprintCheck('actor_fingerprint')}
+    ) STRICT;
+  `
+}
+
 function createSchema(database) {
   withImmediateTransaction(database, () => {
     // Re-read inside the write transaction: a concurrent opener may have
@@ -555,10 +571,10 @@ function verifyStrictTables(database) {
     SELECT name, strict
     FROM pragma_table_list
     WHERE schema = 'main'
-      AND name IN ('rooms', 'direct_members', 'messages', 'realms', 'chat_id_claims')
+      AND name IN ('rooms', 'direct_members', 'messages', 'realms', 'chat_id_claims', 'enrolled_actors')
   `).all()
   const strictByName = new Map(strictTables.map(row => [row.name, Number(row.strict)]))
-  for (const name of ['rooms', 'direct_members', 'messages', 'realms', 'chat_id_claims']) {
+  for (const name of ['rooms', 'direct_members', 'messages', 'realms', 'chat_id_claims', 'enrolled_actors']) {
     if (strictByName.get(name) !== 1) {
       fail('database_schema_invalid', `database table ${name} is missing or is not STRICT`)
     }
@@ -676,6 +692,33 @@ function verifyChatIdClaimsIndex(database) {
   }
 }
 
+// Story 4.1 (additive, no schema-version bump): the durable enrolled_actors
+// registry joins the schema through the same convergence pattern — CREATE
+// TABLE IF NOT EXISTS on every open, then the column-set verification, so a
+// foreign or drifted table is a coded schema failure at open, never a runtime
+// surprise mid-gate.
+function ensureEnrolledActorsTable(database) {
+  database.exec(enrolledActorsTableDdl({ ifNotExists: true }))
+}
+
+const ENROLLED_ACTORS_COLUMNS = Object.freeze([
+  'actor_fingerprint',
+  'enrolled_at',
+])
+
+function verifyEnrolledActorsColumns(database) {
+  const columns = database
+    .prepare(`SELECT name FROM pragma_table_info('enrolled_actors') ORDER BY cid`)
+    .all()
+    .map(row => row.name)
+  if (
+    columns.length !== ENROLLED_ACTORS_COLUMNS.length
+    || ENROLLED_ACTORS_COLUMNS.some((name, index) => columns[index] !== name)
+  ) {
+    fail('database_schema_invalid', 'database table enrolled_actors has a divergent column set')
+  }
+}
+
 function plainMessage(row) {
   return {
     seq: Number(row.seq),
@@ -776,6 +819,8 @@ export function openRoomLog({ dataDir } = {}) {
       verifyChatIdClaimsColumns(database)
       ensureChatIdClaimsLastSeenIndex(database)
       verifyChatIdClaimsIndex(database)
+      ensureEnrolledActorsTable(database)
+      verifyEnrolledActorsColumns(database)
       verifyStrictTables(database)
 
       // Report the file's actual version, never the compiled constant.
@@ -1344,6 +1389,55 @@ export function openRoomLog({ dataDir } = {}) {
             .run(cutoff)
           return Number(result.changes)
         })
+      },
+
+      // Durable enrollment registry (Story 4.1, AD-5): one row per enrolled
+      // Actor — the key registered once, which the challenge-answer route
+      // gates on. The row set is the record a reconnect re-proves against:
+      // enrollment does not expire in v0.2 and is never deleted here, and
+      // re-presentation through the local exchange's success path changes
+      // nothing (INSERT ... DO NOTHING — the first registration's timestamp
+      // sticks, FR-3/FR-12). There is no un-enroll: plugin-data deletion mints
+      // a new fingerprint that is simply not in this table. Each write is its
+      // own BEGIN IMMEDIATE transaction.
+      enrollActor(options) {
+        assertOpen()
+        const { actorFingerprint, enrolledAt } = requireObject(options)
+        const validFingerprint = requireFingerprint(actorFingerprint)
+        const enrolled = requireClaimTimestamp(enrolledAt)
+
+        return withImmediateTransaction(database, () => {
+          database.prepare(`
+            INSERT INTO enrolled_actors (actor_fingerprint, enrolled_at)
+            VALUES (?, ?)
+            ON CONFLICT (actor_fingerprint) DO NOTHING
+          `).run(validFingerprint, enrolled)
+          // Report the row as stored — with the FIRST registration's
+          // timestamp, never the attempted input on a re-presentation.
+          const row = database.prepare(`
+            SELECT actor_fingerprint, enrolled_at
+            FROM enrolled_actors
+            WHERE actor_fingerprint = ?
+          `).get(validFingerprint)
+          return {
+            actor_fingerprint: row.actor_fingerprint,
+            enrolled_at: row.enrolled_at,
+          }
+        })
+      },
+
+      // Whether a fingerprint holds the durable enrollment record the
+      // challenge-answer route gates on. A pure read: it writes nothing and
+      // never creates a row.
+      isActorEnrolled(actorFingerprint) {
+        assertOpen()
+        const validFingerprint = requireFingerprint(actorFingerprint)
+        const row = database.prepare(`
+          SELECT 1 AS found
+          FROM enrolled_actors
+          WHERE actor_fingerprint = ?
+        `).get(validFingerprint)
+        return Boolean(row)
       },
     }
     return Object.freeze(api)

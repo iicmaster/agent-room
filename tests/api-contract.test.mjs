@@ -223,8 +223,9 @@ test('the implemented mark covers exactly the live frozen routes', () => {
   // session connect surface (POST/PATCH/DELETE /api/session) in 1.5, the
   // presence + status reads (GET /api/presence, GET /api/status) in 1.6, the
   // conversation surface (POST /api/rooms/direct and the messages pair) in
-  // 1.7, and the enumeration read (GET /api/rooms) in Story 2.2; later
-  // stories extend additively.
+  // 1.7, the enumeration read (GET /api/rooms) in Story 2.2, and the remote
+  // challenge pair (POST /api/auth/challenge, POST /api/auth/answer) in
+  // Story 4.1; later stories extend additively.
   const implemented = ROUTE_TABLE.filter(route => route.implemented === true)
   assert.deepEqual(implemented.map(routeKey), [
     'POST /api/session',
@@ -236,11 +237,20 @@ test('the implemented mark covers exactly the live frozen routes', () => {
     'GET /api/rooms/:id/messages',
     'POST /api/rooms/:id/messages',
     'GET /api/status',
+    'POST /api/auth/challenge',
+    'POST /api/auth/answer',
     'POST /api/auth/local',
     'GET /health',
   ])
   const local = ROUTE_TABLE.find(route => routeKey(route) === 'POST /api/auth/local')
   assert.deepEqual([...local.requestFields], ['public_key'])
+  // Story 4.1: identity binds at challenge — the challenge takes exactly the
+  // key field; the answer takes exactly nonce and signature, no public_key to
+  // substitute with.
+  const challenge = ROUTE_TABLE.find(route => routeKey(route) === 'POST /api/auth/challenge')
+  const answer = ROUTE_TABLE.find(route => routeKey(route) === 'POST /api/auth/answer')
+  assert.deepEqual([...challenge.requestFields], ['public_key'])
+  assert.deepEqual([...answer.requestFields], ['nonce', 'signature'])
   // The session surface: chat_id plus the 1.6 closed-set client_type
   // declaration on connect and rename, none on disconnect — actor identity
   // always comes from the token, never the body.
@@ -280,6 +290,12 @@ test('story 1.3 error codes are registered once with their canonical statuses', 
     unauthorized: [401, 'session authentication is required'],
     unknown_field: [400, 'request contains an unknown field'],
     invalid_request: [400, 'request shape is invalid'],
+    // Story 4.1 additions: the challenge path's three codes — an unanswerable
+    // or spent nonce, a failed verification against the challenge-recorded
+    // key, and the answer route's enrollment gate.
+    challenge_invalid: [401, 'challenge nonce is invalid, expired, or already used'],
+    signature_invalid: [401, 'signature verification failed'],
+    not_enrolled: [403, 'this public key is not enrolled on this server'],
   }
   for (const [code, [status, message]] of Object.entries(expected)) {
     assert.equal(PUBLIC_ERROR_STATUS[code], status, code)

@@ -5,7 +5,14 @@
 //   ensureServer(sharedDataDir)  — Local Mode bootstrap (attach or boot)
 //   POST /api/auth/local         — the shared-data-dir local token plus this
 //                                  installation's raw public key exchange for
-//                                  a session token (auto-enrollment)
+//                                  a session token (auto-enrollment) — OR,
+//                                  when the installation declares
+//                                  AGENT_ROOM_CONNECTION_MODE=remote, the
+//                                  Story 4.1 challenge lane: POST
+//                                  /api/auth/challenge, sign the raw nonce
+//                                  with the installation keypair, POST
+//                                  /api/auth/answer (no local token is ever
+//                                  presented on the declared lane)
 //   POST /api/session            — bind the configured Chat ID with
 //                                  client_type 'mcp' (the closed-set bind)
 //
@@ -64,7 +71,7 @@ import {
   sharedDataDirectory,
   instanceDataDirectory,
 } from '../runtime.mjs'
-import { loadOrCreateKeypair } from '../keys.mjs'
+import { loadOrCreateKeypair, signWithInstallationKey } from '../keys.mjs'
 import { loadOrCreateLocalToken } from '../api/local-token.mjs'
 import { ensureServer, probeHealth } from './ensure-server.mjs'
 import { REMOTE_TRANSPORT } from './trust.mjs'
@@ -343,11 +350,12 @@ export function createAgentRoomClient({
   let sessionToken = null
   // The receiving installation's own connection mode (Story 3.2's trust
   // matrix input): how the LIVE session authenticated. The local token file
-  // exchange is the Local Mode path ('local'); the remote challenge path
-  // (Epic 4) will mark 'remote'. A declared remote mode (Story 3.5's
-  // AGENT_ROOM_CONNECTION_MODE seam) pins 'remote' for the client's lifetime
-  // — the matrix fail-closes toward hold, so an unauthenticated client (null,
-  // or a pre-auth declared client) never reads as local.
+  // exchange records 'local'; the remote challenge path (Story 4.1) records
+  // 'remote' — earned, only after its exchange succeeded. Before any
+  // authentication the declared mode (Story 3.5's AGENT_ROOM_CONNECTION_MODE
+  // seam) pins 'remote' — the matrix fail-closes toward hold, so an
+  // unauthenticated client (null, or a pre-auth declared client) never reads
+  // as local.
   let transportMode = connectionMode ?? null
   let needsReresolve = false
   let ensurePromise = null
@@ -370,12 +378,77 @@ export function createAgentRoomClient({
     }
   }
 
-  // The credential exchange plus bind: one session for this client process.
-  // The session token is committed ONLY after the bind succeeds — a failed
-  // bind (a live name collision, for instance) clears any held token and
-  // surfaces the bind's real coded cause, so the next call re-authenticates
-  // from scratch instead of riding a token that was never bound.
+  // The bind both issuance paths share: one session for this client process,
+  // bound with the closed-set MCP client type. The session token is committed
+  // ONLY after the bind succeeds — a failed bind (a live name collision, for
+  // instance) clears any held token and surfaces the bind's real coded cause,
+  // so the next call re-authenticates from scratch instead of riding a token
+  // that was never bound. The raw path (not request()): authenticate runs
+  // before/inside the ensure step, so routing through request() would await
+  // the very ensure it is part of.
+  async function bindWithToken(token) {
+    try {
+      const bind = await rawRequest('POST', '/api/session', {
+        body: { chat_id: config.chatId, client_type: MCP_CLIENT_TYPE },
+        bearer: token,
+      })
+      sessionToken = token
+      return bind
+    } catch (error) {
+      sessionToken = null
+      throw error
+    }
+  }
+
+  // The credential exchange plus bind. The installation's DECLARED connection
+  // mode (Story 3.5's seam) is the auth-path switch (Story 4.1): a declared
+  // remote installation runs the challenge lane — challenge, sign the raw
+  // nonce with this installation's own keypair, answer — and NEVER touches
+  // the local token file, because the declaration means exactly that the
+  // OS-user boundary is not this installation's own; presenting the shared
+  // token would contradict the declaration and silently widen the
+  // credential's reach. There is no fallback: a coded challenge-path failure
+  // (not_enrolled, challenge_invalid) surfaces as-is and the next call
+  // re-authenticates. The undeclared default keeps the local exchange
+  // byte-for-byte.
   async function authenticate() {
+    if (connectionMode === REMOTE_TRANSPORT) {
+      const challenge = await httpRequest({
+        port,
+        method: 'POST',
+        path: '/api/auth/challenge',
+        headers: protocolHeaders(),
+        body: JSON.stringify({ public_key: keypair.publicKey.toString('base64url') }),
+        timeoutMs: requestTimeoutMs,
+      })
+      assertCoded(challenge)
+      const nonce = challenge.body?.result?.nonce
+      if (typeof nonce !== 'string' || nonce.length === 0) {
+        throw new AgentRoomRuntimeError('request_failed', 'agent-room challenge returned no nonce')
+      }
+      // Sign the RAW nonce bytes — the 32 decoded random bytes — with this
+      // installation's private key; only the signature travels. Identity
+      // binds at challenge time: the answer carries no key field, so the
+      // server verifies against the key the nonce was issued to.
+      const signature = signWithInstallationKey(pluginDataDir, Buffer.from(nonce, 'base64url')).toString('base64url')
+      const answer = await httpRequest({
+        port,
+        method: 'POST',
+        path: '/api/auth/answer',
+        headers: protocolHeaders(),
+        body: JSON.stringify({ nonce, signature }),
+        timeoutMs: requestTimeoutMs,
+      })
+      assertCoded(answer)
+      // The transport mark is EARNED here: recorded only after the challenge
+      // exchange succeeded, never before and never by declaration alone.
+      transportMode = REMOTE_TRANSPORT
+      const token = answer.body?.result?.session_token
+      if (typeof token !== 'string' || token.length === 0) {
+        throw new AgentRoomRuntimeError('request_failed', 'agent-room challenge answer returned no session token')
+      }
+      return bindWithToken(token)
+    }
     const localToken = loadOrCreateLocalToken(dataDir)
     const exchange = await httpRequest({
       port,
@@ -389,30 +462,14 @@ export function createAgentRoomClient({
     // The credential that just authenticated this session is the shared data
     // dir's local token file — the Local Mode connection mode. Recorded for
     // the trust matrix: the messages this session receives came through the
-    // OS-user boundary that token file enforces. A declared remote mode
-    // (Story 3.5's seam) outranks the credential path: the installation has
-    // declared that its boundary is not the OS user, so the matrix keeps
-    // evaluating the remote lane.
-    transportMode = connectionMode ?? 'local'
+    // OS-user boundary that token file enforces. (A declared remote mode
+    // never reaches this branch — the challenge lane above owns it.)
+    transportMode = 'local'
     const token = exchange.body?.result?.session_token
     if (typeof token !== 'string' || token.length === 0) {
       throw new AgentRoomRuntimeError('request_failed', 'agent-room credential exchange returned no session token')
     }
-    // The bind declares the closed-set MCP client type; a live name collision
-    // surfaces coded (chat_id_taken) — never suffixed, never retried. The raw
-    // path (not request()): authenticate runs before/inside the ensure step,
-    // so routing through request() would await the very ensure it is part of.
-    try {
-      const bind = await rawRequest('POST', '/api/session', {
-        body: { chat_id: config.chatId, client_type: MCP_CLIENT_TYPE },
-        bearer: token,
-      })
-      sessionToken = token
-      return bind
-    } catch (error) {
-      sessionToken = null
-      throw error
-    }
+    return bindWithToken(token)
   }
 
   // One single-flight credential exchange + bind for the whole client: the
@@ -620,8 +677,8 @@ export function createAgentRoomClient({
     // This installation's own connection mode ('local' once the live session
     // authenticated through the local token path, null before any
     // authentication, 'remote' when declared via AGENT_ROOM_CONNECTION_MODE
-    // or — from Epic 4 — earned through the challenge path) — the trust
-    // matrix's transport input (Story 3.2).
+    // or — Story 4.1 — earned through the challenge-answer exchange) — the
+    // trust matrix's transport input (Story 3.2).
     get transport() { return transportMode },
 
     // GET /api/presence — who is addressable (optionally offline-recently).

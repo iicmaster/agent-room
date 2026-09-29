@@ -35,6 +35,20 @@ export const INVITE_MAX_USES = 1
 export const INVITE_TTL_SECONDS = 24 * 60 * 60
 export const SESSION_TTL_SECONDS = 12 * 60 * 60
 
+// Story 4.1: the remote challenge path's bounds (AD-5/AD-7). The nonce is 32
+// random bytes minted base64url (43 characters — AD-7 requires only ≥16, the
+// declared bound is stricter and stated once here); a pending challenge
+// expires CHALLENGE_NONCE_TTL_MS after issue and the pending set is capped at
+// CHALLENGE_NONCES_MAX with the session registry's sweep-then-evict
+// discipline. A presented signature longer than CHALLENGE_SIGNATURE_MAX_CHARS
+// can never be a valid Ed25519 signature (64 bytes → 86 base64url
+// characters) and is refused before any verify work, mirroring the session
+// token's presented-credential cap.
+export const CHALLENGE_NONCE_BYTES = 32
+export const CHALLENGE_NONCE_TTL_MS = 60_000
+export const CHALLENGE_NONCES_MAX = 1000
+export const CHALLENGE_SIGNATURE_MAX_CHARS = 256
+
 // Duplicate gate and reconnect backoff.
 export const DUPLICATE_WINDOW_MS = 5_000
 export const RECONNECT_BACKOFF_MIN_SECONDS = 1
@@ -128,6 +142,9 @@ export const PUBLIC_ERRORS = Object.freeze({
   ambiguous_chat_id: 'chat id is claimed by multiple actors; retry with one candidate fingerprint as target_fingerprint',
   chat_id_not_found: 'no actor has claimed this chat id',
   chat_id_taken: 'chat id is already claimed by another connected session',
+  // Story 4.1: the challenge nonce is missing, expired, already consumed, or
+  // evicted — the single code every no-longer-answerable challenge answers.
+  challenge_invalid: 'challenge nonce is invalid, expired, or already used',
   client_message_id_conflict: 'client_message_id was already used for different content',
   daemon_start_busy: 'another agent-room daemon start did not finish',
   daemon_start_failed: 'agent-room daemon did not become ready',
@@ -152,6 +169,9 @@ export const PUBLIC_ERRORS = Object.freeze({
   message_frame_too_large: 'message cannot fit the daemon frame',
   message_not_found: 'message was not found',
   node_version_unsupported: 'Node runtime is unsupported',
+  // Story 4.1: the answer route's enrollment gate — a key that holds no
+  // durable enrollment record can prove possession and still mint no session.
+  not_enrolled: 'this public key is not enrolled on this server',
   protocol_required: 'Agent-Room-Protocol header is required',
   reply_room_mismatch: 'reply target belongs to another room',
   request_cancelled: 'request was cancelled',
@@ -163,6 +183,9 @@ export const PUBLIC_ERRORS = Object.freeze({
   server_start_busy: 'another agent-room server start did not finish',
   server_start_failed: 'agent-room server did not become ready',
   server_start_lock_invalid: 'agent-room server start lock is not a bounded regular file',
+  // Story 4.1: the Ed25519 verification against the challenge-recorded key
+  // failed — identity binds at challenge time and cannot be substituted.
+  signature_invalid: 'signature verification failed',
   sqlite_version_unsupported: 'SQLite runtime is unsupported',
   unauthorized: 'session authentication is required',
   unknown_field: 'request contains an unknown field',
@@ -189,12 +212,19 @@ export const PUBLIC_ERRORS = Object.freeze({
 // (invalid_wait_ms — the hold bound is READ_HOLD_MAX_MS), and a name claimed
 // by several Actors is a conflicted state answered 409 (ambiguous_chat_id)
 // that carries the candidates list in the error envelope for
-// target_fingerprint disambiguation. Declared once here — never per-route.
+// target_fingerprint disambiguation. Story 4.1 additions: a challenge nonce
+// that is missing, expired, already consumed, or evicted is a
+// credential-class failure answered 401 (challenge_invalid), a failed Ed25519
+// verification against the challenge-recorded key is answered 401
+// (signature_invalid), and a key with no durable enrollment record is
+// answered 403 (not_enrolled — the answer route's gate, even with a proven
+// signature). Declared once here — never per-route.
 export const PUBLIC_ERROR_STATUS = Object.freeze({
   actor_not_member: 403,
   ambiguous_chat_id: 409,
   chat_id_not_found: 404,
   chat_id_taken: 409,
+  challenge_invalid: 401,
   client_message_id_conflict: 409,
   daemon_start_busy: 503,
   daemon_start_failed: 500,
@@ -219,6 +249,7 @@ export const PUBLIC_ERROR_STATUS = Object.freeze({
   message_frame_too_large: 400,
   message_not_found: 404,
   node_version_unsupported: 500,
+  not_enrolled: 403,
   protocol_required: 400,
   reply_room_mismatch: 400,
   request_cancelled: 400,
@@ -230,6 +261,7 @@ export const PUBLIC_ERROR_STATUS = Object.freeze({
   server_start_busy: 503,
   server_start_failed: 500,
   server_start_lock_invalid: 500,
+  signature_invalid: 401,
   sqlite_version_unsupported: 500,
   unauthorized: 401,
   unknown_field: 400,

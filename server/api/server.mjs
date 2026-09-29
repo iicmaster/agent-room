@@ -15,7 +15,16 @@
 // Story 1.4 local credential path — POST /api/auth/local exchanges the
 // shared-data-dir local token (Bearer) plus the installation's public key
 // (Local Mode auto-enrollment, additive AD-8 amendment) for a session bound
-// to that key's fingerprint; the Story 1.5 session connect surface —
+// to that key's fingerprint — which, since Story 4.1, also records the
+// presented key's fingerprint in the durable enrolled_actors registry; the
+// Story 4.1 remote credential path — POST /api/auth/challenge issues a
+// single-use nonce bound to the presented raw key (open to any well-formed
+// key: Story 4.2's invite enrollment is itself a challenge-response
+// consumer), and POST /api/auth/answer consumes the nonce before verifying
+// (a failed answer burns it), verifies the Ed25519 signature against the
+// challenge-recorded key, gates on the enrollment record, and issues a
+// session token from the SAME registry the local path issues from; the
+// Story 1.5 session connect surface —
 // POST/PATCH/DELETE /api/session bind, rename, and release the session's
 // Chat ID against the live-session registry (server/core/session-registry.mjs)
 // and the durable chat_id_claims index in the store; the Story 1.6
@@ -51,11 +60,12 @@
 // (touch with the 1.5 persist pattern on every authenticated request) — no
 // dedicated heartbeat surface exists server-side; the 60 s client heartbeat
 // cadence belongs to the Story 1.7 adapter and is only a constant here. The
-// sliding 12 h session TTL is provisional per DR-2 (ratified at Story 4.1).
+// sliding 12 h session TTL stands as declared — ratified at Story 4.1 (DR-2
+// resolved; see the spine's AD-5 amendment and Open Question 1).
 // The actor-class auth stage runs the real session verifier from session.mjs
 // (the 1.3 reject-all default remains only as the pipeline's structural
-// fallback). Every other frozen AD-8 route stays unregistered (404
-// route_not_found behind the gates).
+// fallback). The only frozen AD-8 route still unregistered is POST
+// /api/auth/enroll — Story 4.2's (404 route_not_found behind the gates).
 
 import { createServer } from 'node:http'
 import { timingSafeEqual } from 'node:crypto'
@@ -71,6 +81,7 @@ import {
   sharedDataDirectory,
 } from '../runtime.mjs'
 import {
+  CHALLENGE_SIGNATURE_MAX_CHARS,
   CHAT_ID_INVALID_MESSAGE,
   CLAIMS_TTL_MS,
   CLIENT_TYPES,
@@ -90,7 +101,7 @@ import { openRoomLog } from '../store/room-log.mjs'
 import { migrateV1InPlace } from '../store/migrate-v1.mjs'
 import { bootstrapRealm } from '../core/realm.mjs'
 import { createLiveSessionRegistry } from '../core/session-registry.mjs'
-import { fingerprintFromPublicKey } from '../keys.mjs'
+import { fingerprintFromPublicKey, verifyWithRawPublicKey } from '../keys.mjs'
 import { ROUTE_TABLE, matchRoute, routeKey as routeKeyOf } from './routes.mjs'
 import {
   ProtocolStage,
@@ -101,6 +112,7 @@ import {
   runPipeline,
 } from './pipeline.mjs'
 import { bearerTokenFromHeaders, createSessionRegistry, createSessionVerifier } from './session.mjs'
+import { createChallengeRegistry } from './challenge.mjs'
 import { readLocalToken } from './local-token.mjs'
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1'])
@@ -117,6 +129,15 @@ const REGISTERED_HANDLERS = new Map()
 // OS user. startServer({sessionRegistry}) overrides it so an injected
 // verifier and its registry stay one coherent pair.
 const SESSION_REGISTRY = createSessionRegistry()
+
+// Story 4.1: one challenge registry per server process, mirroring the session
+// registry's default-plus-override pattern. Both issuance paths — local and
+// challenge — issue into the SAME session registry (AD-5: one mechanism, two
+// paths); this registry holds only the pending nonces. In-memory by design —
+// a restart invalidates every outstanding challenge while the durable
+// enrollment record survives. startServer({challengeRegistry}) overrides it
+// so tests can isolate each server instance.
+const CHALLENGE_REGISTRY = createChallengeRegistry()
 
 // Story 1.5: one live Chat ID registry per server process, mirroring the
 // session registry's default-plus-override pattern. Ephemeral by design — a
@@ -141,8 +162,10 @@ function credentialsMatch(presented, expected) {
 // The installation's public key arrives as 32 raw bytes base64url-encoded —
 // exactly the 43-character unpadded form. Shape only: presentation is NOT
 // possession proof on the local path (no signature check under the OS-user
-// boundary; challenge-response is Epic 4's remote path). Anything else is a
-// request-shape rejection.
+// boundary; possession is the challenge path's guarantee, Story 4.1). The
+// same gate is the challenge route's key-shape check — issuing a nonce to a
+// well-formed key is privilegeless. Anything else is a request-shape
+// rejection.
 function rawInstallationPublicKey(value) {
   if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(value)) return null
   const raw = Buffer.from(value, 'base64url')
@@ -197,6 +220,15 @@ registerHandler('GET /health', function health() {
 // and the constant-time token compare succeed. The auth stage passes pre-auth
 // requests through, so this handler performs the one credential check it
 // exists for.
+//
+// Story 4.1: the success path also records the presented key's fingerprint in
+// the durable enrolled_actors registry — the record the challenge-answer
+// route gates on. Zero wire change, zero new privilege: the local exchange
+// already admitted the key under the OS-user boundary, and recording it turns
+// that implicit fact into the durable registration reconnects re-prove
+// against without re-enrolling (FR-3/FR-12; the INSERT ... DO NOTHING write
+// keeps the first registration's timestamp). A rejected exchange still
+// writes nothing.
 registerHandler('POST /api/auth/local', function localAuth(context) {
   const presented = bearerTokenFromHeaders(context.headers)
   if (presented === null) return reject('unauthorized')
@@ -206,9 +238,72 @@ registerHandler('POST /api/auth/local', function localAuth(context) {
   }
   const localToken = readLocalToken(context.dataDir)
   if (!credentialsMatch(presented, localToken)) return reject('unauthorized')
+  const fingerprint = fingerprintFromPublicKey(publicKey)
+  context.store.enrollActor({ actorFingerprint: fingerprint, enrolledAt: new Date().toISOString() })
   const registry = context.sessionRegistry ?? SESSION_REGISTRY
-  const sessionToken = registry.issue(fingerprintFromPublicKey(publicKey))
+  const sessionToken = registry.issue(fingerprint)
   return { session_token: sessionToken }
+})
+
+// Story 4.1 remote credential path (pre-auth class), the challenge half: a
+// fresh single-use nonce bound to the presented raw key. Issuing a nonce is
+// privilegeless — a random value bound to a key shape — so this route stays
+// OPEN to any well-formed 32-byte public key, including keys no one has
+// enrolled yet: Story 4.2's invite-gated enrollment is itself a
+// challenge-response consumer (AD-5's "reconnects re-prove it" needs a
+// possession-proof primitive that works for not-yet-enrolled keys). Minting
+// a session is the privilege, and that is exactly where the answer route's
+// enrollment gate sits. Shape only, same gate the local path uses; zero
+// state change on rejection.
+registerHandler('POST /api/auth/challenge', function challenge(context) {
+  const publicKey = rawInstallationPublicKey(context.body?.public_key)
+  if (publicKey === null) {
+    return reject('invalid_request', 'public_key is required: the raw 32-byte Ed25519 public key as base64url')
+  }
+  const registry = context.challengeRegistry ?? CHALLENGE_REGISTRY
+  return { nonce: registry.issue(publicKey) }
+})
+
+// Story 4.1 remote credential path (pre-auth class), the answer half: spend
+// the nonce, verify possession against the CHALLENGE-RECORDED key (never a
+// request field — the frozen field set carries no public_key to substitute
+// with, so identity binds at challenge time), gate on the durable enrollment
+// record, and only then issue a session from the SAME registry the local
+// path issues from (AD-5: one session mechanism, two issuance paths — same
+// sliding TTL, capacity, and revocation).
+//
+// The nonce is consumed BEFORE the signature is verified: the first answer
+// attempt kills it whatever its outcome, so a failed answer cannot absorb
+// signature guesses against one challenge and a replayed answer finds an
+// empty slot. Every rejection here is zero-state: no session, no enrollment
+// touch, no nonce resurrection.
+registerHandler('POST /api/auth/answer', function answerChallenge(context) {
+  const nonce = context.body?.nonce
+  if (nonce === undefined || nonce === null || nonce === '') {
+    return reject('invalid_request', 'nonce is required: the challenge nonce as issued')
+  }
+  if (typeof nonce !== 'string') {
+    return reject('invalid_request', 'nonce must be a string')
+  }
+  const signature = context.body?.signature
+  if (signature === undefined || signature === null || signature === '') {
+    return reject('invalid_request', 'signature is required: the Ed25519 signature over the raw nonce bytes as base64url')
+  }
+  if (typeof signature !== 'string' || signature.length > CHALLENGE_SIGNATURE_MAX_CHARS) {
+    return reject('invalid_request', `signature must be a base64url string of at most ${CHALLENGE_SIGNATURE_MAX_CHARS} characters`)
+  }
+  const registry = context.challengeRegistry ?? CHALLENGE_REGISTRY
+  const rawKey = registry.consume(nonce)
+  if (rawKey === null) return reject('challenge_invalid')
+  // Verify over the raw nonce bytes — the decoded 32 random bytes the nonce
+  // string carries — against the key the challenge was issued to.
+  if (!verifyWithRawPublicKey(rawKey, Buffer.from(nonce, 'base64url'), Buffer.from(signature, 'base64url'))) {
+    return reject('signature_invalid')
+  }
+  const fingerprint = fingerprintFromPublicKey(rawKey)
+  if (!context.store.isActorEnrolled(fingerprint)) return reject('not_enrolled')
+  const sessionRegistry = context.sessionRegistry ?? SESSION_REGISTRY
+  return { session_token: sessionRegistry.issue(fingerprint) }
 })
 
 // Story 1.5 session connect surface. The auth stage has already resolved the
@@ -654,6 +749,7 @@ async function handleRequest(request, response, options) {
     dataDir: options.dataDir,
     sessionRegistry: options.sessionRegistry,
     liveSessionRegistry: options.liveSessionRegistry,
+    challengeRegistry: options.challengeRegistry,
     store: options.store,
   }
 
@@ -722,6 +818,7 @@ export async function startServer({
   viewerVerifier,
   sessionRegistry,
   liveSessionRegistry,
+  challengeRegistry,
   claimsTtlMs = CLAIMS_TTL_MS,
   pruneIntervalMs,
   pruneClaims,
@@ -769,6 +866,15 @@ export async function startServer({
       'liveSessionRegistry must be a live-session registry (claim/release/rename/touch/lookup/presenceSnapshot/clear) when provided',
     )
   }
+  if (challengeRegistry !== undefined
+    && (typeof challengeRegistry !== 'object' || challengeRegistry === null
+      || typeof challengeRegistry.issue !== 'function'
+      || typeof challengeRegistry.consume !== 'function')) {
+    throw new AgentRoomRuntimeError(
+      'invalid_argument',
+      'challengeRegistry must be a challenge registry (issue/consume) when provided',
+    )
+  }
   if (!Number.isSafeInteger(claimsTtlMs) || claimsTtlMs <= 0) {
     throw new AgentRoomRuntimeError('invalid_argument', 'claimsTtlMs must be a positive safe integer')
   }
@@ -802,6 +908,10 @@ export async function startServer({
   // Story 1.6: the process-default live registry receives the operator-tuned
   // presence TTL; an injected registry is the caller's to configure.
   const effectiveLiveRegistry = liveSessionRegistry ?? createLiveSessionRegistry({ presenceTtlMs })
+  // Story 4.1: the challenge nonces follow the same default-plus-override
+  // pattern; issuance into the session registry always resolves through the
+  // effective one so an injected pair stays coherent.
+  const effectiveChallengeRegistry = challengeRegistry ?? CHALLENGE_REGISTRY
 
   // Story 2.3 (AR-4): the one-time v0.1→v0.2 migration is a startup step.
   // A v0.1 data file is migrated in place here — absorb-or-stop the live
@@ -887,6 +997,7 @@ export async function startServer({
         dataDir,
         sessionRegistry: effectiveRegistry,
         liveSessionRegistry: effectiveLiveRegistry,
+        challengeRegistry: effectiveChallengeRegistry,
         store,
       }).catch(() => {
         response.destroy()

@@ -53,6 +53,7 @@ import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { once } from 'node:events'
+import http from 'node:http'
 import { PassThrough } from 'node:stream'
 import { generateKeyPairSync } from 'node:crypto'
 import { tmpdir } from 'node:os'
@@ -63,6 +64,7 @@ import test from 'node:test'
 
 import { HELD_CACHE_MAX, READ_PAGE_MAX } from '../../server/constants.mjs'
 import { atomicWriteJson } from '../../server/runtime.mjs'
+import { loadOrCreateLocalToken } from '../../server/api/local-token.mjs'
 import { main } from '../../server/cli/agent-room.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
@@ -128,7 +130,7 @@ const HELD_METADATA_KEYS = [
 
 // --- Harness: real server child, two real MCP children, in-process CLI -------------
 
-function makeWorld(t, { chatIds }) {
+function makeWorld(t, { chatIds, preenroll = [] }) {
   const parent = mkdtempSync(join(tmpdir(), 'agent-room-trust-chain-'))
   t.after(() => rmSync(parent, { recursive: true, force: true }))
   const sharedData = join(parent, 'shared')
@@ -142,7 +144,23 @@ function makeWorld(t, { chatIds }) {
     atomicWriteJson(configPath, { chat_id: chatId })
     assert.equal(statSync(pluginData).mode & 0o777, 0o700, `${key}: PLUGIN_DATA is 0700`)
     assert.equal(statSync(configPath).mode & 0o777, 0o600, `${key}: config.json is 0600`)
-    installations[key] = { pluginData, configPath, chatId }
+    let publicKey = null
+    // Story 4.1: a declared-remote installation authenticates through the
+    // challenge lane, so its key must hold the durable enrollment record
+    // BEFORE the child runs. The harness births that installation's keypair
+    // here (the exact file the child's loadOrCreateKeypair then loads) and
+    // the drill enrolls it once through the shipped local exchange after the
+    // server is ready — the same reconnection story any real remote
+    // installation has: enrolled once, re-proving since. The child's client
+    // never presents the local token.
+    if (preenroll.includes(key)) {
+      const { privateKey, publicKey: spki } = generateKeyPairSync('ed25519')
+      const keyPath = join(pluginData, 'identity.key')
+      writeFileSync(keyPath, privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 })
+      assert.equal(statSync(keyPath).mode & 0o777, 0o600, `${key}: identity.key is 0600`)
+      publicKey = spki.export({ type: 'spki', format: 'der' }).subarray(-32).toString('base64url')
+    }
+    installations[key] = { pluginData, configPath, chatId, publicKey }
   }
 
   const runtimePath = join(sharedData, RUNTIME_RECORD_FILENAME)
@@ -350,11 +368,62 @@ function messageRows(databasePath, roomId) {
   }
 }
 
+// The shipped enrollment path (Story 4.1): one real POST /api/auth/local
+// exchange — the shared data dir's local token plus the installation's
+// pre-generated public key — records the durable enrollment the challenge
+// lane's answer gate reads. Used once per preenrolled installation before
+// its declared-remote child starts; the child itself never presents the
+// local token.
+function enrollThroughLocalExchange(port, sharedData, publicKeyBase64url) {
+  const localToken = loadOrCreateLocalToken(sharedData)
+  const body = JSON.stringify({ public_key: publicKeyBase64url })
+  return new Promise((resolvePromise, rejectPromise) => {
+    const request = http.request(
+      {
+        host: '127.0.0.1',
+        port,
+        method: 'POST',
+        path: '/api/auth/local',
+        headers: {
+          'agent-room-protocol': '1',
+          authorization: `Bearer ${localToken}`,
+          'content-type': 'application/json; charset=utf-8',
+          'content-length': Buffer.byteLength(body),
+        },
+        agent: false,
+      },
+      response => {
+        const chunks = []
+        response.on('data', chunk => chunks.push(chunk))
+        response.on('error', rejectPromise)
+        response.on('end', () => {
+          const text = Buffer.concat(chunks).toString('utf8')
+          if (response.statusCode !== 200) {
+            rejectPromise(new Error(`local enrollment exchange answered ${response.statusCode}: ${text}`))
+            return
+          }
+          resolvePromise(JSON.parse(text))
+        })
+      },
+    )
+    request.on('error', rejectPromise)
+    request.write(body)
+    request.end()
+  })
+}
+
 // --- The chain ----------------------------------------------------------------------
 
 test('trust chain end-to-end: stranger hold with zero body bytes, cursor persistence past the held seq, evicted-body recovery byte-matching the durable log, allow release, --remove re-hold, and monotonic cursors', async t => {
-  const world = makeWorld(t, { chatIds: { local: 'Local', foreign: 'Stranger' } })
+  const world = makeWorld(t, { chatIds: { local: 'Local', foreign: 'Stranger' }, preenroll: ['local'] })
   const record = await world.waitReady()
+
+  // Story 4.1: the declared-remote receiver's key enrolls ONCE through the
+  // shipped local exchange (above), so the challenge lane its child now runs
+  // answers with a session instead of not_enrolled. The drill's matrix
+  // outcomes are unchanged — only the credential discipline of the seam
+  // changed with the story that earned it.
+  await enrollThroughLocalExchange(record.port, world.sharedData, world.installations.local.publicKey)
 
   const local = startMcpChild(t, {
     label: 'local',

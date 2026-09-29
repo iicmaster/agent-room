@@ -717,3 +717,92 @@
     evidence:
       - test: "trust chain end-to-end: stranger hold with zero body bytes, cursor persistence past the held seq, evicted-body recovery byte-matching the durable log, allow release, --remove re-hold, and monotonic cursors"
         file: "tests/integration/trust-chain.test.mjs"
+
+# --- Epic 4 (The Wider Room) -----------------------------------------------------
+# Running: 4.1 is evidenced; the sweep fails loudly on every story below until
+# each one carries real evidence — the intended state while the epic runs.
+
+  4.1:                       # Remote challenge authentication (4 criteria)
+    note: >-
+      Proves the remote half of AD-5's one-mechanism-two-paths split over real
+      spawned server children, the real api-client, and an injectable clock.
+      AC-1 (challenge/answer): POST /api/auth/challenge issues a fresh
+      single-use nonce of exactly CHALLENGE_NONCE_BYTES (32) random bytes —
+      two challenges for one key differ — open to any well-formed key
+      including unenrolled ones (Story 4.2's enrollment is a challenge-
+      response consumer), with non-32-byte/non-base64url keys refused 400
+      invalid_request naming the field; POST /api/auth/answer consumes the
+      nonce FIRST (a wrong signature burns it — the follow-up correct
+      signature finds an empty slot, no grinding), verifies the Ed25519
+      signature against the CHALLENGE-RECORDED key (a foreign key signing the
+      same nonce answers 401 signature_invalid — the frozen field set carries
+      no public_key to substitute), gates on the durable enrolled_actors
+      STRICT table (an unenrolled key: challenge 200, answer 403
+      not_enrolled, zero state), and issues a session token from the SAME
+      registry as the local path — identical sliding TTL (expiry = last use +
+      SESSION_TTL_MS under the clock), identical revoke, shared capacity
+      (a 4th issue across mixed paths evicts the oldest regardless of issuing
+      path); DR-2 is ratified as declared, SESSION_TTL_SECONDS untouched. AC-2
+      (capture/replay + key hygiene): the exact captured answer replayed
+      answers 401 challenge_invalid with no second token and byte-identical
+      store/token/record state; expiry at the 60 s bound (CHALLENGE_NONCE_TTL_MS
+      imported by name) and CHALLENGE_NONCES_MAX eviction (oldest-pending,
+      sweep-then-evict) are proven at the registry under the clock; the
+      private key never travels — counted scans over every captured request
+      and response body (direct HTTP and the real api-client via an
+      observation seam over node:http), every spawned server's stderr, and
+      the tool-path coded errors: zero occurrences of the PEM markers and of
+      every base64 line of every installation's real key file, and only the
+      four frozen fields (public_key, nonce, signature, session_token) ever
+      ride the auth wire. Enrollment seeds durably from the local lane's
+      success path (first timestamp sticks on re-presentation; a rejected
+      exchange writes nothing) and survives a restart while outstanding
+      nonces die with the process. AC-3 (deletion): a wiped PLUGIN_DATA with
+      a fresh keypair is not enrolled (403) and, once re-enrolled, lists only
+      the Broadcast Room — no inherited DMs, no realms/ trust state, exactly
+      one 0600 keypair. AC-4 (NFR-3 mirrored): actor_fingerprint on
+      POST /api/session, sender_fingerprint on the send route, and
+      public_key on POST /api/auth/answer are each 400 unknown_field; the
+      send route still refuses a mismatched chat_id, and the smuggled answer
+      is refused before the nonce is even consumed. Row 10 proves the first
+      production use of the remote lane: declared-remote clients (both the
+      env seam and the connectionMode option) authenticate through
+      challenge-answer only — zero /api/auth/local requests carrying their
+      keys in the captured phase — earn transport 'remote', bind/send/read,
+      exchange DMs with a local-lane installation whose own exchange is
+      byte-identical, and an unenrolled declared client surfaces the coded
+      not_enrolled AgentRoomRuntimeError with never a fallback. Does NOT
+      prove a literal cross-machine wire (the challenge lane still runs over
+      the loopback ensureServer path — Story 4.3 owns configured URLs and
+      transport policy), invite-gated enrollment (Story 4.2 — POST
+      /api/auth/enroll stays 404-unregistered), rate limiting (Story 4.4),
+      or any persuasion-resistance property.
+    evidence:
+      - test: "POST /api/auth/challenge issues a fresh single-use nonce; shape rejections change no state (row 1)"
+        file: "tests/challenge-auth.test.mjs"
+      - test: "POST /api/auth/answer commits a session for an enrolled key into the SAME registry (row 2)"
+        file: "tests/challenge-auth.test.mjs"
+      - test: "a replayed answer yields no second token and zero state; a failed answer burns the nonce (rows 3 and 6)"
+        file: "tests/challenge-auth.test.mjs"
+      - test: "identity binds at challenge: a foreign key signing the same nonce is refused (row 4)"
+        file: "tests/challenge-auth.test.mjs"
+      - test: "challenge expiry lands at the declared 60 s bound and sweeps lazily (row 5)"
+        file: "tests/challenge-auth.test.mjs"
+      - test: "an unenrolled key is admitted at challenge and gated at answer (row 7)"
+        file: "tests/challenge-auth.test.mjs"
+      - test: "enrollment seeds durably from the local lane and survives a restart while nonces do not (row 8)"
+        file: "tests/challenge-auth.test.mjs"
+      - test: "the pending set is bounded: oldest-pending eviction at capacity (row 9)"
+        file: "tests/challenge-auth.test.mjs"
+      - test: "one mechanism, two issuance paths: sliding TTL, capacity, and revoke behave identically (row 14, DR-2 ratified)"
+        file: "tests/challenge-auth.test.mjs"
+      - test: "the declared-remote client runs the challenge lane end to end; the local lane is byte-identical (row 10)"
+        file: "tests/challenge-auth.test.mjs"
+      - test: "the private key never travels: counted scans of every captured body and every server stderr line (row 11)"
+        file: "tests/challenge-auth.test.mjs"
+      - test: "plugin-data deletion creates a new, unrelated Actor with no inherited rooms or trust (row 12, FR-3)"
+        file: "tests/challenge-auth.test.mjs"
+      - test: "NFR-3 mirrored at the wire: no body field asserts sender authority (row 13)"
+        file: "tests/challenge-auth.test.mjs"
+      - test: "the keys helpers sign with the installation key and verify against a raw key"
+        file: "tests/challenge-auth.test.mjs"

@@ -257,6 +257,7 @@ test('every v0.1 public error code has an HTTP status declared once', () => {
   assert.deepEqual(codes, [
     'actor_not_member',
     'ambiguous_chat_id',
+    'challenge_invalid',
     'chat_id_not_found',
     'chat_id_taken',
     'client_message_id_conflict',
@@ -283,6 +284,7 @@ test('every v0.1 public error code has an HTTP status declared once', () => {
     'message_frame_too_large',
     'message_not_found',
     'node_version_unsupported',
+    'not_enrolled',
     'protocol_required',
     'reply_room_mismatch',
     'request_cancelled',
@@ -294,6 +296,7 @@ test('every v0.1 public error code has an HTTP status declared once', () => {
     'server_start_busy',
     'server_start_failed',
     'server_start_lock_invalid',
+    'signature_invalid',
     'sqlite_version_unsupported',
     'unauthorized',
     'unknown_field',
@@ -350,6 +353,12 @@ test('every v0.1 public error code has an HTTP status declared once', () => {
     server_start_busy: 503,
     server_start_failed: 500,
     server_start_lock_invalid: 500,
+    // Story 4.1: an unanswerable or spent nonce (401), a failed verification
+    // against the challenge-recorded key (401), and the answer route's
+    // enrollment gate (403 — even with a proven signature).
+    challenge_invalid: 401,
+    signature_invalid: 401,
+    not_enrolled: 403,
   }
   for (const [code, status] of Object.entries(expectedStatus)) {
     assert.equal(PUBLIC_ERROR_STATUS[code], status, code)

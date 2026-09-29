@@ -68,8 +68,15 @@ export const ROUTE_TABLE = Object.freeze([
   // pre-auth (AD-8): POST /api/auth/enroll · POST /api/auth/challenge ·
   // POST /api/auth/answer · POST /api/auth/local
   Object.freeze({ method: 'POST', path: '/api/auth/enroll', class: 'pre-auth', requestFields: Object.freeze(['invite_token']) }),
-  Object.freeze({ method: 'POST', path: '/api/auth/challenge', class: 'pre-auth', requestFields: Object.freeze(['public_key']) }),
-  Object.freeze({ method: 'POST', path: '/api/auth/answer', class: 'pre-auth', requestFields: Object.freeze(['nonce', 'signature']) }),
+  // Story 4.1: the remote credential path's pair is live (handlers in
+  // server.mjs). The challenge stays OPEN to any well-formed 32-byte public
+  // key — issuing a nonce is privilegeless, and Story 4.2's invite
+  // enrollment is itself a challenge-response consumer — while the answer is
+  // GATED on the durable enrolled_actors record. Identity binds at challenge
+  // time: the answer's frozen field set carries no public_key, so the
+  // signature always verifies against the key the nonce was issued to.
+  Object.freeze({ method: 'POST', path: '/api/auth/challenge', class: 'pre-auth', implemented: true, requestFields: Object.freeze(['public_key']) }),
+  Object.freeze({ method: 'POST', path: '/api/auth/answer', class: 'pre-auth', implemented: true, requestFields: Object.freeze(['nonce', 'signature']) }),
   // Story 1.4: the local credential path is live (issuer/verifier wiring in
   // server.mjs). `implemented` marks registration status for the frozen
   // table's readers; unmarked routes stay unregistered until their stories.
@@ -103,9 +110,11 @@ export const ROUTE_TABLE = Object.freeze([
 // presence row fields chat_id and client_type to the responses, and the
 // Story 1.7 amendment adds candidates to the responses (the optional
 // candidate list the ambiguous_chat_id error carries for target_fingerprint
-// disambiguation — never a guess), and the Story 2.2 amendment adds rooms
+// disambiguation — never a guess), the Story 2.2 amendment adds rooms
 // (the enumeration list GET /api/rooms returns — one row per room the reading
-// Actor belongs to, each carrying the room id and kind).
+// Actor belongs to, each carrying the room id and kind), and the Story 4.1
+// amendment adds nonce (the single-use challenge nonce POST /api/auth/challenge
+// issues and POST /api/auth/answer spends — see the spine's dated amendment).
 export const REQUEST_FIELD_VOCABULARY = Object.freeze([
   'chat_id',
   'client_message_id',
@@ -145,6 +154,7 @@ export const RESPONSE_FIELD_VOCABULARY = Object.freeze([
   'client_type',
   'candidates',
   'rooms',
+  'nonce',
 ])
 
 // Matching: specific patterns first, wildcard (`/viewer/` + static assets)

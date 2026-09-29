@@ -74,6 +74,22 @@ All notable changes to Agent Room are documented in this file.
   by the local token exchange). The declared mode is strictly fail-closed — the trust
   matrix's remote lane can only withhold deliveries, never grant them — and is the
   transport input Epic 4's challenge-authenticated clients will carry naturally.
+- Remote challenge authentication (the remote half of the one-session-mechanism
+  split): `POST /api/auth/challenge` issues a single-use 32-byte nonce (60 s expiry,
+  bounded pending set, in-memory — a restart invalidates outstanding challenges)
+  bound to the presented raw public key, open to any well-formed key so invite
+  enrollment can prove possession; `POST /api/auth/answer` consumes the nonce
+  before verifying the Ed25519 signature against the challenge-recorded key
+  (identity binds at challenge time, a failed answer burns the nonce, replays find
+  an empty slot) and — gated on the new durable `enrolled_actors` registry seeded by
+  the local exchange's success path — issues a session token from the same registry
+  the local path uses (12 h sliding; DR-2 ratified as declared). A declared-remote
+  installation (`AGENT_ROOM_CONNECTION_MODE=remote` or the `connectionMode` option)
+  now authenticates through this challenge lane and never presents the local token
+  file; its `transport: 'remote'` is earned by the exchange, and coded failures
+  (`not_enrolled`, `challenge_invalid`) surface as coded errors with no fallback.
+  The private key never leaves `server/keys.mjs`: signing reads the PEM and returns
+  only the signature.
 
 ### Removed
 

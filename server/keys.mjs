@@ -18,6 +18,8 @@ import {
   createPublicKey,
   generateKeyPairSync,
   randomUUID,
+  sign as cryptoSign,
+  verify as cryptoVerify,
 } from 'node:crypto'
 import { join } from 'node:path'
 
@@ -168,4 +170,54 @@ export function loadOrCreateKeypair(pluginDataDir) {
     // disk is the single authoritative keypair for the installation.
   }
   return readKeypair(path)
+}
+
+// The fixed 12-byte SPKI DER prefix of an Ed25519 SubjectPublicKeyInfo —
+// the exact bytes rawPublicKeyFrom strips when it takes the trailing 32
+// bytes. Prepending it to a raw key rebuilds the same DER encoding, which is
+// the whole construction of verifyWithRawPublicKey below.
+const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex')
+
+// Sign a payload with the installation's own keypair (Story 4.1's remote
+// challenge path). The private PEM is read INSIDE this module, the signing
+// happens INSIDE this module, and the only thing that leaves is the 64-byte
+// signature: no return value, log line, wire body, or tool result ever
+// carries key material (FR-3's first consequence). The keypair is
+// load-or-created like every other consumer, so a first sign on a fresh
+// installation births the identity exactly once.
+export function signWithInstallationKey(pluginDataDir, data) {
+  if (!(data instanceof Uint8Array) || data.length === 0) {
+    fail('agent-room signing requires a non-empty payload as a Buffer or Uint8Array')
+  }
+  loadOrCreateKeypair(pluginDataDir)
+  const pem = readPrivateKeyPem(join(ensurePrivateDirectory(pluginDataDir), KEYPAIR_FILENAME))
+  let privateKey
+  try {
+    privateKey = createPrivateKey(pem)
+  } catch {
+    fail('agent-room identity key file is not valid private key material')
+  }
+  if (privateKey.asymmetricKeyType !== 'ed25519') {
+    fail('agent-room identity key must be an Ed25519 private key')
+  }
+  return cryptoSign(null, Buffer.from(data), privateKey)
+}
+
+// Verify an Ed25519 signature against a RAW 32-byte public key — the exact
+// inverse of rawPublicKeyFrom: the raw bytes are wrapped back into their SPKI
+// DER encoding and handed to crypto.verify. Any malformed input — wrong key
+// length, wrong signature length, undecodable DER — is `false`, never a
+// throw: the challenge-answer route maps false to its coded rejection
+// without an internal-fault detour.
+export function verifyWithRawPublicKey(rawPublicKey, data, signature) {
+  try {
+    if (!(rawPublicKey instanceof Uint8Array) || rawPublicKey.length !== 32) return false
+    if (!(data instanceof Uint8Array) || data.length === 0) return false
+    if (!(signature instanceof Uint8Array) || signature.length !== 64) return false
+    const spkiDer = Buffer.concat([ED25519_SPKI_PREFIX, Buffer.from(rawPublicKey)])
+    const publicKey = createPublicKey({ key: spkiDer, format: 'der', type: 'spki' })
+    return cryptoVerify(null, Buffer.from(data), publicKey, Buffer.from(signature))
+  } catch {
+    return false
+  }
 }

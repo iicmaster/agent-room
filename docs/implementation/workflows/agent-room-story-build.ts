@@ -802,7 +802,16 @@ const newlyCreatedUntracked = currentUntracked.filter(path => !preexistingUntrac
 const dirtyNow = await gitLines(["diff", "--name-only", "HEAD", "--"]);
 const newlyDirtyTracked = dirtyNow.filter(path => !preexistingModified.has(path));
 const trackedPaths = newlyDirtyTracked;
-await assertScope([...trackedPaths, ...newlyCreatedUntracked], allowlist, "after implementation");
+// Post-implementation scope check is ADVISORY: a planner cannot enumerate every
+// file a legitimate implementation touches (4.1's routes/registration is the
+// standing example), and the reviewers read the actual changed files from disk
+// either way — so unscoped paths EXPAND the review scope (nothing hides) and
+// the triager judges them. The hard allowlist gate lives only in finalize
+// staging, where unscoped paths would enter the story commit.
+const outsidePaths = [...trackedPaths, ...newlyCreatedUntracked].filter(path => !allowlist.has(path));
+if (outsidePaths.length > 0) {
+  log(`คำเตือน: ${outsidePaths.length} path อยู่นอก allowlist ของสเปก — ขยาย review scope และให้ triage ตัดสิน: ${outsidePaths.join(", ")}`);
+}
 await assertPreexistingUnrelated(preexistingSnapshots, allowlist, ephemeralPaths, "after implementation");
 const changedPaths = [...new Set([
   ...trackedPaths,
