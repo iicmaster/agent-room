@@ -52,6 +52,13 @@ import {
   assertSupportedRuntime,
   ensurePrivateDirectory,
 } from '../runtime.mjs'
+import {
+  INVITE_CONSUMPTIONS_COLUMNS,
+  INVITES_COLUMNS,
+  createInviteOperations,
+  inviteConsumptionsTableDdl,
+  invitesTableDdl,
+} from './invites.mjs'
 
 export const ROOM_LOG_DATABASE_FILENAME = 'agent-room.sqlite'
 export const ROOM_LOG_SCHEMA_VERSION = 2
@@ -571,10 +578,10 @@ function verifyStrictTables(database) {
     SELECT name, strict
     FROM pragma_table_list
     WHERE schema = 'main'
-      AND name IN ('rooms', 'direct_members', 'messages', 'realms', 'chat_id_claims', 'enrolled_actors')
+      AND name IN ('rooms', 'direct_members', 'messages', 'realms', 'chat_id_claims', 'enrolled_actors', 'invites', 'invite_consumptions')
   `).all()
   const strictByName = new Map(strictTables.map(row => [row.name, Number(row.strict)]))
-  for (const name of ['rooms', 'direct_members', 'messages', 'realms', 'chat_id_claims', 'enrolled_actors']) {
+  for (const name of ['rooms', 'direct_members', 'messages', 'realms', 'chat_id_claims', 'enrolled_actors', 'invites', 'invite_consumptions']) {
     if (strictByName.get(name) !== 1) {
       fail('database_schema_invalid', `database table ${name} is missing or is not STRICT`)
     }
@@ -719,6 +726,31 @@ function verifyEnrolledActorsColumns(database) {
   }
 }
 
+// Story 4.2 (additive, no schema-version bump): the invites registry and its
+// consumption ledger join the schema through the same convergence pattern —
+// CREATE TABLE IF NOT EXISTS on every open, then the column-set verification,
+// so a foreign or drifted table is a coded schema failure at open. The DDL
+// and the operations live in ./invites.mjs; this store owns their wiring and
+// contributes its one transaction runner so consumption + enrollment commit
+// or roll back inside the store's single-writer discipline.
+function ensureInvitesTables(database) {
+  database.exec(invitesTableDdl({ ifNotExists: true }))
+  database.exec(inviteConsumptionsTableDdl({ ifNotExists: true }))
+}
+
+function verifyInvitesColumns(database, tableName, expectedColumns) {
+  const columns = database
+    .prepare(`SELECT name FROM pragma_table_info('${tableName}') ORDER BY cid`)
+    .all()
+    .map(row => row.name)
+  if (
+    columns.length !== expectedColumns.length
+    || expectedColumns.some((name, index) => columns[index] !== name)
+  ) {
+    fail('database_schema_invalid', `database table ${tableName} has a divergent column set`)
+  }
+}
+
 function plainMessage(row) {
   return {
     seq: Number(row.seq),
@@ -821,6 +853,9 @@ export function openRoomLog({ dataDir } = {}) {
       verifyChatIdClaimsIndex(database)
       ensureEnrolledActorsTable(database)
       verifyEnrolledActorsColumns(database)
+      ensureInvitesTables(database)
+      verifyInvitesColumns(database, 'invites', INVITES_COLUMNS)
+      verifyInvitesColumns(database, 'invite_consumptions', INVITE_CONSUMPTIONS_COLUMNS)
       verifyStrictTables(database)
 
       // Report the file's actual version, never the compiled constant.
@@ -871,6 +906,11 @@ export function openRoomLog({ dataDir } = {}) {
     const assertOpen = () => {
       if (closed) fail('store_connection_closed', 'agent-room store connection is closed')
     }
+
+    // Story 4.2: the invite registry's operations (./invites.mjs), wired
+    // with this store's transaction runner and guarded by this store's
+    // closed-connection discipline like every other api method.
+    const inviteOperations = createInviteOperations({ database, withImmediateTransaction })
 
     const api = {
       databasePath,
@@ -1438,6 +1478,31 @@ export function openRoomLog({ dataDir } = {}) {
           WHERE actor_fingerprint = ?
         `).get(validFingerprint)
         return Boolean(row)
+      },
+
+      // Story 4.2: the invite registry and the atomic invite-gated
+      // enrollment (mintInvite / listInvites / revokeInvite /
+      // enrollRemoteActor), owned by ./invites.mjs. Mint/revoke are the
+      // operator CLI's calls (AR-13, in process, no HTTP); enrollRemoteActor
+      // is the POST /api/auth/enroll route's single durable transaction.
+      mintInvite(...args) {
+        assertOpen()
+        return inviteOperations.mintInvite(...args)
+      },
+
+      listInvites(...args) {
+        assertOpen()
+        return inviteOperations.listInvites(...args)
+      },
+
+      revokeInvite(...args) {
+        assertOpen()
+        return inviteOperations.revokeInvite(...args)
+      },
+
+      enrollRemoteActor(...args) {
+        assertOpen()
+        return inviteOperations.enrollRemoteActor(...args)
       },
     }
     return Object.freeze(api)

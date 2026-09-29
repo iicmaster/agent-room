@@ -23,6 +23,12 @@ export const REQUEST_BUDGET_PER_MINUTE = 120
 export const REQUEST_BUDGET_BURST = 30
 export const ENROLLMENT_PER_MINUTE = 5
 export const ENROLLMENT_BURST = 5
+// Story 4.2: the fixed window the enroll route's minimal limiter counts over
+// — the "per minute" of ENROLLMENT_PER_MINUTE. The fixed window admits at
+// most ENROLLMENT_PER_MINUTE requests per client identity per window, which
+// for the ratified 5/min burst-5 pair realizes the declared burst exactly; a
+// future retune that splits the pair belongs to Story 4.4's budget stage.
+export const ENROLLMENT_WINDOW_MS = 60_000
 
 // Presence.
 export const PRESENCE_HEARTBEAT_SECONDS = 60
@@ -34,6 +40,26 @@ export const OFFLINE_RECENT_SECONDS = 24 * 60 * 60
 export const INVITE_MAX_USES = 1
 export const INVITE_TTL_SECONDS = 24 * 60 * 60
 export const SESSION_TTL_SECONDS = 12 * 60 * 60
+
+// Story 4.2: the invite token's shape (FR-14). A token is INVITE_TOKEN_PREFIX
+// plus exactly INVITE_TOKEN_CHARS base64url characters — the canonical
+// unpadded encoding of INVITE_TOKEN_BYTES (32) random bytes. Only the SHA-256
+// digest of those 32 bytes is ever persisted (server/store/invites.mjs); the
+// raw token is shown exactly once at mint and never appears in a listing, an
+// error, or a diagnostic. The pattern gates a presented token before any
+// digest work, declared once here beside the other identifier shapes.
+export const INVITE_TOKEN_PREFIX = 'ar_inv1_'
+export const INVITE_TOKEN_BYTES = 32
+export const INVITE_TOKEN_CHARS = 43
+export const INVITE_TOKEN_PATTERN = new RegExp(
+  `^${INVITE_TOKEN_PREFIX}[A-Za-z0-9_-]{${INVITE_TOKEN_CHARS}}$`,
+)
+// Story 4.2: the digest prefix an operator sees in `invite list` and types
+// into `invite revoke`. Twelve hex characters (48 bits of the stored SHA-256
+// digest) identify an invite without ever exposing a secret-shaped value; a
+// revoke argument below this length is a usage refusal, and a prefix matching
+// several invites is refused with the candidate prefixes — never a guess.
+export const INVITE_DIGEST_PREFIX_CHARS = 12
 
 // Story 4.1: the remote challenge path's bounds (AD-5/AD-7). The nonce is 32
 // random bytes minted base64url (43 characters — AD-7 requires only ≥16, the
@@ -178,6 +204,12 @@ export const PUBLIC_ERRORS = Object.freeze({
   invalid_text: 'message text is invalid',
   invalid_title: 'room title is invalid',
   invalid_wait_ms: 'wait_ms is invalid',
+  // Story 4.2: the invite gate — a well-formed token that is unknown,
+  // expired, or revoked; an invite whose uses are spent by other keys; and
+  // the operator's revoke-prefix miss.
+  invite_exhausted: 'invite has no uses remaining',
+  invite_invalid: 'invite token is unknown, expired, or revoked',
+  invite_not_found: 'no invite matches this digest prefix',
   local_token_invalid: 'agent-room local token is missing or invalid',
   message_frame_too_large: 'message cannot fit the daemon frame',
   message_not_found: 'message was not found',
@@ -186,6 +218,11 @@ export const PUBLIC_ERRORS = Object.freeze({
   // durable enrollment record can prove possession and still mint no session.
   not_enrolled: 'this public key is not enrolled on this server',
   protocol_required: 'Agent-Room-Protocol header is required',
+  // Story 4.2: the enroll route's admission refusal — the minimal fixed-
+  // window counter that paces POST /api/auth/enroll at ENROLLMENT_PER_MINUTE
+  // per client identity. The full request-budget policy (counting every
+  // route, per key) is Story 4.4's and extends from this code.
+  rate_limited: 'request rate limit exceeded',
   reply_room_mismatch: 'reply target belongs to another room',
   request_cancelled: 'request was cancelled',
   request_failed: 'agent-room request failed',
@@ -231,7 +268,15 @@ export const PUBLIC_ERRORS = Object.freeze({
 // verification against the challenge-recorded key is answered 401
 // (signature_invalid), and a key with no durable enrollment record is
 // answered 403 (not_enrolled — the answer route's gate, even with a proven
-// signature). Declared once here — never per-route.
+// signature). Story 4.2 additions: an unknown, expired, or revoked (but
+// well-formed) invite is a credential-class failure answered 403
+// (invite_invalid), an invite whose uses other keys spent is a conflicted
+// state answered 409 (invite_exhausted — the race loser's coded answer), a
+// revoke prefix matching no invite is a miss answered 404
+// (invite_not_found), and the enroll route's admission refusal is answered
+// 429 (rate_limited — the send-status code's HTTP face arrives here first;
+// Story 4.4's budget stage reuses the code per-route). Declared once here —
+// never per-route.
 export const PUBLIC_ERROR_STATUS = Object.freeze({
   actor_not_member: 403,
   ambiguous_chat_id: 409,
@@ -258,12 +303,16 @@ export const PUBLIC_ERROR_STATUS = Object.freeze({
   invalid_text: 400,
   invalid_title: 400,
   invalid_wait_ms: 400,
+  invite_exhausted: 409,
+  invite_invalid: 403,
+  invite_not_found: 404,
   local_token_invalid: 401,
   message_frame_too_large: 400,
   message_not_found: 404,
   node_version_unsupported: 500,
   not_enrolled: 403,
   protocol_required: 400,
+  rate_limited: 429,
   reply_room_mismatch: 400,
   request_cancelled: 400,
   request_failed: 500,

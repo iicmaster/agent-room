@@ -22,11 +22,17 @@ import {
   DUPLICATE_WINDOW_MS,
   ENROLLMENT_BURST,
   ENROLLMENT_PER_MINUTE,
+  ENROLLMENT_WINDOW_MS,
   FRAME_MAX_BYTES,
   HELD_CACHE_MAX,
   IDENTIFIER_MAX,
   INTERNAL_ERROR_CODES,
+  INVITE_DIGEST_PREFIX_CHARS,
   INVITE_MAX_USES,
+  INVITE_TOKEN_BYTES,
+  INVITE_TOKEN_CHARS,
+  INVITE_TOKEN_PATTERN,
+  INVITE_TOKEN_PREFIX,
   INVITE_TTL_SECONDS,
   KEYPAIR_FILE_MAX_BYTES,
   LOCAL_TOKEN_MAX_BYTES,
@@ -136,6 +142,17 @@ test('AD-9 limits are owned once with their ratified values', () => {
   assert.equal(REQUEST_BUDGET_BURST, 30)
   assert.equal(ENROLLMENT_PER_MINUTE, 5)
   assert.equal(ENROLLMENT_BURST, 5)
+  // Story 4.2: the enroll route's fixed window and the invite token's shape
+  // bounds — declared once beside the limits they gate.
+  assert.equal(ENROLLMENT_WINDOW_MS, 60_000)
+  assert.equal(INVITE_TOKEN_PREFIX, 'ar_inv1_')
+  assert.equal(INVITE_TOKEN_BYTES, 32)
+  assert.equal(INVITE_TOKEN_CHARS, 43)
+  assert.equal(INVITE_DIGEST_PREFIX_CHARS, 12)
+  assert.equal(INVITE_TOKEN_PATTERN.test('ar_inv1_' + 'A'.repeat(43)), true)
+  assert.equal(INVITE_TOKEN_PATTERN.test('ar_inv1_' + 'A'.repeat(42)), false)
+  assert.equal(INVITE_TOKEN_PATTERN.test('ar_inv1_' + 'A'.repeat(44)), false)
+  assert.equal(INVITE_TOKEN_PATTERN.test('ar_inv2_' + 'A'.repeat(43)), false)
   assert.equal(PRESENCE_HEARTBEAT_SECONDS, 60)
   assert.equal(PRESENCE_HEARTBEAT_JITTER, 0.1)
   assert.equal(PRESENCE_TTL_SECONDS, 180)
@@ -310,12 +327,16 @@ test('every v0.1 public error code has an HTTP status declared once', () => {
     'invalid_text',
     'invalid_title',
     'invalid_wait_ms',
+    'invite_exhausted',
+    'invite_invalid',
+    'invite_not_found',
     'local_token_invalid',
     'message_frame_too_large',
     'message_not_found',
     'node_version_unsupported',
     'not_enrolled',
     'protocol_required',
+    'rate_limited',
     'reply_room_mismatch',
     'request_cancelled',
     'request_failed',
@@ -389,6 +410,12 @@ test('every v0.1 public error code has an HTTP status declared once', () => {
     challenge_invalid: 401,
     signature_invalid: 401,
     not_enrolled: 403,
+    // Story 4.2: the invite gate (unknown/expired/revoked 403, spent 409,
+    // revoke-prefix miss 404) and the enroll route's admission refusal (429).
+    invite_invalid: 403,
+    invite_exhausted: 409,
+    invite_not_found: 404,
+    rate_limited: 429,
   }
   for (const [code, status] of Object.entries(expectedStatus)) {
     assert.equal(PUBLIC_ERROR_STATUS[code], status, code)

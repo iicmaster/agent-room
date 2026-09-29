@@ -601,17 +601,18 @@ test('unregistered routes 404 behind the gates; unknown paths 404; echoes follow
   assert.equal(fallthrough.json().error.code, 'unauthorized')
   assert.equal(fallthrough.headers[PROTOCOL_KEY], '1')
 
-  // The one pre-auth route still unregistered answers 404 route_not_found
-  // behind the gates — Story 4.2's invite enrollment (its story registers
-  // it); Story 4.1 brought /api/auth/challenge and /api/auth/answer live.
-  for (const path of ['/api/auth/enroll']) {
-    const unregistered = await request(record.port, 'POST', path, {
-      headers: { [PROTOCOL_KEY]: '1' },
-    })
-    assert.equal(unregistered.status, 404, path)
-    assert.equal(unregistered.json().error.code, 'route_not_found', path)
-    assert.equal(unregistered.headers[PROTOCOL_KEY], '1', path)
-  }
+  // Story 4.2 brought /api/auth/enroll live — the frozen pre-auth surface is
+  // now fully registered (Stories 4.1 and 4.2 own the former 404s). With a
+  // valid protocol header the gates pass and the handler's shape gate
+  // answers: an empty body is a 400 invalid_request naming the invite token.
+  const enrollGate = await request(record.port, 'POST', '/api/auth/enroll', {
+    headers: { [PROTOCOL_KEY]: '1', 'content-type': 'application/json; charset=utf-8' },
+    body: '{}',
+  })
+  assert.equal(enrollGate.status, 400)
+  assert.equal(enrollGate.json().error.code, 'invalid_request')
+  assert.match(enrollGate.json().error.message, /invite_token/)
+  assert.equal(enrollGate.headers[PROTOCOL_KEY], '1')
 
   // An unknown field on that route is rejected before the handler position.
   const unknownField = await request(record.port, 'POST', '/api/auth/local', {
@@ -981,7 +982,8 @@ test('a pre-1.3 v2 store (no realms table, NOT NULL creator) converges on open a
   `).all().map(row => row.name)
   // Story 1.5: chat_id_claims joins additively beside the 1.3 realms table.
   // Story 4.1: enrolled_actors joins the same open-path convergence.
-  assert.deepEqual(tableNames, ['chat_id_claims', 'direct_members', 'enrolled_actors', 'messages', 'realms', 'rooms'])
+  // Story 4.2: invites + invite_consumptions join it with them.
+  assert.deepEqual(tableNames, ['chat_id_claims', 'direct_members', 'enrolled_actors', 'invite_consumptions', 'invites', 'messages', 'realms', 'rooms'])
   const creatorColumn = inspector
     .prepare(`SELECT "notnull" AS "notnull" FROM pragma_table_info('rooms') WHERE name = 'created_by_fingerprint'`)
     .get()
@@ -1003,17 +1005,17 @@ test('startup enforces the implemented-flag contract in both directions', async 
 
   // A registered handler on a route without the implemented mark fails
   // startup — a live handler the wire contract does not promise. (Every
-  // actor-class route is live now — /api/status since Story 1.6 and
-  // /api/rooms since Story 2.2 — so the probe rides the still unregistered
-  // POST /api/auth/enroll, which touches no live handler.)
-  const removeEnroll = registerHandler('POST /api/auth/enroll', () => ({}))
+  // pre-auth and actor-class route is live now — /api/auth/enroll since
+  // Story 4.2 — so the probe rides the still unimplemented viewer class's
+  // auth bridge, which touches no live handler.)
+  const removeViewerAuth = registerHandler('GET /viewer/auth', () => ({}))
   try {
     await assert.rejects(
       () => startServer({ dataDir }),
       error => error?.code === 'invalid_argument' && /not marked implemented/.test(error.message),
     )
   } finally {
-    removeEnroll()
+    removeViewerAuth()
   }
 
   // A marked route without a registered handler fails startup the other way.

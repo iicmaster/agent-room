@@ -806,3 +806,91 @@
         file: "tests/challenge-auth.test.mjs"
       - test: "the keys helpers sign with the installation key and verify against a raw key"
         file: "tests/challenge-auth.test.mjs"
+
+  4.2:                       # Invite-gated enrollment & the operator CLI host (5 criteria)
+    note: >-
+      Proves the whole FR-14 discipline over real processes. AC-1 (the CLI
+      host): the invite family is mounted on the shared agent-room dispatch
+      (the help carries the grammar), runs IN-PROCESS against the store with
+      NO HTTP client and NO session (pinned structurally on the family's
+      source and behaviorally by writing through the real store with no
+      server running), and speaks JSON lines with stable exit codes — mint 0,
+      coded refusals 1, usage 2 — the HCI-3 grammar later operator stories
+      (4.5/4.6) extend. AC-2 (token shape + digest-only + finite flags): a
+      minted token matches the literal ar_inv1_ + 43-base64url oracle and
+      decodes to exactly 32 bytes; the stored digest equals SHA-256 over
+      those bytes computed independently in the test; counted scans prove the
+      raw token and its payload appear in NO byte of the database file or
+      WAL while the digest hex does; sixteen CLI spellings of unlimited or
+      never-expiring budgets (--uses none/0/-1/1.5/Infinity/NaN/empty,
+      --ttl 0/-1/inf/Infinity/NaN/none/abc/empty) each answer exit 2 with a
+      JSON usage line and create NOTHING, and the store defends the same
+      rule with no implicit default below the CLI. AC-3 (the race + retry +
+      rollback): two REAL child processes on their own SQLite connections
+      racing one single-use invite yield exactly one committed enrollment
+      and one coded invite_exhausted loser with uses_remaining 0, one
+      consumption row, one enrolled_actors row (the invite stays LISTED at 0
+      remaining — spent, never deleted); the lost-response retry reattaches
+      without consuming at the store and as the identical replayed HTTP
+      request (one consumption row per key even after full spend); a
+      transaction whose final INSERT fails (enrolled_actors dropped by state
+      surgery) rolls back the decrement AND the consumption row, and the
+      reopened store enrolls normally. AC-4 (mint/list/revoke hygiene):
+      listings project exactly digest prefix + uses remaining + expiry +
+      revoked (never a token, never a full digest — counted scans across
+      every printed byte); revocation is idempotent, blocks new enrollment
+      only, refuses unknown prefixes with invite_not_found and ambiguous
+      prefixes with the candidate list (crafted near-collision) without
+      revoking anything. AC-5 (the enroll route + admission): the route is
+      live with the frozen three-field set, derives identity (a smuggled
+      fingerprint field is unknown_field), refuses wrong-signer and
+      non-canonical signatures 401 signature_invalid with zero consumption,
+      gates unknown/revoked/expired tokens 403 invite_invalid and a spent
+      invite 409 invite_exhausted, and merely unlocks the ALREADY-LIVE
+      challenge-answer path (an enrolled key mints a session; an unenrolled
+      stranger still answers not_enrolled) — proven across a real spawned
+      server child end to end. Admission is the minimal fixed-window limiter
+      in the budgets stage scoped to this one route: the sixth rapid attempt
+      answers 429 rate_limited, the window rolls by the injected clock, five
+      DISTINCT spoofed X-Forwarded-For headers fill ONE socket bucket without
+      trustedProxy while the explicit configuration keys buckets by the
+      leftmost forwarded entry, and malformed wiring fails startup. Does NOT
+      prove a configured-URL remote client or HTTPS transport policy (Story
+      4.3), the full per-key budget stage or any send-path rate gate (Story
+      4.4), ban persistence (4.5), capacity gates (4.6), or a real
+      cross-machine deployment — the enroll lane runs over the loopback
+      transport the pipeline already accepts, and the remote dress rehearsal
+      is Story 4.8's.
+    evidence:
+      - test: "a default mint matches the token shape oracle, persists the SHA-256 digest only, and the raw token appears nowhere in the database file"
+        file: "tests/invites.test.mjs"
+      - test: "mint accepts only finite --uses/--ttl values, at the CLI and the store, and the CLI usage refusals create nothing"
+        file: "tests/invites.test.mjs"
+      - test: "the invite family speaks JSON lines with stable exit codes: mint 0, list 0 (secret-free projection), revoke 0, coded refusal 1, usage 2"
+        file: "tests/invites.test.mjs"
+      - test: "a revoke prefix matching several invites is refused with the candidates, never guessed"
+        file: "tests/invites.test.mjs"
+      - test: "a rolled-back enrollment consumes nothing: the consumption row and the decrement vanish with the transaction"
+        file: "tests/invites.test.mjs"
+      - test: "two processes racing one single-use invite: exactly one enrollment commits, the loser answers invite_exhausted, and the invite shows 0 remaining"
+        file: "tests/invites.test.mjs"
+      - test: "a lost-response retry reattaches without consuming: the same key re-presenting the same invite succeeds idempotently at the store and over the route"
+        file: "tests/invites.test.mjs"
+      - test: "the enroll route requires the possession proof and validates the frozen field shapes before any state moves"
+        file: "tests/invites.test.mjs"
+      - test: "the enroll route gates state: unknown, revoked, and expired invites answer invite_invalid; a spent invite answers invite_exhausted"
+        file: "tests/invites.test.mjs"
+      - test: "a multi-use invite admits distinct keys up to its budget; an already-attached key keeps reattaching for free"
+        file: "tests/invites.test.mjs"
+      - test: "enrollment unlocks the live challenge-answer path: the enrolled key mints a session, an unenrolled key still answers not_enrolled"
+        file: "tests/invites.test.mjs"
+      - test: "on a real spawned server the enrolled key completes the whole journey: mint, enroll over HTTP, challenge, answer, and an actor read"
+        file: "tests/invites.test.mjs"
+      - test: "the enroll route is rate-limited 5/min per identity (burst 5): the 6th rapid attempt is refused rate_limited and the window rolls over by the clock"
+        file: "tests/invites.test.mjs"
+      - test: "forwarded addresses are trusted only from an explicitly configured proxy: spoofed X-Forwarded-For cannot mint fresh buckets without it, and with it the leftmost entry keys the bucket"
+        file: "tests/invites.test.mjs"
+      - test: "listings and diagnostics never show a secret: a counted scan of every byte the family printed finds no token and no full digest"
+        file: "tests/invites.test.mjs"
+      - test: "the operator family is the established CLI host: in-process store access with no HTTP session, documented in the shared help, and later operator stories extend this dispatch"
+        file: "tests/invites.test.mjs"

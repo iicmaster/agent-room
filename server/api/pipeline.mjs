@@ -19,6 +19,7 @@ import {
   SUPPORTED_PROTOCOL_VERSIONS,
 } from '../constants.mjs'
 import { AgentRoomRuntimeError } from '../runtime.mjs'
+import { FORWARDED_FOR_HEADER, enrollClientIdentity } from './enroll-rate-limit.mjs'
 
 // Canonical stage order (AD-7). The handler is not a stage; it runs after the
 // last stage and only if every stage passed.
@@ -257,15 +258,33 @@ export class AuthStage {
   }
 }
 
-// Budgets stage (AD-7): request budgets per key / per IP. Epic 4 owns the
-// policy; until then the stage is a structural pass-through that occupies its
-// fixed position in the pipeline order.
+// Budgets stage (AD-7): request budgets per key / per IP. Story 4.2 lands the
+// policy's first gate, scoped exactly as its story demands: the enroll route
+// only, through the minimal fixed-window limiter injected at startServer (a
+// limiter is configured ONLY for that route's admission; every other route is
+// untouched until Story 4.4's full budget stage). The gate lives here, in the
+// stage — never in a handler — and a refusal is the coded rate_limited (429):
+// zero state, nothing consumed, the handler never runs.
 export class BudgetStage {
-  constructor() {
+  constructor({ enrollRateLimiter = null, trustedProxy = false } = {}) {
     this.name = 'budgets'
+    this.enrollRateLimiter = enrollRateLimiter
+    this.trustedProxy = trustedProxy === true
   }
 
-  process() {
+  process(context) {
+    if (this.enrollRateLimiter !== null && context.route?.path === '/api/auth/enroll') {
+      const rawForwarded = context.headers?.[FORWARDED_FOR_HEADER]
+      const forwardedFor = Array.isArray(rawForwarded) ? rawForwarded[0] : rawForwarded
+      const identity = enrollClientIdentity({
+        remoteAddress: context.remoteAddress,
+        forwardedFor,
+        trustedProxy: this.trustedProxy,
+      })
+      if (this.enrollRateLimiter.check(identity) !== true) {
+        return reject('rate_limited')
+      }
+    }
     return undefined
   }
 }
@@ -303,7 +322,10 @@ export function assertStageOrder(stages) {
 
 // Per-class assembly: the identical-gate door for Stories 1.4-1.8. Actor and
 // pre-auth classes run all stages; viewer and health skip the protocol stage.
-// The two verifier slots keep actor and viewer credentials apart.
+// The two verifier slots keep actor and viewer credentials apart. The budget
+// stage's injects (Story 4.2) default to no limiting — a direct assemblePipeline
+// caller gets the structural pass-through; startServer wires the enroll route's
+// limiter and its proxy-trust configuration.
 export function assemblePipeline(routeClass, options = {}) {
   if (!PROTOCOL_APPLIES_TO.includes(routeClass) && routeClass !== 'viewer' && routeClass !== 'health') {
     throw new AgentRoomRuntimeError('invalid_argument', `unknown route class "${String(routeClass)}"`)
@@ -316,7 +338,10 @@ export function assemblePipeline(routeClass, options = {}) {
       sessionVerifier: options.sessionVerifier,
       viewerVerifier: options.viewerVerifier,
     }),
-    new BudgetStage(),
+    new BudgetStage({
+      enrollRateLimiter: options.enrollRateLimiter ?? null,
+      trustedProxy: options.trustedProxy,
+    }),
     new AuthzStage(),
   )
   assertStageOrder(stages)

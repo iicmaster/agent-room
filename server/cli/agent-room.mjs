@@ -29,6 +29,22 @@
 //                         session holds the name and leave zero presence or
 //                         durable-claim footprint.
 //
+//   invite (Story 4.2)    the OPERATOR family and the CLI host later operator
+//                         stories extend (4.5 ban, 4.6 capacity add commands
+//                         here, never their own entrypoint): `invite mint`
+//                         (raw token printed exactly once — only its SHA-256
+//                         digest is stored), `invite list` (digest prefix +
+//                         uses remaining + expiry + revoked; never a secret)
+//                         and `invite revoke <digest-prefix>`. Unlike the
+//                         families above these run on the SERVER HOST and
+//                         open the store DIRECTLY, in process — the operator
+//                         boundary is the host itself (AR-13: no operator
+//                         HTTP route exists), the server need not be running,
+//                         and the output grammar is JSON LINES with stable
+//                         exit codes (0 ok, 1 refusal, 2 usage — HCI-3's
+//                         grammar begins here). Bodies in
+//                         ./invite-commands.mjs.
+//
 // stdin discipline: prompting happens ONLY when stdin is a TTY. A non-TTY
 // stdin (pipes, the MCP host, CI) exits with guidance and touches nothing —
 // a command that needs a human answer can never be driven programmatically
@@ -70,6 +86,7 @@ import {
   runAllow,
   runAllowAll,
 } from './held-commands.mjs'
+import { runInviteFamilyCommand } from './invite-commands.mjs'
 
 const OK_STATUS = 200
 // The collision status is owned by the constants table (chat_id_taken), never restated.
@@ -274,6 +291,26 @@ Commands:
       interactive y/N confirmation; --remove switches it off without one
       (holding messages again is the fail-safe direction).
 
+  agent-room invite mint [--uses N] [--ttl HOURS]
+      Mint an enrollment invite. Run this on the SERVER HOST: the command
+      opens the server's store directly, in process — there is no operator
+      HTTP route (the API cannot mint invites). Prints ONE JSON line in
+      which the raw token appears exactly once; only the token's SHA-256
+      digest is stored, so the token can never be shown or recovered again.
+      Defaults: 1 use, 24 hours to expiry. --uses and --ttl accept finite
+      values only; unlimited and never-expiring invites are refused.
+
+  agent-room invite list
+      List invites, one JSON line per invite: digest prefix, uses remaining,
+      expiry, revoked. Never a token, and never a full digest — a listing
+      carries no secret by construction.
+
+  agent-room invite revoke <digest-prefix>
+      Revoke an invite by the digest prefix shown in "invite list" (at least
+      12 hex characters). Blocks new enrollment only; keys already enrolled
+      are untouched. A prefix matching several invites is refused with the
+      candidates, never guessed.
+
   agent-room help
       Show this help.
 
@@ -392,8 +429,7 @@ export async function main(argv = process.argv.slice(2), {
     }
     return outcome
   }
-  if (command === 'held' || command === 'allow' || command === 'allow-all') {
-    let outcome = null
+  if (command === 'held' || command === 'allow' || command === 'allow-all') {    let outcome = null
     try {
       outcome = await runHeldFamilyCommand(
         command,
@@ -434,6 +470,25 @@ export async function main(argv = process.argv.slice(2), {
       return outcome
     }
     output.write(`${outcome.lines.join('\n')}\n`)
+    return outcome
+  }
+  // Story 4.2: the operator invite family — the CLI host later operator
+  // stories extend. Success prints one JSON object per line on stdout and
+  // exits 0; a refusal or usage error prints ONE JSON object on stderr and
+  // exits 1 or 2 (the HCI-3 grammar: stable codes, machine-readable lines).
+  if (command === 'invite') {
+    const outcome = await runInviteFamilyCommand(subcommand, argv.slice(2), deps)
+    if (outcome.status === 'ok') {
+      for (const line of outcome.lines) output.write(`${line}\n`)
+      return outcome
+    }
+    errorOutput.write(`${JSON.stringify({
+      ok: false,
+      command: outcome.command,
+      code: outcome.code,
+      message: outcome.message,
+    })}\n`)
+    process.exitCode = outcome.status === 'usage' ? 2 : 1
     return outcome
   }
   // No args or an unknown command: one coded line, then usage plus the

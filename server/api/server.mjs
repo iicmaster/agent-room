@@ -64,8 +64,16 @@
 // resolved; see the spine's AD-5 amendment and Open Question 1).
 // The actor-class auth stage runs the real session verifier from session.mjs
 // (the 1.3 reject-all default remains only as the pipeline's structural
-// fallback). The only frozen AD-8 route still unregistered is POST
-// /api/auth/enroll — Story 4.2's (404 route_not_found behind the gates).
+// fallback). Story 4.2 completes the frozen pre-auth surface: POST
+// /api/auth/enroll is the invite-gated enrollment route — the presented
+// ar_inv1_ token's SHA-256 digest names a row the operator minted, the
+// presented raw public key derives the enrolled fingerprint, and the Ed25519
+// signature over the exact token bytes is the possession proof, validated
+// inside the store's single BEGIN IMMEDIATE enrollment transaction before
+// any use is consumed (atomic, race-safe, lost-response retries reattach
+// without consuming). The budgets stage paces the route at 5/min per client
+// identity (burst 5) through the minimal fixed-window limiter; forwarded
+// addresses are trusted only when the operator configured trustedProxy.
 
 import { createServer } from 'node:http'
 import { timingSafeEqual } from 'node:crypto'
@@ -87,6 +95,9 @@ import {
   CLAIMS_TTL_MS,
   CLIENT_TYPES,
   FINGERPRINT_PATTERN,
+  INVITE_TOKEN_CHARS,
+  INVITE_TOKEN_PREFIX,
+  INVITE_TOKEN_PATTERN,
   LONGPOLL_POLL_INTERVAL_MS,
   PRESENCE_TTL_MS,
   PRUNE_INTERVAL_MS,
@@ -114,6 +125,7 @@ import {
 } from './pipeline.mjs'
 import { bearerTokenFromHeaders, createSessionRegistry, createSessionVerifier } from './session.mjs'
 import { createChallengeRegistry } from './challenge.mjs'
+import { createEnrollRateLimiter } from './enroll-rate-limit.mjs'
 import { readLocalToken } from './local-token.mjs'
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1'])
@@ -315,6 +327,55 @@ registerHandler('POST /api/auth/answer', function answerChallenge(context) {
   if (!context.store.isActorEnrolled(fingerprint)) return reject('not_enrolled')
   const sessionRegistry = context.sessionRegistry ?? SESSION_REGISTRY
   return { session_token: sessionRegistry.issue(fingerprint) }
+})
+
+// Story 4.2 invite-gated enrollment (pre-auth class, the frozen route's last
+// unimplemented row). The wire is three fields, none of them identity: the
+// invite token (the operator's secret, shown to the invitee exactly once),
+// the raw public key whose DERIVED fingerprint will be enrolled (identity is
+// never claimed — there is no fingerprint field to forge), and the Ed25519
+// signature over the exact token bytes — the possession proof. All gating is
+// the store's ONE BEGIN IMMEDIATE transaction (unknown/revoked/expired →
+// invite_invalid, proof failure → signature_invalid, spent invite →
+// invite_exhausted, already-consumed pair → idempotent reattach), so a
+// failed or raced attempt consumes nothing and exactly one contender
+// commits. Success returns the derived fingerprint; the session itself is
+// minted by the ALREADY-LIVE challenge→answer path, which this enrollment
+// unlocks by writing the enrolled_actors row its gate reads (one session
+// mechanism, two issuance paths — AD-5 unchanged).
+//
+// Shape gates mirror the answer route's discipline: a missing or malformed
+// field is invalid_request naming the field; a present-but-non-canonical
+// signature is signature_invalid (the base64url decoder must never fold a
+// decorated spelling onto real signature bytes). Admission is paced by the
+// budgets stage's fixed-window limiter — a rate_limited refusal happens
+// before this handler and consumes nothing.
+registerHandler('POST /api/auth/enroll', function enroll(context) {
+  const inviteToken = context.body?.invite_token
+  if (typeof inviteToken !== 'string' || !INVITE_TOKEN_PATTERN.test(inviteToken)) {
+    return reject(
+      'invalid_request',
+      `invite_token is required: ${INVITE_TOKEN_PREFIX} followed by exactly ${INVITE_TOKEN_CHARS} base64url characters`,
+    )
+  }
+  const publicKey = rawInstallationPublicKey(context.body?.public_key)
+  if (publicKey === null) {
+    return reject('invalid_request', 'public_key is required: the raw 32-byte Ed25519 public key as base64url')
+  }
+  const signature = context.body?.signature
+  if (signature === undefined || signature === null || signature === '') {
+    return reject('invalid_request', 'signature is required: the Ed25519 signature over the exact invite token bytes as base64url')
+  }
+  if (typeof signature !== 'string' || signature.length > CHALLENGE_SIGNATURE_MAX_CHARS) {
+    return reject('invalid_request', `signature must be a base64url string of at most ${CHALLENGE_SIGNATURE_MAX_CHARS} characters`)
+  }
+  if (!CHALLENGE_SIGNATURE_PATTERN.test(signature)) return reject('signature_invalid')
+  const outcome = context.store.enrollRemoteActor({
+    inviteToken,
+    rawPublicKey: publicKey,
+    signature: Buffer.from(signature, 'base64url'),
+  })
+  return { fingerprint: outcome.fingerprint }
 })
 
 // Story 1.5 session connect surface. The auth stage has already resolved the
@@ -731,8 +792,7 @@ function respondFailure(response, failure, echo) {
   respondJson(response, failure.status, errorEnvelope(failure), echo)
 }
 
-async function handleRequest(request, response, options) {
-  let pathname = null
+async function handleRequest(request, response, options) {  let pathname = null
   let query = {}
   let queryKeys = []
   try {
@@ -793,6 +853,8 @@ async function handleRequest(request, response, options) {
     const stages = assemblePipeline(route.class, {
       sessionVerifier: options.sessionVerifier,
       viewerVerifier: options.viewerVerifier,
+      enrollRateLimiter: options.enrollRateLimiter,
+      trustedProxy: options.trustedProxy,
     })
     const handler = REGISTERED_HANDLERS.get(routeKeyOf(route)) ?? UNREGISTERED_ROUTE_HANDLER
     const outcome = await runPipeline(stages, context, handler)
@@ -834,6 +896,8 @@ export async function startServer({
   pruneIntervalMs,
   pruneClaims,
   presenceTtlMs = PRESENCE_TTL_MS,
+  trustedProxy = false,
+  enrollRateLimiter,
 } = {}) {
   // Runtime gate first: Node >= 24.15 / SQLite >= 3.51.3, diagnosable error.
   assertSupportedRuntime()
@@ -902,6 +966,25 @@ export async function startServer({
   if (!Number.isSafeInteger(presenceTtlMs) || presenceTtlMs <= 0) {
     throw new AgentRoomRuntimeError('invalid_argument', 'presenceTtlMs must be a positive safe integer')
   }
+  // Story 4.2: the enroll route's admission control. trustedProxy is the
+  // explicit operator configuration that turns X-Forwarded-For trust ON —
+  // default OFF, so forwarded addresses are never trusted by default — and
+  // the limiter defaults to a fresh fixed-window counter per server (a
+  // process-shared counter would let two test servers, or two realms on one
+  // host, fill each other's buckets; an injected limiter is the caller's to
+  // share). Malformed wiring fails at startup, never per-request.
+  if (trustedProxy !== true && trustedProxy !== false) {
+    throw new AgentRoomRuntimeError('invalid_argument', 'trustedProxy must be a boolean when provided')
+  }
+  if (enrollRateLimiter !== undefined
+    && (typeof enrollRateLimiter !== 'object' || enrollRateLimiter === null
+      || typeof enrollRateLimiter.check !== 'function')) {
+    throw new AgentRoomRuntimeError(
+      'invalid_argument',
+      'enrollRateLimiter must be an enroll rate limiter (check) when provided',
+    )
+  }
+  const effectiveEnrollRateLimiter = enrollRateLimiter ?? createEnrollRateLimiter()
   // implemented-flag enforcement: every frozen route marked implemented must
   // have a registered handler, and every registered handler must belong to a
   // marked route — a mismatch fails startup instead of silently 404ing a
@@ -1009,6 +1092,8 @@ export async function startServer({
         sessionRegistry: effectiveRegistry,
         liveSessionRegistry: effectiveLiveRegistry,
         challengeRegistry: effectiveChallengeRegistry,
+        enrollRateLimiter: effectiveEnrollRateLimiter,
+        trustedProxy,
         store,
       }).catch(() => {
         response.destroy()

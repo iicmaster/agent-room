@@ -90,6 +90,26 @@ All notable changes to Agent Room are documented in this file.
   (`not_enrolled`, `challenge_invalid`) surface as coded errors with no fallback.
   The private key never leaves `server/keys.mjs`: signing reads the PEM and returns
   only the signature.
+- Invite-gated enrollment and the operator CLI host (Story 4.2): `agent-room
+  invite mint` mints an `ar_inv1_` token (32 random bytes, 43 base64url
+  characters) whose SHA-256 digest is the only thing ever stored — the raw
+  token is printed exactly once and can never be recovered; `--uses` and
+  `--ttl` accept finite values only (unlimited/never-expiring invites are
+  rejected outright). `invite list` shows digest prefix, uses remaining,
+  expiry, and revoked — never a secret; `invite revoke <digest-prefix>`
+  blocks new enrollment only. The family runs on the server host, opens the
+  store directly in process (AR-13: no operator HTTP route), and speaks JSON
+  lines with stable exit codes (0 ok, 1 refusal, 2 usage) — the operator CLI
+  host later stories extend. `POST /api/auth/enroll` is now live: the
+  presented key's Ed25519 signature over the exact invite token bytes is the
+  possession proof, validated inside one BEGIN IMMEDIATE transaction with
+  invite validation and consumption — races yield exactly one enrollment
+  (`invite_exhausted` for the loser), failed or rolled-back attempts consume
+  nothing, and a lost-response retry reattaches without consuming. The route
+  is rate-limited 5/min per client identity (burst 5) by a minimal
+  fixed-window counter; `X-Forwarded-For` is trusted only from an explicitly
+  configured `trustedProxy`. New public codes: `invite_invalid` (403),
+  `invite_exhausted` (409), `invite_not_found` (404), `rate_limited` (429).
 
 ### Removed
 

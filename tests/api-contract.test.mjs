@@ -223,9 +223,10 @@ test('the implemented mark covers exactly the live frozen routes', () => {
   // session connect surface (POST/PATCH/DELETE /api/session) in 1.5, the
   // presence + status reads (GET /api/presence, GET /api/status) in 1.6, the
   // conversation surface (POST /api/rooms/direct and the messages pair) in
-  // 1.7, the enumeration read (GET /api/rooms) in Story 2.2, and the remote
+  // 1.7, the enumeration read (GET /api/rooms) in Story 2.2, the remote
   // challenge pair (POST /api/auth/challenge, POST /api/auth/answer) in
-  // Story 4.1; later stories extend additively.
+  // Story 4.1, and the invite-gated enrollment route
+  // (POST /api/auth/enroll) in Story 4.2; later stories extend additively.
   const implemented = ROUTE_TABLE.filter(route => route.implemented === true)
   assert.deepEqual(implemented.map(routeKey), [
     'POST /api/session',
@@ -237,6 +238,7 @@ test('the implemented mark covers exactly the live frozen routes', () => {
     'GET /api/rooms/:id/messages',
     'POST /api/rooms/:id/messages',
     'GET /api/status',
+    'POST /api/auth/enroll',
     'POST /api/auth/challenge',
     'POST /api/auth/answer',
     'POST /api/auth/local',
@@ -251,6 +253,11 @@ test('the implemented mark covers exactly the live frozen routes', () => {
   const answer = ROUTE_TABLE.find(route => routeKey(route) === 'POST /api/auth/answer')
   assert.deepEqual([...challenge.requestFields], ['public_key'])
   assert.deepEqual([...answer.requestFields], ['nonce', 'signature'])
+  // Story 4.2: the invite-gated enrollment takes exactly the token, the raw
+  // key whose DERIVED fingerprint enrolls (identity is never claimed), and
+  // the possession-proof signature over the exact token bytes.
+  const enroll = ROUTE_TABLE.find(route => routeKey(route) === 'POST /api/auth/enroll')
+  assert.deepEqual([...enroll.requestFields], ['invite_token', 'public_key', 'signature'])
   // The session surface: chat_id plus the 1.6 closed-set client_type
   // declaration on connect and rename, none on disconnect — actor identity
   // always comes from the token, never the body.
@@ -296,6 +303,13 @@ test('story 1.3 error codes are registered once with their canonical statuses', 
     challenge_invalid: [401, 'challenge nonce is invalid, expired, or already used'],
     signature_invalid: [401, 'signature verification failed'],
     not_enrolled: [403, 'this public key is not enrolled on this server'],
+    // Story 4.2 additions: the invite gate (unknown/expired/revoked → 403,
+    // spent by other keys → 409, revoke-prefix miss → 404) and the enroll
+    // route's admission refusal (429 — the send-status code's HTTP face).
+    invite_invalid: [403, 'invite token is unknown, expired, or revoked'],
+    invite_exhausted: [409, 'invite has no uses remaining'],
+    invite_not_found: [404, 'no invite matches this digest prefix'],
+    rate_limited: [429, 'request rate limit exceeded'],
   }
   for (const [code, [status, message]] of Object.entries(expected)) {
     assert.equal(PUBLIC_ERROR_STATUS[code], status, code)

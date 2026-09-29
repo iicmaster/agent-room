@@ -67,7 +67,19 @@ export const ROUTE_TABLE = Object.freeze([
 
   // pre-auth (AD-8): POST /api/auth/enroll · POST /api/auth/challenge ·
   // POST /api/auth/answer · POST /api/auth/local
-  Object.freeze({ method: 'POST', path: '/api/auth/enroll', class: 'pre-auth', requestFields: Object.freeze(['invite_token']) }),
+  //
+  // Story 4.2: the invite-gated enrollment route is live (handler in
+  // server.mjs), by the dated 2026-09-29 spine amendment growing its frozen
+  // request fields from invite_token alone to invite_token + public_key +
+  // signature (all three already in the frozen vocabulary — additions only,
+  // NFR-8). The presented token must match the ar_inv1_ shape; the raw
+  // 32-byte public key DERIVES the enrolled fingerprint (identity is never
+  // a claim); the Ed25519 signature over the exact token bytes is the
+  // possession proof the store validates inside the single enrollment
+  // transaction before anything is consumed. The budgets stage paces this
+  // route at 5/min per client identity (burst 5) with forwarded addresses
+  // trusted only from an explicitly configured proxy.
+  Object.freeze({ method: 'POST', path: '/api/auth/enroll', class: 'pre-auth', implemented: true, requestFields: Object.freeze(['invite_token', 'public_key', 'signature']) }),
   // Story 4.1: the remote credential path's pair is live (handlers in
   // server.mjs). The challenge stays OPEN to any well-formed 32-byte public
   // key — issuing a nonce is privilegeless, and Story 4.2's invite
