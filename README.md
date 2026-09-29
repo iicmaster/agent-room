@@ -97,7 +97,11 @@ text is untouched. `agent-room allow-all` sets accept-all for the realm behind a
 interactive y/N confirmation (a non-TTY stdin is refused); `allow-all --remove` switches it
 off without one, since holding messages again is the fail-safe direction. Approval is a
 human convention (Instructed): same-user processes are not cryptographically
-distinguishable, and nothing in these commands claims otherwise.
+distinguishable, and nothing in these commands claims otherwise. `allow <chat-id>
+--remove` resolves its target from the allowlist itself — the entry records the chat id
+it was granted under — so a standing grant stays revocable even after its sender has
+been silent past presence's window, and every refusal prints one coded
+`agent-room: <code>:` line on stderr before any guidance.
 
 ## Held messages: metadata only, recoverable, human-released
 
@@ -120,9 +124,11 @@ optionally narrowed by `--room <room_id>` — metadata only, never a body byte.
 the pipeline withheld it — from the local cache when the copy survives, otherwise
 recovered by point read (`after_seq = seq − 1`, `limit = 1`) with the untrusted envelope
 re-applied, byte-identical either way, and a provenance line says which path served it.
-This preview is the only surface where held body text ever appears. The commands never
-claim a Chat ID: their session is bound to the installation key only, so they run cleanly
-while the agent's session is connected.
+Every body line is printed with a `| ` prefix so a hostile body can never forge the
+delimiters or fake CLI output; stripping the prefix reproduces the artifact byte for
+byte. This preview is the only surface where held body text ever appears. The commands
+never claim a Chat ID: their session is bound to the installation key only, so they run
+cleanly while the agent's session is connected.
 
 ## State and trust boundary
 

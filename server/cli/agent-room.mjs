@@ -291,19 +291,28 @@ function failure(command, code, message, lines) {
 }
 
 // Strict argv tokens for one command: the flags this command family declares,
-// everything else positional; any other --token is refused.
+// everything else positional; any other --token is refused. `--` is the
+// end-of-options marker: everything after it passes through as positionals,
+// because the DR-1 grammar makes a leading-hyphen Chat ID legal
+// (`agent-room allow -- --alice`). A value-flag never consumes another flag
+// as its value: a following --token is a coded refusal, never a silent
+// mis-parse.
 function parseTokens(tokens, { booleanFlags = [], valueFlags = [] } = {}) {
   const positional = []
   const options = {}
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index]
+    if (token === '--') {
+      positional.push(...tokens.slice(index + 1))
+      break
+    }
     if (booleanFlags.includes(token)) {
       options[token] = true
       continue
     }
     if (valueFlags.includes(token)) {
       const value = tokens[index + 1]
-      if (value === undefined) return { error: `${token} needs a value` }
+      if (value === undefined || value.startsWith('--')) return { error: `${token} needs a value` }
       options[token] = value
       index += 1
       continue
@@ -403,6 +412,10 @@ export async function main(argv = process.argv.slice(2), {
       )
     }
     if (outcome === null) {
+      // Coded usage refusal (review patch): the family shape that did not
+      // resolve is named, then the help follows.
+      const attempted = [command, subcommand].filter(part => part !== undefined).join(' ')
+      errorOutput.write(`agent-room: usage_refusal: unknown command "${attempted}"; run "agent-room help" for the command reference\n`)
       errorOutput.write(HELP_TEXT)
       process.exitCode = 1
       return { status: 'usage' }
@@ -410,9 +423,9 @@ export async function main(argv = process.argv.slice(2), {
     if (outcome.ok === false) {
       if (outcome.aborted === true) {
         // The human answered the prompt "no" (or the input ended): the setup
-        // command's established abort discipline — the message, exit 1,
+        // command's established abort discipline — one coded line, exit 1,
         // nothing changed.
-        errorOutput.write(`${outcome.message}\n`)
+        errorOutput.write(`agent-room: confirm_declined: ${outcome.message}\n`)
       } else {
         errorOutput.write(`agent-room ${outcome.command} failed: ${outcome.code}: ${outcome.message}\n`)
         for (const line of outcome.lines ?? []) errorOutput.write(`${line}\n`)
@@ -423,10 +436,12 @@ export async function main(argv = process.argv.slice(2), {
     output.write(`${outcome.lines.join('\n')}\n`)
     return outcome
   }
-  // No args or an unknown command: usage plus the honesty statement on
-  // stderr, exit 1, no state touched.
+  // No args or an unknown command: one coded line, then usage plus the
+  // honesty statement on stderr, exit 1, no state touched.
   if (command !== undefined) {
-    errorOutput.write(`agent-room: unknown command "${command}"\n`)
+    errorOutput.write(`agent-room: unknown_command: unknown command "${command}"; run "agent-room help" for the command reference\n`)
+  } else {
+    errorOutput.write('agent-room: usage_refusal: no command given; run "agent-room help" for the command reference\n')
   }
   errorOutput.write(HELP_TEXT)
   process.exitCode = 1

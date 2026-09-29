@@ -586,9 +586,23 @@
       unknown-command exit non-zero with usage plus the honesty statement on
       stderr. AC-4 (actionable coded errors): every CLI refusal exits
       non-zero with one `agent-room <command> failed: <code>: <message>`
-      line naming the failing input. The unbound-session discipline is
+      line naming the failing input. Review patches extend this: usage /
+      unknown-command / declined-confirmation refusals print one coded
+      `agent-room: <code>:` line before any guidance; the `held show` body
+      prints pipe-prefixed so a hostile body cannot forge the delimiters or
+      fake CLI output; a record released mid-show answers message_not_found
+      "no longer held" instead of request_failed; `allow <name> --remove`
+      resolves from the allowlist itself (the entry records its granted chat
+      id) so a standing grant stays revocable after its sender ages past
+      presence's window; the release report re-snapshots after the final
+      clear and states newly-held residual rows honestly; allow-all's
+      non-TTY gate runs before any boot; the argv grammar supports `--`
+      end-of-options and refuses value-flags that would swallow flags; and
+      the point read's exact HTTP query (`after_seq = seq − 1, limit = 1`)
+      is pinned. The unbound-session discipline is
       proven against a live MCP child holding the installation's Chat ID:
-      held list, held show, allow, and allow-all --remove all succeed — no
+      held list, held show, allow, allow --remove, allow-all --remove, and a
+      confirmed allow-all all succeed — no
       chat_id_taken, no new durable claim row, no presence change, the
       child's session and claim unchanged — and the command module's source
       never contains the session-bind route. Does NOT prove a hold produced
@@ -598,7 +612,11 @@
       the REAL matrix's reason) — and Story 3.5 chains hold, cursor,
       recovery, release, and removal together in one zero-mock drill. Also
       does not prove any persuasion-resistance property: the Instructed lane
-      is a human convention, honestly labeled as such.
+      is a human convention, honestly labeled as such. The residual-report
+      wording (a row registered while the release loop is still clearing) is
+      pinned at its composer plus a structural placement pin: the scenario is
+      cross-process-only and two whole-file state writers cannot be ordered
+      deterministically from a test.
     evidence:
       - test: "held list: an empty realm names itself with no held messages and creates no state, a seeded realm lists one metadata line per record sorted by (room, seq) with zero body bytes, and the --room filter narrows the listing while a non-room-id shape is refused coded"
         file: "tests/cli-surface.test.mjs"
@@ -619,4 +637,18 @@
       - test: "allow-all: a non-TTY stdin is refused with guidance and nothing changed, a TTY y sets accept_all with the Instructed honesty, and --remove switches it off without any confirmation"
         file: "tests/cli-surface.test.mjs"
       - test: "help and usage carry the verbatim Instructed honesty and never the overclaim; and with a live MCP child holding the Chat ID every command succeeds with zero session footprint"
+        file: "tests/cli-surface.test.mjs"
+      - test: "allow <chat-id> --remove resolves from the allowlist itself: a sender silent past every resolution source keeps a revocation path for its standing grant, and an unknown name refuses"
+        file: "tests/cli-surface.test.mjs"
+      - test: "held show distinguishes a still-held record whose body cannot be recovered (request_failed) from a record released mid-show (message_not_found: no longer held)"
+        file: "tests/cli-surface.test.mjs"
+      - test: "allow-all gates the non-TTY refusal before any boot: on a fresh installation with no server it creates nothing and prints the TTY guidance"
+        file: "tests/cli-surface.test.mjs"
+      - test: "held show cannot be closed early by a hostile body: the forged end-delimiter and fake CLI lines stay pipe-prefixed inside the block"
+        file: "tests/cli-surface.test.mjs"
+      - test: "the release report composes its residual honesty once: a complete release says so plainly and a stale snapshot's newly-held rows are reported with the recovery step"
+        file: "tests/cli-surface.test.mjs"
+      - test: "argv grammar: `--` ends the options so a dash-leading grammar-legal chat id reaches allow, and a value-flag never consumes another flag as its value"
+        file: "tests/cli-surface.test.mjs"
+      - test: "the CLI point-read seam emits exactly the pinned HTTP query (after_seq = seq − 1, limit = 1) and applies the untrusted envelope to the raw page"
         file: "tests/cli-surface.test.mjs"

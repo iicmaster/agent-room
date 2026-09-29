@@ -39,6 +39,13 @@
 // inherits nothing, and a record with a null fingerprint is never matched by
 // name).
 //
+// REMOVAL RESOLVES FROM THE ALLOWLIST: `allow <name> --remove` never consults
+// the live resolution sources — the grant's entry records the chat id it was
+// granted under (the entry's note), and the removal matches that record
+// (falling back to a direct match when the input IS a fingerprint). A sender
+// silent past presence's window therefore keeps a human revocation path for
+// its standing grant; the zero-candidates refusal stays a GRANT-path rule.
+//
 // Shape discipline: the `run*` bodies take runSetup's injectable-deps shape
 // (input/output/sharedDataDir/pluginDataDir) and return structured outcomes —
 // `{ ok: true, lines, ... }` for the dispatch to print, `{ ok: false, code,
@@ -54,7 +61,9 @@ import { createInterface } from 'node:readline'
 
 import {
   CHAT_ID_INVALID_MESSAGE,
+  FINGERPRINT_HEX_LENGTH,
   FINGERPRINT_PATTERN,
+  FINGERPRINT_PREFIX,
   IDENTIFIER_MAX,
   REALM_KEY_PATTERN,
   chatIdForms,
@@ -69,6 +78,14 @@ import { heldBody, heldClear, heldList } from '../client/held.mjs'
 import { loadAllowlist, setAcceptAll, setAllowlistEntry } from '../client/trust.mjs'
 
 const OK_STATUS = 200
+
+// The preview's injection guard (review patch): every body line is prefixed
+// with this fixed two-character marker, so no body line can ever equal or
+// mimic a bare delimiter or a CLI output line — a hostile body that contains
+// the end delimiter (or forged trust output) stays visibly inside the block.
+// The preview stays byte-exact modulo this documented prefix.
+export const HELD_BODY_LINE_PREFIX = '| '
+export const HELD_BODY_PREFIX_NOTE = 'every body line below is prefixed with "| " so no body line can imitate this output or the delimiters; the preview is otherwise the artifact verbatim'
 
 export const ALLOW_ALL_REQUIRES_TTY_MESSAGE = 'agent-room allow-all grants blanket delivery for a realm without per-sender verification, so it asks a human to confirm and needs an interactive terminal (a TTY). Run it in your own terminal: agent-room allow-all'
 
@@ -234,8 +251,20 @@ export async function runHeldShow({ sharedDataDir, pluginDataDir }, rawId) {
     }),
   })
   if (typeof preview.body !== 'string') {
-    // The record is held but neither the local cache nor the durable log
-    // served the body — an honest refusal, never an empty preview.
+    // Distinguish the two honest failures (review patch): the record was
+    // present at this command's snapshot, so if it is gone from the held
+    // state NOW, it was released or cleared mid-show — the truth is "no
+    // longer held", never "could not be recovered". Only a record that is
+    // still held (its cached copy gone AND the durable log not serving the
+    // row) gets the recovery-failure refusal.
+    const stillHeld = heldList(pluginDataDir, session.realmId, { roomId })
+      .some(candidate => candidate.seq === seq)
+    if (!stillHeld) {
+      throw new AgentRoomRuntimeError(
+        'message_not_found',
+        `held message "${roomId}:${seq}" is no longer held (released or cleared) — a released record's body is never shown again`,
+      )
+    }
     throw new AgentRoomRuntimeError(
       'request_failed',
       `held message "${roomId}:${seq}" is held but its body could not be recovered by point read from the durable log`,
@@ -255,8 +284,13 @@ export async function runHeldShow({ sharedDataDir, pluginDataDir }, rawId) {
       preview.evicted
         ? 'provenance: the preview was recovered by point read (after_seq = seq − 1, limit = 1) from the durable log'
         : 'provenance: the preview came from the local cache',
+      HELD_BODY_PREFIX_NOTE,
       '--- held body ---',
-      preview.body,
+      // Every body line carries the fixed pipe prefix: a body that contains
+      // the end delimiter (or any forged CLI-shaped line) can never close
+      // the block early or imitate the command's own output. Byte-exactness
+      // is preserved modulo the documented prefix.
+      ...preview.body.split('\n').map(line => `${HELD_BODY_LINE_PREFIX}${line}`),
       '--- end of held body ---',
     ],
   }
@@ -345,13 +379,30 @@ function candidateLines(candidates) {
 
 // --- allow: resolve, save, release ---------------------------------------------------
 
+// The release report's second line, composed once (review patch): a complete
+// release says so plainly, and a stale snapshot's residual — rows for this
+// key that arrived while earlier clears were still running — is reported
+// honestly with the recovery step, never silently claimed as released.
+export function releaseReportLine(released, residual) {
+  if (released === 0 && residual === 0) {
+    return 'no held records carried this fingerprint; nothing to release'
+  }
+  const releasedClause = `released ${released} held record(s) for this fingerprint`
+  if (residual === 0) return releasedClause
+  return `${releasedClause}; ${residual} newly-held row${residual === 1 ? '' : 's'} for this key ${residual === 1 ? 'remains' : 'remain'} pending — re-run allow to release them`
+}
+
+// The Chat-ID grammar gate guards the GRANT path. The --remove path resolves
+// against the ALLOWLIST itself (below), so its <name> position also accepts a
+// bare fingerprint: a sender aged out of every live resolution source keeps a
+// human revocation path for its standing grant.
 export async function runAllow(
   { sharedDataDir, pluginDataDir },
   rawName,
   { remove = false, fingerprint: fingerprintArg } = {},
 ) {
   const forms = chatIdForms(rawName)
-  if (!forms) {
+  if (!forms && remove !== true) {
     throw new AgentRoomRuntimeError(
       'invalid_chat_id',
       `"${String(rawName)}" is not a valid Chat ID: ${CHAT_ID_INVALID_MESSAGE}`,
@@ -362,12 +413,74 @@ export async function runAllow(
     if (typeof fingerprintArg !== 'string' || !FINGERPRINT_PATTERN.test(fingerprintArg)) {
       throw new AgentRoomRuntimeError(
         'invalid_request',
-        `"${String(fingerprintArg)}" is not a well-formed fingerprint (expected sha256: followed by 64 lowercase hex characters)`,
+        `"${String(fingerprintArg)}" is not a well-formed fingerprint (expected ${FINGERPRINT_PREFIX} followed by ${FINGERPRINT_HEX_LENGTH} lowercase hex characters)`,
       )
     }
     fingerprintFilter = fingerprintArg
   }
   const session = await openCliSession({ sharedDataDir, pluginDataDir })
+
+  if (remove === true) {
+    // Removal resolves from the ALLOWLIST itself, never from the live
+    // resolution sources (review patch): the zero-candidates refusal is a
+    // GRANT-path rule — you cannot allow an unknown name — but a standing
+    // grant must stay revocable even when its sender has gone silent past
+    // presence's window. The name is matched against the chat id recorded on
+    // the entry at grant time, falling back to a direct fingerprint match
+    // when the input IS a fingerprint.
+    const allowlist = loadAllowlist(pluginDataDir, session.realmId)
+    let targets
+    let resolvedChatId
+    if (fingerprintFilter !== null) {
+      targets = [fingerprintFilter]
+    } else if (typeof rawName === 'string' && FINGERPRINT_PATTERN.test(rawName)) {
+      targets = [rawName]
+    } else {
+      const wanted = `chat_id=${forms.normalized}`
+      targets = allowlist.entries
+        .filter(entry => typeof entry.note === 'string' && entry.note.toLowerCase() === wanted)
+        .map(entry => entry.fingerprint)
+      resolvedChatId = forms.display
+      if (targets.length > 1) {
+        return {
+          ok: false,
+          command: 'allow',
+          code: 'ambiguous_chat_id',
+          message: `the allowlist records ${targets.length} entries under chat id "${forms.display}"; nothing was removed — retry with one entry's fingerprint: agent-room allow <fingerprint> --remove`,
+          lines: targets.map(entryFingerprint => `  entry: fingerprint ${entryFingerprint}`),
+        }
+      }
+      if (targets.length === 0) {
+        return {
+          ok: false,
+          command: 'allow',
+          code: 'chat_id_not_found',
+          message: `no allowlist entry for this realm records chat id "${forms.display}"; nothing was removed — entries match the chat id recorded at grant time, or remove one directly by its key: agent-room allow <fingerprint> --remove`,
+        }
+      }
+    }
+    const fingerprint = targets[0]
+    const had = allowlist.entries.some(entry => entry.fingerprint === fingerprint)
+    setAllowlistEntry(pluginDataDir, session.realmId, fingerprint, false)
+    const chatIdClause = resolvedChatId === undefined ? '' : ` (chat id "${resolvedChatId}")`
+    return {
+      ok: true,
+      command: 'allow',
+      realmId: session.realmId,
+      fingerprint,
+      ...(resolvedChatId === undefined ? {} : { chatId: resolvedChatId }),
+      removed: true,
+      lines: had
+        ? [
+            `realm ${session.realmId}: removed the allowlist entry for fingerprint ${fingerprint}${chatIdClause}`,
+            'future messages from this sender are held again; already-ingested text and the durable log are untouched',
+          ]
+        : [
+            `realm ${session.realmId}: no allowlist entry existed for fingerprint ${fingerprint}${chatIdClause}; nothing was changed`,
+          ],
+    }
+  }
+
   const candidates = await resolveChatIdCandidates({
     port: session.port,
     sessionToken: session.sessionToken,
@@ -407,36 +520,16 @@ export async function runAllow(
   }
   const fingerprint = fingerprintFilter ?? candidates[0].fingerprint
 
-  if (remove === true) {
-    // Removal affects future ingestion only: the entry goes, the held records
-    // of every key stay pending decisions, and the durable log is untouched.
-    const had = loadAllowlist(pluginDataDir, session.realmId)
-      .entries
-      .some(entry => entry.fingerprint === fingerprint)
-    setAllowlistEntry(pluginDataDir, session.realmId, fingerprint, false)
-    return {
-      ok: true,
-      command: 'allow',
-      realmId: session.realmId,
-      fingerprint,
-      chatId: forms.display,
-      removed: true,
-      lines: had
-        ? [
-            `realm ${session.realmId}: removed the allowlist entry for fingerprint ${fingerprint} (chat id "${forms.display}")`,
-            'future messages from this sender are held again; already-ingested text and the durable log are untouched',
-          ]
-        : [
-            `realm ${session.realmId}: no allowlist entry existed for fingerprint ${fingerprint} (chat id "${forms.display}"); nothing was changed`,
-          ],
-    }
-  }
-
   // Persist the entry FIRST, then release: success is never reported without
   // the entry on disk, and the release runs through the pipeline's own
   // heldClear per (room, seq) — matched by actor_fingerprint === the resolved
-  // fingerprint, never by name (D13).
-  const allowlist = setAllowlistEntry(pluginDataDir, session.realmId, fingerprint, true)
+  // fingerprint, never by name (D13). The entry's note records the chat id
+  // the human granted under, so `allow <chat-id> --remove` can later resolve
+  // the standing grant from the allowlist alone, however silent the sender
+  // has gone since.
+  const allowlist = setAllowlistEntry(pluginDataDir, session.realmId, fingerprint, true, {
+    note: `chat_id=${forms.display}`,
+  })
   const matching = heldList(pluginDataDir, session.realmId)
     .filter(row => row.actor_fingerprint === fingerprint)
   let released = 0
@@ -444,6 +537,13 @@ export async function runAllow(
     const cleared = await heldClear(pluginDataDir, session.realmId, row.room_id, row.seq)
     if (cleared) released += 1
   }
+  // The snapshot can go stale inside the release loop (a sender can register
+  // a new held row while earlier clears are still running), so the report
+  // re-snapshots once after the final clear and states any residual honestly
+  // (review patch) instead of claiming a complete release.
+  const residual = heldList(pluginDataDir, session.realmId)
+    .filter(row => row.actor_fingerprint === fingerprint)
+    .length
   return {
     ok: true,
     command: 'allow',
@@ -451,12 +551,11 @@ export async function runAllow(
     fingerprint,
     chatId: forms.display,
     released,
+    residual,
     allowlist,
     lines: [
       `realm ${session.realmId}: allowed fingerprint ${fingerprint} (chat id "${forms.display}")`,
-      released === 0
-        ? 'no held records carried this fingerprint; nothing to release'
-        : `released ${released} held record(s) for this fingerprint`,
+      releaseReportLine(released, residual),
     ],
   }
 }
@@ -483,6 +582,15 @@ function askConfirm({ input, output, question }) {
 }
 
 export async function runAllowAll({ input, output, sharedDataDir, pluginDataDir }, { remove = false } = {}) {
+  // The non-TTY gate comes FIRST (review patch): the blanket grant can never
+  // be driven programmatically, so a non-TTY stdin is refused before any
+  // server is booted, any token read, or any state file created — pipes, the
+  // MCP host, and CI leave zero footprint. The fail-safe --remove direction
+  // keeps running without a TTY and still opens the session (it needs the
+  // realm).
+  if (remove !== true && !input.isTTY) {
+    return { ok: false, command: 'allow-all', code: 'invalid_request', message: ALLOW_ALL_REQUIRES_TTY_MESSAGE }
+  }
   const session = await openCliSession({ sharedDataDir, pluginDataDir })
   if (remove === true) {
     // The fail-safe direction: no confirmation, holding messages again.
@@ -497,11 +605,6 @@ export async function runAllowAll({ input, output, sharedDataDir, pluginDataDir 
         `realm ${session.realmId}: accept-all is OFF — future senders without an allowlist entry are held again`,
       ],
     }
-  }
-  if (!input.isTTY) {
-    // The blanket grant can never be driven programmatically: pipes, the MCP
-    // host, and CI are refused with guidance before anything is touched.
-    return { ok: false, command: 'allow-all', code: 'invalid_request', message: ALLOW_ALL_REQUIRES_TTY_MESSAGE }
   }
   const confirmed = await askConfirm({
     input,
