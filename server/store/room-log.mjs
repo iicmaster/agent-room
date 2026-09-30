@@ -45,6 +45,8 @@ import {
   ROOM_ID_ENTROPY_BYTES,
   STORE_OPEN_BUSY_BACKOFF_MS,
   STORE_OPEN_BUSY_RETRY_LIMIT,
+  STORAGE_REFUSE_FREE_BYTES,
+  STORAGE_WARN_FREE_BYTES,
   TITLE_MAX,
   chatIdForms,
 } from '../constants.mjs'
@@ -65,6 +67,12 @@ import {
   inviteConsumptionsTableDdl,
   invitesTableDdl,
 } from './invites.mjs'
+import {
+  createStorageAdmissionGate,
+  defaultStorageWarn,
+  resolveStorageThresholds,
+  statfsFreeBytes,
+} from './storage-gate.mjs'
 
 export const ROOM_LOG_DATABASE_FILENAME = 'agent-room.sqlite'
 export const ROOM_LOG_SCHEMA_VERSION = 2
@@ -100,6 +108,11 @@ const SQLITE_BUSY = 5
 const SQLITE_CORRUPT = 11
 const SQLITE_NOTADB = 26
 const SQLITE_CONSTRAINT = 19
+// Story 4.6: the disk-full write. The storage gate refuses BELOW the reserve
+// before the insert; SQLITE_FULL is the insert or commit hitting a disk that
+// filled anyway (the gate observed, then space vanished — a race the gate
+// cannot close). Both faces answer the same coded storage_low.
+const SQLITE_FULL = 13
 
 const MESSAGE_PROJECTION = `
   SELECT
@@ -804,6 +817,46 @@ function verifyBannedActorsColumns(database) {
   }
 }
 
+// The duplicate gate (Story 4.4, FR-16) runs one window query per append —
+// the byte-identical-payload scan over this Actor's rows in one room. With
+// no index serving it, SQLite rode the (room_id, seq) primary key's room_id
+// prefix and filtered every row of the room per append: measured cost grew
+// linearly with the log (60 ms/msg at 5k rows to 733 ms/msg at 30k —
+// quadratic overall), the REL-2 continuity drill's per-send cost climbed
+// 2.1 → 12.4 ms as its log grew, and the page faults of those per-append
+// scans ratcheted the server's RSS so its warm-then-measure warmup never
+// stabilized. The index gives the gate an exact answer: equality on
+// (room_id, actor_fingerprint, text) probes the few byte-identical
+// candidates directly, seq trails the key so the DESC ordering rides the
+// index and LIMIT 1 stops at the newest match, and the residual
+// (reply_to_seq IS ? AND created_at >= ?) evaluates against a handful of
+// rows instead of the room's whole history (proven: the plan is a
+// SEARCH on this index, and append cost is flat across a 30k-row log —
+// see tests/store.test.mjs's duplicate-gate index rows).
+//
+// Additive convergence, no schema-version bump (the Story 1.6 claims-index
+// precedent): IF NOT EXISTS on every open recreates a dropped index, and
+// the named-index verification refuses a foreign squatter — the same
+// discipline as ensureChatIdClaimsLastSeenIndex/verifyChatIdClaimsIndex.
+const MESSAGES_DUPLICATE_GATE_INDEX_NAME = 'idx_messages_duplicate_gate'
+
+function ensureMessagesDuplicateGateIndex(database) {
+  database.exec(`
+    CREATE INDEX IF NOT EXISTS ${MESSAGES_DUPLICATE_GATE_INDEX_NAME}
+      ON messages (room_id, actor_fingerprint, text, seq);
+  `)
+}
+
+function verifyMessagesDuplicateGateIndex(database) {
+  const indexes = database
+    .prepare(`SELECT name FROM pragma_index_list('messages')`)
+    .all()
+    .map(row => row.name)
+  if (!indexes.includes(MESSAGES_DUPLICATE_GATE_INDEX_NAME)) {
+    fail('database_schema_invalid', 'database table messages is missing the duplicate-gate index')
+  }
+}
+
 function plainMessage(row) {
   return {
     seq: Number(row.seq),
@@ -828,13 +881,34 @@ function plainRoom(row) {
   }
 }
 
-export function openRoomLog({ dataDir, duplicateWindowMs = DUPLICATE_WINDOW_MS } = {}) {
+export function openRoomLog({
+  dataDir,
+  duplicateWindowMs = DUPLICATE_WINDOW_MS,
+  storageWarnFreeBytes = STORAGE_WARN_FREE_BYTES,
+  storageRefuseFreeBytes = STORAGE_REFUSE_FREE_BYTES,
+  storageFreeBytesFn = statfsFreeBytes,
+  storageWarn = defaultStorageWarn,
+} = {}) {
   if (typeof dataDir !== 'string' || dataDir.trim().length === 0) {
     fail('data_directory_invalid', 'dataDir must be a non-empty path')
   }
   // Story 4.4: the duplicate gate's window (the operator-tunable floor) is
   // validated at open, never per append.
   const validDuplicateWindowMs = requireDuplicateWindowMs(duplicateWindowMs)
+  // Story 4.6: the storage admission reserves (the operator-tunable capacity
+  // reserves) and their injectable seams are validated at open, never per
+  // append — a malformed threshold or a non-function free-space source is a
+  // startup failure, never a mid-send surprise.
+  const validStorageThresholds = resolveStorageThresholds({
+    warnFreeBytes: storageWarnFreeBytes,
+    refuseFreeBytes: storageRefuseFreeBytes,
+  })
+  if (typeof storageFreeBytesFn !== 'function') {
+    fail('invalid_argument', 'storageFreeBytesFn must be a function when provided')
+  }
+  if (typeof storageWarn !== 'function') {
+    fail('invalid_argument', 'storageWarn must be a function when provided')
+  }
 
   const directory = ensurePrivateDirectory(dataDir)
   const databasePath = join(directory, ROOM_LOG_DATABASE_FILENAME)
@@ -914,6 +988,8 @@ export function openRoomLog({ dataDir, duplicateWindowMs = DUPLICATE_WINDOW_MS }
       verifyInvitesColumns(database, 'invite_consumptions', INVITE_CONSUMPTIONS_COLUMNS)
       ensureBannedActorsTable(database)
       verifyBannedActorsColumns(database)
+      ensureMessagesDuplicateGateIndex(database)
+      verifyMessagesDuplicateGateIndex(database)
       verifyStrictTables(database)
 
       // Report the file's actual version, never the compiled constant.
@@ -983,6 +1059,20 @@ export function openRoomLog({ dataDir, duplicateWindowMs = DUPLICATE_WINDOW_MS }
       database,
       withImmediateTransaction,
       isBanned: actorFingerprint => banOperations.isActorBanned(actorFingerprint),
+    })
+
+    // Story 4.6: the storage admission gate over the data directory — free
+    // space below the refuse reserve refuses new appends with the coded
+    // storage_low, below the warn reserve it emits the once-per-interval warn
+    // line, above the warn reserve it is a no-op. The gate rides this store's
+    // injectable free-space source (tests simulate full disks without filling
+    // one) and warn sink; thresholds were validated at open.
+    const storageGate = createStorageAdmissionGate({
+      dataDir: directory,
+      warnFreeBytes: validStorageThresholds.warnFreeBytes,
+      refuseFreeBytes: validStorageThresholds.refuseFreeBytes,
+      freeBytesFn: storageFreeBytesFn,
+      warn: storageWarn,
     })
 
     const api = {
@@ -1154,6 +1244,22 @@ export function openRoomLog({ dataDir, duplicateWindowMs = DUPLICATE_WINDOW_MS }
       // serialize: exactly one commits, the other is dropped. nowMs
       // injects the gate clock (created_at rides the same clock, so the
       // window comparison is exact).
+      //
+      // Story 4.6 adds the storage admission gate INSIDE the same
+      // transaction, ordered AFTER the idempotency lookup and the duplicate
+      // gate, immediately before the insert: the gate refuses only work that
+      // would actually write. An exact retry (the tuple exists) and a
+      // duplicate drop (nothing to write) resolve from reads alone and keep
+      // answering below the refuse reserve — "refusal never drops or alters
+      // accepted work" is structural, not a promise — while a NEW append
+      // against a full disk is refused storage_low and the transaction rolls
+      // back having written nothing. Reads everywhere in this store are
+      // never gated. One statfs of the data directory per append is the
+      // whole mechanism (see ./storage-gate.mjs). A disk-full write the
+      // gate's observation raced (SQLITE_FULL at insert or commit time)
+      // maps to the same coded storage_low: both faces answer explicitly,
+      // and withImmediateTransaction has already rolled the write back, so
+      // an uncommitted message is never acknowledged.
       appendMessage(options) {
         assertOpen()
         const {
@@ -1173,95 +1279,120 @@ export function openRoomLog({ dataDir, duplicateWindowMs = DUPLICATE_WINDOW_MS }
         const validReplyToSeq = requireReplyToSeq(replyToSeq)
         const gateNowMs = requireNowMs(nowMs)
 
-        return withImmediateTransaction(database, () => {
-          const room = requireRoom(validRoomId)
-          requireDirectMembership(room, validFingerprint)
+        try {
+          return withImmediateTransaction(database, () => {
+            const room = requireRoom(validRoomId)
+            requireDirectMembership(room, validFingerprint)
 
-          const existingRow = database.prepare(`
-            ${MESSAGE_PROJECTION}
-            WHERE room_id = ? AND actor_fingerprint = ? AND client_message_id = ?
-          `).get(validRoomId, validFingerprint, validClientMessageId)
-          if (existingRow) {
-            const existing = plainMessage(existingRow)
-            if (existing.text !== validText || existing.reply_to_seq !== validReplyToSeq) {
-              fail(
-                'client_message_id_conflict',
-                'clientMessageId was already used with a different message payload',
-              )
-            }
-            return { message: existing, duplicate: true, duplicateDropped: false, original: null }
-          }
-
-          // Reply targets resolve room-locally against (room_id, seq). Only
-          // when the seq is absent from this room does a global lookup
-          // distinguish a cross-room target from a nonexistent one.
-          if (validReplyToSeq !== null) {
-            const localTarget = database
-              .prepare('SELECT 1 AS found FROM messages WHERE room_id = ? AND seq = ?')
-              .get(validRoomId, validReplyToSeq)
-            if (!localTarget) {
-              const foreignTarget = database
-                .prepare('SELECT 1 AS found FROM messages WHERE seq = ? AND room_id <> ?')
-                .get(validReplyToSeq, validRoomId)
-              if (foreignTarget) {
-                fail('reply_room_mismatch', 'replyToSeq identifies a message in another room')
+            const existingRow = database.prepare(`
+              ${MESSAGE_PROJECTION}
+              WHERE room_id = ? AND actor_fingerprint = ? AND client_message_id = ?
+            `).get(validRoomId, validFingerprint, validClientMessageId)
+            if (existingRow) {
+              const existing = plainMessage(existingRow)
+              if (existing.text !== validText || existing.reply_to_seq !== validReplyToSeq) {
+                fail(
+                  'client_message_id_conflict',
+                  'clientMessageId was already used with a different message payload',
+                )
               }
-              fail('message_not_found', 'replyToSeq does not identify an existing message')
+              return { message: existing, duplicate: true, duplicateDropped: false, original: null }
             }
-          }
 
-          // The duplicate gate (Story 4.4, FR-16): one Actor repeating the
-          // byte-identical payload in one room within the window is an
-          // explicit duplicate_dropped notice naming the original sequence —
-          // never a silent second commit, never an error. The window is
-          // inclusive at its lower boundary (a message exactly windowMs old
-          // is still a duplicate), matching the store's other window
-          // comparisons.
-          const duplicateCutoff = new Date(gateNowMs - validDuplicateWindowMs).toISOString()
-          const duplicateRow = database.prepare(`
-            ${MESSAGE_PROJECTION}
-            WHERE room_id = ? AND actor_fingerprint = ? AND text = ? AND reply_to_seq IS ?
-              AND created_at >= ?
-            ORDER BY seq DESC
-            LIMIT 1
-          `).get(validRoomId, validFingerprint, validText, validReplyToSeq, duplicateCutoff)
-          if (duplicateRow) {
-            const original = plainMessage(duplicateRow)
-            return { message: null, duplicate: false, duplicateDropped: true, original }
-          }
+            // Reply targets resolve room-locally against (room_id, seq). Only
+            // when the seq is absent from this room does a global lookup
+            // distinguish a cross-room target from a nonexistent one.
+            if (validReplyToSeq !== null) {
+              const localTarget = database
+                .prepare('SELECT 1 AS found FROM messages WHERE room_id = ? AND seq = ?')
+                .get(validRoomId, validReplyToSeq)
+              if (!localTarget) {
+                const foreignTarget = database
+                  .prepare('SELECT 1 AS found FROM messages WHERE seq = ? AND room_id <> ?')
+                  .get(validReplyToSeq, validRoomId)
+                if (foreignTarget) {
+                  fail('reply_room_mismatch', 'replyToSeq identifies a message in another room')
+                }
+                fail('message_not_found', 'replyToSeq does not identify an existing message')
+              }
+            }
 
-          const nextSeq = Number(database
-            .prepare('SELECT COALESCE(MAX(seq), 0) + 1 AS next_seq FROM messages WHERE room_id = ?')
-            .get(validRoomId).next_seq)
-          const createdAt = new Date(gateNowMs).toISOString()
-          database.prepare(`
-            INSERT INTO messages (
-              room_id,
-              seq,
-              actor_fingerprint,
-              chat_id,
-              client_message_id,
-              text,
-              reply_to_seq,
-              created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-          `).run(
-            validRoomId,
-            nextSeq,
-            validFingerprint,
-            validChatId,
-            validClientMessageId,
-            validText,
-            validReplyToSeq,
-            createdAt,
-          )
-          return {
-            message: selectMessage(validRoomId, nextSeq),
-            duplicate: false,
-            duplicateDropped: false,
-            original: null,
+            // The duplicate gate (Story 4.4, FR-16): one Actor repeating the
+            // byte-identical payload in one room within the window is an
+            // explicit duplicate_dropped notice naming the original sequence —
+            // never a silent second commit, never an error. The window is
+            // inclusive at its lower boundary (a message exactly windowMs old
+            // is still a duplicate), matching the store's other window
+            // comparisons.
+            const duplicateCutoff = new Date(gateNowMs - validDuplicateWindowMs).toISOString()
+            // The window scan rides idx_messages_duplicate_gate (equality on
+            // room, actor, and the exact text; the DESC seq ordering and the
+            // LIMIT ride the index too) — the query is an exact probe, never
+            // a scan of the room's history.
+            const duplicateRow = database.prepare(`
+              ${MESSAGE_PROJECTION}
+              WHERE room_id = ? AND actor_fingerprint = ? AND text = ? AND reply_to_seq IS ?
+                AND created_at >= ?
+              ORDER BY seq DESC
+              LIMIT 1
+            `).get(validRoomId, validFingerprint, validText, validReplyToSeq, duplicateCutoff)
+            if (duplicateRow) {
+              const original = plainMessage(duplicateRow)
+              return { message: null, duplicate: false, duplicateDropped: true, original }
+            }
+
+            // The storage admission gate (Story 4.6): the insert is about to
+            // allocate durable space, so this is where a full disk refuses.
+            // Below the refuse reserve the coded storage_low throws here —
+            // withImmediateTransaction rolls the (so far read-only)
+            // transaction back and the caller sees an explicit refusal, never
+            // a silent drop and never an acknowledgment. Between the reserves
+            // the append commits and the rate-limited warn line goes out.
+            storageGate.check(gateNowMs)
+
+            const nextSeq = Number(database
+              .prepare('SELECT COALESCE(MAX(seq), 0) + 1 AS next_seq FROM messages WHERE room_id = ?')
+              .get(validRoomId).next_seq)
+            const createdAt = new Date(gateNowMs).toISOString()
+            database.prepare(`
+              INSERT INTO messages (
+                room_id,
+                seq,
+                actor_fingerprint,
+                chat_id,
+                client_message_id,
+                text,
+                reply_to_seq,
+                created_at
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            `).run(
+              validRoomId,
+              nextSeq,
+              validFingerprint,
+              validChatId,
+              validClientMessageId,
+              validText,
+              validReplyToSeq,
+              createdAt,
+            )
+            return {
+              message: selectMessage(validRoomId, nextSeq),
+              duplicate: false,
+              duplicateDropped: false,
+              original: null,
+            }
+          })
+        } catch (error) {
+          // The disk filled between the gate's observation and the write:
+          // the insert (or the commit that flushes it) answered SQLITE_FULL.
+          // withImmediateTransaction has already rolled back, so nothing was
+          // written and nothing will be acknowledged; the raw SQLite result
+          // code becomes the same coded refusal the reserve breach answers.
+          if (error?.errcode === SQLITE_FULL) {
+            fail('storage_low', 'the disk holding the agent-room data directory is full; the message was not committed')
           }
-        })
+          throw error
+        }
       },
 
       // Cursor page over the room-local log: strictly-greater afterSeq, seq

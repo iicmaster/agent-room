@@ -91,7 +91,12 @@
 // session-authenticated request from a banned key, plus the enroll route's
 // post-proof store gate; the long-poll loop re-checks the ban each poll
 // iteration so an in-flight hold terminates within its window) and
-// storage_low completing the enum for Story 4.6.
+// storage_low landed by Story 4.6 (the store's append-path admission gate —
+// free space below the refuse reserve, or the disk-full write itself —
+// answered by the send route as the 200 result {status:'storage_low'},
+// never an acknowledgment; the operator reserves are startServer overrides
+// plus the AGENT_ROOM_STORAGE_* env knobs for the direct launch, and the
+// `agent-room capacity` command reports the filesystem against them).
 
 import { createServer } from 'node:http'
 import { timingSafeEqual } from 'node:crypto'
@@ -130,9 +135,12 @@ import {
   REQUEST_BUDGET_PER_MINUTE,
   SEND_TOKEN_CAPACITY,
   SEND_TOKEN_REFILL_PER_SECOND,
+  STORAGE_REFUSE_FREE_BYTES,
+  STORAGE_WARN_FREE_BYTES,
   chatIdForms,
 } from '../constants.mjs'
 import { openRoomLog } from '../store/room-log.mjs'
+import { resolveStorageThresholds, storageThresholdsFromEnv } from '../store/storage-gate.mjs'
 import { migrateV1InPlace } from '../store/migrate-v1.mjs'
 import { bootstrapRealm } from '../core/realm.mjs'
 import { createLiveSessionRegistry } from '../core/session-registry.mjs'
@@ -771,7 +779,12 @@ registerHandler('GET /api/rooms/:id/messages', async function readMessages(conte
 // rate_limited answers from the budgets stage (429 + retry_after_ms);
 // client_message_id_conflict answers as the coded 409; banned (Story 4.5's
 // authz-stage refusal — a banned key's send never reaches this handler)
-// and storage_low complete the enum from Stories 4.5/4.6.
+// answers as the coded 403; and storage_low (Story 4.6's append-gate
+// refusal) answers here as the 200 result {status:'storage_low'} — the
+// explicit, never-acknowledged notice that the store wrote nothing, mapped
+// from the store's coded refusal in this handler because the condition
+// belongs to the sender's actionable vocabulary (like duplicate_dropped),
+// not to the error channel that would invite a retry against a full disk.
 function requiredString(value, name, detail) {
   if (value === undefined || value === null || value === '') {
     return { error: reject('invalid_request', detail ?? `${name} is required`) }
@@ -806,14 +819,32 @@ registerHandler('POST /api/rooms/:id/messages', function appendMessageRoute(cont
   if (textField.error) return textField.error
   const replyToSeq = context.body?.reply_to_seq
 
-  const outcome = context.store.appendMessage({
-    roomId: context.params?.id,
-    actorFingerprint: principal.actorFingerprint,
-    chatId: live.chatId,
-    clientMessageId: clientMessageIdField.value,
-    text: textField.value,
-    replyToSeq,
-  })
+  // Story 4.6: the store's storage admission gate refuses below the refuse
+  // reserve with the coded storage_low (or the disk-full write maps to the
+  // same code). The route answers the FR-17 status as a 200 RESULT —
+  // {status:'storage_low'} — never an error envelope and never an
+  // acknowledgment: the store rolled back having written nothing, so there
+  // is no seq to name and no commit to claim. The sender learns explicitly
+  // that this exact attempt did not happen; a retry of the SAME
+  // client_message_id after space returns commits normally, and a retry of
+  // an ALREADY-committed message keeps resolving to its original below the
+  // reserve (the store's idempotency lookup precedes the gate).
+  let outcome
+  try {
+    outcome = context.store.appendMessage({
+      roomId: context.params?.id,
+      actorFingerprint: principal.actorFingerprint,
+      chatId: live.chatId,
+      clientMessageId: clientMessageIdField.value,
+      text: textField.value,
+      replyToSeq,
+    })
+  } catch (error) {
+    if (error?.code === 'storage_low') {
+      return { status: 'storage_low' }
+    }
+    throw error
+  }
   if (outcome.duplicateDropped) {
     return {
       status: 'duplicate_dropped',
@@ -965,6 +996,10 @@ export async function startServer({
   requestBudgetPerMinute = REQUEST_BUDGET_PER_MINUTE,
   requestBudgetBurst = REQUEST_BUDGET_BURST,
   duplicateWindowMs = DUPLICATE_WINDOW_MS,
+  storageWarnFreeBytes = STORAGE_WARN_FREE_BYTES,
+  storageRefuseFreeBytes = STORAGE_REFUSE_FREE_BYTES,
+  storageFreeBytesFn,
+  storageWarn,
 } = {}) {
   // Runtime gate first: Node >= 24.15 / SQLite >= 3.51.3, diagnosable error.
   assertSupportedRuntime()
@@ -1073,6 +1108,18 @@ export async function startServer({
   if (!Number.isSafeInteger(duplicateWindowMs) || duplicateWindowMs <= 0) {
     throw new AgentRoomRuntimeError('invalid_argument', 'duplicateWindowMs must be a positive safe integer')
   }
+  // Story 4.6: the storage admission reserves — tunable capacity reserves
+  // (never retention quotas), validated at startup like every other
+  // operator override: both non-negative safe integers of bytes and the
+  // refuse reserve not above the warn reserve. The free-space source and
+  // warn sink are the test seams (injectable functions when provided).
+  resolveStorageThresholds({ warnFreeBytes: storageWarnFreeBytes, refuseFreeBytes: storageRefuseFreeBytes })
+  if (storageFreeBytesFn !== undefined && typeof storageFreeBytesFn !== 'function') {
+    throw new AgentRoomRuntimeError('invalid_argument', 'storageFreeBytesFn must be a function when provided')
+  }
+  if (storageWarn !== undefined && typeof storageWarn !== 'function') {
+    throw new AgentRoomRuntimeError('invalid_argument', 'storageWarn must be a function when provided')
+  }
   const effectiveEnrollRateLimiter = enrollRateLimiter ?? createEnrollRateLimiter()
   // Story 4.4: the two per-Actor token buckets (request budget + send
   // bucket), one pair per server instance — per-realm admission state is
@@ -1117,7 +1164,17 @@ export async function startServer({
   // non-v1 foreign schema.
   await migrateV1InPlace({ dataDir })
 
-  const store = openRoomLog({ dataDir, duplicateWindowMs })
+  const store = openRoomLog({
+    dataDir,
+    duplicateWindowMs,
+    // Story 4.6: the storage admission reserves and their seams ride through
+    // (undefined triggers openRoomLog's declared defaults for the two
+    // injectable functions).
+    storageWarnFreeBytes,
+    storageRefuseFreeBytes,
+    storageFreeBytesFn,
+    storageWarn,
+  })
 
   // Story 1.6: one liveness mechanism. The actor-class auth stage already
   // slides the 12 h auth TTL on every successful verify (the documented
@@ -1417,7 +1474,21 @@ if (launchedDirectly()) {
   for (const gateWarning of gateWarnings) {
     process.stderr.write(`agent-room-server: ${gateWarning}\n`)
   }
-  startServer({ dataDir: sharedDataDirectory(), claimsTtlMs, presenceTtlMs, ...gateLimits })
+  // Story 4.6: the storage admission reserves ride the same direct-launch
+  // convention — AGENT_ROOM_STORAGE_WARN_BYTES / _REFUSE_BYTES, strictly
+  // validated, junk warns once and falls back to the declared default.
+  const { storageWarnFreeBytes, storageRefuseFreeBytes, warnings: storageWarnings } = storageThresholdsFromEnv()
+  for (const storageWarning of storageWarnings) {
+    process.stderr.write(`agent-room-server: ${storageWarning}\n`)
+  }
+  startServer({
+    dataDir: sharedDataDirectory(),
+    claimsTtlMs,
+    presenceTtlMs,
+    ...gateLimits,
+    storageWarnFreeBytes,
+    storageRefuseFreeBytes,
+  })
     .then(server => {
       let shuttingDown = false
       const shutdown = () => {

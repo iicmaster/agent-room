@@ -54,6 +54,18 @@
 //                         an in-flight long-poll ends at its next poll wake.
 //                         Bodies in ./ban-commands.mjs.
 //
+//   capacity (4.6)        the operator's storage view over the SAME host and
+//                         grammar: `capacity` stats the shared data
+//                         directory once against the storage admission
+//                         reserves (the store gate's own mechanism — no
+//                         store open, so it answers even when the store file
+//                         cannot) and prints one JSON line: free bytes, both
+//                         reserves, state ok|warn|refuse, admits_appends.
+//                         Exit 0 while appends are admitted (warn included),
+//                         1 below the refuse reserve, 2 on usage. Thresholds
+//                         ride the AGENT_ROOM_STORAGE_* env knobs the direct
+//                         launch reads. Bodies in ./capacity-commands.mjs.
+//
 //   remote (Story 4.3)    the installation's Remote Mode configuration:
 //                         `remote set <https-url>` (https required — a
 //                         plaintext http:// URL is refused with the coded
@@ -108,6 +120,7 @@ import {
 import { runInviteFamilyCommand } from './invite-commands.mjs'
 import { runRemoteFamilyCommand } from './remote-commands.mjs'
 import { runBanFamilyCommand } from './ban-commands.mjs'
+import { runCapacityFamilyCommand } from './capacity-commands.mjs'
 
 const OK_STATUS = 200
 // The collision status is owned by the constants table (chat_id_taken), never restated.
@@ -351,6 +364,24 @@ Commands:
       key flow again immediately. Unbanning a key that holds no ban is
       already the requested state and succeeds.
 
+  agent-room capacity
+      Report the shared data directory's free disk space against the storage
+      admission reserves. Run this on the SERVER HOST. One statfs of the
+      data directory — the store's own append-gate mechanism — against the
+      reserves (defaults: warn below 1 GiB free, refuse appends below
+      256 MiB free; tune with AGENT_ROOM_STORAGE_WARN_BYTES and
+      AGENT_ROOM_STORAGE_REFUSE_BYTES, non-negative integer bytes; the
+      refuse reserve may not exceed the warn reserve). Prints ONE JSON line
+      on stdout: data_dir, free_bytes, warn_free_bytes, refuse_free_bytes,
+      state (ok | warn | refuse), admits_appends, and a detail note on the
+      non-ok states. Exit 0 while new appends are admitted (ok and warn
+      alike — a reserve breach is a warning, never a refusal), 1 when free
+      space is below the refuse reserve (sends answer storage_low until
+      space is freed) or the data directory cannot be inspected, 2 on usage
+      error. The reserves are capacity gates, NEVER retention quotas:
+      nothing is ever deleted to free space. See
+      docs/self-hosting-storage.md for backup, restore, and disk expansion.
+
   agent-room remote set <https-url>
       Point this installation at a remote agent-room server (Remote Mode).
       The URL must be https:// with a hostname — plaintext (http://) remote
@@ -471,13 +502,14 @@ export async function main(argv = process.argv.slice(2), {
   errorOutput = process.stderr,
   sharedDataDir = sharedDataDirectory(),
   pluginDataDir = instanceDataDirectory(),
+  env = process.env,
 } = {}) {
   const [command, subcommand] = argv
   if (command === 'help' || command === '--help' || command === '-h') {
     output.write(HELP_TEXT)
     return { status: 'help' }
   }
-  const deps = { input, output, sharedDataDir, pluginDataDir }
+  const deps = { input, output, errorOutput, sharedDataDir, pluginDataDir, env }
   if (command === 'setup') {
     const outcome = await runSetup({ input, output, sharedDataDir, pluginDataDir })
     if (outcome.status === 'not-a-tty' || outcome.status === 'aborted') {
@@ -529,21 +561,27 @@ export async function main(argv = process.argv.slice(2), {
     output.write(`${outcome.lines.join('\n')}\n`)
     return outcome
   }
-  // Stories 4.2, 4.3, and 4.5: the machine-readable families (HCI-3's
+  // Stories 4.2, 4.3, 4.5, and 4.6: the machine-readable families (HCI-3's
   // grammar). Success prints one JSON object per line on stdout and exits 0;
   // a refusal or usage error prints ONE JSON object on stderr and exits 1
   // or 2. The invite family is the operator store surface; the remote
   // family is the installation's Remote Mode configuration; the ban family
-  // is the operator's ban registry — all later operator stories' families
-  // extend this dispatch and this printer.
-  if (command === 'invite' || command === 'remote' || command === 'ban' || command === 'unban') {
+  // is the operator's ban registry; the capacity command is the storage
+  // view — all later operator stories' families extend this dispatch and
+  // this printer. (Capacity's refuse state keeps its report on stdout and
+  // exits 1 through the outcome's exitCode — the report IS the answer, and
+  // the exit code is the severity a script keys on.)
+  if (command === 'invite' || command === 'remote' || command === 'ban' || command === 'unban' || command === 'capacity') {
     const outcome = command === 'invite'
       ? await runInviteFamilyCommand(subcommand, argv.slice(2), deps)
       : command === 'remote'
         ? await runRemoteFamilyCommand(subcommand, argv.slice(2), deps)
-        : await runBanFamilyCommand(command, argv.slice(1), deps)
+        : command === 'capacity'
+          ? await runCapacityFamilyCommand(command, argv.slice(1), deps)
+          : await runBanFamilyCommand(command, argv.slice(1), deps)
     if (outcome.status === 'ok') {
       for (const line of outcome.lines) output.write(`${line}\n`)
+      if (outcome.exitCode === 1) process.exitCode = 1
       return outcome
     }
     errorOutput.write(`${JSON.stringify({

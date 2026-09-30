@@ -94,8 +94,14 @@ export const RECONNECT_BACKOFF_MIN_SECONDS = 1
 export const RECONNECT_BACKOFF_MAX_SECONDS = 60
 
 // Storage gates: warn below 1 GiB free, refuse appends below 256 MiB free.
+// Story 4.6: both are tunable capacity RESERVES (operator knobs), never
+// retention quotas — the log is append-only and nothing is ever deleted to
+// free space. The warn's rate limit is the minimum interval between two
+// storage-low warn lines on one store connection: the line is a hint an
+// operator must be able to read in a log, not one per append.
 export const STORAGE_WARN_FREE_BYTES = 1024 ** 3
 export const STORAGE_REFUSE_FREE_BYTES = 256 * 1024 ** 2
+export const STORAGE_WARN_INTERVAL_MS = 60_000
 
 // Held cache and viewer freshness.
 export const HELD_CACHE_MAX = 100
@@ -172,7 +178,11 @@ export const SUPPORTED_PROTOCOL_VERSIONS = Object.freeze([PROTOCOL_VERSION])
 // `rate_limited` as the coded 429 carrying retry_after_ms,
 // `client_message_id_conflict` as the coded 409, and `banned`/`storage_low`
 // as the coded refusals Stories 4.5/4.6 wire by name when their triggers
-// land. Names never rename; the set is closed at these six.
+// land. Landed: `banned` is Story 4.5's 403 authz refusal; `storage_low` is
+// Story 4.6's append-gate refusal, answered on the send route as a 200
+// result {status:'storage_low'} — an explicit, never-acknowledged notice
+// (the store wrote nothing), not an error the sender should retry against.
+// Names never rename; the set is closed at these six.
 export const SEND_STATUSES = Object.freeze([
   'committed',
   'rate_limited',
@@ -250,6 +260,13 @@ export const PUBLIC_ERRORS = Object.freeze({
   // failed — identity binds at challenge time and cannot be substituted.
   signature_invalid: 'signature verification failed',
   sqlite_version_unsupported: 'SQLite runtime is unsupported',
+  // Story 4.6: the storage admission gate's refusal — free space below the
+  // configured refuse reserve, or the disk-full write itself. The send route
+  // answers the FR-17 status (a 200 result {status:'storage_low'} naming a
+  // send that was never committed and is never acknowledged); this coded face
+  // keeps the refusal named and diagnosable wherever a store refusal surfaces
+  // outside that route, instead of collapsing into request_failed.
+  storage_low: 'storage is below the configured free-space reserve',
   unauthorized: 'session authentication is required',
   unknown_field: 'request contains an unknown field',
 })
@@ -342,6 +359,12 @@ export const PUBLIC_ERROR_STATUS = Object.freeze({
   server_start_lock_invalid: 500,
   signature_invalid: 401,
   sqlite_version_unsupported: 500,
+  // Story 4.6: the storage admission gate's coded face, answered if the
+  // store's storage_low refusal ever surfaces outside the send route (which
+  // maps it to the FR-17 200 result per the send-status contract). 507 is the
+  // Insufficient Storage class — the one HTTP status whose name is this
+  // condition.
+  storage_low: 507,
   unauthorized: 401,
   unknown_field: 400,
 })

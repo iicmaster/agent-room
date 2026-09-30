@@ -719,8 +719,10 @@
         file: "tests/integration/trust-chain.test.mjs"
 
 # --- Epic 4 (The Wider Room) -----------------------------------------------------
-# Running: 4.1 is evidenced; the sweep fails loudly on every story below until
-# each one carries real evidence — the intended state while the epic runs.
+# Running: 4.1-4.5 are evidenced (4.5's entry added 2026-09-30 — the story was
+# committed done at 658744f without one, and the epic-4 sweep stays red until
+# every committed story carries real evidence); 4.6's entry is in flight in the
+# working tree; the sweep fails loudly on 4.7/4.8 until those stories land.
 
   4.1:                       # Remote challenge authentication (4 criteria)
     note: >-
@@ -1035,5 +1037,145 @@
         file: "tests/rate-gates.test.mjs"
       - test: "connection churn: 100 connect/authenticate/bind/send/disconnect cycles all succeed, hold the server at its post-warmup FD baseline (±5), and leak zero sockets"
         file: "tests/churn.test.mjs"
+      - test: "send-status enum and protocol header are the frozen wire contract"
+        file: "tests/constants.test.mjs"
+
+  4.5:                       # Ban by identity key (1 criterion)
+    note: >-
+      Proves the ban surface end to end over the real CLI host, real spawned
+      server children, and the durable store. The operator surface is the
+      Story 4.2 CLI host (no new entrypoint): `agent-room ban <fingerprint>
+      [--reason]` / `unban` answer JSON lines with stable exit codes and one
+      coded stderr line on malformed usage. Enforcement: the authz stage
+      refuses every session-authenticated request from a banned key with the
+      coded `banned` (403) — send and read land at NEXT request while a
+      non-banned peer is untouched and history is kept; the gate is a direct
+      indexed store query per request (deliberately not a cached set, so a
+      ban the separate CLI process commits is visible at next request
+      through WAL) and the stage stays a structural pass-through without a
+      ban surface. The long-poll read loop re-checks each poll iteration, so
+      an in-flight hold terminates within its window with the coded refusal
+      — never a killed connection past the 20 s bound. Re-enroll from a
+      banned key is refused `banned` after the possession proof and before
+      any invite use is consumed. Persistence (the Epic 2 review's B1
+      boundary, closed here): ban state survives close-and-reopen at the
+      store layer and a full server restart driven by a real CLI child
+      write, SIGKILL, and respawn; the registry keeps the first ban's
+      timestamp and reason on re-ban, and unban deletes the row so traffic
+      flows immediately. Does NOT prove: bans scoped beyond one realm/server
+      (the registry is the store's — multi-process deployment is out of scope
+      per AD-2), any rate-based or heuristic banning (the operator names the
+      key), the CLI host's own surface (Story 4.2's evidence), or the 4.5
+      interactions with storage refusal (Story 4.6's refusal path).
+
+    evidence:
+      - test: "a ban lands at next request: send and read are refused banned, a non-banned peer is untouched, history is kept"
+        file: "tests/ban.test.mjs"
+      - test: "the authz stage refuses a banned session key and stays a structural pass-through without a ban surface"
+        file: "tests/ban.test.mjs"
+      - test: "an active long-poll terminates within its window when the key is banned mid-hold"
+        file: "tests/ban.test.mjs"
+      - test: "re-enroll from a banned key is refused banned after proof and before any use is consumed"
+        file: "tests/ban.test.mjs"
+      - test: "unban restores sends and reads immediately"
+        file: "tests/ban.test.mjs"
+      - test: "ban state survives a full server restart: CLI child writes, SIGKILL, respawn, refusal"
+        file: "tests/ban.test.mjs"
+      - test: "the ban registry persists bans by fingerprint, keeps the first ban on re-ban, and answers the gate read"
+        file: "tests/ban.test.mjs"
+      - test: "ban state survives close and reopen — the store restart (B1)"
+        file: "tests/ban.test.mjs"
+      - test: "the ban family answers JSON lines with stable exit codes on the Story 4.2 host"
+        file: "tests/ban.test.mjs"
+
+  4.6:                       # Storage admission control (2 criteria)
+    note: >-
+      Proves both clauses against the real surfaces, with the free-space
+      source injectable at every layer so a full disk is simulated without
+      filling one, and the real mechanism (one statfs of the data directory:
+      bavail × bsize) proven against the live filesystem in its own row.
+      AC-1 (the gates and the reserves): the append path's gate lives INSIDE
+      the store's BEGIN IMMEDIATE transaction, ordered after the idempotency
+      lookup and the duplicate gate and immediately before the insert — so a
+      NEW append below the refuse reserve throws the coded storage_low and
+      the transaction rolls back having written nothing, while an exact
+      retry, a duplicate drop, and every read keep resolving from reads
+      alone (reserves are capacity gates, never retention quotas: no code
+      path in the repository deletes a committed message); between the
+      reserves appends COMMIT and the warn line goes out at most once per
+      STORAGE_WARN_INTERVAL_MS on the append's own injectable clock (proven
+      through the real server against an injected sink AND through the
+      default process-stderr sink on the wall clock); the thresholds are
+      tunable via startServer overrides (validated at startup: junk and
+      refuse-above-warn fail invalid_argument) and the two
+      AGENT_ROOM_STORAGE_* env knobs for the direct launch and the capacity
+      command (junk warns once and falls back to the declared default); and
+      `agent-room capacity` — a command of the CLI HOST 4.2 established, no
+      store open, the gate's own statfs mechanism — answers one JSON line
+      (free bytes, both reserves, state ok/warn/refuse, admits_appends) with
+      exit 0 while appends are admitted, 1 below the refuse reserve or when
+      the data directory cannot be inspected, 2 on usage. AC-2 (the refused
+      or disk-full send): over the wire the refusal is EXPLICIT and never an
+      acknowledgment — 200 {ok:true, result:{status:'storage_low'}}, the
+      FR-17 status, not an error envelope; the message is absent from the
+      page, absent from a direct read-only inspection, and absent after a
+      full server stop and store reopen (zero acknowledgment, durably), and
+      the gap-free next append proves the refusal consumed no sequence (the
+      refused send's own client_message_id then commits under its original
+      identity once space returns); reads, presence, and enumeration
+      answer 200 throughout the refusal. Does NOT prove the raced disk-full
+      mapping — SQLITE_FULL at insert or commit mapping to the same coded
+      storage_low after the rollback is IMPLEMENTED (room-log.mjs:115,
+      :1391-1392) but exercised by NO test (grep for
+      SQLITE_FULL/max_page_count/errcode in tests/ is empty — re-verified
+      2026-09-30); it is the 4-6 review's strongest deferred finding,
+      carried in spec-4-6's Deferred Review Findings, and the 4-6 re-run
+      must add the matrix row-7 test. Also does NOT prove operator tuning
+      THROUGH a spawned child's env end-to-end (the env knobs are proven at
+      the parser, through the capacity CLI over its env, and through
+      startServer overrides — the spawned-child env row is the same
+      storageThresholdsFromEnv surface the direct launch reads), backup and
+      restore EXECUTION (the guide is pinned for content and section
+      structure; running it against a live disk is the operator's
+      walkthrough), or Story 4.7's TLS deployment guide (its own story).
+    evidence:
+      - test: "resolveStorageThresholds accepts reserves, requires refuse <= warn, and rejects junk"
+        file: "tests/storage-gates.test.mjs"
+      - test: "capacityOf derives exactly three states and admits_appends only above the refuse reserve"
+        file: "tests/storage-gates.test.mjs"
+      - test: "the gate refuses below the refuse reserve, warns between reserves, and passes above"
+        file: "tests/storage-gates.test.mjs"
+      - test: "the gate warn rate limit is one line per interval on the injected clock"
+        file: "tests/storage-gates.test.mjs"
+      - test: "below the refuse reserve a new append is refused storage_low and writes nothing"
+        file: "tests/storage-gates.test.mjs"
+      - test: "below the refuse reserve accepted work keeps resolving: retries, duplicate drops, and reads"
+        file: "tests/storage-gates.test.mjs"
+      - test: "between the reserves appends commit and the warn line is emitted once per minute on the append clock"
+        file: "tests/storage-gates.test.mjs"
+      - test: "openRoomLog validates the storage reserves and seams at open"
+        file: "tests/storage-gates.test.mjs"
+      - test: "storageThresholdsFromEnv parses the two knobs strictly and falls back per junk value"
+        file: "tests/storage-gates.test.mjs"
+      - test: "a refused send answers 200 {status:storage_low}, is never acknowledged, and survives a restart as absent"
+        file: "tests/storage-gates.test.mjs"
+      - test: "an exact retry of a committed message keeps resolving below the refuse reserve"
+        file: "tests/storage-gates.test.mjs"
+      - test: "reads continue wherever storage can serve them while sends are refused"
+        file: "tests/storage-gates.test.mjs"
+      - test: "the server warn reaches the injected sink once per minute and commits between reserves"
+        file: "tests/storage-gates.test.mjs"
+      - test: "the default warn sink is the server process stderr, rate-limited by the wall clock"
+        file: "tests/storage-gates.test.mjs"
+      - test: "startServer honors storage threshold overrides and fails malformed ones at startup"
+        file: "tests/storage-gates.test.mjs"
+      - test: "the real free-space source is the answer of the filesystem holding the data directory"
+        file: "tests/storage-gates.test.mjs"
+      - test: "agent-room capacity reports the data directory against the declared reserves"
+        file: "tests/storage-gates.test.mjs"
+      - test: "agent-room capacity refuses unusable surfaces with the coded grammar and usage errors with exit 2"
+        file: "tests/storage-gates.test.mjs"
+      - test: "the backup/restore + disk-expansion guide exists and names its required sections"
+        file: "tests/storage-gates.test.mjs"
       - test: "send-status enum and protocol header are the frozen wire contract"
         file: "tests/constants.test.mjs"

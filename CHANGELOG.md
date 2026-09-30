@@ -189,6 +189,36 @@ All notable changes to Agent Room are documented in this file.
   — the registry/state the poll checks, never a killed connection. Ban
   state survives restart (the Epic 2 review's B1 boundary closes here:
   persistence proven over a real CLI child write, SIGKILL, and respawn).
+- Storage admission control (Story 4.6): the durable log can no longer die
+  of a full disk silently. The store's append path carries a free-space
+  gate inside the same BEGIN IMMEDIATE transaction — one statfs of the data
+  directory per append (bavail × bsize; the injectable free-space source
+  lets tests simulate full disks without filling one) — ordered after the
+  idempotency lookup and the duplicate gate, immediately before the insert.
+  Below the refuse reserve (default 256 MiB free) a NEW append is refused
+  with the coded `storage_low` (the transaction rolls back having written
+  nothing, no sequence is consumed, and a disk-full write the observation
+  raced — SQLITE_FULL — maps to the same code after the rollback), while an
+  exact retry, a duplicate drop, and every read keep resolving from reads
+  alone: refusal never drops or alters accepted work. The send route
+  answers the refusal as the explicit, never-acknowledged FR-17 status —
+  200 `{status:'storage_low'}` (the code is also registered in the public
+  error tables with its 507 coded face for any path outside that route).
+  Between the refuse and warn reserves (default 1 GiB) appends commit and
+  the server emits one warn line per minute on stderr. Both thresholds are
+  operator-tunable capacity RESERVES, never retention quotas: startServer
+  overrides validated at startup (refuse above warn is a contradiction and
+  fails), the `AGENT_ROOM_STORAGE_WARN_BYTES` /
+  `AGENT_ROOM_STORAGE_REFUSE_BYTES` env knobs for the direct launch (junk
+  warns once and falls back), and `STORAGE_WARN_INTERVAL_MS` pacing the
+  warn. `agent-room capacity` joins the operator CLI host (no store open —
+  the gate's own statfs mechanism against the data directory): one JSON
+  line with free bytes, both reserves, state `ok`/`warn`/`refuse` and
+  `admits_appends`; exit 0 while appends are admitted, 1 below the refuse
+  reserve or on an uninspectable data directory, 2 on usage. The
+  backup/restore + disk-expansion guide lives at
+  `docs/self-hosting-storage.md` (stop-copy-restart backup, all-or-nothing
+  restore, free-space-based expansion, and a failure-mode table).
 
 ### Removed
 

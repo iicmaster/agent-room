@@ -78,6 +78,7 @@ import {
   SESSION_TTL_SECONDS,
   STORAGE_REFUSE_FREE_BYTES,
   STORAGE_WARN_FREE_BYTES,
+  STORAGE_WARN_INTERVAL_MS,
   STORE_OPEN_BUSY_BACKOFF_MS,
   STORE_OPEN_BUSY_RETRY_LIMIT,
   SUPPORTED_PROTOCOL_VERSIONS,
@@ -162,6 +163,9 @@ test('AD-9 limits are owned once with their ratified values', () => {
   assert.equal(DUPLICATE_WINDOW_MS, 5_000)
   assert.equal(STORAGE_WARN_FREE_BYTES, 1024 ** 3)
   assert.equal(STORAGE_REFUSE_FREE_BYTES, 256 * 1024 ** 2)
+  // Story 4.6: the storage warn's rate limit — one line per minute per
+  // store connection, whatever the append cadence.
+  assert.equal(STORAGE_WARN_INTERVAL_MS, 60_000)
   assert.equal(RECONNECT_BACKOFF_MIN_SECONDS, 1)
   assert.equal(RECONNECT_BACKOFF_MAX_SECONDS, 60)
   // Story 2.2: the schedule's jitter fraction and the recovery-probe cadence
@@ -350,6 +354,7 @@ test('every v0.1 public error code has an HTTP status declared once', () => {
     'server_start_lock_invalid',
     'signature_invalid',
     'sqlite_version_unsupported',
+    'storage_low',
     'unauthorized',
     'unknown_field',
   ])
@@ -420,6 +425,11 @@ test('every v0.1 public error code has an HTTP status declared once', () => {
     // Story 4.5: the operator ban's refusal — every send, read, or re-enroll
     // from a banned key answers 403 (the send-status code's HTTP face).
     banned: 403,
+    // Story 4.6: the storage admission gate's coded face (507 — the
+    // Insufficient Storage class). The send route answers the FR-17 status
+    // as a 200 result {status:'storage_low'}; this is the coded face for
+    // any path where the store refusal surfaces outside that route.
+    storage_low: 507,
   }
   for (const [code, status] of Object.entries(expectedStatus)) {
     assert.equal(PUBLIC_ERROR_STATUS[code], status, code)

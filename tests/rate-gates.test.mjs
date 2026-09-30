@@ -299,6 +299,74 @@ test('the window boundary is exact and inclusive: a repeat exactly windowMs old 
   assert.equal(pastWindow.message.seq, 2)
 })
 
+test('the duplicate-gate window scan rides its index: exact plan, additive convergence, and no per-append scan of the room history', t => {
+  // The gate runs once per append, so its query is the append path's
+  // asymptotics. Without idx_messages_duplicate_gate the plan rode the
+  // (room_id, seq) primary key's room_id prefix and filtered every row of
+  // the room per append — measured cost grew linearly with the log
+  // (quadratic overall), the REL-2 drill's per-send cost climbed with its
+  // history, and the scan's page faults ratcheted the server's RSS. This
+  // row pins the index's presence, its convergence, and the plan.
+  const { store } = storeFixture(t)
+  const dbPath = store.databasePath
+  const indexNames = () => {
+    const raw = new DatabaseSync(dbPath)
+    try {
+      return raw.prepare(`SELECT name FROM pragma_index_list('messages')`).all().map(row => row.name)
+    } finally {
+      raw.close()
+    }
+  }
+  assert.ok(indexNames().includes('idx_messages_duplicate_gate'), 'the index exists on a fresh store')
+
+  // The plan must be an exact SEARCH on the index — equality on room, actor,
+  // and the byte-identical text — never a scan wearing the primary key's
+  // room_id prefix. This pin fails if the query drifts off the index.
+  const raw = new DatabaseSync(dbPath)
+  const plan = raw.prepare(`
+    EXPLAIN QUERY PLAN SELECT seq FROM messages
+    WHERE room_id = ? AND actor_fingerprint = ? AND text = ? AND reply_to_seq IS ?
+      AND created_at >= ?
+    ORDER BY seq DESC
+    LIMIT 1
+  `).all('room-x', FINGERPRINT_A, 'some text', null, '2026-01-01')
+  raw.close()
+  assert.deepEqual(
+    plan.map(row => row.detail),
+    ['SEARCH messages USING INDEX idx_messages_duplicate_gate (room_id=? AND actor_fingerprint=? AND text=?)'],
+    'the duplicate-gate query is an exact search on its index',
+  )
+
+  // Convergence: a file whose index was dropped (or predates it) is brought
+  // back by the next open, with no version bump, and the gate still drops
+  // through the recreated index.
+  store.close()
+  const dropper = new DatabaseSync(dbPath)
+  dropper.exec('DROP INDEX idx_messages_duplicate_gate')
+  dropper.close()
+  assert.equal(indexNames().includes('idx_messages_duplicate_gate'), false)
+
+  const reopened = openRoomLog({ dataDir: dirname(dbPath) })
+  try {
+    assert.ok(indexNames().includes('idx_messages_duplicate_gate'), 'the open recreated the index')
+    let nowMs = 5_000_000
+    const first = reopened.appendMessage({
+      roomId: (reopened.createBroadcastRoom({ actorFingerprint: FINGERPRINT_A, title: 'Converged' })).id,
+      actorFingerprint: FINGERPRINT_A, chatId: 'alice',
+      clientMessageId: 'c-1', text: 'post-convergence payload', nowMs,
+    })
+    nowMs += 1000
+    const repeat = reopened.appendMessage({
+      roomId: first.message.room_id, actorFingerprint: FINGERPRINT_A, chatId: 'alice',
+      clientMessageId: 'c-2', text: 'post-convergence payload', nowMs,
+    })
+    assert.equal(repeat.duplicateDropped === true && repeat.original.seq === first.message.seq, true,
+      'the gate still drops an in-window repeat through the recreated index')
+  } finally {
+    reopened.close()
+  }
+})
+
 test('identical text in a different room, a different reply context, or from a different actor is not deduplicated', t => {
   const { store, room, other } = storeFixture(t)
   let nowMs = 3_000_000

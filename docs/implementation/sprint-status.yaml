@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 09-21-2026 08:52
-last_updated: 09-29-2026 11:35
+last_updated: 09-30-2026 12:00
 project: agent-room
 project_key: NOKEY
 tracking_system: file-system
@@ -64,11 +64,11 @@ development_status:
   epic-3-retrospective: done
 
   epic-4: backlog
-  4-1-remote-challenge-authentication-keypair-born-in-story-1-1: backlog
-  4-2-invite-gated-enrollment-the-operator-cli-host: backlog
-  4-3-remote-client-transport-policy: backlog
-  4-4-the-four-rate-gates-full-send-statuses: backlog
-  4-5-ban-by-identity-key: backlog
+  4-1-remote-challenge-authentication-keypair-born-in-story-1-1: done
+  4-2-invite-gated-enrollment-the-operator-cli-host: done
+  4-3-remote-client-transport-policy: done
+  4-4-the-four-rate-gates-full-send-statuses: done
+  4-5-ban-by-identity-key: done
   4-6-storage-admission-control: backlog
   4-7-self-hosting-deployment-guide: backlog
   4-8-remote-churn-the-dress-rehearsal-blocking-gate-ruling-q3: backlog
