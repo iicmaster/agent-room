@@ -70,7 +70,7 @@ function installation() {
   }
 }
 
-function makeWorld(t, { chatId = 'Agent' } = {}) {
+function makeWorld(t, { chatId = 'Agent', serverEnv = {} } = {}) {
   const parent = mkdtempSync(join(tmpdir(), 'agent-room-mcp-tools-'))
   t.after(() => rmSync(parent, { recursive: true, force: true }))
   const sharedData = join(parent, 'shared')
@@ -86,7 +86,7 @@ function makeWorld(t, { chatId = 'Agent' } = {}) {
 
   function startServerChild() {
     serverChild = spawn(process.execPath, [SERVER_ENTRY], {
-      env: { ...process.env, AGENT_ROOM_DATA_DIR: sharedData },
+      env: { ...process.env, AGENT_ROOM_DATA_DIR: sharedData, ...serverEnv },
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     t.after(async () => {
@@ -585,6 +585,44 @@ test('end-to-end: status, presence (mcp client type), direct open, committed sen
     text: 'a different payload',
   }))
   assert.equal(conflict.error.code, 'client_message_id_conflict')
+
+  assert.equal(mcp.stderr, '')
+  await mcp.close()
+})
+
+test('message_send surfaces a storage_low refusal as the tool result, never an error', async t => {
+  // The harness is its child's operator: the refuse reserve tuned far above
+  // any real free space through the documented env knob (the same operator
+  // surface the direct launch reads — Story 4.6's AGENT_ROOM_STORAGE_*), so
+  // every NEW send is refused. The MCP tool result is the api-client's
+  // passthrough of the send route's 200 result {status:'storage_low'}: the
+  // explicit FR-17 status rides the RESULT channel — never an error envelope
+  // that would invite retries against a full disk, and never an
+  // outcome_unknown loop, because the client returns a 200 result without
+  // throwing.
+  const world = makeWorld(t, {
+    serverEnv: {
+      AGENT_ROOM_STORAGE_WARN_BYTES: String(2 ** 50),
+      AGENT_ROOM_STORAGE_REFUSE_BYTES: String(2 ** 49),
+    },
+  })
+  const record = await world.waitReady()
+  const mcp = startMcpChild(t, world)
+  t.after(() => mcp.close())
+  await mcp.initialize()
+
+  const status = structured(await mcp.tool('room_status'))
+  const sent = structured(await mcp.tool('message_send', {
+    room_id: status.broadcast_room_id,
+    client_message_id: 'storage-low-1',
+    text: 'refused under the tuned reserve',
+  }))
+  assert.deepEqual(sent, { status: 'storage_low' })
+
+  // The refusal acknowledged nothing: the tool's own read shows an empty log.
+  const read = structured(await mcp.tool('message_read', { room_id: status.broadcast_room_id, after_seq: 0 }))
+  assert.equal(read.messages.length, 0)
+  assert.equal(read.head_seq, 0)
 
   assert.equal(mcp.stderr, '')
   await mcp.close()

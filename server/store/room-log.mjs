@@ -291,7 +291,7 @@ function pragmaValue(database, sql) {
 // wal_autocheckpoint 1000 — asserted after applying, never assumed. The busy
 // timeout is applied FIRST: it is the only guard for the journal-mode switch,
 // which is the open path's first contended write under concurrent openers.
-function configureConnection(database) {
+function configureConnection(database, { maxPageCount } = {}) {
   const sqliteVersion = String(
     database.prepare('SELECT sqlite_version() AS version').get().version,
   )
@@ -318,6 +318,22 @@ function configureConnection(database) {
     PRAGMA busy_timeout = 5000;
     PRAGMA wal_autocheckpoint = 1000;
   `)
+
+  // The disk-full seam (the Story 4.6 mapping proof): a connection-local page
+  // ceiling makes the next page allocation answer SQLITE_FULL (result code
+  // 13) — the same result code a full filesystem produces at insert or
+  // commit — so tests drive the append path's SQLITE_FULL → storage_low
+  // mapping without filling a real disk. Per-connection by SQLite's own
+  // semantics (it constrains this connection's writes and no other
+  // connection), applied last among the pragmas and asserted after setting,
+  // never assumed. A test seam beside the storage free-space source, never an
+  // operator surface: no server flag or env knob reads it.
+  if (maxPageCount !== undefined) {
+    database.exec(`PRAGMA max_page_count = ${maxPageCount};`)
+    if (Number(pragmaValue(database, 'PRAGMA max_page_count')) !== maxPageCount) {
+      fail('database_configuration_failed', 'the max_page_count connection pragma was not applied')
+    }
+  }
 
   const pragmas = Object.freeze({
     synchronous: Number(pragmaValue(database, 'PRAGMA synchronous')),
@@ -831,14 +847,33 @@ function verifyBannedActorsColumns(database) {
 // index and LIMIT 1 stops at the newest match, and the residual
 // (reply_to_seq IS ? AND created_at >= ?) evaluates against a handful of
 // rows instead of the room's whole history (proven: the plan is a
-// SEARCH on this index, and append cost is flat across a 30k-row log —
-// see tests/store.test.mjs's duplicate-gate index rows).
+// SEARCH on this index, a dropped index is rebuilt by the next open, and a
+// same-name index over a different column set is refused at open — see
+// tests/rate-gates.test.mjs's duplicate-gate index rows; the flat-cost
+// claim at scale is the measured history above, not a pinned oracle).
+//
+// STORAGE COST: the key carries `text`, so the index holds a SECOND copy of
+// every message body — the gate's equality probe reads text straight from
+// the index without a table row lookup, and the price is roughly doubling
+// the on-disk bytes a message occupies. The reserves in ./storage-gate.mjs
+// are the operator's lever for exactly this kind of margin.
 //
 // Additive convergence, no schema-version bump (the Story 1.6 claims-index
 // precedent): IF NOT EXISTS on every open recreates a dropped index, and
-// the named-index verification refuses a foreign squatter — the same
-// discipline as ensureChatIdClaimsLastSeenIndex/verifyChatIdClaimsIndex.
+// the verification refuses BOTH a missing index and a foreign squatter — a
+// same-name index over a different column set would pass CREATE IF NOT
+// EXISTS and silently restore the per-append room scan this index exists to
+// kill, so the column set is verified via pragma_index_info and divergence
+// is a coded database_schema_invalid at open, never a runtime surprise
+// mid-gate (the same discipline as ensureChatIdClaimsLastSeenIndex/
+// verifyChatIdClaimsIndex).
 const MESSAGES_DUPLICATE_GATE_INDEX_NAME = 'idx_messages_duplicate_gate'
+const MESSAGES_DUPLICATE_GATE_INDEX_COLUMNS = Object.freeze([
+  'room_id',
+  'actor_fingerprint',
+  'text',
+  'seq',
+])
 
 function ensureMessagesDuplicateGateIndex(database) {
   database.exec(`
@@ -854,6 +889,23 @@ function verifyMessagesDuplicateGateIndex(database) {
     .map(row => row.name)
   if (!indexes.includes(MESSAGES_DUPLICATE_GATE_INDEX_NAME)) {
     fail('database_schema_invalid', 'database table messages is missing the duplicate-gate index')
+  }
+  // A squatter wearing the right name is still a squatter: the gate's query
+  // plan is the exact column SET in the exact order, so the open path pins
+  // both via pragma_index_info.
+  const columns = database
+    .prepare(`SELECT name FROM pragma_index_info('${MESSAGES_DUPLICATE_GATE_INDEX_NAME}') ORDER BY seqno`)
+    .all()
+    .map(row => row.name)
+  if (
+    columns.length !== MESSAGES_DUPLICATE_GATE_INDEX_COLUMNS.length
+    || MESSAGES_DUPLICATE_GATE_INDEX_COLUMNS.some((name, position) => columns[position] !== name)
+  ) {
+    fail(
+      'database_schema_invalid',
+      `database index ${MESSAGES_DUPLICATE_GATE_INDEX_NAME} has a divergent column set `
+        + `(${columns.join(', ')}; expected ${MESSAGES_DUPLICATE_GATE_INDEX_COLUMNS.join(', ')})`,
+    )
   }
 }
 
@@ -888,6 +940,8 @@ export function openRoomLog({
   storageRefuseFreeBytes = STORAGE_REFUSE_FREE_BYTES,
   storageFreeBytesFn = statfsFreeBytes,
   storageWarn = defaultStorageWarn,
+  maxPageCount,
+  storageNowMs,
 } = {}) {
   if (typeof dataDir !== 'string' || dataDir.trim().length === 0) {
     fail('data_directory_invalid', 'dataDir must be a non-empty path')
@@ -908,6 +962,20 @@ export function openRoomLog({
   }
   if (typeof storageWarn !== 'function') {
     fail('invalid_argument', 'storageWarn must be a function when provided')
+  }
+  // The disk-full simulation seam (see configureConnection): validated at
+  // open like every other seam — a malformed ceiling is an open failure,
+  // never a mid-append surprise.
+  if (maxPageCount !== undefined && (!Number.isSafeInteger(maxPageCount) || maxPageCount < 1)) {
+    fail('invalid_argument', 'maxPageCount must be a positive safe integer when provided')
+  }
+  // The storage gate's clock seam: injectable at the gate (check(nowMs)), the
+  // store (this option), and the server (startServer threads it through). It
+  // answers epoch milliseconds ONLY for appends that do not carry their own
+  // nowMs, so tests can drive the warn interval precisely through the server
+  // layer; requireNowMs validates whatever it answers.
+  if (storageNowMs !== undefined && typeof storageNowMs !== 'function') {
+    fail('invalid_argument', 'storageNowMs must be a function when provided')
   }
 
   const directory = ensurePrivateDirectory(dataDir)
@@ -972,7 +1040,7 @@ export function openRoomLog({
       const probedVersion = probeSchemaVersion(database)
 
       chmodSync(databasePath, 0o600)
-      const connection = configureConnection(database)
+      const connection = configureConnection(database, { maxPageCount })
 
       if (probedVersion === 0) createSchema(database)
       ensureRealmTable(database)
@@ -1067,12 +1135,23 @@ export function openRoomLog({
     // line, above the warn reserve it is a no-op. The gate rides this store's
     // injectable free-space source (tests simulate full disks without filling
     // one) and warn sink; thresholds were validated at open.
+    //
+    // The warn sink defers: `check` runs inside the append's BEGIN IMMEDIATE
+    // (the admission decision and the insert it guards share one
+    // serialization point), but the sink write happens only AFTER the commit
+    // returns — the rate-limited warn line is captured here and emitted by
+    // the append path once the write lock is released, so a warn is never
+    // synchronous I/O under the transaction's exclusive lock (a stalled
+    // stderr sink could hold the single writer for every realm). A captured
+    // line whose transaction then rolled back is dropped: nothing committed,
+    // so nothing warns — conservative for the rate limit, never the reverse.
+    let deferredStorageWarn = null
     const storageGate = createStorageAdmissionGate({
       dataDir: directory,
       warnFreeBytes: validStorageThresholds.warnFreeBytes,
       refuseFreeBytes: validStorageThresholds.refuseFreeBytes,
       freeBytesFn: storageFreeBytesFn,
-      warn: storageWarn,
+      warn: line => { deferredStorageWarn = line },
     })
 
     const api = {
@@ -1277,10 +1356,16 @@ export function openRoomLog({
         const validClientMessageId = requireClientMessageId(clientMessageId)
         const validText = requireMessageText(text)
         const validReplyToSeq = requireReplyToSeq(replyToSeq)
-        const gateNowMs = requireNowMs(nowMs)
+        // The storage gate's clock (and the append's created_at) defaults to
+        // the wall clock; the open path's storageNowMs injection fills an
+        // omitted nowMs (requireNowMs calls a function argument and validates
+        // what it answers), so the warn interval is drivable through the
+        // server layer where the send route passes no nowMs at all.
+        const gateNowMs = requireNowMs(nowMs ?? storageNowMs)
 
         try {
-          return withImmediateTransaction(database, () => {
+          deferredStorageWarn = null
+          const outcome = withImmediateTransaction(database, () => {
             const room = requireRoom(validRoomId)
             requireDirectMembership(room, validFingerprint)
 
@@ -1382,6 +1467,22 @@ export function openRoomLog({
               original: null,
             }
           })
+          // The commit has returned: the write lock is released, and the
+          // warn line the gate captured for this committed append goes out
+          // now — never while the transaction holds the exclusive lock. A
+          // rolled-back transaction never reaches this emit: its captured
+          // line (if the interval rolled) is dropped, because nothing was
+          // committed and nothing warns. The emit itself is isolated: a
+          // throwing injected sink is a diagnostics failure and must never
+          // recolor work the store has already committed.
+          if (deferredStorageWarn !== null) {
+            try {
+              storageWarn(deferredStorageWarn)
+            } catch {
+              // Committed is committed; a failed warn line is not a failed send.
+            }
+          }
+          return outcome
         } catch (error) {
           // The disk filled between the gate's observation and the write:
           // the insert (or the commit that flushes it) answered SQLITE_FULL.

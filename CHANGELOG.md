@@ -218,7 +218,17 @@ All notable changes to Agent Room are documented in this file.
   reserve or on an uninspectable data directory, 2 on usage. The
   backup/restore + disk-expansion guide lives at
   `docs/self-hosting-storage.md` (stop-copy-restart backup, all-or-nothing
-  restore, free-space-based expansion, and a failure-mode table).
+  restore, free-space-based expansion, and a failure-mode table). The
+  story's review re-run (2026-09-30) hardened the same surfaces: the raced
+  disk-full write is proven at the insert face — a store-level page-ceiling
+  seam drives a real `SQLITE_FULL` (errcode 13) through the real append
+  path, mapping to the same coded `storage_low` (the commit face maps
+  through the same catch, unexercised by any drivable seam); the
+  two storage env knobs now reach a plugin-managed auto-started server
+  through the bootstrap spawn whitelist; the rate-limited warn line is
+  emitted after the append transaction commits (never synchronous I/O under
+  the write lock); and the duplicate-gate index verifies its column set at
+  open, refusing a same-name squatter with `database_schema_invalid`.
 
 ### Removed
 

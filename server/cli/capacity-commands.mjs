@@ -19,14 +19,21 @@
 //
 // THE JSON-LINES GRAMMAR (HCI-3): the answer is always exactly one JSON
 // object on stdout — `state` (ok | warn | refuse) and `admits_appends` are
-// the machine-readable severity, and `detail` rides the non-ok states. Exit
-// 0 while new appends are admitted (ok and warn alike — a reserve breach is
-// a warning, never a refusal), 1 when free space is below the refuse reserve
-// (new appends answer storage_low) or the data directory cannot be stat'ed,
-// 2 on usage error. A junk env value warns one line on stderr and falls back
-// to the declared default — it never blocks the answer.
+// the machine-readable severity, FR-22's byte counts (`database_bytes`,
+// `wal_bytes`, sized by stat with no store open) ride beside the free-space
+// number, and `detail` rides the non-ok states. Exit 0 while new appends
+// are admitted (ok and warn alike — a reserve breach is a warning, never a
+// refusal), 1 when free space is below the refuse reserve (new appends
+// answer storage_low) or the data directory cannot be stat'ed, 2 on usage
+// error. A junk env value warns one line on stderr and falls back to the
+// declared default — it never blocks the answer by itself (the resolved
+// pair is still validated: refuse above warn fails coded).
+
+import { statSync } from 'node:fs'
+import { join } from 'node:path'
 
 import { capacityOf, resolveStorageThresholds, statfsFreeBytes, storageThresholdsFromEnv } from '../store/storage-gate.mjs'
+import { ROOM_LOG_DATABASE_FILENAME } from '../store/room-log.mjs'
 
 const line = object => JSON.stringify(object)
 
@@ -66,6 +73,22 @@ export function runCapacity({ sharedDataDir, env, errorOutput } = {}, tokens = [
     return { status: 'refusal', command: 'capacity', code: 'data_directory_invalid', message: reason }
   }
 
+  // FR-22's byte counts: the database file and its WAL sidecar, sized by
+  // stat — still NO store open (the command reads file sizes, never the
+  // database). An absent file is zero bytes (nothing written yet, or the
+  // WAL is fully checkpointed); this stays a filesystem-and-configuration
+  // view that answers with the store file corrupt or absent.
+  const fileSize = name => {
+    try {
+      return Number(statSync(join(sharedDataDir, name)).size)
+    } catch (error) {
+      if (error?.code === 'ENOENT') return 0
+      throw error
+    }
+  }
+  const databaseBytes = fileSize(ROOM_LOG_DATABASE_FILENAME)
+  const walBytes = fileSize(`${ROOM_LOG_DATABASE_FILENAME}-wal`)
+
   const { state, admitsAppends } = capacityOf({ freeBytes, ...thresholds })
   const detail = state === 'refuse'
     ? 'free space is below the refuse reserve; new appends are refused with storage_low until space is freed'
@@ -85,6 +108,8 @@ export function runCapacity({ sharedDataDir, env, errorOutput } = {}, tokens = [
       capacity: {
         data_dir: sharedDataDir,
         free_bytes: freeBytes,
+        database_bytes: databaseBytes,
+        wal_bytes: walBytes,
         warn_free_bytes: thresholds.warnFreeBytes,
         refuse_free_bytes: thresholds.refuseFreeBytes,
         state,

@@ -18,7 +18,10 @@
 // IMMEDIATE transaction, so the admission decision and the insert it guards
 // share one serialization point: a refusal and a commit can never race.
 // The free-space source is injectable (freeBytesFn) so tests simulate full
-// disks without filling a real one.
+// disks without filling a real one. (The live-filesystem test's 2% tolerance
+// guards filesystems whose root reservation makes bavail differ measurably
+// from bfree — on a filesystem where the two are equal the tolerance cannot
+// distinguish them; see tests/storage-gates.test.mjs's real-source row.)
 //
 // The warn is rate-limited to one line per STORAGE_WARN_INTERVAL_MS per store
 // connection — a hint an operator must be able to read in a log, not one line
@@ -85,8 +88,14 @@ export function resolveStorageThresholds({ warnFreeBytes, refuseFreeBytes } = {}
 // The direct launch's operator surface (and the capacity command's): the two
 // env knobs, each strictly validated — a present-but-invalid value never
 // blocks a boot or breaks the command; it warns once and falls back to the
-// declared default. Same shape and discipline as the server's other env
-// parsers (claimsTtlMsFromEnv, gateLimitsFromEnv).
+// declared default. The fallback is PER KEY: each junk value is replaced by
+// its own default, and only then is the RESOLVED pair validated by
+// `resolveStorageThresholds` — so a junk value that leaves refuse above warn
+// (for example a valid `AGENT_ROOM_STORAGE_WARN_BYTES=0` beside junk refuse
+// falling back to 256 MiB) still fails coded `invalid_argument` at
+// resolution, exactly as a hand-tuned contradiction would. Same shape and
+// discipline as the server's other env parsers (claimsTtlMsFromEnv,
+// gateLimitsFromEnv).
 export function storageThresholdsFromEnv(env = process.env) {
   const warnings = []
   const readBytes = (key, fallback) => {

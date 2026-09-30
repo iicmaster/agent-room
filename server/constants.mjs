@@ -359,11 +359,12 @@ export const PUBLIC_ERROR_STATUS = Object.freeze({
   server_start_lock_invalid: 500,
   signature_invalid: 401,
   sqlite_version_unsupported: 500,
-  // Story 4.6: the storage admission gate's coded face, answered if the
-  // store's storage_low refusal ever surfaces outside the send route (which
-  // maps it to the FR-17 200 result per the send-status contract). 507 is the
-  // Insufficient Storage class — the one HTTP status whose name is this
-  // condition.
+  // Story 4.6: the storage admission gate's coded face, reserved for the
+  // store's storage_low refusal should it ever surface outside the send route
+  // (which maps it to the FR-17 200 result per the send-status contract —
+  // today the append path is the code's only producer, and message appends
+  // are FR-22's scope). 507 is the Insufficient Storage class — the one HTTP
+  // status whose name is this condition.
   storage_low: 507,
   unauthorized: 401,
   unknown_field: 400,

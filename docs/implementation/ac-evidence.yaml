@@ -1155,32 +1155,64 @@
       command (junk warns once and falls back to the declared default); and
       `agent-room capacity` — a command of the CLI HOST 4.2 established, no
       store open, the gate's own statfs mechanism — answers one JSON line
-      (free bytes, both reserves, state ok/warn/refuse, admits_appends) with
-      exit 0 while appends are admitted, 1 below the refuse reserve or when
-      the data directory cannot be inspected, 2 on usage. AC-2 (the refused
-      or disk-full send): over the wire the refusal is EXPLICIT and never an
-      acknowledgment — 200 {ok:true, result:{status:'storage_low'}}, the
-      FR-17 status, not an error envelope; the message is absent from the
-      page, absent from a direct read-only inspection, and absent after a
-      full server stop and store reopen (zero acknowledgment, durably), and
-      the gap-free next append proves the refusal consumed no sequence (the
-      refused send's own client_message_id then commits under its original
-      identity once space returns); reads, presence, and enumeration
-      answer 200 throughout the refusal. Does NOT prove the raced disk-full
-      mapping — SQLITE_FULL at insert or commit mapping to the same coded
-      storage_low after the rollback is IMPLEMENTED (room-log.mjs:115,
-      :1391-1392) but exercised by NO test (grep for
-      SQLITE_FULL/max_page_count/errcode in tests/ is empty — re-verified
-      2026-09-30); it is the 4-6 review's strongest deferred finding,
-      carried in spec-4-6's Deferred Review Findings, and the 4-6 re-run
-      must add the matrix row-7 test. Also does NOT prove operator tuning
-      THROUGH a spawned child's env end-to-end (the env knobs are proven at
-      the parser, through the capacity CLI over its env, and through
-      startServer overrides — the spawned-child env row is the same
-      storageThresholdsFromEnv surface the direct launch reads), backup and
-      restore EXECUTION (the guide is pinned for content and section
-      structure; running it against a live disk is the operator's
-      walkthrough), or Story 4.7's TLS deployment guide (its own story).
+      (free bytes, FR-22's database/WAL byte counts, both reserves, state
+      ok/warn/refuse, admits_appends) with exit 0 while appends are admitted,
+      1 below the refuse reserve or when the data directory cannot be
+      inspected, 2 on usage. AC-2 (the refused or disk-full send): over the
+      wire the refusal is EXPLICIT and never an acknowledgment — 200
+      {ok:true, result:{status:'storage_low'}}, the FR-17 status, not an
+      error envelope; the message is absent from the page, absent from a
+      direct read-only inspection, and absent after a full server stop and
+      store reopen (zero acknowledgment, durably), and the gap-free next
+      append proves the refusal consumed no sequence (the refused send's own
+      client_message_id then commits under its original identity once space
+      returns); reads, presence, and enumeration answer 200 throughout the
+      refusal. The raced disk-full mapping — SQLITE_FULL at the INSERT face
+      mapping to the same coded storage_low after the rollback (the commit
+      face maps through the same shared catch but no drivable seam exercises
+      it) — was the 4-6 review's strongest deferred finding (carried in
+      spec-4-6's Deferred Review Findings as internal-2-1) and is now PROVEN
+      (4-6 re-run, 2026-09-30): the store's open-time maxPageCount seam caps
+      the connection's own database pages, so the NEXT page allocation at the
+      INSERT answers a real errcode 13 through the real appendMessage while
+      the injected free-space source stays above every reserve — two rows
+      prove it (store-level: the mapped coded refusal names the disk, the
+      warn sink stayed silent because the gate never fired, the rollback
+      wrote nothing, and a fresh connection takes the gap-free next seq;
+      wire-level: the IN-PROCESS send route (startServer) answers 200
+      {ok:true,result:{status:'storage_low'}}, never a raw SQLite error, and
+      the refused message is absent after a full stop and reopen — the
+      SPAWNED face is separately proven by the env-tuned child row below).
+      Operator tuning THROUGH a spawned child's env is likewise now proven
+      end-to-end (internal-2-2): a real direct-launch child with a raised
+      refuse reserve refuses sends over the wire, a junk value produces
+      exactly one `agent-room-server: ignoring invalid …` stderr line with
+      the declared defaults in effect, and the contradictory resolved pair
+      (WARN=0 beside the default refuse) fails both operator faces coded —
+      the capacity CLI exit 1 and the direct launch's early exit with the
+      coded stderr line; the MCP face rides the same env proof (message_send
+      surfaces the 200 result's storage_low status as a TOOL result, never an
+      error, never outcome_unknown), and a plugin-managed auto-start child
+      inherits the two knobs through ensure-server's pinned closed
+      whitelist. Still NOT proven: backup and restore EXECUTION (the guide
+      is pinned for content and section structure; running it against a live
+      disk is the operator's walkthrough), or Story 4.7's TLS deployment
+      guide (its own story). The re-run also added: capacity's negative rows
+      (the command answers one JSON line exit 0 with the store file corrupt —
+      it opens NO store — and refuses a non-ENOENT statfs failure coded
+      data_directory_invalid exit 1); the duplicate-gate index's column-set
+      verification with a squatter-fixture refusal (a same-name index over
+      different columns is a coded database_schema_invalid at open, closing
+      internal-1-6/2-7/4-4) plus the upgrade-time full-disk open row (a
+      capped open needing index pages fails with raw errcode 13 and the next
+      clean open converges, nothing lost); the warn sink deferred to after
+      COMMIT — its captured line dropped when the transaction rolls back and
+      a throwing sink never recoloring committed work (internal-1-4); the
+      storage gate's clock injected at the SERVER layer (storageNowMs driving
+      the warn-interval boundary through real sends — luna-F3); and the
+      auto-start child's env whitelist now an exported pure helper pinned to
+      its exact key set (PATH, LANG, AGENT_ROOM_DATA_DIR, knobs only when
+      set) with a canary proving nothing else passes.
     evidence:
       - test: "resolveStorageThresholds accepts reserves, requires refuse <= warn, and rejects junk"
         file: "tests/storage-gates.test.mjs"
@@ -1220,5 +1252,35 @@
         file: "tests/storage-gates.test.mjs"
       - test: "the backup/restore + disk-expansion guide exists and names its required sections"
         file: "tests/storage-gates.test.mjs"
+      - test: "a disk-full write at the insert (SQLITE_FULL) maps to the same coded storage_low after the rollback"
+        file: "tests/storage-gates.test.mjs"
+      - test: "a disk-full send over the wire answers 200 {status:storage_low}, never a raw SQLite error"
+        file: "tests/storage-gates.test.mjs"
+      - test: "a warn line captured for an append that then rolls back is dropped: the emit happens only after a commit"
+        file: "tests/storage-gates.test.mjs"
+      - test: "a throwing warn sink never recolors committed work"
+        file: "tests/storage-gates.test.mjs"
+      - test: "the storage gate clock is injectable at the server layer: the warn interval rolls on driven sends"
+        file: "tests/storage-gates.test.mjs"
+      - test: "the direct launch honors the AGENT_ROOM_STORAGE_* env knobs: a raised refuse reserve refuses sends"
+        file: "tests/storage-gates.test.mjs"
+      - test: "the direct launch survives junk AGENT_ROOM_STORAGE_* env: one warning line, declared defaults in effect"
+        file: "tests/storage-gates.test.mjs"
+      - test: "the direct launch dies early and coded on a contradictory resolved pair from env"
+        file: "tests/storage-gates.test.mjs"
+      - test: "agent-room capacity answers with the store file corrupt or absent and refuses a non-ENOENT statfs failure"
+        file: "tests/storage-gates.test.mjs"
+      - test: "agent-room capacity refuses a contradictory resolved pair: valid WARN=0 beside the junk-fallback refuse"
+        file: "tests/storage-gates.test.mjs"
+      - test: "message_send surfaces a storage_low refusal as the tool result, never an error"
+        file: "tests/mcp-tools.test.mjs"
+      - test: "the auto-start child inherits the AGENT_ROOM_STORAGE_* operator knobs from the starting process"
+        file: "tests/ensure-server.test.mjs"
+      - test: "the auto-start child environment is a closed whitelist: exact keys, knobs only when set"
+        file: "tests/ensure-server.test.mjs"
+      - test: "a foreign squatter wearing the duplicate-gate index name is a coded schema failure at open"
+        file: "tests/rate-gates.test.mjs"
+      - test: "the upgrade-time index rebuild on a full disk fails the open raw and converges on the next one"
+        file: "tests/rate-gates.test.mjs"
       - test: "send-status enum and protocol header are the frozen wire contract"
         file: "tests/constants.test.mjs"

@@ -440,6 +440,27 @@ function returnRecord(directory, record, spawned, { connectionMode } = {}) {
   })
 }
 
+// The auto-start child's exact environment — the closed whitelist, built by
+// this exported pure helper so a test can pin its exact key set: the process
+// basics a spawned server needs (PATH, LANG), the data dir under its
+// canonical name, and the two operator storage reserves ONLY when set. Every
+// other name in the starting process's environment — secrets, unrelated
+// AGENT_ROOM_ variables, anything else — stays behind.
+export function autoStartChildEnv({ env = process.env, dataDir } = {}) {
+  if (typeof dataDir !== 'string' || dataDir.trim().length === 0) {
+    throw new AgentRoomRuntimeError('invalid_argument', 'dataDir must be a non-empty path')
+  }
+  const childEnv = {
+    PATH: env?.PATH || '',
+    LANG: env?.LANG || 'C.UTF-8',
+    AGENT_ROOM_DATA_DIR: dataDir,
+  }
+  for (const knob of ['AGENT_ROOM_STORAGE_WARN_BYTES', 'AGENT_ROOM_STORAGE_REFUSE_BYTES']) {
+    if (env?.[knob] !== undefined) childEnv[knob] = env[knob]
+  }
+  return childEnv
+}
+
 // Race-safe auto-start + attach. Returns { port, record, spawned } — spawned
 // tells the adapter which path happened (boot vs attach). Options exist for
 // harnesses: dataDir overrides the shared dir (tests), serverPath overrides
@@ -524,14 +545,21 @@ export async function ensureServer({
       throw new AgentRoomRuntimeError('server_start_failed', 'agent-room server did not become ready')
     }
 
+    // The auto-start child is a direct launch of the same server, so the
+    // direct launch's documented AGENT_ROOM_ surfaces ride the whitelist:
+    // the data dir always, and the two operator storage reserves (Story 4.6)
+    // when set — the starting process's tuning reaches a plugin-managed
+    // server exactly as it would a hand-launched one. The knobs are validated
+    // inputs, never secret material: the child's own startup re-validates
+    // them (a junk value warns once and falls back to the declared default),
+    // so nothing a hostile environment puts here can disable the whitelist's
+    // hygiene — only these two names pass, and only as opaque strings the
+    // child parses strictly. The exact key set is pinned by test through the
+    // exported pure helper below.
     const child = spawn(process.execPath, [serverPath], {
       detached: true,
       stdio: 'ignore',
-      env: {
-        PATH: process.env.PATH || '',
-        LANG: process.env.LANG || 'C.UTF-8',
-        AGENT_ROOM_DATA_DIR: directory,
-      },
+      env: autoStartChildEnv({ env: process.env, dataDir: directory }),
     })
     child.unref()
     let spawnError = null

@@ -22,7 +22,7 @@ server watches the free space on the filesystem holding the data directory
 
 | Reserve | Default | Effect |
 |---|---|---|
-| Warn | 1 GiB (`1073741824` bytes) | Below this, every writer emits a warn line on the server's stderr, rate-limited to one line per minute. Appends still commit. |
+| Warn | 1 GiB (`1073741824` bytes) | Below this, every message append emits a warn line on the server's stderr, rate-limited to one line per minute. Appends still commit. |
 | Refuse | 256 MiB (`268435456` bytes) | Below this, new appends are refused with the explicit `storage_low` outcome. Already-committed messages stay readable; retries of an already-committed send still return the original; nothing is ever dropped or altered. |
 
 Tune them with environment variables (non-negative integer bytes):
@@ -32,10 +32,25 @@ export AGENT_ROOM_STORAGE_WARN_BYTES=2147483648    # 2 GiB warn reserve
 export AGENT_ROOM_STORAGE_REFUSE_BYTES=536870912   # 512 MiB refuse reserve
 ```
 
+These are plain environment variables: a server you launch directly reads
+them from its own environment, and a plugin-managed auto-started server
+inherits the two knobs from the process that started it, so tuning them
+where the plugin runs reaches the server too. `agent-room capacity` reads
+them from the shell you run it in.
+
 Rules the server enforces at startup:
 
-- Both values must be non-negative integers of bytes. A junk value warns once
-  and falls back to the default — it never blocks a boot.
+- Both values must be non-negative integers of bytes. A junk value warns
+  once (one line per knob) and falls back to that knob's default — it never
+  blocks a boot **by itself** (but see the next rule: the resolved pair is
+  still validated).
+- The fallback is per knob, and the **resolved pair** is then validated: if
+  the fallback leaves the refuse reserve above the warn reserve (for
+  example a valid `AGENT_ROOM_STORAGE_WARN_BYTES=0` beside a junk refuse
+  value falling back to 256 MiB), the server fails startup with
+  `storageRefuseFreeBytes … must not exceed storageWarnFreeBytes`, and the
+  `capacity` command answers the same coded refusal — fix one of the two
+  values so refuse ≤ warn.
 - The refuse reserve may not exceed the warn reserve (refusing while still
   "above the warning line" is a contradiction).
 - A reserve of `0` disables that level (free space is never below zero).
@@ -43,6 +58,12 @@ Rules the server enforces at startup:
 The reserves are **safety margins you declare, not rules about your data**:
 raising them makes agent-room stop accepting new work earlier; lowering them
 lets it run closer to the edge. No value of either knob ever causes a delete.
+
+A sizing note, since the reserves are byte margins: the log keeps every
+message body twice on disk — once in the table, once in the duplicate-gate
+index that makes repeat-sending cheap — so a realm with N bytes of message
+text occupies roughly 2N bytes of database plus WAL headroom. Budget the
+reserves with that in mind.
 
 ### Checking capacity: `agent-room capacity`
 
@@ -157,11 +178,13 @@ refused sends were never acknowledged, their senders can retry the same
 | Symptom | Likely cause | Recovery |
 |---|---|---|
 | `agent-room capacity` exits 1 with `"state":"refuse"` | Free space below the refuse reserve | Free space (rotate logs, prune other data) or expand the disk (§4). Sends answer `storage_low` until then; reads continue. |
+| After upgrading agent-room, the server cannot open the store at all (a schema error at startup, not `storage_low`) while the disk is full | The first open after an upgrade converges the schema (creating indexes, e.g. the duplicate-gate index) and that write needs disk space the full disk cannot give | Free space (or expand, §4) and start again — the next open converges the schema and the server boots; nothing was lost or corrupted by the failed attempt |
 | Sends answer `{"status":"storage_low"}` but `capacity` says `ok` | The server runs with reserves tuned above the shell's env (a `startServer` override, or different env in the server's unit) — the command reads **its own** environment | Inspect the server's environment (`systemctl show <unit> --property=Environment` or equivalent); align the env, or tune the reserves where the server is launched |
 | Send answers `storage_low`, disk has space after expansion, retry still refused | The retry is hitting a *different* room or a different `client_message_id` is in use — or the volume was expanded but not grown (`df` still shows the old size) | Grow the filesystem itself; retry with the original `client_message_id` |
 | `capacity` exits 1 with `data_directory_invalid`, "does not exist yet" | The data directory was never created (server never started) or `AGENT_ROOM_DATA_DIR` points elsewhere | Start the server once to create it, or correct `AGENT_ROOM_DATA_DIR` |
 | `capacity` warns `ignoring invalid AGENT_ROOM_STORAGE_WARN_BYTES …` | A junk env value (non-integer, negative, fractional) | Fix the value to a non-negative integer of bytes; the default applied meanwhile |
 | Server refuses to boot: `storageRefuseFreeBytes … must not exceed storageWarnFreeBytes` | The tuned reserves are contradictory | Set refuse ≤ warn |
+| A plugin-managed (auto-started) server fails to start with `server_start_failed` and no storage diagnostic after you tuned `AGENT_ROOM_STORAGE_*` where the plugin runs | The auto-start child runs with its output discarded, so its diagnosable boot failure — here the resolved-pair contradiction (§1) — surfaces only as the generic start failure | Align the pair to refuse ≤ warn in the starting process's environment (the same values the child inherits, §6), then let the plugin start the server again |
 | Server stderr shows `storage_low warning: free space … below the warning reserve` | The warn reserve is breached — the margin you declared is gone | Plan a backup and expansion now; appends still commit below warn, and the line repeats at most once per minute |
 | A send fails with `storage_low` while the log shows no warn | The disk filled faster than the warn reserve — the write itself hit `SQLITE_FULL` | Same recovery as the refuse state; the message was rolled back and never acknowledged |
 | After restore, server fails to open the store | Permissions, or a `-wal` mixed from another backup | `chmod 700` dir / `chmod 600` files; restore the whole set from one backup |
@@ -170,7 +193,7 @@ refused sends were never acknowledged, their senders can retry the same
 
 | Surface | Where | Applies to |
 |---|---|---|
-| `AGENT_ROOM_STORAGE_WARN_BYTES`, `AGENT_ROOM_STORAGE_REFUSE_BYTES` | The server process's environment (and the `agent-room capacity` command's) | The direct-launch server; the capacity report |
+| `AGENT_ROOM_STORAGE_WARN_BYTES`, `AGENT_ROOM_STORAGE_REFUSE_BYTES` | The server process's environment (and the `agent-room capacity` command's) | A directly launched server; a plugin-managed auto-started server (which inherits the two knobs from the starting process's environment); the capacity report |
 | `startServer({ storageWarnFreeBytes, storageRefuseFreeBytes })` | Code (embedders, test harnesses) | That server instance only — invisible to a separately-run `capacity` command, which is why the env is the documented shared surface |
 | Defaults | `server/constants.mjs` (`STORAGE_WARN_FREE_BYTES`, `STORAGE_REFUSE_FREE_BYTES`) | Everything, when no override applies |
 

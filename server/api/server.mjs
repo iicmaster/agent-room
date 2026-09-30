@@ -1000,6 +1000,8 @@ export async function startServer({
   storageRefuseFreeBytes = STORAGE_REFUSE_FREE_BYTES,
   storageFreeBytesFn,
   storageWarn,
+  maxPageCount,
+  storageNowMs,
 } = {}) {
   // Runtime gate first: Node >= 24.15 / SQLite >= 3.51.3, diagnosable error.
   assertSupportedRuntime()
@@ -1120,6 +1122,19 @@ export async function startServer({
   if (storageWarn !== undefined && typeof storageWarn !== 'function') {
     throw new AgentRoomRuntimeError('invalid_argument', 'storageWarn must be a function when provided')
   }
+  // The disk-full simulation seam (a store-level test seam, like the
+  // free-space source above — no operator surface reads it): validated at
+  // startup so a malformed ceiling fails the boot, never the first send.
+  if (maxPageCount !== undefined && (!Number.isSafeInteger(maxPageCount) || maxPageCount < 1)) {
+    throw new AgentRoomRuntimeError('invalid_argument', 'maxPageCount must be a positive safe integer when provided')
+  }
+  // The storage gate's clock seam (injectable at the gate, the store, and
+  // the server): the send route passes no nowMs, so this function — when
+  // provided — answers the append clock for every server-driven send, and
+  // the warn interval can be driven precisely in tests.
+  if (storageNowMs !== undefined && typeof storageNowMs !== 'function') {
+    throw new AgentRoomRuntimeError('invalid_argument', 'storageNowMs must be a function when provided')
+  }
   const effectiveEnrollRateLimiter = enrollRateLimiter ?? createEnrollRateLimiter()
   // Story 4.4: the two per-Actor token buckets (request budget + send
   // bucket), one pair per server instance — per-realm admission state is
@@ -1174,6 +1189,8 @@ export async function startServer({
     storageRefuseFreeBytes,
     storageFreeBytesFn,
     storageWarn,
+    maxPageCount,
+    storageNowMs,
   })
 
   // Story 1.6: one liveness mechanism. The actor-class auth stage already

@@ -23,8 +23,8 @@ import test from 'node:test'
 
 import { APP_VERSION, serverStartupLockPath } from '../server/runtime.mjs'
 import { SERVER_STARTUP_LOCK_STALE_MS } from '../server/constants.mjs'
-import { ensureServer } from '../server/client/ensure-server.mjs'
-import { localTokenPath } from '../server/api/local-token.mjs'
+import { ensureServer, autoStartChildEnv } from '../server/client/ensure-server.mjs'
+import { loadOrCreateLocalToken, localTokenPath } from '../server/api/local-token.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const ENSURE_SERVER_MODULE = join(ROOT, 'server', 'client', 'ensure-server.mjs')
@@ -168,6 +168,94 @@ test('a second ensureServer attaches to the live server without spawning', async
   assertRecordShape(second, { spawned: false })
   assert.equal(second.record.pid, first.record.pid)
   assert.equal(second.port, first.port)
+})
+
+// A JSON-lines HTTP request against the auto-started server (the local-mode
+// journey this suite's rows need; one socket, no keep-alive).
+function jsonRequest(port, method, path, { headers = {}, body } = {}) {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const req = http.request(
+      { host: '127.0.0.1', port, method, path, headers, agent: false },
+      response => {
+        const chunks = []
+        response.on('data', chunk => chunks.push(chunk))
+        response.on('error', rejectPromise)
+        response.on('end', () => {
+          const text = Buffer.concat(chunks).toString('utf8')
+          resolvePromise({ status: response.statusCode, text, json: () => JSON.parse(text) })
+        })
+      },
+    )
+    req.on('error', rejectPromise)
+    if (body !== undefined) req.write(body)
+    req.end()
+  })
+}
+
+test('the auto-start child inherits the AGENT_ROOM_STORAGE_* operator knobs from the starting process', async t => {
+  const dataDir = makeDataDir(t)
+  // Set in THIS process's environment: the spawn whitelist passes the two
+  // operator storage reserves through to the detached child when set (they
+  // are validated inputs, never secrets — the child's own startup re-validates
+  // them), so a plugin-managed auto-start tunes the reserves like any direct
+  // launch. The refuse reserve tuned far above any real free space (and the
+  // warn reserve above it, the pair being validated together) refuses sends
+  // where the DEFAULT reserves would admit — the passthrough, proven on the
+  // wire.
+  const previousWarn = process.env.AGENT_ROOM_STORAGE_WARN_BYTES
+  const previousRefuse = process.env.AGENT_ROOM_STORAGE_REFUSE_BYTES
+  process.env.AGENT_ROOM_STORAGE_WARN_BYTES = String(2 ** 50)
+  process.env.AGENT_ROOM_STORAGE_REFUSE_BYTES = String(2 ** 49)
+  try {
+    const result = await ensureForTest(t, { dataDir })
+    const token = loadOrCreateLocalToken(dataDir)
+    const installationKey = (await import('node:crypto'))
+      .generateKeyPairSync('ed25519')
+    const spki = installationKey.publicKey.export({ type: 'spki', format: 'der' })
+    const publicKey = spki.subarray(spki.length - 32).toString('base64url')
+
+    const auth = await jsonRequest(result.port, 'POST', '/api/auth/local', {
+      headers: {
+        'agent-room-protocol': '1',
+        authorization: `Bearer ${token}`,
+        'content-type': 'application/json; charset=utf-8',
+      },
+      body: JSON.stringify({ public_key: publicKey }),
+    })
+    assert.equal(auth.status, 200, auth.text)
+    const sessionToken = auth.json().result.session_token
+    const bound = await jsonRequest(result.port, 'POST', '/api/session', {
+      headers: {
+        'agent-room-protocol': '1',
+        authorization: `Bearer ${sessionToken}`,
+        'content-type': 'application/json; charset=utf-8',
+      },
+      body: JSON.stringify({ chat_id: 'AutoStart' }),
+    })
+    assert.equal(bound.status, 200, bound.text)
+    const status = await jsonRequest(result.port, 'GET', '/api/status', {
+      headers: { 'agent-room-protocol': '1', authorization: `Bearer ${sessionToken}` },
+    })
+    assert.equal(status.status, 200, status.text)
+    const roomId = status.json().result.broadcast_room_id
+
+    const sent = await jsonRequest(result.port, 'POST', `/api/rooms/${roomId}/messages`, {
+      headers: {
+        'agent-room-protocol': '1',
+        authorization: `Bearer ${sessionToken}`,
+        'content-type': 'application/json; charset=utf-8',
+      },
+      body: JSON.stringify({ chat_id: 'AutoStart', client_message_id: 'auto-start-1', text: 'refused through the inherited reserve' }),
+    })
+    assert.equal(sent.status, 200, sent.text)
+    assert.equal(sent.json().ok, true)
+    assert.deepEqual(sent.json().result, { status: 'storage_low' })
+  } finally {
+    if (previousWarn === undefined) delete process.env.AGENT_ROOM_STORAGE_WARN_BYTES
+    else process.env.AGENT_ROOM_STORAGE_WARN_BYTES = previousWarn
+    if (previousRefuse === undefined) delete process.env.AGENT_ROOM_STORAGE_REFUSE_BYTES
+    else process.env.AGENT_ROOM_STORAGE_REFUSE_BYTES = previousRefuse
+  }
 })
 
 test('the server binds loopback only: no other local address answers', async t => {
@@ -494,6 +582,47 @@ test('ensureServer validates its options', async t => {
   await assert.rejects(() => ensureServer({ dataDir, waitMs: 0 }), /waitMs/)
   await assert.rejects(() => ensureServer({ dataDir, waitMs: -5 }), /waitMs/)
   await assert.rejects(() => ensureServer({ dataDir, serverPath: '' }), /serverPath/)
+})
+
+test('the auto-start child environment is a closed whitelist: exact keys, knobs only when set', () => {
+  // The whitelist's hygiene is the claim: PATH/LANG/AGENT_ROOM_DATA_DIR
+  // always, the two storage knobs ONLY when set, and nothing else — a
+  // canary in the starting process's environment must not pass.
+  const env = {
+    PATH: '/usr/bin:/bin',
+    LANG: 'C.UTF-8',
+    HOME: '/home/you',
+    TMPDIR: '/tmp',
+    AGENT_ROOM_DATA_DIR: '/somewhere/else-ignored',
+    AGENT_ROOM_SECRET: 'canary-must-not-pass',
+    AGENT_ROOM_STORAGE_WARN_BYTES: '2147483648',
+    AGENT_ROOM_STORAGE_REFUSE_BYTES: '536870912',
+    PLUGIN_DATA: '/plugin-side-state',
+  }
+  const child = autoStartChildEnv({ env, dataDir: '/data' })
+  assert.deepEqual(
+    Object.keys(child).sort(),
+    ['AGENT_ROOM_DATA_DIR', 'AGENT_ROOM_STORAGE_REFUSE_BYTES', 'AGENT_ROOM_STORAGE_WARN_BYTES', 'LANG', 'PATH'],
+    'the exact key set: PATH, LANG, the data dir, and the two knobs',
+  )
+  assert.equal(child.AGENT_ROOM_DATA_DIR, '/data', 'the data dir is the canonical name, never the parent env\'s')
+  assert.equal(child.AGENT_ROOM_STORAGE_WARN_BYTES, '2147483648')
+  assert.equal(child.AGENT_ROOM_STORAGE_REFUSE_BYTES, '536870912')
+  assert.equal(child.AGENT_ROOM_SECRET, undefined, 'the canary stays behind')
+  assert.equal(child.HOME, undefined)
+  assert.equal(child.PLUGIN_DATA, undefined)
+
+  // Knobs absent: the exact three-key base set.
+  const quiet = autoStartChildEnv({ env: { PATH: '/bin', LANG: 'C' }, dataDir: '/data' })
+  assert.deepEqual(Object.keys(quiet).sort(), ['AGENT_ROOM_DATA_DIR', 'LANG', 'PATH'])
+  assert.equal(quiet.PATH, '/bin')
+  assert.equal(quiet.LANG, 'C')
+
+  // Missing PATH/LANG fall back to the spawn-safe defaults.
+  const bare = autoStartChildEnv({ env: {}, dataDir: '/data' })
+  assert.equal(bare.PATH, '')
+  assert.equal(bare.LANG, 'C.UTF-8')
+  assert.throws(() => autoStartChildEnv({ env: {}, dataDir: '' }), error => error.code === 'invalid_argument')
 })
 
 test('the local path takes no URL, credential, or room-name configuration anywhere', () => {

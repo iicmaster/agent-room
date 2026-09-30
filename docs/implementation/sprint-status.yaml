@@ -69,7 +69,7 @@ development_status:
   4-3-remote-client-transport-policy: done
   4-4-the-four-rate-gates-full-send-statuses: done
   4-5-ban-by-identity-key: done
-  4-6-storage-admission-control: backlog
+  4-6-storage-admission-control: done
   4-7-self-hosting-deployment-guide: backlog
   4-8-remote-churn-the-dress-rehearsal-blocking-gate-ruling-q3: backlog
   epic-4-retrospective: optional

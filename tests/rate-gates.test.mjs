@@ -367,6 +367,118 @@ test('the duplicate-gate window scan rides its index: exact plan, additive conve
   }
 })
 
+test('a foreign squatter wearing the duplicate-gate index name is a coded schema failure at open', t => {
+  // A same-name index over a DIFFERENT column set passes CREATE IF NOT
+  // EXISTS and name-presence verification alike, silently restoring the
+  // per-append room scan the index exists to kill — so the open path pins
+  // the column set via pragma_index_info and refuses divergence coded.
+  const { store } = storeFixture(t)
+  const dbPath = store.databasePath
+  store.close()
+
+  const squatter = new DatabaseSync(dbPath)
+  squatter.exec('DROP INDEX idx_messages_duplicate_gate')
+  squatter.exec('CREATE INDEX idx_messages_duplicate_gate ON messages (room_id, seq)')
+  squatter.close()
+
+  assert.throws(
+    () => openRoomLog({ dataDir: dirname(dbPath) }),
+    error => error.code === 'database_schema_invalid'
+      && /idx_messages_duplicate_gate/.test(error.message)
+      && /divergent column set/.test(error.message),
+    'the squatter is refused by column-set verification, not just name presence',
+  )
+
+  // Recovery is convergence, not surgery: dropping the squatter lets the
+  // next open rebuild the real index.
+  const reformer = new DatabaseSync(dbPath)
+  reformer.exec('DROP INDEX idx_messages_duplicate_gate')
+  reformer.close()
+  const reopened = openRoomLog({ dataDir: dirname(dbPath) })
+  t.after(() => reopened.close())
+  const raw = new DatabaseSync(dbPath, { readOnly: true })
+  try {
+    const columns = raw
+      .prepare(`SELECT name FROM pragma_index_info('idx_messages_duplicate_gate') ORDER BY seqno`)
+      .all()
+      .map(row => row.name)
+    assert.deepEqual(columns, ['room_id', 'actor_fingerprint', 'text', 'seq'])
+  } finally {
+    raw.close()
+  }
+})
+
+test('the upgrade-time index rebuild on a full disk fails the open raw and converges on the next one', t => {
+  // The guide's §5 upgrade row, both halves: the first open after an
+  // upgrade converges the schema (here, rebuilding the duplicate-gate
+  // index), and that write needs disk space a full disk cannot give — the
+  // open fails with the raw SQLite FULL error, and the next clean open
+  // converges with nothing lost. The disk is a page ceiling (the store's
+  // maxPageCount seam), and the recipe below makes the rebuild un-fundable:
+  // the index is dropped, its freed pages are consumed by filler rows, and
+  // the ceiling equals the resulting page count — so the rebuild must
+  // allocate BEYOND the disk.
+  const { store } = storeFixture(t)
+  const dbPath = store.databasePath
+  const roomId = (store.createBroadcastRoom({ actorFingerprint: FINGERPRINT_A, title: 'Upgrade disk' })).id
+  const kept = store.appendMessage({
+    roomId, actorFingerprint: FINGERPRINT_A, chatId: 'alice',
+    clientMessageId: 'pre-upgrade', text: 'the row that must survive', nowMs: 1_000_000,
+  })
+  assert.equal(kept.message.seq, 1)
+  store.close()
+
+  // Drop the index and consume every freed page with filler rows, so the
+  // upgrade-time rebuild has nothing to reuse.
+  const raw = new DatabaseSync(dbPath)
+  raw.exec('DROP INDEX idx_messages_duplicate_gate')
+  const freelistCount = () => Number(raw.prepare('PRAGMA freelist_count').get().freelist_count)
+  const insertFiller = raw.prepare(`
+    INSERT INTO messages (room_id, seq, actor_fingerprint, chat_id, client_message_id, text, reply_to_seq, created_at)
+    SELECT room_id, seq + ? AS next_seq, actor_fingerprint, chat_id, ?, 'f' || ? AS filler_text, reply_to_seq, created_at
+    FROM messages ORDER BY seq DESC LIMIT 1
+  `)
+  let filler = 0
+  while (freelistCount() > 0) {
+    filler += 1
+    insertFiller.run(filler * 10_000, `filler-${filler}`, 'x'.repeat(8192))
+    assert.ok(filler < 10_000, 'the freelist must drain within the bounded loop')
+  }
+  const pageCount = Number(raw.prepare('PRAGMA page_count').get().page_count)
+  raw.close()
+
+  // The upgrade open, on a disk capped exactly at the current page count:
+  // the schema convergence's index rebuild needs pages beyond it — the open
+  // fails with the RAW SQLite error (a boot failure, not a coded storage_low;
+  // the refusal face belongs to appends, this is the store refusing to open).
+  assert.throws(
+    () => openRoomLog({ dataDir: dirname(dbPath), maxPageCount: pageCount }),
+    error => error.errcode === 13 && /database or disk is full/.test(error.message),
+    'the capped open cannot fund the index rebuild',
+  )
+
+  // Recovery: space "freed" (the ceiling lifts) and the next open converges —
+  // the index is rebuilt with its exact column set and the pre-upgrade row is
+  // intact, byte for byte.
+  const recovered = openRoomLog({ dataDir: dirname(dbPath) })
+  t.after(() => recovered.close())
+  const page = recovered.readPage({ roomId, actorFingerprint: FINGERPRINT_A, afterSeq: 0, limit: 10 })
+  const keptRow = page.find(row => row.client_message_id === 'pre-upgrade')
+  assert.ok(keptRow, 'the pre-upgrade row survives the failed open')
+  assert.equal(keptRow.seq, 1)
+  assert.equal(keptRow.text, 'the row that must survive')
+  const indexRaw = new DatabaseSync(dbPath, { readOnly: true })
+  try {
+    const columns = indexRaw
+      .prepare(`SELECT name FROM pragma_index_info('idx_messages_duplicate_gate') ORDER BY seqno`)
+      .all()
+      .map(row => row.name)
+    assert.deepEqual(columns, ['room_id', 'actor_fingerprint', 'text', 'seq'])
+  } finally {
+    indexRaw.close()
+  }
+})
+
 test('identical text in a different room, a different reply context, or from a different actor is not deduplicated', t => {
   const { store, room, other } = storeFixture(t)
   let nowMs = 3_000_000
