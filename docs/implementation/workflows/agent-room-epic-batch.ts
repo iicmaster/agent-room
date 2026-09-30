@@ -112,8 +112,19 @@ async function resolveQueue(): Promise<string[]> {
       const [be, bs] = b.split("-").map(Number);
       return (ae ?? 0) - (be ?? 0) || (as ?? 0) - (bs ?? 0);
     });
-  if (candidates.length === 0) throw new Error("no backlog stories in epics 4-6 found");
-  return candidates;
+  // Sprint status lags the real work (stories land between syncs), so a
+  // backlog entry whose spec already says done is skipped — otherwise a stale
+  // file re-runs finished stories.
+  const live: string[] = [];
+  for (const id of candidates) {
+    const specs = await files.glob(`docs/implementation/spec-${id}-*.md`);
+    const spec = specs.find(p => !p.includes("workflows"));
+    if (spec === undefined) { live.push(id); continue; }
+    const text = await files.read(spec).catch(() => "");
+    if (!/^status: 'done'$/m.test(text)) live.push(id);
+  }
+  if (live.length === 0) throw new Error("no live backlog stories found — every spec is done");
+  return live;
 }
 
 const queue = await resolveQueue();
@@ -243,7 +254,7 @@ for (const story of queue) {
   ];
   const reviews = await Promise.all(
     lenses.map(lens =>
-      agent(`ผู้ตรวจ ${lens.name}`).ask<ReviewResult>(
+      agent(`ผู้ตรวจ ${story} ${lens.name}`).ask<ReviewResult>(
         `${lens.ask}\n\nThe contract is ${plan.specPath} — read it fully. The change under review ` +
           `is every file differing from baseline ${baseline}:\n${scope}\nRead those files (plus ` +
           `anything they import) with your own tools. Suite currently: ${suite.counts}. ` +
@@ -267,7 +278,7 @@ for (const story of queue) {
 
   // ---- luna ----
   phase("ฟังความเห็นจาก codex-advisor[luna]");
-  await agent(`ผู้ประสานงาน lane ของ luna (${story})`).ask(
+  await agent(`ผู้ประสานงาน lane ของ luna ${story}`).ask(
     `Ensure the codex-advisor[luna] external audit lane for story ${story} has COMPLETED and its ` +
       `outbox exists.\n\nWorking directory: /Users/ngs/agent-skills/plugins/agent-room\n` +
       `Task id: ${lunaTaskId} (letters, digits, dashes ONLY)\n` +
