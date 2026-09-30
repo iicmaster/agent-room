@@ -1062,11 +1062,40 @@
       store layer and a full server restart driven by a real CLI child
       write, SIGKILL, and respawn; the registry keeps the first ban's
       timestamp and reason on re-ban, and unban deletes the row so traffic
-      flows immediately. Does NOT prove: bans scoped beyond one realm/server
-      (the registry is the store's — multi-process deployment is out of scope
-      per AD-2), any rate-based or heuristic banning (the operator names the
-      key), the CLI host's own surface (Story 4.2's evidence), or the 4.5
-      interactions with storage refusal (Story 4.6's refusal path).
+      flows immediately. Review-hardened (2026-09-30 triage, 13 distinct
+      patches applied, all proven): the store refusals are pinned by their
+      error CODE (`invalid_actor_id` / `invalid_request`), `banned_at` is
+      pinned to the canonical ISO 8601 shape at the store, restart, and
+      CLI-receipt rows (plus one tautology fixed), the `banned_actors` CHECK
+      constraint is proven against raw non-canonical INSERTs through a
+      `DatabaseSync` handle (uppercase hex, uppercase prefix, short tail each
+      a CHECK violation; the canonical shape inserting), `PRAGMA user_version`
+      is pinned unchanged across the additive convergence and the
+      divergent-shape refusal, the stage test gained the unbanned-fingerprint
+      arm and the `store: {}` typeof-guard pass-through, the challenge route
+      is pinned privilegeless-open to a banned key, the CLI family's refusal
+      leg (valid argv into a coded `data_directory_invalid` store failure:
+      exit 1, empty stdout, exactly one coded JSON stderr line) has its own
+      row, the usage-refusal row pins that no store file was ever opened, the
+      refused reattach pins `uses_remaining` unchanged, the unban receipts pin
+      exactly one stdout line each, and `createInviteOperations` now REQUIRES
+      the `isBanned` reader (a construction without it is a coded
+      `invalid_argument`, never a silent enrollment-gate loss). Honest
+      boundary: per the frozen Story 4.4 stage order, a banned key that has
+      exhausted its OWN request budget or send bucket is answered 429
+      `rate_limited` before the authz stage can answer 403 `banned` — the
+      refusal stays pre-handler in every case and no banned request reaches a
+      handler, but the refusal CODE alternates with the key's own budget
+      state; the ban tests deliberately widen the rate gates, so they do not
+      exercise that alternation. Does NOT prove: bans scoped beyond one
+      realm/server (the registry is the store's — multi-process deployment is
+      out of scope per AD-2), any rate-based or heuristic banning (the
+      operator names the key), the CLI host's own surface (Story 4.2's
+      evidence), or the 4.5 interactions with storage refusal (Story 4.6's
+      refusal path). Suite state at close, finalizer run 2026-09-30:
+      `node --test --test-timeout=300000` → 497 pass / 0 fail / 0 skipped;
+      the epic-4 sweep verdicts `gaps` on exactly 4.7/4.8 (the future
+      stories) with 4.5 evidenced.
 
     evidence:
       - test: "a ban lands at next request: send and read are refused banned, a non-banned peer is untouched, history is kept"
@@ -1086,6 +1115,20 @@
       - test: "ban state survives close and reopen — the store restart (B1)"
         file: "tests/ban.test.mjs"
       - test: "the ban family answers JSON lines with stable exit codes on the Story 4.2 host"
+        file: "tests/ban.test.mjs"
+      - test: "the ban registry refuses malformed identities and reasons with coded store errors"
+        file: "tests/ban.test.mjs"
+      - test: "the banned_actors CHECK constraint refuses non-canonical keys at the storage layer"
+        file: "tests/ban.test.mjs"
+      - test: "the banned_actors table converges additively on open and refuses a divergent shape"
+        file: "tests/ban.test.mjs"
+      - test: "the challenge route stays privilegeless-open to a banned key: a nonce is issued, ban state leaks nothing"
+        file: "tests/ban.test.mjs"
+      - test: "the ban family refuses malformed usage with one coded JSON line on stderr and exit 2"
+        file: "tests/ban.test.mjs"
+      - test: "the ban family answers a coded store failure on the refusal leg: exit 1, one JSON line on stderr"
+        file: "tests/ban.test.mjs"
+      - test: "the canonical fingerprint shape the CLI gate enforces is the constants pattern"
         file: "tests/ban.test.mjs"
 
   4.6:                       # Storage admission control (2 criteria)

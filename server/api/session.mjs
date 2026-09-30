@@ -96,9 +96,16 @@ export function createSessionRegistry({
   }
 
   // Explicit revocation by session KEY: the session stops authenticating at
-  // once. Used by the re-auth recovery path's counterpart (logout, ban in
-  // Epic 4) and by the dead-holder release rule. Returns whether an entry
-  // was actually removed.
+  // once. This is the session-token registry's invalidation primitive —
+  // reserved for logout when it lands; the re-auth recovery path's
+  // dead-holder release is the live session registry's own `release`
+  // (../core/session-registry.mjs, called from the session-bind route), never
+  // this function. Story 4.5's operator ban deliberately does NOT call this
+  // either: the ban holds at the resource boundary (the authz stage refuses
+  // every session-authenticated route), so a banned key's existing session is
+  // left in place and simply cannot do anything — revoking it here would add
+  // nothing and would blur where the ban's teeth live. Returns whether an
+  // entry was actually removed.
   // The live session keys (digests), for operator diagnostics and for the
   // server-side invalidation path. Read-only: a copy of the live key set.
   function sessionKeys() {

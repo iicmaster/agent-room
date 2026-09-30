@@ -33,7 +33,7 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { generateKeyPairSync, sign as cryptoSign } from 'node:crypto'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { once } from 'node:events'
 import http from 'node:http'
 import { tmpdir } from 'node:os'
@@ -101,6 +101,11 @@ function installation() {
 // A stable well-formed fingerprint with no key behind it — the preemptive
 // ban rows use this (a ban is about the identity, and needs no keyholder).
 const FOREIGN_FINGERPRINT = `sha256:${'f'.repeat(64)}`
+
+// The canonical ISO 8601 UTC shape every durable ban timestamp carries: the
+// store normalizes through toISOString at the write (bans.mjs), so the shape
+// is pinning the write path's normalization, not hoping for it.
+const ISO_8601_CANONICAL = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
 
 // The CLI runs IN-PROCESS through the real dispatch with injected streams and
 // directories, so the assertions see exactly the bytes a terminal would.
@@ -321,7 +326,7 @@ test('the ban registry persists bans by fingerprint, keeps the first ban on re-b
   // first-class success: the ban is about the identity, not its history.
   const banned = store.banActor({ actorFingerprint: fingerprint, reason: 'abuse' })
   assert.equal(banned.actor_fingerprint, fingerprint)
-  assert.ok(!Number.isNaN(Date.parse(banned.banned_at)), 'banned_at is a canonical ISO 8601 timestamp')
+  assert.match(banned.banned_at, ISO_8601_CANONICAL, 'banned_at is a canonical ISO 8601 UTC timestamp')
   assert.equal(banned.reason, 'abuse')
   assert.equal(store.isActorBanned(fingerprint), true)
 
@@ -343,24 +348,84 @@ test('the ban registry persists bans by fingerprint, keeps the first ban on re-b
   assert.equal(nothing.removed, false)
   assert.equal(store.isActorBanned(fingerprint), false)
 
-  // Ban without a reason stores NULL — never an empty string.
+  // Ban without a reason stores NULL — never an empty string. The row is
+  // captured once so the assertion is not a tautology on its own input.
   store.banActor({ actorFingerprint: fingerprint })
-  assert.deepEqual(banRows(dataDir), [
-    { actor_fingerprint: fingerprint, banned_at: banRows(dataDir)[0].banned_at, reason: null },
-  ])
+  const [nullReasonRow] = banRows(dataDir)
+  assert.equal(nullReasonRow.reason, null)
+  assert.equal(nullReasonRow.actor_fingerprint, fingerprint)
+  assert.match(nullReasonRow.banned_at, ISO_8601_CANONICAL)
   store.close()
 })
 
 test('the ban registry refuses malformed identities and reasons with coded store errors', t => {
   const dataDir = makeDataDir(t)
   const store = openRoomLog({ dataDir })
-  assert.throws(() => store.isActorBanned('not-a-fingerprint'), /sha256:/)
-  assert.throws(() => store.banActor({ actorFingerprint: 'sha256:NOTHEX' }), /sha256:/)
-  assert.throws(() => store.unbanActor({ actorFingerprint: FOREIGN_FINGERPRINT.toUpperCase() }), /sha256:/)
-  assert.throws(() => store.banActor({ actorFingerprint: FOREIGN_FINGERPRINT, reason: '   ' }), /reason/)
-  assert.throws(() => store.banActor({ actorFingerprint: FOREIGN_FINGERPRINT, reason: 42 }), /reason/)
+  // The CODE is the pin (the wire face the authz-stage refusal rides); the
+  // message regex rides along for readability.
+  assert.throws(
+    () => store.isActorBanned('not-a-fingerprint'),
+    error => error.code === 'invalid_actor_id' && /sha256:/.test(error.message),
+  )
+  assert.throws(
+    () => store.banActor({ actorFingerprint: 'sha256:NOTHEX' }),
+    error => error.code === 'invalid_actor_id' && /sha256:/.test(error.message),
+  )
+  assert.throws(
+    () => store.unbanActor({ actorFingerprint: FOREIGN_FINGERPRINT.toUpperCase() }),
+    error => error.code === 'invalid_actor_id' && /sha256:/.test(error.message),
+  )
+  assert.throws(
+    () => store.banActor({ actorFingerprint: FOREIGN_FINGERPRINT, reason: '   ' }),
+    error => error.code === 'invalid_request' && /reason/.test(error.message),
+  )
+  assert.throws(
+    () => store.banActor({ actorFingerprint: FOREIGN_FINGERPRINT, reason: 42 }),
+    error => error.code === 'invalid_request' && /reason/.test(error.message),
+  )
   assert.equal(store.isActorBanned(FOREIGN_FINGERPRINT), false, 'refused writes store nothing')
   store.close()
+})
+
+test('the banned_actors CHECK constraint refuses non-canonical keys at the storage layer', t => {
+  const dataDir = makeDataDir(t)
+  // Materialize the schema through the store's own open path, then go under
+  // it: a raw handle INSERTs directly, bypassing requireFingerprint — the
+  // only way to prove the CHECK constraint (the constants pattern's storage
+  // face) is real and not redundant with the module's argv-shaped guard.
+  const store = openRoomLog({ dataDir })
+  store.close()
+  const raw = new DatabaseSync(join(dataDir, ROOM_LOG_DATABASE_FILENAME))
+  try {
+    const insert = raw.prepare(`
+      INSERT INTO banned_actors (actor_fingerprint, banned_at, reason)
+      VALUES (?, ?, ?)
+    `)
+    // Uppercase hex, an uppercase prefix, and a short hex tail: each is a
+    // CHECK violation — a decorated spelling could not insert even if a
+    // future writer bypassed requireFingerprint.
+    for (const bad of [
+      `sha256:${'A'.repeat(64)}`,
+      `SHA256:${'a'.repeat(64)}`,
+      `sha256:${'a'.repeat(63)}`,
+    ]) {
+      assert.throws(
+        () => insert.run(bad, '2026-09-30T00:00:00.000Z', null),
+        error => /CHECK constraint failed/.test(error.message),
+        bad,
+      )
+    }
+    // The canonical shape inserts — the constraint admits exactly the key
+    // the constants module defines.
+    insert.run(`sha256:${'b'.repeat(64)}`, '2026-09-30T00:00:00.000Z', null)
+    assert.equal(
+      raw.prepare('SELECT count(*) AS count FROM banned_actors').get().count,
+      1,
+      'only the canonical insert landed',
+    )
+  } finally {
+    raw.close()
+  }
 })
 
 test('ban state survives close and reopen — the store restart (B1)', t => {
@@ -386,10 +451,20 @@ test('the banned_actors table converges additively on open and refuses a diverge
   const dataDir = makeDataDir(t)
   const fingerprint = FOREIGN_FINGERPRINT
 
+  const readUserVersion = () => {
+    const raw = new DatabaseSync(join(dataDir, ROOM_LOG_DATABASE_FILENAME), { readOnly: true })
+    try {
+      return raw.prepare('PRAGMA user_version').get().user_version
+    } finally {
+      raw.close()
+    }
+  }
+
   // A v2 store from before this story's table (or any earlier build): the
   // open path converges the missing table additively, no version bump.
   const first = openRoomLog({ dataDir })
   first.close()
+  const versionBefore = readUserVersion()
   const dropper = new DatabaseSync(join(dataDir, ROOM_LOG_DATABASE_FILENAME))
   dropper.exec('DROP TABLE banned_actors;')
   dropper.close()
@@ -399,14 +474,17 @@ test('the banned_actors table converges additively on open and refuses a diverge
   second.banActor({ actorFingerprint: fingerprint })
   assert.equal(second.isActorBanned(fingerprint), true)
   second.close()
+  assert.equal(readUserVersion(), versionBefore, 'the additive convergence bumped no schema version')
 
   // A foreign squatter of the name (a divergent column set) is a coded
-  // schema failure at open, never a runtime surprise mid-gate.
+  // schema failure at open, never a runtime surprise mid-gate — and the
+  // refusal writes no schema version either.
   const squatter = new DatabaseSync(join(dataDir, ROOM_LOG_DATABASE_FILENAME))
   squatter.exec('DROP TABLE banned_actors;')
   squatter.exec('CREATE TABLE banned_actors (actor_fingerprint TEXT PRIMARY KEY) STRICT;')
   squatter.close()
   assert.throws(() => openRoomLog({ dataDir }), error => error.code === 'database_schema_invalid')
+  assert.equal(readUserVersion(), versionBefore, 'the divergent-shape refusal bumped no schema version')
 })
 
 // --- The authz stage: structural pass-through and the per-request gate ----------
@@ -449,6 +527,39 @@ test('the authz stage refuses a banned session key and stays a structural pass-t
   assert.equal(refused.code, 'banned')
   assert.equal(refused.status, 403)
   assert.deepEqual(calls, [FOREIGN_FINGERPRINT])
+
+  // The unbanned arm at stage level: a different session fingerprint is
+  // consulted by the same gate and passes — the refusal is per-fingerprint,
+  // never per-request.
+  const unbannedFingerprint = `sha256:${'c'.repeat(64)}`
+  const unbannedStages = assemblePipeline('actor', {
+    sessionVerifier: () => ({ sessionKey: 'k2', actorFingerprint: unbannedFingerprint }),
+  })
+  const allowed = await runPipeline(unbannedStages, {
+    method: 'GET',
+    route: { class: 'actor', path: '/api/status', requestFields: [] },
+    headers: { [PROTOCOL_KEY]: '1' },
+    remoteAddress: '127.0.0.1',
+    store: gateStore,
+  }, () => ({ fine: true }))
+  assert.equal(allowed.ok, true, allowed.error?.message ?? allowed.reason)
+  assert.deepEqual(
+    calls,
+    [FOREIGN_FINGERPRINT, unbannedFingerprint],
+    'the gate consulted both fingerprints and banned only the first',
+  )
+
+  // A store WITHOUT the ban surface (the typeof guard) stays the structural
+  // pass-through — the same direct-caller tolerance as no store at all.
+  const banless = await runPipeline(unbannedStages, {
+    method: 'GET',
+    route: { class: 'actor', path: '/api/status', requestFields: [] },
+    headers: { [PROTOCOL_KEY]: '1' },
+    remoteAddress: '127.0.0.1',
+    session: { sessionKey: 'k', actorFingerprint: FOREIGN_FINGERPRINT },
+    store: {},
+  }, () => ({ fine: true }))
+  assert.equal(banless.ok, true, banless.error?.message ?? banless.reason)
 })
 
 // --- The wire: refusal at next request, every session-authenticated route -------
@@ -499,6 +610,30 @@ test('a ban lands at next request: send and read are refused banned, a non-banne
   const texts = bobRead.json().result.messages.map(message => message.text)
   assert.ok(texts.includes('before the ban'), 'the pre-ban message stays readable')
   assert.ok(!texts.includes('after the ban'), 'the refused send never committed')
+})
+
+test('the challenge route stays privilegeless-open to a banned key: a nonce is issued, ban state leaks nothing', async t => {
+  const dataDir = makeDataDir(t)
+  const server = await startTestServer(t, dataDir)
+  const port = server.port
+  const stranger = installation()
+  const store = openRoomLog({ dataDir })
+  store.banActor({ actorFingerprint: stranger.fingerprint })
+  store.close()
+
+  // Issuing a nonce is privilegeless (no session identity, zero state): the
+  // banned key's challenge answers 200 with a nonce exactly like any other
+  // well-formed key's — gating it would leak ban state to unauthenticated
+  // callers, so the ban holds at the resource boundary instead.
+  const challenge = await request(port, 'POST', '/api/auth/challenge', {
+    headers: jsonHeaders,
+    body: JSON.stringify({ public_key: stranger.publicKey }),
+  })
+  assert.equal(challenge.status, 200, challenge.text)
+  const nonce = challenge.json().result.nonce
+  assert.equal(typeof nonce, 'string')
+  assert.match(nonce, /^[A-Za-z0-9_-]+$/, 'the nonce is base64url')
+  assert.ok(nonce.length >= 22, `the nonce encodes at least 16 bytes (${nonce.length} chars)`)
 })
 
 test('an active long-poll terminates within its window when the key is banned mid-hold', async t => {
@@ -614,6 +749,12 @@ test('re-enroll from a banned key is refused banned after proof and before any u
   })
   assert.equal(reattach.status, 403, reattach.text)
   assert.equal(reattach.json().error.code, 'banned')
+
+  // The refused reattach consumed nothing either: carol's pre-ban enrollment
+  // holds the only consumption row, and the budget is where it was.
+  const afterReattach = openRoomLog({ dataDir })
+  assert.equal(afterReattach.listInvites()[0].uses_remaining, 1, 'the refused reattach consumed no use')
+  afterReattach.close()
 })
 
 test('unban restores sends and reads immediately', async t => {
@@ -716,7 +857,7 @@ test('ban state survives a full server restart: CLI child writes, SIGKILL, respa
   assert.equal(rows.length, 1)
   assert.equal(rows[0].actor_fingerprint, alice.fingerprint)
   assert.equal(rows[0].reason, 'restart-proof')
-  assert.ok(!Number.isNaN(Date.parse(rows[0].banned_at)))
+  assert.match(rows[0].banned_at, ISO_8601_CANONICAL, 'the on-disk banned_at is canonical ISO 8601 UTC')
 })
 
 // --- The CLI family: JSON lines, exit codes, grammar ----------------------------
@@ -735,7 +876,7 @@ test('the ban family answers JSON lines with stable exit codes on the Story 4.2 
   assert.equal(banLine.command, 'ban')
   assert.equal(banLine.ban.fingerprint, fingerprint)
   assert.equal(banLine.ban.banned, true)
-  assert.ok(!Number.isNaN(Date.parse(banLine.ban.banned_at)))
+  assert.match(banLine.ban.banned_at, ISO_8601_CANONICAL, 'the receipt banned_at is canonical ISO 8601 UTC')
   assert.equal(banLine.ban.reason, 'grammar')
 
   // Re-ban: idempotent success reporting the FIRST ban's state.
@@ -749,6 +890,7 @@ test('the ban family answers JSON lines with stable exit codes on the Story 4.2 
   const unbanned = await runCli(dataDir, ['unban', fingerprint])
   assert.equal(unbanned.exitCode, 0, unbanned.stderr)
   assert.equal(unbanned.stderr, '')
+  assert.equal(unbanned.stdout.split('\n').filter(lineText => lineText.length > 0).length, 1, 'exactly one JSON line')
   const [unbanLine] = jsonLines(unbanned.stdout)
   assert.equal(unbanLine.ok, true)
   assert.equal(unbanLine.command, 'unban')
@@ -759,6 +901,7 @@ test('the ban family answers JSON lines with stable exit codes on the Story 4.2 
   const stranger = `sha256:${'e'.repeat(64)}`
   const nothing = await runCli(dataDir, ['unban', stranger])
   assert.equal(nothing.exitCode, 0, nothing.stderr)
+  assert.equal(nothing.stdout.split('\n').filter(lineText => lineText.length > 0).length, 1, 'exactly one JSON line')
   assert.equal(jsonLines(nothing.stdout)[0].ban.banned, false)
 
   // The store row is gone after the unban (the CLI output is the resulting
@@ -795,8 +938,34 @@ test('the ban family refuses malformed usage with one coded JSON line on stderr 
     assert.match(errorLine.message, new RegExp(messagePart), JSON.stringify(argv))
   }
 
-  // No store row was written by any refused invocation.
+  // No store row was written by any refused invocation — and stronger: the
+  // argv gate runs BEFORE the store opens, so no store file exists at all.
   assert.deepEqual(banRows(dataDir), [])
+  assert.equal(
+    existsSync(join(dataDir, ROOM_LOG_DATABASE_FILENAME)),
+    false,
+    'the family never opened the store for a refused argv',
+  )
+})
+
+test('the ban family answers a coded store failure on the refusal leg: exit 1, one JSON line on stderr', async t => {
+  // Valid argv, a store path that cannot open: openRoomLog throws the coded
+  // data_directory_invalid, the family's catch maps it to status:'refusal',
+  // and the host's single JSON-error printer answers exactly one coded line
+  // on stderr with exit 1 — the grammar's third leg, after ok (0) and
+  // usage (2).
+  const parent = makeDataDir(t)
+  const notADirectory = join(parent, 'not-a-directory')
+  writeFileSync(notADirectory, 'a regular file, never a data dir')
+  const outcome = await runCli(notADirectory, ['ban', FOREIGN_FINGERPRINT, '--reason', 'broken store'])
+  assert.equal(outcome.exitCode, 1, outcome.stderr)
+  assert.equal(outcome.stdout, '')
+  const errorLines = jsonLines(outcome.stderr)
+  assert.equal(errorLines.length, 1, 'exactly one JSON line on stderr')
+  assert.equal(errorLines[0].ok, false)
+  assert.equal(errorLines[0].command, 'ban')
+  assert.equal(errorLines[0].code, 'data_directory_invalid')
+  assert.ok(errorLines[0].message.length > 0)
 })
 
 test('the canonical fingerprint shape the CLI gate enforces is the constants pattern', () => {

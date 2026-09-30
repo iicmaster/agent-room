@@ -144,22 +144,28 @@ function expireMs(expiresAt) {
 // the whole store, and the property that makes consumption + enrollment
 // all-or-nothing. `now` is injectable so tests can exercise expiry without
 // waiting on the wall clock. `isBanned` is room-log's ban-registry reader
-// (Story 4.5): the enrollment transaction's post-proof gate — a banned key
+// (Story 4.5, REQUIRED — a construction without it is a coded
+// invalid_argument): the enrollment transaction's post-proof gate — a banned key
 // is refused `banned` after its possession proof verifies and before
 // anything is consumed or reattached, so ban state leaks to no caller who
 // cannot prove possession, and a banned key consumes no invite use (a
 // banned key's reattach — the lost-response retry of an enrollment it made
 // BEFORE the ban — is refused too: every re-enroll from a banned key is a
 // `banned` refusal).
-export function createInviteOperations({ database, withImmediateTransaction, now = Date.now, isBanned = null }) {
+export function createInviteOperations({ database, withImmediateTransaction, now = Date.now, isBanned }) {
   if (typeof withImmediateTransaction !== 'function') {
     fail('invalid_argument', 'createInviteOperations requires the store transaction runner')
   }
   if (typeof now !== 'function') {
     fail('invalid_argument', 'createInviteOperations now must be a function')
   }
-  if (isBanned !== null && typeof isBanned !== 'function') {
-    fail('invalid_argument', 'createInviteOperations isBanned must be a function when provided')
+  // The ban reader is REQUIRED (Story 4.5 review hardening): the enrollment
+  // transaction's post-proof ban gate must never be silently absent — a
+  // construction without it would silently drop the gate for every future
+  // enrollment — so a missing or non-function reader is a coded
+  // construction-time failure, never a fail-open default.
+  if (typeof isBanned !== 'function') {
+    fail('invalid_argument', 'createInviteOperations requires the isBanned reader')
   }
 
   const selectInvite = digest => database
@@ -313,7 +319,7 @@ export function createInviteOperations({ database, withImmediateTransaction, now
         // possession of the key) and BEFORE the reattach check or any use
         // is consumed (every re-enroll from a banned key is refused
         // `banned`, and a banned attempt consumes nothing).
-        if (isBanned !== null && isBanned(fingerprint)) {
+        if (isBanned(fingerprint)) {
           fail('banned', 'this key is banned by the operator')
         }
         const reattached = database.prepare(`

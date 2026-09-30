@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 09-21-2026 08:52
-last_updated: 09-29-2026 14:00
+last_updated: '2026-09-30'
 project: agent-room
 project_key: NOKEY
 tracking_system: file-system
