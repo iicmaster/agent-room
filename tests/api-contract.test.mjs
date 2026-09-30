@@ -312,6 +312,9 @@ test('story 1.3 error codes are registered once with their canonical statuses', 
     invite_exhausted: [409, 'invite has no uses remaining'],
     invite_not_found: [404, 'no invite matches this digest prefix'],
     rate_limited: [429, 'request rate limit exceeded'],
+    // Story 4.5 addition: the operator ban's refusal — every send, read, or
+    // re-enroll from a banned key answers 403 (the send-status code's face).
+    banned: [403, 'this key is banned by the operator'],
   }
   for (const [code, [status, message]] of Object.entries(expected)) {
     assert.equal(PUBLIC_ERROR_STATUS[code], status, code)

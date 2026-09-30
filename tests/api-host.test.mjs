@@ -983,7 +983,8 @@ test('a pre-1.3 v2 store (no realms table, NOT NULL creator) converges on open a
   // Story 1.5: chat_id_claims joins additively beside the 1.3 realms table.
   // Story 4.1: enrolled_actors joins the same open-path convergence.
   // Story 4.2: invites + invite_consumptions join it with them.
-  assert.deepEqual(tableNames, ['chat_id_claims', 'direct_members', 'enrolled_actors', 'invite_consumptions', 'invites', 'messages', 'realms', 'rooms'])
+  // Story 4.5: banned_actors joins the same convergence discipline.
+  assert.deepEqual(tableNames, ['banned_actors', 'chat_id_claims', 'direct_members', 'enrolled_actors', 'invite_consumptions', 'invites', 'messages', 'realms', 'rooms'])
   const creatorColumn = inspector
     .prepare(`SELECT "notnull" AS "notnull" FROM pragma_table_info('rooms') WHERE name = 'created_by_fingerprint'`)
     .get()

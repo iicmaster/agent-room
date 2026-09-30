@@ -379,14 +379,39 @@ export class BudgetStage {
   }
 }
 
-// Authorization stage (AD-7): bans and room ACLs. Epics 3-4 own the policy;
-// structural pass-through until then.
+// Authorization stage (AD-7): bans and room ACLs. Story 4.5 lands the ban
+// half: every actor-class route — the session-authenticated surface, so
+// every send, read, session, presence, and enumeration request — is refused
+// `banned` when the session token's Actor fingerprint holds a row in the
+// store's durable ban registry. The check is a direct indexed query per
+// request on the request's own store connection, deliberately NOT a cached
+// in-process set: the operator CLI (Story 4.2's host, AR-13) commits bans
+// from a SEPARATE process directly into the same SQLite file, and the ban
+// must hold "at next request" — a per-request read of the WAL-connected
+// store is the only state that can never go stale. There is no ban check
+// outside the actor class here: pre-auth credential routes derive identity
+// in their handlers (the enroll route's post-proof gate lives inside the
+// store's enrollment transaction), the challenge route stays
+// privilegeless-open by design (gating it would leak ban state to
+// unauthenticated callers), and viewer/health carry no Actor identity.
+// Room ACLs remain the store's boundary checks (room_not_found /
+// actor_not_member), unchanged. A stage whose context carries no store (or
+// a store without the ban surface — a direct assemblePipeline caller) stays
+// the structural pass-through.
 export class AuthzStage {
   constructor() {
     this.name = 'authz'
   }
 
-  process() {
+  process(context) {
+    if (context.route?.class !== 'actor') return undefined
+    const store = context.store
+    if (!store || typeof store.isActorBanned !== 'function') return undefined
+    const actorFingerprint = context.session?.actorFingerprint
+    if (typeof actorFingerprint !== 'string' || actorFingerprint.length === 0) return undefined
+    if (store.isActorBanned(actorFingerprint)) {
+      return reject('banned')
+    }
     return undefined
   }
 }

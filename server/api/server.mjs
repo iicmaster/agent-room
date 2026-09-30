@@ -87,7 +87,11 @@
 // Send answers now carry the full FR-17 status vocabulary: committed,
 // duplicate_dropped (a 200 result naming original_seq), rate_limited (429 +
 // retry_after_ms), client_message_id_conflict (the coded 409), with banned
-// and storage_low completing the enum for Stories 4.5/4.6.
+// landed by Story 4.5 (the authz stage's per-request refusal of every
+// session-authenticated request from a banned key, plus the enroll route's
+// post-proof store gate; the long-poll loop re-checks the ban each poll
+// iteration so an in-flight hold terminates within its window) and
+// storage_low completing the enum for Story 4.6.
 
 import { createServer } from 'node:http'
 import { timingSafeEqual } from 'node:crypto'
@@ -671,6 +675,16 @@ registerHandler('POST /api/rooms/direct', function directOpen(context) {
 // when the page is empty) and head_seq (the room's largest allocated seq).
 // Member ACL reuses the store: readPage (and headSeq, ordered after it)
 // enforce room_not_found / actor_not_member.
+//
+// Story 4.5: the ban gate is re-checked on EVERY poll iteration, not only
+// at admission. The authz stage refuses an already-banned reader before the
+// handler runs, but a ban that lands mid-hold must terminate the in-flight
+// poll within its window — so the loop consults the same per-request store
+// read each wake (one indexed lookup per iteration; the wake is never more
+// than LONGPOLL_POLL_INTERVAL_MS away) and answers the coded `banned`
+// refusal the moment the row appears. The termination rides the state the
+// poll already checks — no connection is killed, and the poll never runs
+// past its deadline.
 function integerQuery(value, name, { min, max, code }) {
   if (value === undefined || value === null) return { default: true, value: null }
   if (value === '' || typeof value !== 'string' || !/^[0-9]+$/.test(value)) {
@@ -707,6 +721,13 @@ registerHandler('GET /api/rooms/:id/messages', async function readMessages(conte
   const deadline = Date.now() + waitMs
 
   for (;;) {
+    // Story 4.5: the per-iteration ban re-check (see the route comment). A
+    // ban committed while this poll holds — by the operator CLI process,
+    // visible here through the store on the very next wake — answers the
+    // coded refusal instead of a page, within the hold window.
+    if (context.store.isActorBanned(principal.actorFingerprint)) {
+      return reject('banned')
+    }
     const messages = context.store.readPage({
       roomId,
       actorFingerprint: principal.actorFingerprint,
@@ -748,8 +769,9 @@ registerHandler('GET /api/rooms/:id/messages', async function readMessages(conte
 // response status vocabulary is the FR-17 set in the constants module
 // (SEND_STATUSES): committed and duplicate_dropped answer here as results;
 // rate_limited answers from the budgets stage (429 + retry_after_ms);
-// client_message_id_conflict answers as the coded 409; banned and storage_low
-// join the same enum from Stories 4.5/4.6 as their refusals land.
+// client_message_id_conflict answers as the coded 409; banned (Story 4.5's
+// authz-stage refusal — a banned key's send never reaches this handler)
+// and storage_low complete the enum from Stories 4.5/4.6.
 function requiredString(value, name, detail) {
   if (value === undefined || value === null || value === '') {
     return { error: reject('invalid_request', detail ?? `${name} is required`) }

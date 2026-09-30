@@ -304,6 +304,7 @@ test('every v0.1 public error code has an HTTP status declared once', () => {
   assert.deepEqual(codes, [
     'actor_not_member',
     'ambiguous_chat_id',
+    'banned',
     'challenge_invalid',
     'chat_id_not_found',
     'chat_id_taken',
@@ -416,6 +417,9 @@ test('every v0.1 public error code has an HTTP status declared once', () => {
     invite_exhausted: 409,
     invite_not_found: 404,
     rate_limited: 429,
+    // Story 4.5: the operator ban's refusal — every send, read, or re-enroll
+    // from a banned key answers 403 (the send-status code's HTTP face).
+    banned: 403,
   }
   for (const [code, status] of Object.entries(expectedStatus)) {
     assert.equal(PUBLIC_ERROR_STATUS[code], status, code)

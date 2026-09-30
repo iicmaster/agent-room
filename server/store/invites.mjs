@@ -143,13 +143,23 @@ function expireMs(expiresAt) {
 // implementation of the BEGIN IMMEDIATE / COMMIT / ROLLBACK discipline for
 // the whole store, and the property that makes consumption + enrollment
 // all-or-nothing. `now` is injectable so tests can exercise expiry without
-// waiting on the wall clock.
-export function createInviteOperations({ database, withImmediateTransaction, now = Date.now }) {
+// waiting on the wall clock. `isBanned` is room-log's ban-registry reader
+// (Story 4.5): the enrollment transaction's post-proof gate — a banned key
+// is refused `banned` after its possession proof verifies and before
+// anything is consumed or reattached, so ban state leaks to no caller who
+// cannot prove possession, and a banned key consumes no invite use (a
+// banned key's reattach — the lost-response retry of an enrollment it made
+// BEFORE the ban — is refused too: every re-enroll from a banned key is a
+// `banned` refusal).
+export function createInviteOperations({ database, withImmediateTransaction, now = Date.now, isBanned = null }) {
   if (typeof withImmediateTransaction !== 'function') {
     fail('invalid_argument', 'createInviteOperations requires the store transaction runner')
   }
   if (typeof now !== 'function') {
     fail('invalid_argument', 'createInviteOperations now must be a function')
+  }
+  if (isBanned !== null && typeof isBanned !== 'function') {
+    fail('invalid_argument', 'createInviteOperations isBanned must be a function when provided')
   }
 
   const selectInvite = digest => database
@@ -297,6 +307,14 @@ export function createInviteOperations({ database, withImmediateTransaction, now
         if (timestamp >= expireMs(row.expires_at)) fail('invite_invalid', 'invite has expired')
         if (!verifyWithRawPublicKey(rawPublicKey, tokenBytes, Buffer.from(signature))) {
           fail('signature_invalid', 'the invite possession proof failed: the signature does not verify under the presented key over the exact token bytes')
+        }
+        // Story 4.5: the operator ban's enrollment gate — AFTER the proof
+        // (ban state is never revealed to a caller who cannot prove
+        // possession of the key) and BEFORE the reattach check or any use
+        // is consumed (every re-enroll from a banned key is refused
+        // `banned`, and a banned attempt consumes nothing).
+        if (isBanned !== null && isBanned(fingerprint)) {
+          fail('banned', 'this key is banned by the operator')
         }
         const reattached = database.prepare(`
           SELECT 1 AS found

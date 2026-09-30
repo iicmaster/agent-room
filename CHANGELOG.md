@@ -165,6 +165,30 @@ All notable changes to Agent Room are documented in this file.
   (`tests/rate-gates.test.mjs`): a warm server's end-to-end loopback send
   p95 upper-bounds the server-side processing, and the churn harness drives
   one gate-paced send per cycle with a monotonic-sequence oracle.
+- Ban by identity key (Story 4.5): `agent-room ban <fingerprint>
+  [--reason <text>]` and `agent-room unban <fingerprint>` join the operator
+  CLI host (the Story 4.2 bin — no new entrypoint), running on the server
+  host and opening the store directly in process (AR-13; no operator HTTP
+  route). The durable `banned_actors` registry (STRICT, additive open-path
+  convergence like the invites tables) is keyed by the canonical Actor
+  fingerprint; banning a fingerprint nobody has enrolled is first-class
+  (preemptive ban), re-banning is idempotent keeping the first ban's
+  timestamp and reason, and unbanning deletes the row so traffic flows
+  again immediately. The server's authz stage refuses every
+  session-authenticated request from a banned key with the coded `banned`
+  (403 — the send-status enum's HTTP face, registered once in the constants
+  module) by a direct indexed store query per request — deliberately not a
+  cached set, so a ban the separate CLI process commits is visible AT NEXT
+  REQUEST through WAL. The enroll gate lives inside the enrollment
+  transaction, after the possession proof and before any use is consumed:
+  a banned key's re-enroll (including a pre-ban reattach retry) is refused
+  `banned`, consumes nothing, and reveals ban state to no caller who cannot
+  prove possession. The long-poll read loop re-checks the ban gate each
+  poll iteration, so an in-flight hold terminates at its next wake (≤ the
+  250 ms poll interval, well inside the 20 s window) with the coded refusal
+  — the registry/state the poll checks, never a killed connection. Ban
+  state survives restart (the Epic 2 review's B1 boundary closes here:
+  persistence proven over a real CLI child write, SIGKILL, and respawn).
 
 ### Removed
 

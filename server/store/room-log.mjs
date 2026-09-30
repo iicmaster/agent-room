@@ -54,6 +54,11 @@ import {
   ensurePrivateDirectory,
 } from '../runtime.mjs'
 import {
+  BANNED_ACTORS_COLUMNS,
+  bannedActorsTableDdl,
+  createBanOperations,
+} from './bans.mjs'
+import {
   INVITE_CONSUMPTIONS_COLUMNS,
   INVITES_COLUMNS,
   createInviteOperations,
@@ -599,10 +604,10 @@ function verifyStrictTables(database) {
     SELECT name, strict
     FROM pragma_table_list
     WHERE schema = 'main'
-      AND name IN ('rooms', 'direct_members', 'messages', 'realms', 'chat_id_claims', 'enrolled_actors', 'invites', 'invite_consumptions')
+      AND name IN ('rooms', 'direct_members', 'messages', 'realms', 'chat_id_claims', 'enrolled_actors', 'invites', 'invite_consumptions', 'banned_actors')
   `).all()
   const strictByName = new Map(strictTables.map(row => [row.name, Number(row.strict)]))
-  for (const name of ['rooms', 'direct_members', 'messages', 'realms', 'chat_id_claims', 'enrolled_actors', 'invites', 'invite_consumptions']) {
+  for (const name of ['rooms', 'direct_members', 'messages', 'realms', 'chat_id_claims', 'enrolled_actors', 'invites', 'invite_consumptions', 'banned_actors']) {
     if (strictByName.get(name) !== 1) {
       fail('database_schema_invalid', `database table ${name} is missing or is not STRICT`)
     }
@@ -772,6 +777,33 @@ function verifyInvitesColumns(database, tableName, expectedColumns) {
   }
 }
 
+// Story 4.5 (additive, no schema-version bump): the durable operator ban
+// registry joins the schema through the same convergence pattern as the
+// invites tables — CREATE TABLE IF NOT EXISTS on every open, then the
+// column-set verification, so a foreign or drifted table is a coded schema
+// failure at open. The DDL and the operations live in ./bans.mjs; this store
+// owns the wiring and contributes its one transaction runner. Ban rows
+// survive restart by construction (B1 closes here: persistence proven by
+// Story 4.5's tests), and the server's per-request gate reads the same
+// table, so a ban written by the separate CLI process is visible at next
+// request through WAL.
+function ensureBannedActorsTable(database) {
+  database.exec(bannedActorsTableDdl({ ifNotExists: true }))
+}
+
+function verifyBannedActorsColumns(database) {
+  const columns = database
+    .prepare(`SELECT name FROM pragma_table_info('banned_actors') ORDER BY cid`)
+    .all()
+    .map(row => row.name)
+  if (
+    columns.length !== BANNED_ACTORS_COLUMNS.length
+    || BANNED_ACTORS_COLUMNS.some((name, index) => columns[index] !== name)
+  ) {
+    fail('database_schema_invalid', 'database table banned_actors has a divergent column set')
+  }
+}
+
 function plainMessage(row) {
   return {
     seq: Number(row.seq),
@@ -880,6 +912,8 @@ export function openRoomLog({ dataDir, duplicateWindowMs = DUPLICATE_WINDOW_MS }
       ensureInvitesTables(database)
       verifyInvitesColumns(database, 'invites', INVITES_COLUMNS)
       verifyInvitesColumns(database, 'invite_consumptions', INVITE_CONSUMPTIONS_COLUMNS)
+      ensureBannedActorsTable(database)
+      verifyBannedActorsColumns(database)
       verifyStrictTables(database)
 
       // Report the file's actual version, never the compiled constant.
@@ -931,10 +965,25 @@ export function openRoomLog({ dataDir, duplicateWindowMs = DUPLICATE_WINDOW_MS }
       if (closed) fail('store_connection_closed', 'agent-room store connection is closed')
     }
 
+    // Story 4.5: the ban registry's operations (./bans.mjs), guarded by this
+    // store's closed-connection discipline like every other api method. The
+    // operations are created BEFORE the invite operations so the enrollment
+    // transaction can consult the ban table inside its own transaction.
+    const banOperations = createBanOperations({ database, withImmediateTransaction })
+
     // Story 4.2: the invite registry's operations (./invites.mjs), wired
     // with this store's transaction runner and guarded by this store's
-    // closed-connection discipline like every other api method.
-    const inviteOperations = createInviteOperations({ database, withImmediateTransaction })
+    // closed-connection discipline like every other api method. The ban
+    // reader is the enrollment transaction's post-proof gate: a banned key
+    // is refused `banned` AFTER its possession proof verifies and BEFORE any
+    // use is consumed, all inside the one enrollment transaction — a failed
+    // or banned attempt consumes nothing and reveals ban state to no caller
+    // who cannot prove possession.
+    const inviteOperations = createInviteOperations({
+      database,
+      withImmediateTransaction,
+      isBanned: actorFingerprint => banOperations.isActorBanned(actorFingerprint),
+    })
 
     const api = {
       databasePath,
@@ -1589,6 +1638,29 @@ export function openRoomLog({ dataDir, duplicateWindowMs = DUPLICATE_WINDOW_MS }
       enrollRemoteActor(...args) {
         assertOpen()
         return inviteOperations.enrollRemoteActor(...args)
+      },
+
+      // Story 4.5: the operator ban registry (./bans.mjs). banActor and
+      // unbanActor are the operator CLI's calls (AR-13, in process, no
+      // HTTP); isActorBanned is the per-request gate's read — the authz
+      // stage and the long-poll loop query it directly, so a ban the CLI
+      // process committed is refused at next request and an in-flight
+      // long-poll terminates at its next poll iteration. Idempotent
+      // re-ban/unban; a preemptive ban of a never-seen fingerprint is
+      // first-class.
+      banActor(...args) {
+        assertOpen()
+        return banOperations.banActor(...args)
+      },
+
+      unbanActor(...args) {
+        assertOpen()
+        return banOperations.unbanActor(...args)
+      },
+
+      isActorBanned(...args) {
+        assertOpen()
+        return banOperations.isActorBanned(...args)
       },
     }
     return Object.freeze(api)

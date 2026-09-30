@@ -188,6 +188,10 @@ export const SEND_STATUSES = Object.freeze([
 export const PUBLIC_ERRORS = Object.freeze({
   actor_not_member: 'actor is not a member of this room',
   ambiguous_chat_id: 'chat id is claimed by multiple actors; retry with one candidate fingerprint as target_fingerprint',
+  // Story 4.5: the operator ban's refusal — every send, read, or re-enroll
+  // from a banned key answers this code (the send-status enum's `banned`
+  // taking its wire face here, as rate_limited did before it).
+  banned: 'this key is banned by the operator',
   chat_id_not_found: 'no actor has claimed this chat id',
   chat_id_taken: 'chat id is already claimed by another connected session',
   // Story 4.1: the challenge nonce is missing, expired, already consumed, or
@@ -284,11 +288,15 @@ export const PUBLIC_ERRORS = Object.freeze({
 // revoke prefix matching no invite is a miss answered 404
 // (invite_not_found), and the enroll route's admission refusal is answered
 // 429 (rate_limited — the send-status code's HTTP face arrives here first;
-// Story 4.4's budget stage reuses the code per-route). Declared once here —
-// never per-route.
+// Story 4.4's budget stage reuses the code per-route). Story 4.5 addition:
+// a banned key's refusal on any send, read, or re-enroll is a
+// credential-class failure answered 403 (banned — the send-status code's
+// HTTP face; the operator ban is the actor equivalent of actor_not_member).
+// Declared once here — never per-route.
 export const PUBLIC_ERROR_STATUS = Object.freeze({
   actor_not_member: 403,
   ambiguous_chat_id: 409,
+  banned: 403,
   chat_id_not_found: 404,
   chat_id_taken: 409,
   challenge_invalid: 401,

@@ -45,6 +45,15 @@
 //                         grammar begins here). Bodies in
 //                         ./invite-commands.mjs.
 //
+//   ban/unban (4.5)       the operator ban family over the SAME host and
+//                         grammar: `ban <fingerprint> [--reason <text>]` and
+//                         `unban <fingerprint>` write the durable
+//                         banned_actors registry directly, in process — a
+//                         running server refuses the key's sends, reads,
+//                         and re-enrolls with `banned` at next request, and
+//                         an in-flight long-poll ends at its next poll wake.
+//                         Bodies in ./ban-commands.mjs.
+//
 //   remote (Story 4.3)    the installation's Remote Mode configuration:
 //                         `remote set <https-url>` (https required — a
 //                         plaintext http:// URL is refused with the coded
@@ -98,6 +107,7 @@ import {
 } from './held-commands.mjs'
 import { runInviteFamilyCommand } from './invite-commands.mjs'
 import { runRemoteFamilyCommand } from './remote-commands.mjs'
+import { runBanFamilyCommand } from './ban-commands.mjs'
 
 const OK_STATUS = 200
 // The collision status is owned by the constants table (chat_id_taken), never restated.
@@ -322,6 +332,25 @@ Commands:
       are untouched. A prefix matching several invites is refused with the
       candidates, never guessed.
 
+  agent-room ban <fingerprint> [--reason <text>]
+      Ban an identity key. Run this on the SERVER HOST: the command opens
+      the server's store directly, in process — there is no operator HTTP
+      route (the API cannot ban). Takes the key's fingerprint ("sha256:"
+      followed by 64 lowercase hex characters, as the key holder's
+      diagnostics show it); banning a fingerprint nobody has enrolled is
+      fine (a preemptive ban). At the next request every send, read, or
+      re-enroll from the banned key is refused with the coded refusal
+      "banned", and an in-flight long-poll ends at its next poll wake —
+      well inside its hold window. The ban survives restarts. An optional
+      --reason is stored with the ban (free text, shown to no one but the
+      store). Re-banning a banned key is an idempotent success keeping the
+      first ban's timestamp.
+
+  agent-room unban <fingerprint>
+      Lift a ban: the registry row is deleted and future requests from the
+      key flow again immediately. Unbanning a key that holds no ban is
+      already the requested state and succeeds.
+
   agent-room remote set <https-url>
       Point this installation at a remote agent-room server (Remote Mode).
       The URL must be https:// with a hostname — plaintext (http://) remote
@@ -500,16 +529,19 @@ export async function main(argv = process.argv.slice(2), {
     output.write(`${outcome.lines.join('\n')}\n`)
     return outcome
   }
-  // Stories 4.2 and 4.3: the machine-readable families (HCI-3's grammar).
-  // Success prints one JSON object per line on stdout and exits 0; a refusal
-  // or usage error prints ONE JSON object on stderr and exits 1 or 2. The
-  // invite family is the operator store surface; the remote family is the
-  // installation's Remote Mode configuration — both later stories' families
+  // Stories 4.2, 4.3, and 4.5: the machine-readable families (HCI-3's
+  // grammar). Success prints one JSON object per line on stdout and exits 0;
+  // a refusal or usage error prints ONE JSON object on stderr and exits 1
+  // or 2. The invite family is the operator store surface; the remote
+  // family is the installation's Remote Mode configuration; the ban family
+  // is the operator's ban registry — all later operator stories' families
   // extend this dispatch and this printer.
-  if (command === 'invite' || command === 'remote') {
+  if (command === 'invite' || command === 'remote' || command === 'ban' || command === 'unban') {
     const outcome = command === 'invite'
       ? await runInviteFamilyCommand(subcommand, argv.slice(2), deps)
-      : await runRemoteFamilyCommand(subcommand, argv.slice(2), deps)
+      : command === 'remote'
+        ? await runRemoteFamilyCommand(subcommand, argv.slice(2), deps)
+        : await runBanFamilyCommand(command, argv.slice(1), deps)
     if (outcome.status === 'ok') {
       for (const line of outcome.lines) output.write(`${line}\n`)
       return outcome
