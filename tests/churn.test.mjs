@@ -3,14 +3,16 @@
 //
 // The churn row is the numeric oracle the criterion demands (review M4: never
 // "stable"): one real spawned server child, then 100 full connect →
-// authenticate → bind → disconnect cycles over real loopback HTTP (every
-// request its own socket, Connection: close), each cycle asserting its wire
-// answers. The server's file-descriptor count is sampled FROM OUTSIDE through
-// the leak-tracker harness (ps/lsof on macOS, /proc on Linux) before, during,
-// and after the churn, and every sample must sit within ±5 of the post-warmup
-// baseline; a TCP-socket inventory of the server process must then show
-// exactly one socket — the listener — proving zero leaked sockets, and a
-// presence probe must show zero leaked live sessions.
+// authenticate → bind → send → disconnect cycles over real loopback HTTP
+// (every request its own socket, Connection: close), each cycle asserting its
+// wire answers — including, since Story 4.4, one uniquely-identified
+// Broadcast Room send per cycle through the real rate gates, sampled for the
+// send-latency tripwire. The server's file-descriptor count is sampled FROM
+// OUTSIDE through the leak-tracker harness (ps/lsof on macOS, /proc on Linux)
+// before, during, and after the churn, and every sample must sit within ±5 of
+// the post-warmup baseline; a TCP-socket inventory of the server process must
+// then show exactly one socket — the listener — proving zero leaked sockets,
+// and a presence probe must show zero leaked live sessions.
 //
 // The memory row runs a bounded churn workload under the tracker's timed
 // sampling and asserts the single memory pass rule: the least-squares slope of
@@ -51,6 +53,19 @@ const SERVER_ENTRY = join(ROOT, 'server', 'api', 'server.mjs')
 const RUNTIME_RECORD_FILENAME = 'runtime.json'
 const DATABASE_FILENAME = 'agent-room.sqlite'
 
+// Story 4.4: this harness is its server child's operator. The four gates'
+// documented env floors are raised so the harness's point — hundreds of
+// full connect/authenticate/bind/send/disconnect cycles from ONE
+// installation key — is the churn it drives, not throttling; the gates still
+// run on every request, and their refusal behavior is exercised for its own
+// sake by tests/rate-gates.test.mjs at the declared defaults.
+const OPERATOR_RATE_FLOOR_ENV = Object.freeze({
+  AGENT_ROOM_SEND_TOKEN_REFILL_PER_SECOND: '2000',
+  AGENT_ROOM_SEND_TOKEN_CAPACITY: '100000',
+  AGENT_ROOM_REQUEST_BUDGET_PER_MINUTE: '120000',
+  AGENT_ROOM_REQUEST_BUDGET_BURST: '100000',
+})
+
 // Wire vocabulary as literals of this file (the oracle discipline: expected
 // values are built here, never imported).
 const PROTOCOL_KEY = 'agent-room-protocol'
@@ -74,8 +89,11 @@ const FD_DRIFT_TOLERANCE = 5
 // state working set this workload's allocation rate demands (the same reason
 // soaks warm up before measuring), then a time-bounded PACED window runs
 // under the tracker's timed sampling, so the least-squares slope reads
-// retained growth — leaks — not allocator ramp-up.
-const MEMORY_WARMUP_CYCLES = 2500
+// retained growth — leaks — not allocator ramp-up. Since Story 4.4 each
+// cycle also carries a status read and a Broadcast Room send through the
+// real gates (six requests), so the warmup grew from 2500 to 4500 cycles to
+// reach the heavier workload's plateau.
+const MEMORY_WARMUP_CYCLES = 4500
 const MEMORY_SETTLE_MS = 500
 const MEMORY_WINDOW_MS = 10_000
 const MEMORY_WINDOW_HARD_CAP_MS = 25_000
@@ -131,7 +149,12 @@ async function withDeadline(promise, label, budgetMs = REQUEST_DEADLINE_MS) {
 
 // One full connect → authenticate → bind → use → disconnect cycle, every step
 // asserted on the wire. agent:false pins Connection: close, so a cycle drives
-// four fresh real sockets through the server.
+// five fresh real sockets through the server. Story 4.4 adds the SEND half:
+// each cycle reads the realm status and appends one uniquely-identified
+// message to the Broadcast Room through the real rate gates (at the raised
+// operator floors), timing the send end-to-end for the latency sample — the
+// binding p95 ≤ 150 ms oracle lives in tests/rate-gates.test.mjs, measured
+// server-side; here it is a pathology tripwire only.
 async function churnCycle(port, credentials, cycleNumber) {
   const label = `cycle ${cycleNumber}`
   const auth = await withDeadline(request(port, 'POST', '/api/auth/local', {
@@ -163,12 +186,36 @@ async function churnCycle(port, credentials, cycleNumber) {
   assert.equal(presence.status, 200, `${label}: the presence read answered ${presence.status}: ${presence.text}`)
   assert.equal(Array.isArray(presence.json().result.online), true, `${label}: the presence read returned the online group`)
 
+  const status = await withDeadline(request(port, 'GET', '/api/status', {
+    headers: { [PROTOCOL_KEY]: PROTOCOL_VERSION, authorization: `Bearer ${sessionToken}` },
+  }), `${label}: status read`)
+  assert.equal(status.status, 200, `${label}: the status read answered ${status.status}: ${status.text}`)
+  const broadcastRoomId = status.json().result.broadcast_room_id
+  assert.equal(typeof broadcastRoomId === 'string' && broadcastRoomId.length > 0, true, `${label}: the status read named the Broadcast Room`)
+
+  const clientMessageId = `churn-${String(cycleNumber).replace(/[^A-Za-z0-9_.:-]+/g, '-')}`
+  const sendStartedAt = Date.now()
+  const sent = await withDeadline(request(port, 'POST', `/api/rooms/${broadcastRoomId}/messages`, {
+    headers: {
+      [PROTOCOL_KEY]: PROTOCOL_VERSION,
+      authorization: `Bearer ${sessionToken}`,
+      'content-type': 'application/json; charset=utf-8',
+    },
+    body: JSON.stringify({ chat_id: CHAT_ID, client_message_id: clientMessageId, text: `churn cycle ${cycleNumber}` }),
+  }), `${label}: send`)
+  const sendLatencyMs = Date.now() - sendStartedAt
+  assert.equal(sent.status, 200, `${label}: the send answered ${sent.status}: ${sent.text}`)
+  const sendResult = sent.json().result
+  assert.equal(sendResult.status, 'committed', `${label}: the send is committed`)
+  assert.equal(typeof sendResult.seq === 'number' && sendResult.seq >= 1, true, `${label}: the send acked at a positive sequence`)
+  assert.deepEqual(Object.keys(sendResult).sort(), ['room_id', 'seq', 'status'], `${label}: the committed send carries exactly the frozen result keys`)
+
   const release = await withDeadline(request(port, 'DELETE', '/api/session', {
     headers: { [PROTOCOL_KEY]: PROTOCOL_VERSION, authorization: `Bearer ${sessionToken}` },
   }), `${label}: disconnect`)
   assert.equal(release.status, 200, `${label}: the disconnect answered ${release.status}: ${release.text}`)
 
-  return { cycle: cycleNumber, chat_id: bind.json().result.chat_id }
+  return { cycle: cycleNumber, chat_id: bind.json().result.chat_id, sendLatencyMs, seq: sendResult.seq }
 }
 
 // --- Server TCP-socket inventory (the zero-leaked-sockets oracle) -----------------
@@ -280,7 +327,7 @@ function makeWorld(t) {
   const runtimePath = join(sharedData, RUNTIME_RECORD_FILENAME)
   const databasePath = join(sharedData, DATABASE_FILENAME)
   const child = spawn(process.execPath, [SERVER_ENTRY], {
-    env: { ...process.env, AGENT_ROOM_DATA_DIR: sharedData },
+    env: { ...process.env, AGENT_ROOM_DATA_DIR: sharedData, ...OPERATOR_RATE_FLOOR_ENV },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   let stderr = ''
@@ -366,7 +413,7 @@ function assertWorldPermissions(world) {
 
 // --- The churn regression -----------------------------------------------------------
 
-test('connection churn: 100 connect/authenticate/bind/disconnect cycles all succeed, hold the server at its post-warmup FD baseline (±5), and leak zero sockets', async t => {
+test('connection churn: 100 connect/authenticate/bind/send/disconnect cycles all succeed, hold the server at its post-warmup FD baseline (±5), and leak zero sockets', async t => {
   const world = makeWorld(t)
   assertWorldPermissions(world)
   const runtimeRecord = await world.waitReady()
@@ -376,10 +423,20 @@ test('connection churn: 100 connect/authenticate/bind/disconnect cycles all succ
 
   const tracker = createLeakTracker({ pid: world.serverPid, intervalMs: 50, tolerancePct: MEMORY_TOLERANCE_PCT })
 
+  // The send log is append-only and this installation is its only sender, so
+  // every cycle's Broadcast Room send acks at exactly lastSeq + 1 — a
+  // monotonic counter across warmup and measured churn — and every send's
+  // end-to-end latency is sampled for the Story 4.4 tripwire.
+  let lastSeq = 0
+  const sendLatencySamples = []
+
   // Warmup absorbs boot-adjacent growth so the baseline below is the
   // steady-state server, not a half-warm one.
   for (let cycle = 1; cycle <= CHURN_WARMUP_CYCLES; cycle += 1) {
-    await churnCycle(port, world.credentials, `warmup ${cycle}`)
+    const warmed = await churnCycle(port, world.credentials, `warmup ${cycle}`)
+    assert.equal(warmed.seq, lastSeq + 1, `warmup ${cycle}: the send acked at the next sequence`)
+    lastSeq = warmed.seq
+    sendLatencySamples.push(warmed.sendLatencyMs)
   }
   await sleep(TEARDOWN_SETTLE_MS)
 
@@ -393,7 +450,11 @@ test('connection churn: 100 connect/authenticate/bind/disconnect cycles all succ
   // sampled through the tracker every CHURN_SAMPLE_EVERY_CYCLES cycles.
   const completed = []
   for (let cycle = 1; cycle <= CHURN_CYCLES; cycle += 1) {
-    completed.push(await churnCycle(port, world.credentials, cycle))
+    const done = await churnCycle(port, world.credentials, cycle)
+    assert.equal(done.seq, lastSeq + 1, `cycle ${cycle}: the send acked at the next sequence`)
+    lastSeq = done.seq
+    sendLatencySamples.push(done.sendLatencyMs)
+    completed.push(done)
     if (cycle % CHURN_SAMPLE_EVERY_CYCLES === 0) await tracker.sampleNow()
   }
   await sleep(TEARDOWN_SETTLE_MS)
@@ -471,6 +532,16 @@ test('connection churn: 100 connect/authenticate/bind/disconnect cycles all succ
     headers: { [PROTOCOL_KEY]: PROTOCOL_VERSION, authorization: `Bearer ${probeToken}` },
   }), 'probe disconnect')
   assert.equal(probeRelease.status, 200, 'the probe session disconnected')
+
+  // Oracle 6 — Story 4.4's churn send sampling: over warmup + the 100 cycles,
+  // every send completed through the real gates and the end-to-end p95 stays
+  // inside this harness's generous tripwire. The BINDING p95 ≤ 150 ms oracle
+  // lives in tests/rate-gates.test.mjs, measured server-side; this row only
+  // catches pathological regressions while real churn traffic flows.
+  sendLatencySamples.sort((left, right) => left - right)
+  const p95 = sendLatencySamples[Math.ceil(0.95 * sendLatencySamples.length) - 1]
+  t.diagnostic(`send latency across ${sendLatencySamples.length} churn sends: p95=${p95}ms max=${sendLatencySamples[sendLatencySamples.length - 1]}ms`)
+  assert.ok(p95 <= 1000, `the churn send p95 ${p95}ms must stay inside the 1000 ms pathology tripwire (the binding 150 ms oracle is server-side in tests/rate-gates.test.mjs)`)
 })
 
 // --- The memory pass rule ------------------------------------------------------------

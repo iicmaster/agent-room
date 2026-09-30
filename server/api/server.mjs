@@ -74,6 +74,20 @@
 // without consuming). The budgets stage paces the route at 5/min per client
 // identity (burst 5) through the minimal fixed-window limiter; forwarded
 // addresses are trusted only when the operator configured trustedProxy.
+// Story 4.4 completes the budget stage with the four rate gates (FR-16/
+// FR-17): the per-Actor request budget (every authenticated request counts
+// at admission — failed, replayed, and long-polls once) and the per-Actor
+// send bucket on the send route (idempotency-aware: an exact retry — an
+// existing (room, actor, client_message_id) tuple — is admitted free and
+// consumes nothing, even from an empty bucket), both token buckets over
+// operator-tunable floors (startServer overrides; the direct launch reads
+// the AGENT_ROOM_SEND_TOKEN_* / AGENT_ROOM_REQUEST_BUDGET_* /
+// AGENT_ROOM_DUPLICATE_WINDOW_MS env knobs), and the store's duplicate gate
+// ordered after the idempotency lookup inside the same append transaction.
+// Send answers now carry the full FR-17 status vocabulary: committed,
+// duplicate_dropped (a 200 result naming original_seq), rate_limited (429 +
+// retry_after_ms), client_message_id_conflict (the coded 409), with banned
+// and storage_low completing the enum for Stories 4.5/4.6.
 
 import { createServer } from 'node:http'
 import { timingSafeEqual } from 'node:crypto'
@@ -94,6 +108,7 @@ import {
   CHAT_ID_INVALID_MESSAGE,
   CLAIMS_TTL_MS,
   CLIENT_TYPES,
+  DUPLICATE_WINDOW_MS,
   FINGERPRINT_PATTERN,
   INVITE_TOKEN_CHARS,
   INVITE_TOKEN_PREFIX,
@@ -107,6 +122,10 @@ import {
   READ_HOLD_MAX_MS,
   READ_PAGE_DEFAULT,
   READ_PAGE_MAX,
+  REQUEST_BUDGET_BURST,
+  REQUEST_BUDGET_PER_MINUTE,
+  SEND_TOKEN_CAPACITY,
+  SEND_TOKEN_REFILL_PER_SECOND,
   chatIdForms,
 } from '../constants.mjs'
 import { openRoomLog } from '../store/room-log.mjs'
@@ -126,6 +145,7 @@ import {
 import { bearerTokenFromHeaders, createSessionRegistry, createSessionVerifier } from './session.mjs'
 import { createChallengeRegistry } from './challenge.mjs'
 import { createEnrollRateLimiter } from './enroll-rate-limit.mjs'
+import { createRateGates } from './rate-gates.mjs'
 import { readLocalToken } from './local-token.mjs'
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1'])
@@ -711,14 +731,25 @@ registerHandler('GET /api/rooms/:id/messages', async function readMessages(conte
 }, 'actor')
 
 // POST /api/rooms/:id/messages: the idempotent append. The idempotency tuple
-// (Actor fingerprint, room, client_message_id) lives in the store: a matching
-// resend returns the original committed message (status committed, same seq —
-// the outcome_unknown resolution), a conflicting payload surfaces the coded
-// client_message_id_conflict. The attribution Chat ID is declared in the body
-// (the frozen route vocabulary) but holds no authority: it must match the
-// session's CURRENT live Chat ID — the name bound from the token side — and
-// the value attributed to the message is always the live row's display form,
-// so a session can never attribute a message to a name it does not hold.
+// (Actor fingerprint, room, client_message_id) lives in the store, checked
+// BEFORE the duplicate gate (Story 4.4's ordering, structural inside the
+// store's single append transaction): a matching resend returns the original
+// committed message (status committed, same seq — the outcome_unknown
+// resolution), a conflicting payload surfaces the coded
+// client_message_id_conflict. A NEW send whose byte-identical payload the
+// same Actor repeated in the same room within the duplicate window is
+// answered duplicate_dropped (a normal 200 result naming original_seq — an
+// explicit notice, never an error, never a silent success; the store wrote
+// nothing). The attribution Chat ID is declared in the body (the frozen route
+// vocabulary) but holds no authority: it must match the session's CURRENT
+// live Chat ID — the name bound from the token side — and the value
+// attributed to the message is always the live row's display form, so a
+// session can never attribute a message to a name it does not hold. The
+// response status vocabulary is the FR-17 set in the constants module
+// (SEND_STATUSES): committed and duplicate_dropped answer here as results;
+// rate_limited answers from the budgets stage (429 + retry_after_ms);
+// client_message_id_conflict answers as the coded 409; banned and storage_low
+// join the same enum from Stories 4.5/4.6 as their refusals land.
 function requiredString(value, name, detail) {
   if (value === undefined || value === null || value === '') {
     return { error: reject('invalid_request', detail ?? `${name} is required`) }
@@ -753,7 +784,7 @@ registerHandler('POST /api/rooms/:id/messages', function appendMessageRoute(cont
   if (textField.error) return textField.error
   const replyToSeq = context.body?.reply_to_seq
 
-  const { message } = context.store.appendMessage({
+  const outcome = context.store.appendMessage({
     roomId: context.params?.id,
     actorFingerprint: principal.actorFingerprint,
     chatId: live.chatId,
@@ -761,7 +792,14 @@ registerHandler('POST /api/rooms/:id/messages', function appendMessageRoute(cont
     text: textField.value,
     replyToSeq,
   })
-  return { status: 'committed', seq: message.seq, room_id: message.room_id }
+  if (outcome.duplicateDropped) {
+    return {
+      status: 'duplicate_dropped',
+      original_seq: outcome.original.seq,
+      room_id: outcome.original.room_id,
+    }
+  }
+  return { status: 'committed', seq: outcome.message.seq, room_id: outcome.message.room_id }
 }, 'actor')
 
 const UNREGISTERED_ROUTE_HANDLER = () => reject('route_not_found')
@@ -855,6 +893,8 @@ async function handleRequest(request, response, options) {  let pathname = null
       viewerVerifier: options.viewerVerifier,
       enrollRateLimiter: options.enrollRateLimiter,
       trustedProxy: options.trustedProxy,
+      requestBudgetGate: options.requestBudgetGate,
+      sendBucketGate: options.sendBucketGate,
     })
     const handler = REGISTERED_HANDLERS.get(routeKeyOf(route)) ?? UNREGISTERED_ROUTE_HANDLER
     const outcome = await runPipeline(stages, context, handler)
@@ -898,6 +938,11 @@ export async function startServer({
   presenceTtlMs = PRESENCE_TTL_MS,
   trustedProxy = false,
   enrollRateLimiter,
+  sendTokenRefillPerSecond = SEND_TOKEN_REFILL_PER_SECOND,
+  sendTokenCapacity = SEND_TOKEN_CAPACITY,
+  requestBudgetPerMinute = REQUEST_BUDGET_PER_MINUTE,
+  requestBudgetBurst = REQUEST_BUDGET_BURST,
+  duplicateWindowMs = DUPLICATE_WINDOW_MS,
 } = {}) {
   // Runtime gate first: Node >= 24.15 / SQLite >= 3.51.3, diagnosable error.
   assertSupportedRuntime()
@@ -984,7 +1029,41 @@ export async function startServer({
       'enrollRateLimiter must be an enroll rate limiter (check) when provided',
     )
   }
+  // Story 4.4: the four gates' operator floors. All five tunables accept
+  // startServer overrides — abuse floors for an invite-only realm (FR-16's
+  // own qualification), never a volumetric-DoS guarantee; an operator raises
+  // them for churn-like legitimate load or tightens them within what their
+  // realm can bear. Malformed wiring fails at startup, never per-request.
+  if (typeof sendTokenRefillPerSecond !== 'number'
+    || !Number.isFinite(sendTokenRefillPerSecond)
+    || sendTokenRefillPerSecond <= 0) {
+    throw new AgentRoomRuntimeError('invalid_argument', 'sendTokenRefillPerSecond must be a positive finite number')
+  }
+  if (!Number.isSafeInteger(sendTokenCapacity) || sendTokenCapacity < 1) {
+    throw new AgentRoomRuntimeError('invalid_argument', 'sendTokenCapacity must be a positive safe integer')
+  }
+  if (!Number.isSafeInteger(requestBudgetPerMinute) || requestBudgetPerMinute < 1) {
+    throw new AgentRoomRuntimeError('invalid_argument', 'requestBudgetPerMinute must be a positive safe integer')
+  }
+  if (!Number.isSafeInteger(requestBudgetBurst) || requestBudgetBurst < 1) {
+    throw new AgentRoomRuntimeError('invalid_argument', 'requestBudgetBurst must be a positive safe integer')
+  }
+  if (!Number.isSafeInteger(duplicateWindowMs) || duplicateWindowMs <= 0) {
+    throw new AgentRoomRuntimeError('invalid_argument', 'duplicateWindowMs must be a positive safe integer')
+  }
   const effectiveEnrollRateLimiter = enrollRateLimiter ?? createEnrollRateLimiter()
+  // Story 4.4: the two per-Actor token buckets (request budget + send
+  // bucket), one pair per server instance — per-realm admission state is
+  // never shared across instances (the 4.2 limiter's default-plus-override
+  // reasoning; here both gates are constructed fresh per server, and tests
+  // inject clocks through createRateGates when they must drive them
+  // directly).
+  const rateGates = createRateGates({
+    sendTokenRefillPerSecond,
+    sendTokenCapacity,
+    requestBudgetPerMinute,
+    requestBudgetBurst,
+  })
   // implemented-flag enforcement: every frozen route marked implemented must
   // have a registered handler, and every registered handler must belong to a
   // marked route — a mismatch fails startup instead of silently 404ing a
@@ -1016,7 +1095,7 @@ export async function startServer({
   // non-v1 foreign schema.
   await migrateV1InPlace({ dataDir })
 
-  const store = openRoomLog({ dataDir })
+  const store = openRoomLog({ dataDir, duplicateWindowMs })
 
   // Story 1.6: one liveness mechanism. The actor-class auth stage already
   // slides the 12 h auth TTL on every successful verify (the documented
@@ -1094,6 +1173,8 @@ export async function startServer({
         challengeRegistry: effectiveChallengeRegistry,
         enrollRateLimiter: effectiveEnrollRateLimiter,
         trustedProxy,
+        requestBudgetGate: rateGates.requestBudgetGate,
+        sendBucketGate: rateGates.sendBucketGate,
         store,
       }).catch(() => {
         response.destroy()
@@ -1249,6 +1330,45 @@ export function presenceTtlMsFromEnv(env = process.env) {
   return { presenceTtlMs: value }
 }
 
+// Story 4.4 review of the direct-launch surface: the four gates' operator
+// floors ride the same env convention as the claim and presence TTLs — five
+// strictly-validated knobs, each falling back to its declared default with
+// one warning line when its value is junk. A present-but-invalid value never
+// blocks a boot.
+export function gateLimitsFromEnv(env = process.env) {
+  const warnings = []
+  const readFraction = (key, fallback) => {
+    const raw = env?.[key]
+    if (raw === undefined || String(raw).trim() === '') return fallback
+    const value = Number(String(raw).trim())
+    if (!Number.isFinite(value) || value <= 0) {
+      warnings.push(`ignoring invalid ${key} "${raw}": must be a positive finite number; using the default ${fallback}`)
+      return fallback
+    }
+    return value
+  }
+  const readInteger = (key, fallback) => {
+    const raw = env?.[key]
+    if (raw === undefined || String(raw).trim() === '') return fallback
+    const trimmed = String(raw).trim()
+    if (!/^[0-9]+$/.test(trimmed) || !Number.isSafeInteger(Number(trimmed)) || Number(trimmed) < 1) {
+      warnings.push(`ignoring invalid ${key} "${raw}": must be a positive integer; using the default ${fallback}`)
+      return fallback
+    }
+    return Number(trimmed)
+  }
+  return {
+    gateLimits: {
+      sendTokenRefillPerSecond: readFraction('AGENT_ROOM_SEND_TOKEN_REFILL_PER_SECOND', SEND_TOKEN_REFILL_PER_SECOND),
+      sendTokenCapacity: readInteger('AGENT_ROOM_SEND_TOKEN_CAPACITY', SEND_TOKEN_CAPACITY),
+      requestBudgetPerMinute: readInteger('AGENT_ROOM_REQUEST_BUDGET_PER_MINUTE', REQUEST_BUDGET_PER_MINUTE),
+      requestBudgetBurst: readInteger('AGENT_ROOM_REQUEST_BUDGET_BURST', REQUEST_BUDGET_BURST),
+      duplicateWindowMs: readInteger('AGENT_ROOM_DUPLICATE_WINDOW_MS', DUPLICATE_WINDOW_MS),
+    },
+    warnings,
+  }
+}
+
 // Run the runtime gate before any other work. Direct launches report one
 // diagnosable line and exit 1 with no stack trace; importers get a catchable
 // rejection so harnesses (tests/runtime.test.mjs entrypoint gates) can assert
@@ -1271,7 +1391,11 @@ if (launchedDirectly()) {
   if (warning) process.stderr.write(`agent-room-server: ${warning}\n`)
   const { presenceTtlMs, warning: presenceWarning } = presenceTtlMsFromEnv()
   if (presenceWarning) process.stderr.write(`agent-room-server: ${presenceWarning}\n`)
-  startServer({ dataDir: sharedDataDirectory(), claimsTtlMs, presenceTtlMs })
+  const { gateLimits, warnings: gateWarnings } = gateLimitsFromEnv()
+  for (const gateWarning of gateWarnings) {
+    process.stderr.write(`agent-room-server: ${gateWarning}\n`)
+  }
+  startServer({ dataDir: sharedDataDirectory(), claimsTtlMs, presenceTtlMs, ...gateLimits })
     .then(server => {
       let shuttingDown = false
       const shutdown = () => {

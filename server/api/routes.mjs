@@ -167,6 +167,13 @@ export const RESPONSE_FIELD_VOCABULARY = Object.freeze([
   'candidates',
   'rooms',
   'nonce',
+  // Story 4.4 (additive, dated spine amendment): original_seq is the original
+  // room-local sequence a duplicate_dropped send names (FR-17's explicit
+  // notice), and retry_after_ms is the retry delay every rate_limited refusal
+  // carries in its error envelope (the extras are declared in the pipeline's
+  // ERROR_ENVELOPE_EXTRAS — a code carries only its declared extras).
+  'original_seq',
+  'retry_after_ms',
 ])
 
 // Matching: specific patterns first, wildcard (`/viewer/` + static assets)

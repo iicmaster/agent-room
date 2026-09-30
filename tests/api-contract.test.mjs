@@ -119,10 +119,12 @@ test('the AD-8 envelope sentence pins the wire shape and the fallback code', () 
 })
 
 test('error-envelope extras are a declared allowlist gated by code and can never clobber fixed fields', () => {
-  // The Story 1.7 amendment declared exactly one entry: ambiguous_chat_id's
-  // optional candidates list.
-  assert.deepEqual(Object.keys(ERROR_ENVELOPE_EXTRAS), ['ambiguous_chat_id'])
+  // The Story 1.7 amendment declared ambiguous_chat_id's optional candidates
+  // list; the Story 4.4 amendment added rate_limited's retry_after_ms — the
+  // rate-limited refusal always names its retry delay (FR-17).
+  assert.deepEqual(Object.keys(ERROR_ENVELOPE_EXTRAS), ['ambiguous_chat_id', 'rate_limited'])
   assert.deepEqual([...ERROR_ENVELOPE_EXTRAS.ambiguous_chat_id], ['candidates'])
+  assert.deepEqual([...ERROR_ENVELOPE_EXTRAS.rate_limited], ['retry_after_ms'])
 
   // Fixed fields are construction-time protected: no declared extra may be
   // named ok, code, message, or status, and a spread of unlisted extras is

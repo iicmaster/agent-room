@@ -88,6 +88,19 @@ const RECORDER_ENTRY = join(dirname(fileURLToPath(import.meta.url)), 'rel2-recor
 const RUNTIME_RECORD_FILENAME = 'runtime.json'
 const DATABASE_FILENAME = 'agent-room.sqlite'
 
+// Story 4.4: this drill is its server child's operator. The four gates'
+// documented env floors are raised so the drill's point — continuous,
+// unpaced-warmup traffic through real SIGKILL cycles — is what is exercised,
+// not throttling; the gates still run on every request, and their refusal
+// behavior is exercised for its own sake by tests/rate-gates.test.mjs at the
+// declared defaults.
+const OPERATOR_RATE_FLOOR_ENV = Object.freeze({
+  AGENT_ROOM_SEND_TOKEN_REFILL_PER_SECOND: '2000',
+  AGENT_ROOM_SEND_TOKEN_CAPACITY: '100000',
+  AGENT_ROOM_REQUEST_BUDGET_PER_MINUTE: '120000',
+  AGENT_ROOM_REQUEST_BUDGET_BURST: '100000',
+})
+
 // --- The seeded randomness -----------------------------------------------------
 //
 // Kill timing is random per the criterion but seeded per the reproducibility
@@ -531,6 +544,7 @@ function makeWorld(t) {
         PATH: process.env.PATH || '',
         LANG: process.env.LANG || 'C.UTF-8',
         AGENT_ROOM_DATA_DIR: sharedData,
+        ...OPERATOR_RATE_FLOOR_ENV,
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     })

@@ -65,6 +65,19 @@ const HELD_COMMANDS_ENTRY = join(ROOT, 'server', 'cli', 'held-commands.mjs')
 const RUNTIME_RECORD_FILENAME = 'runtime.json'
 const PROTOCOL_KEY = 'agent-room-protocol'
 
+// Story 4.4: this harness is its server child's operator. The four gates'
+// documented env floors are raised here so the held-show matrix's point —
+// a 105-message foreign burst and its point-read recoveries — is what is
+// exercised, not throttling; the gates still run on every request, and
+// their refusal behavior is exercised for its own sake by
+// tests/rate-gates.test.mjs at the declared defaults.
+const OPERATOR_RATE_FLOOR_ENV = Object.freeze({
+  AGENT_ROOM_SEND_TOKEN_REFILL_PER_SECOND: '2000',
+  AGENT_ROOM_SEND_TOKEN_CAPACITY: '100000',
+  AGENT_ROOM_REQUEST_BUDGET_PER_MINUTE: '120000',
+  AGENT_ROOM_REQUEST_BUDGET_BURST: '100000',
+})
+
 const sleep = ms => new Promise(resolvePromise => { setTimeout(resolvePromise, ms) })
 
 // A well-formed fingerprint that no real keypair in the test produces: the
@@ -104,7 +117,7 @@ function makeWorld(t, { chatId = 'Agent', startServer = true } = {}) {
 
   function startServerChild() {
     serverChild = spawn(process.execPath, [SERVER_ENTRY], {
-      env: { ...process.env, AGENT_ROOM_DATA_DIR: sharedData },
+      env: { ...process.env, AGENT_ROOM_DATA_DIR: sharedData, ...OPERATOR_RATE_FLOOR_ENV },
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     t.after(async () => {

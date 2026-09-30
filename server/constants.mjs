@@ -166,11 +166,20 @@ export const PROTOCOL_VERSION = '1'
 // NFR-8 (a mangled or unsupported header names this list in the error).
 export const SUPPORTED_PROTOCOL_VERSIONS = Object.freeze([PROTOCOL_VERSION])
 
-// Send-status enum: basic statuses only; the full set completes in Epic 4 and
-// extends this list additively.
+// Send-status enum (FR-17, Story 4.4: the complete set). Every send the
+// server processes answers with exactly one of these — `committed` and
+// `duplicate_dropped` as 200 results (the latter naming original_seq),
+// `rate_limited` as the coded 429 carrying retry_after_ms,
+// `client_message_id_conflict` as the coded 409, and `banned`/`storage_low`
+// as the coded refusals Stories 4.5/4.6 wire by name when their triggers
+// land. Names never rename; the set is closed at these six.
 export const SEND_STATUSES = Object.freeze([
   'committed',
+  'rate_limited',
+  'duplicate_dropped',
+  'storage_low',
   'client_message_id_conflict',
+  'banned',
 ])
 
 // Public error codes with their canonical human message. Seeded from v0.1 and

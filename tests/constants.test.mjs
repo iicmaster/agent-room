@@ -428,7 +428,19 @@ test('every v0.1 public error code has an HTTP status declared once', () => {
 })
 
 test('send-status enum and protocol header are the frozen wire contract', () => {
-  assert.deepEqual([...SEND_STATUSES], ['committed', 'client_message_id_conflict'])
+  // Story 4.4: the complete FR-17 set — committed and duplicate_dropped
+  // answer as 200 results, rate_limited (429 + retry_after_ms) and
+  // client_message_id_conflict (409) as coded refusals, and banned /
+  // storage_low wired by name for Stories 4.5/4.6. The order mirrors the
+  // spine's send-semantics sentence; names never rename.
+  assert.deepEqual([...SEND_STATUSES], [
+    'committed',
+    'rate_limited',
+    'duplicate_dropped',
+    'storage_low',
+    'client_message_id_conflict',
+    'banned',
+  ])
   assert.ok(Object.isFrozen(SEND_STATUSES))
   assert.equal(PROTOCOL_HEADER, 'Agent-Room-Protocol')
   assert.equal(PROTOCOL_VERSION, '1')

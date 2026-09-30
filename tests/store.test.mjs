@@ -961,7 +961,16 @@ test('rooms, the log, idempotency, and direct membership survive reopen', t => {
   assert.deepEqual(reopened.readPage({ roomId: dm.id, actorFingerprint: fpB }), [dmMessage])
   assertCode(() => reopened.readPage({ roomId: dm.id, actorFingerprint: fpC }), 'actor_not_member')
   assert.deepEqual(reopened.readPage({ roomId: room.id, actorFingerprint: fpA }), [original])
-  assert.deepEqual(reopened.appendMessage(payload), { message: original, duplicate: true })
+  // Story 4.4: the append result is a uniform discriminated outcome —
+  // duplicate (the idempotent retry) and duplicateDropped (the new-send
+  // duplicate gate) are disjoint booleans, and original names the prior
+  // message only on the dropped path.
+  assert.deepEqual(reopened.appendMessage(payload), {
+    message: original,
+    duplicate: true,
+    duplicateDropped: false,
+    original: null,
+  })
 })
 
 // --- Connection lifecycle and raw-error hardening --------------------------------

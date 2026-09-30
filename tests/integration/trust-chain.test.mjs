@@ -71,6 +71,18 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const SERVER_ENTRY = join(ROOT, 'server', 'api', 'server.mjs')
 const MCP_ENTRY = join(ROOT, 'server', 'mcp-stdio.mjs')
 const RUNTIME_RECORD_FILENAME = 'runtime.json'
+
+// Story 4.4: this harness is its server child's operator. The four gates'
+// documented env floors are raised here so the harness's point is the
+// traffic it drives, not throttling — the gates still run on every request,
+// and their refusal behavior is exercised for its own sake by
+// tests/rate-gates.test.mjs at the declared defaults.
+const OPERATOR_RATE_FLOOR_ENV = Object.freeze({
+  AGENT_ROOM_SEND_TOKEN_REFILL_PER_SECOND: '2000',
+  AGENT_ROOM_SEND_TOKEN_CAPACITY: '100000',
+  AGENT_ROOM_REQUEST_BUDGET_PER_MINUTE: '120000',
+  AGENT_ROOM_REQUEST_BUDGET_BURST: '100000',
+})
 const DATABASE_FILENAME = 'agent-room.sqlite'
 
 const SERVER_READY_TIMEOUT_MS = 15_000
@@ -168,7 +180,7 @@ function makeWorld(t, { chatIds, preenroll = [] }) {
 
   function startServerChild() {
     serverChild = spawn(process.execPath, [SERVER_ENTRY], {
-      env: { ...process.env, AGENT_ROOM_DATA_DIR: sharedData },
+      env: { ...process.env, AGENT_ROOM_DATA_DIR: sharedData, ...OPERATOR_RATE_FLOOR_ENV },
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     t.after(async () => {

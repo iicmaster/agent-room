@@ -136,6 +136,35 @@ All notable changes to Agent Room are documented in this file.
   naming the operator's invite flow — the client never enrolls itself. The
   `remote` family joins the CLI host's JSON-lines grammar (0 ok, 1 refusal,
   2 usage).
+- The four rate gates and the full send statuses (Story 4.4): the budgets
+  stage now carries the two per-Actor token buckets of FR-16 — the send
+  bucket (0.5/s refill, capacity 10, on the send route) and the request
+  budget (120/min/key, burst 30, counting EVERY authenticated request at
+  admission: failed and replayed attempts included, long-polls exactly
+  once) — and the store's append transaction carries the 5 s duplicate gate,
+  ordered after the idempotency lookup so the ordering is structural. The
+  send bucket is idempotency-aware: a send whose (room, actor,
+  client_message_id) the store already holds is probed before the bucket
+  consumes, so an exact retry is admitted free and consumes nothing even
+  from an empty bucket, while a new send repeating the same byte-identical
+  payload in one room within the window answers `duplicate_dropped` — a
+  normal 200 result naming `original_seq`, never an error, never a second
+  commit, with identical text in a different room or reply context untouched.
+  Every refusal names its delay: `rate_limited` (429) carries
+  `retry_after_ms` in its error envelope (the declared extras allowlist
+  grows to two). The send-status enum completes to the FR-17 six
+  (`committed`, `rate_limited`, `duplicate_dropped`, `storage_low`,
+  `client_message_id_conflict`, `banned`) with the last two wired by name
+  for Stories 4.5/4.6. All five limits are operator-tunable abuse floors
+  (never a volumetric-DoS guarantee) through `startServer` overrides and the
+  `AGENT_ROOM_SEND_TOKEN_REFILL_PER_SECOND` /
+  `AGENT_ROOM_SEND_TOKEN_CAPACITY` / `AGENT_ROOM_REQUEST_BUDGET_PER_MINUTE`
+  / `AGENT_ROOM_REQUEST_BUDGET_BURST` / `AGENT_ROOM_DUPLICATE_WINDOW_MS`
+  env knobs for the direct launch — strictly validated, warning-fallback per
+  knob. NFR-5's send p95 ≤ 150 ms server-side is now executable
+  (`tests/rate-gates.test.mjs`): a warm server's end-to-end loopback send
+  p95 upper-bounds the server-side processing, and the churn harness drives
+  one gate-paced send per cycle with a monotonic-sequence oracle.
 
 ### Removed
 

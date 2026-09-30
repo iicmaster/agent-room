@@ -302,7 +302,7 @@
       the process inventory (TIME_WAIT holds no process descriptor), nor GC /
       allocator behaviour of hosts other than Node 24 on this platform.
     evidence:
-      - test: "connection churn: 100 connect/authenticate/bind/disconnect cycles all succeed, hold the server at its post-warmup FD baseline (±5), and leak zero sockets"
+      - test: "connection churn: 100 connect/authenticate/bind/send/disconnect cycles all succeed, hold the server at its post-warmup FD baseline (±5), and leak zero sockets"
         file: "tests/churn.test.mjs"
       - test: "memory pass: a bounded churn workload under the leak tracker holds the least-squares RSS slope at or below 2% of starting RSS"
         file: "tests/churn.test.mjs"
@@ -960,3 +960,80 @@
         file: "tests/remote-client.test.mjs"
       - test: "without a remote config the client stays on the Local Mode loopback path"
         file: "tests/remote-client.test.mjs"
+
+  4.4:                       # The four rate gates & full send statuses (3 criteria)
+    note: >-
+      Proves the four gates over three layers with the AC's ordering
+      structural, not conventional. AC-1 (the gates and the ordering): the
+      send bucket and request budget are unit-isolated token buckets on
+      injected clocks at the declared constants (exact refusal arithmetic,
+      per-key isolation, sweep-expired state) and the duplicate gate is
+      store-isolated inside the append transaction — the idempotency tuple
+      precedes it BY CONSTRUCTION (an exact retry returns the original and a
+      conflicting resend still conflicts, neither reaching the gate), the
+      window boundary is inclusive and exact, identical text in a different
+      room, a different reply context, or from a different actor commits, a
+      drop leaves the log untouched at its gap-free head, and the gate-level
+      ordering is proven over the wire: during a rate-limited period an exact
+      replay still returns the original while NEW sends stay refused, because
+      the stage probes the store's tuple before the bucket consumes; the
+      request budget counts failed sends and replays and a 300 ms long-poll
+      exactly once at admission. AC-2 (the refusal vocabulary): rate_limited
+      answers 429 carrying the declared retry_after_ms extra (the extras
+      allowlist pinned at exactly ambiguous_chat_id + rate_limited),
+      duplicate_dropped answers a normal 200 result naming original_seq with
+      exactly the frozen keys, SEND_STATUSES is the complete FR-17 six with
+      banned/storage_low wired by name for 4.5/4.6, and every limit is
+      imported by name — the operator floors accept startServer overrides
+      (seven malformed spellings fail startup) and five strictly-validated
+      env knobs for the direct launch, honored by tuned-floor wire rows and
+      by the heavy harnesses, which raise them through that documented
+      surface as their child's operator rather than stubbing the gates.
+      AC-3 (NFR-5 executable): the perf test drives a warm in-process server
+      over real loopback HTTP (keep-alive, 20 warmup + 200 measured sends,
+      every one committed) and asserts the END-TO-END p95 at 150 ms — an
+      upper bound including the loopback RTT, so server-side processing is
+      within it a fortiori (measured p95 = 1-2 ms) — and the churn harness
+      now drives one uniquely-identified send per cycle through the real
+      gates (monotonic gap-free sequences, a 1000 ms tripwire) with its
+      memory row's warmup grown to keep the fixed-warmup allocator plateau
+      honest. Does NOT prove banned or storage_low REFUSALS (their triggers
+      are Stories 4.5/4.6 — only the enum completion and by-name wiring are
+      provable now), the pre-auth global floor AD-7 mentions (unowned —
+      recorded in the AD-7 amendment), or a multi-process deployment story
+      (per-realm in-process admission state is AD-2's single-writer design).
+    evidence:
+      - test: "the send bucket admits capacity 10 instantly, refuses the 11th with a delay, and refills at 0.5/s on the injected clock"
+        file: "tests/rate-gates.test.mjs"
+      - test: "the request budget is the same mechanism at 120/min burst 30, and keys never share buckets"
+        file: "tests/rate-gates.test.mjs"
+      - test: "a bucket idle past its full-refill horizon sweeps to a fresh full bucket (sweep-expired, bounded state)"
+        file: "tests/rate-gates.test.mjs"
+      - test: "the duplicate gate drops a new send repeating the same actor-room-text within the window, writes nothing, and names the original sequence"
+        file: "tests/rate-gates.test.mjs"
+      - test: "the window boundary is exact and inclusive: a repeat exactly windowMs old is dropped, one millisecond later commits"
+        file: "tests/rate-gates.test.mjs"
+      - test: "identical text in a different room, a different reply context, or from a different actor is not deduplicated"
+        file: "tests/rate-gates.test.mjs"
+      - test: "the idempotency tuple is checked before the duplicate gate: an exact retry returns the original and a conflicting resend still conflicts, whatever the window holds"
+        file: "tests/rate-gates.test.mjs"
+      - test: "the budgets stage counts every actor request at admission and answers refusals with the retry delay"
+        file: "tests/rate-gates.test.mjs"
+      - test: "the send-bucket gate probes the idempotency tuple before consuming: an existing tuple is admitted free from an empty bucket"
+        file: "tests/rate-gates.test.mjs"
+      - test: "ordering over the wire: an exact retry during a rate-limited period returns the original and consumes nothing; new sends stay refused with their delay"
+        file: "tests/rate-gates.test.mjs"
+      - test: "duplicate_dropped over the wire: a 200 result naming original_seq, the store untouched, and different-room or different-reply sends commit"
+        file: "tests/rate-gates.test.mjs"
+      - test: "the request budget counts failed and replayed attempts, and a long-poll counts once at admission"
+        file: "tests/rate-gates.test.mjs"
+      - test: "the operator floors are honored: a tuned send capacity refuses, a tuned duplicate window rolls, and malformed overrides fail startup"
+        file: "tests/rate-gates.test.mjs"
+      - test: "the env surface parses the five operator floors strictly and falls back with a warning per junk value"
+        file: "tests/rate-gates.test.mjs"
+      - test: "send p95 stays within 150 ms server-side (end-to-end loopback p95 upper-bounds it), excluding admission-free retries"
+        file: "tests/rate-gates.test.mjs"
+      - test: "connection churn: 100 connect/authenticate/bind/send/disconnect cycles all succeed, hold the server at its post-warmup FD baseline (±5), and leak zero sockets"
+        file: "tests/churn.test.mjs"
+      - test: "send-status enum and protocol header are the frozen wire contract"
+        file: "tests/constants.test.mjs"

@@ -35,6 +35,7 @@ import {
   CHAT_ID_INVALID_MESSAGE,
   CHAT_ID_MAX,
   CLIENT_MESSAGE_ID_MAX,
+  DUPLICATE_WINDOW_MS,
   FINGERPRINT_HEX_LENGTH,
   FINGERPRINT_PATTERN,
   FINGERPRINT_PREFIX,
@@ -212,6 +213,26 @@ function requireReplyToSeq(value) {
   if (value === null || value === undefined) return null
   if (!Number.isSafeInteger(value) || value < 1) {
     fail('invalid_reply_to_seq', 'replyToSeq must be null or a positive safe integer')
+  }
+  return value
+}
+
+// Story 4.4: the duplicate gate's window is an open-time configuration (the
+// operator floor tuned via startServer({duplicateWindowMs}) → here), and the
+// gate's clock is injectable per append so tests can roll the 5 s window
+// without waiting on the wall clock.
+function requireDuplicateWindowMs(value) {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    fail('invalid_argument', 'duplicateWindowMs must be a positive safe integer')
+  }
+  return value
+}
+
+function requireNowMs(value) {
+  if (value === undefined) return Date.now()
+  if (typeof value === 'function') value = value()
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    fail('invalid_argument', 'nowMs must be a finite epoch-millisecond number')
   }
   return value
 }
@@ -775,10 +796,13 @@ function plainRoom(row) {
   }
 }
 
-export function openRoomLog({ dataDir } = {}) {
+export function openRoomLog({ dataDir, duplicateWindowMs = DUPLICATE_WINDOW_MS } = {}) {
   if (typeof dataDir !== 'string' || dataDir.trim().length === 0) {
     fail('data_directory_invalid', 'dataDir must be a non-empty path')
   }
+  // Story 4.4: the duplicate gate's window (the operator-tunable floor) is
+  // validated at open, never per append.
+  const validDuplicateWindowMs = requireDuplicateWindowMs(duplicateWindowMs)
 
   const directory = ensurePrivateDirectory(dataDir)
   const databasePath = join(directory, ROOM_LOG_DATABASE_FILENAME)
@@ -1038,6 +1062,27 @@ export function openRoomLog({ dataDir } = {}) {
         })
       },
 
+      // Story 4.4: the send-bucket gate's idempotency probe — a pure read of
+      // the idempotency tuple (room, actor fingerprint, client_message_id).
+      // The budgets stage consults this BEFORE its bucket consumes, so an
+      // exact retry (and any retry of the tuple, the original or the coded
+      // conflict being its only possible outcomes) is admitted free and
+      // consumes nothing, even from an empty bucket. Returns the original
+      // committed message or null; it writes nothing and validates like every
+      // other store operation.
+      findIdempotentSend(options) {
+        assertOpen()
+        const { roomId, actorFingerprint, clientMessageId } = requireObject(options)
+        const validRoomId = requireRoomId(roomId)
+        const validFingerprint = requireFingerprint(actorFingerprint)
+        const validClientMessageId = requireClientMessageId(clientMessageId)
+        const row = database.prepare(`
+          ${MESSAGE_PROJECTION}
+          WHERE room_id = ? AND actor_fingerprint = ? AND client_message_id = ?
+        `).get(validRoomId, validFingerprint, validClientMessageId)
+        return row ? plainMessage(row) : null
+      },
+
       // Append to the durable log. Sequences are room-local, contiguous from
       // 1, and assigned inside this BEGIN IMMEDIATE transaction via
       // MAX(seq)+1 — gap-free because the single writer serializes appends
@@ -1046,6 +1091,20 @@ export function openRoomLog({ dataDir } = {}) {
       // returns the original message, a differing payload is a conflict.
       // The chat id is stored at send time as attribution and never
       // rewritten; it is therefore not part of the payload comparison.
+      //
+      // Story 4.4 adds the duplicate gate INSIDE the same transaction,
+      // ordered AFTER the idempotency lookup (the AC's gate ordering is
+      // structural here: an exact retry short-circuits above and can never
+      // reach the gate). A NEW send — a different client_message_id — whose
+      // (actor, room, text, reply_to_seq) matches a message the SAME actor
+      // committed in the SAME room within the duplicate window answers
+      // duplicateDropped with the original message and writes nothing; the
+      // reply context is part of the tuple, so identical text in a different
+      // room or against a different reply target is not deduplicated. The
+      // check runs inside BEGIN IMMEDIATE, so two racing same-text sends
+      // serialize: exactly one commits, the other is dropped. nowMs
+      // injects the gate clock (created_at rides the same clock, so the
+      // window comparison is exact).
       appendMessage(options) {
         assertOpen()
         const {
@@ -1055,6 +1114,7 @@ export function openRoomLog({ dataDir } = {}) {
           clientMessageId,
           text,
           replyToSeq = null,
+          nowMs,
         } = requireObject(options)
         const validRoomId = requireRoomId(roomId)
         const validFingerprint = requireFingerprint(actorFingerprint)
@@ -1062,6 +1122,7 @@ export function openRoomLog({ dataDir } = {}) {
         const validClientMessageId = requireClientMessageId(clientMessageId)
         const validText = requireMessageText(text)
         const validReplyToSeq = requireReplyToSeq(replyToSeq)
+        const gateNowMs = requireNowMs(nowMs)
 
         return withImmediateTransaction(database, () => {
           const room = requireRoom(validRoomId)
@@ -1079,7 +1140,7 @@ export function openRoomLog({ dataDir } = {}) {
                 'clientMessageId was already used with a different message payload',
               )
             }
-            return { message: existing, duplicate: true }
+            return { message: existing, duplicate: true, duplicateDropped: false, original: null }
           }
 
           // Reply targets resolve room-locally against (room_id, seq). Only
@@ -1100,10 +1161,30 @@ export function openRoomLog({ dataDir } = {}) {
             }
           }
 
+          // The duplicate gate (Story 4.4, FR-16): one Actor repeating the
+          // byte-identical payload in one room within the window is an
+          // explicit duplicate_dropped notice naming the original sequence —
+          // never a silent second commit, never an error. The window is
+          // inclusive at its lower boundary (a message exactly windowMs old
+          // is still a duplicate), matching the store's other window
+          // comparisons.
+          const duplicateCutoff = new Date(gateNowMs - validDuplicateWindowMs).toISOString()
+          const duplicateRow = database.prepare(`
+            ${MESSAGE_PROJECTION}
+            WHERE room_id = ? AND actor_fingerprint = ? AND text = ? AND reply_to_seq IS ?
+              AND created_at >= ?
+            ORDER BY seq DESC
+            LIMIT 1
+          `).get(validRoomId, validFingerprint, validText, validReplyToSeq, duplicateCutoff)
+          if (duplicateRow) {
+            const original = plainMessage(duplicateRow)
+            return { message: null, duplicate: false, duplicateDropped: true, original }
+          }
+
           const nextSeq = Number(database
             .prepare('SELECT COALESCE(MAX(seq), 0) + 1 AS next_seq FROM messages WHERE room_id = ?')
             .get(validRoomId).next_seq)
-          const createdAt = new Date().toISOString()
+          const createdAt = new Date(gateNowMs).toISOString()
           database.prepare(`
             INSERT INTO messages (
               room_id,
@@ -1125,7 +1206,12 @@ export function openRoomLog({ dataDir } = {}) {
             validReplyToSeq,
             createdAt,
           )
-          return { message: selectMessage(validRoomId, nextSeq), duplicate: false }
+          return {
+            message: selectMessage(validRoomId, nextSeq),
+            duplicate: false,
+            duplicateDropped: false,
+            original: null,
+          }
         })
       },
 

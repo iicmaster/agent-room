@@ -50,9 +50,12 @@ const BODY_METHODS = new Set(['POST', 'PATCH'])
 // name that would clobber one of the envelope's fixed fields is a
 // construction-time error — extras can never overwrite ok, code, message, or
 // status. Story 1.7's amendment declared exactly one entry:
-// ambiguous_chat_id's optional candidates list.
+// ambiguous_chat_id's optional candidates list. Story 4.4's amendment adds
+// the second: rate_limited's retry_after_ms — FR-17's demand that the
+// rate_limited refusal always names its retry delay.
 export const ERROR_ENVELOPE_EXTRAS = Object.freeze({
   ambiguous_chat_id: Object.freeze(['candidates']),
+  rate_limited: Object.freeze(['retry_after_ms']),
 })
 
 const ENVELOPE_FIXED_FIELDS = new Set(['ok', 'code', 'message', 'status'])
@@ -258,21 +261,45 @@ export class AuthStage {
   }
 }
 
-// Budgets stage (AD-7): request budgets per key / per IP. Story 4.2 lands the
-// policy's first gate, scoped exactly as its story demands: the enroll route
-// only, through the minimal fixed-window limiter injected at startServer (a
-// limiter is configured ONLY for that route's admission; every other route is
-// untouched until Story 4.4's full budget stage). The gate lives here, in the
-// stage — never in a handler — and a refusal is the coded rate_limited (429):
-// zero state, nothing consumed, the handler never runs.
+// Budgets stage (AD-7): request budgets per key / per IP. Story 4.2 landed
+// the policy's first gate, scoped exactly as its story demanded: the enroll
+// route only, through the minimal fixed-window limiter injected at
+// startServer. Story 4.4 completes the stage with the two per-Actor token
+// buckets (server/api/rate-gates.mjs): the request budget — every
+// authenticated (actor-class) request consumes one token at admission,
+// whatever it later answers (failed and replayed attempts count, FR-16; a
+// long-poll is one request and counts once, at admission, never per poll
+// iteration) — and the send bucket on the send route, which is
+// idempotency-aware: the stage consults the store's idempotency index FIRST,
+// so an exact retry (an existing (room, actor, client_message_id) tuple)
+// passes without consuming even from an empty bucket, and only a NEW send
+// spends a token. The AC's gate ordering is structural: idempotency tuple →
+// send bucket → duplicate gate (the duplicate gate lives inside the store's
+// append transaction, after the same idempotency lookup — see room-log.mjs).
+//
+// For the send route the stage also performs the request-field read (the one
+// body parse every POST gets), because the idempotency probe needs the
+// body's client_message_id; readRequestFields is re-entrant (a context flag
+// makes runPipeline's later read a no-op), the field gate's rejections are
+// unchanged, and every other route still reads fields after the stages as
+// before. A refusal is the coded rate_limited (429) carrying the
+// declared retry_after_ms extra: zero state, nothing further consumed, the
+// handler never runs. Gate logic lives here — never in a handler.
 export class BudgetStage {
-  constructor({ enrollRateLimiter = null, trustedProxy = false } = {}) {
+  constructor({
+    enrollRateLimiter = null,
+    trustedProxy = false,
+    requestBudgetGate = null,
+    sendBucketGate = null,
+  } = {}) {
     this.name = 'budgets'
     this.enrollRateLimiter = enrollRateLimiter
     this.trustedProxy = trustedProxy === true
+    this.requestBudgetGate = requestBudgetGate
+    this.sendBucketGate = sendBucketGate
   }
 
-  process(context) {
+  async process(context) {
     if (this.enrollRateLimiter !== null && context.route?.path === '/api/auth/enroll') {
       const rawForwarded = context.headers?.[FORWARDED_FOR_HEADER]
       const forwardedFor = Array.isArray(rawForwarded) ? rawForwarded[0] : rawForwarded
@@ -283,6 +310,69 @@ export class BudgetStage {
       })
       if (this.enrollRateLimiter.check(identity) !== true) {
         return reject('rate_limited')
+      }
+    }
+
+    const actorKey = context.session?.actorFingerprint
+    const actorKeyUsable = typeof actorKey === 'string' && actorKey.length > 0
+
+    // The request budget: one token per authenticated request, at admission,
+    // before anything else about the request can refuse it — failed and
+    // replayed attempts count (FR-16). Pre-auth routes have no key yet (the
+    // enroll route keeps its own per-identity limiter above); viewer and
+    // health carry no Actor budget.
+    if (this.requestBudgetGate !== null && context.route?.class === 'actor' && actorKeyUsable) {
+      const verdict = this.requestBudgetGate.check(actorKey)
+      if (verdict.ok !== true) {
+        return reject('rate_limited', undefined, { retry_after_ms: verdict.retryAfterMs })
+      }
+    }
+
+    // The send bucket: per Actor, on the send route only. The idempotency
+    // probe runs BEFORE the bucket consumes: a tuple the store already holds
+    // is a retry — it passes free (the handler resolves it as the original
+    // or the coded conflict) whatever the bucket's state, so an exact retry
+    // during a rate-limited period still returns the original and consumes
+    // nothing. Only a NEW send spends a token.
+    if (
+      this.sendBucketGate !== null
+      && context.method === 'POST'
+      && context.route?.path === '/api/rooms/:id/messages'
+    ) {
+      // The probe reads the body's client_message_id, so the send route's
+      // one field read happens here (re-entrant; runPipeline will not
+      // re-read). A field-gate rejection is the request's answer, exactly as
+      // if it had been read after the stages.
+      const fieldsOutcome = await readRequestFields(context)
+      if (fieldsOutcome) return fieldsOutcome
+
+      const clientMessageId = context.body?.client_message_id
+      const roomId = context.params?.id
+      const probeable = actorKeyUsable
+        && typeof roomId === 'string' && roomId.length > 0
+        && typeof clientMessageId === 'string' && clientMessageId.length > 0
+      if (probeable) {
+        try {
+          const existing = context.store?.findIdempotentSend?.({
+            roomId,
+            actorFingerprint: actorKey,
+            clientMessageId,
+          })
+          // An existing tuple is a retry: admit free, consume nothing.
+          if (existing) return undefined
+        } catch (error) {
+          // A tuple that cannot be proven existing is a new admission: any
+          // coded store refusal here (a malformed id among them) would fail
+          // the send later anyway, and the request budget already counted
+          // this attempt — fall through to the bucket like a first send.
+          // Anything that is not a coded store failure is a real fault and
+          // propagates.
+          if (!(error instanceof AgentRoomRuntimeError)) throw error
+        }
+      }
+      const verdict = this.sendBucketGate.check(actorKey)
+      if (verdict.ok !== true) {
+        return reject('rate_limited', undefined, { retry_after_ms: verdict.retryAfterMs })
       }
     }
     return undefined
@@ -323,9 +413,10 @@ export function assertStageOrder(stages) {
 // Per-class assembly: the identical-gate door for Stories 1.4-1.8. Actor and
 // pre-auth classes run all stages; viewer and health skip the protocol stage.
 // The two verifier slots keep actor and viewer credentials apart. The budget
-// stage's injects (Story 4.2) default to no limiting — a direct assemblePipeline
-// caller gets the structural pass-through; startServer wires the enroll route's
-// limiter and its proxy-trust configuration.
+// stage's injects (Stories 4.2 and 4.4) default to no limiting — a direct
+// assemblePipeline caller gets the structural pass-through; startServer wires
+// the enroll route's limiter, its proxy-trust configuration, and the two
+// per-Actor token buckets (request budget + send bucket).
 export function assemblePipeline(routeClass, options = {}) {
   if (!PROTOCOL_APPLIES_TO.includes(routeClass) && routeClass !== 'viewer' && routeClass !== 'health') {
     throw new AgentRoomRuntimeError('invalid_argument', `unknown route class "${String(routeClass)}"`)
@@ -341,6 +432,8 @@ export function assemblePipeline(routeClass, options = {}) {
     new BudgetStage({
       enrollRateLimiter: options.enrollRateLimiter ?? null,
       trustedProxy: options.trustedProxy,
+      requestBudgetGate: options.requestBudgetGate ?? null,
+      sendBucketGate: options.sendBucketGate ?? null,
     }),
     new AuthzStage(),
   )
@@ -381,7 +474,12 @@ async function readBodyStream(stream, maxBytes) {
 // allowed-field set, which is drawn from the frozen AD-8 vocabulary. Bodies
 // are bounded by FRAME_MAX_BYTES; value parsing belongs to handlers, never
 // here. Returns a rejection outcome or undefined (context.body populated).
+// Re-entrant (Story 4.4): the budgets stage reads the send route's fields
+// before its idempotency probe, so a context whose fields were already read
+// returns immediately — the one body parse per request still holds.
 export async function readRequestFields(context) {
+  if (context.requestFieldsRead === true) return undefined
+  context.requestFieldsRead = true
   const allowed = context.route?.requestFields ?? []
 
   // Duplicate query keys are a malformed request, not a last-key-wins shorthand.
