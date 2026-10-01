@@ -97,10 +97,36 @@
 // never an acknowledgment; the operator reserves are startServer overrides
 // plus the AGENT_ROOM_STORAGE_* env knobs for the direct launch, and the
 // `agent-room capacity` command reports the filesystem against them).
+// Story 4.7 completes FR-4's standalone transport half: startServer accepts
+// tls: { cert, key } — the operator's PEM certificate chain and key as
+// CONTENT strings, validated at startup (the certificate parses, the key
+// parses, the pair matches — one coded invalid_argument before the listener
+// exists, never a runtime handshake mystery) — and builds
+// https.createServer({ cert, key }, handler) around the SAME handleRequest
+// callback, so both TLS paths (this native face and an operator-managed
+// reverse proxy) serve one handler structurally. The loopback-only bind
+// refusal now applies exactly when no tls is given: plaintext remains
+// loopback-only (AD-11); with operator TLS material the operator may bind
+// any host, because nothing plaintext leaves the machine. The direct launch
+// gains the strict topology env — AGENT_ROOM_HOST / AGENT_ROOM_PORT /
+// AGENT_ROOM_TLS_CERT / AGENT_ROOM_TLS_KEY (paths to the PEM files, read
+// through the bounded regular-file reader, both-or-neither): topology is
+// STRICT where the tuning knobs warn-and-fall-back, because a junk value
+// falling back would silently move where the server is reachable — junk
+// fails startup with one coded stderr line, exit 1, and a non-loopback bind
+// on the DEFAULT shared data dir draws one advisory line to use a dedicated
+// AGENT_ROOM_DATA_DIR (one process, one realm, one data dir).
 
-import { createServer } from 'node:http'
-import { timingSafeEqual } from 'node:crypto'
+import { createServer as createHttpServer } from 'node:http'
+import { createServer as createHttpsServer } from 'node:https'
+import {
+  createPrivateKey,
+  createPublicKey,
+  timingSafeEqual,
+  X509Certificate,
+} from 'node:crypto'
 import { readFileSync, realpathSync, unlinkSync } from 'node:fs'
+import { isAbsolute } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import {
@@ -108,6 +134,7 @@ import {
   AgentRoomRuntimeError,
   assertSupportedRuntime,
   atomicWriteJson,
+  regularPrivateFile,
   runtimeRecordPath,
   sharedDataDirectory,
 } from '../runtime.mjs'
@@ -976,10 +1003,51 @@ async function handleRequest(request, response, options) {  let pathname = null
   }
 }
 
+// Story 4.7: the operator's TLS material for FR-4's standalone path —
+// validated ENTIRELY at startup, before any listener exists. https.createServer
+// would otherwise accept malformed PEM silently and fail at the first
+// handshake (a runtime mystery a VPS operator cannot diagnose), and a
+// mismatched pair would surface as exactly that handshake mystery. Here:
+// the certificate parses, the key parses, and the pair matches — one coded
+// invalid_argument per failure, no key or certificate bytes in any message.
+function validatedTlsMaterial(tls) {
+  if (typeof tls !== 'object' || tls === null
+    || typeof tls.cert !== 'string' || tls.cert.length === 0
+    || typeof tls.key !== 'string' || tls.key.length === 0) {
+    throw new AgentRoomRuntimeError(
+      'invalid_argument',
+      'tls must be { cert, key }: the PEM certificate chain and the matching private key as content strings, both required',
+    )
+  }
+  let certificate
+  try {
+    certificate = new X509Certificate(tls.cert)
+  } catch {
+    throw new AgentRoomRuntimeError('invalid_argument', 'tls.cert is not parseable PEM certificate material')
+  }
+  let privateKey
+  try {
+    privateKey = createPrivateKey(tls.key)
+  } catch {
+    throw new AgentRoomRuntimeError('invalid_argument', 'tls.key is not parseable PEM private-key material')
+  }
+  let keyPublicKey
+  try {
+    keyPublicKey = createPublicKey(privateKey)
+  } catch {
+    throw new AgentRoomRuntimeError('invalid_argument', 'tls.key is not parseable PEM private-key material')
+  }
+  if (!certificate.publicKey.equals(keyPublicKey)) {
+    throw new AgentRoomRuntimeError('invalid_argument', "tls.cert and tls.key do not match: the certificate is not this key's certificate")
+  }
+  return Object.freeze({ cert: tls.cert, key: tls.key })
+}
+
 export async function startServer({
   dataDir,
   host = '127.0.0.1',
   port = 0,
+  tls,
   sessionVerifier,
   viewerVerifier,
   sessionRegistry,
@@ -1008,7 +1076,17 @@ export async function startServer({
   if (typeof dataDir !== 'string' || dataDir.trim().length === 0) {
     throw new AgentRoomRuntimeError('data_directory_invalid', 'dataDir must be a non-empty path')
   }
-  if (!LOOPBACK_HOSTS.has(host)) {
+  // Story 4.7: the TLS material validates FIRST — a malformed or mismatched
+  // pair fails here, before the bind rule below is even consulted and long
+  // before any listener exists.
+  const effectiveTls = tls === undefined ? undefined : validatedTlsMaterial(tls)
+  // The bind rule, sharpened (not loosened) by Story 4.7: PLAINTEXT is
+  // permitted only on loopback (AD-11) — the refusal and its message are
+  // byte-identical to the pre-4.7 rule whenever no tls is given. With
+  // validated operator TLS material the operator may bind any host (0.0.0.0
+  // on a VPS): nothing plaintext ever leaves the machine, because the
+  // listener itself encrypts.
+  if (!LOOPBACK_HOSTS.has(host) && effectiveTls === undefined) {
     throw new AgentRoomRuntimeError('invalid_argument', 'the agent-room server binds loopback only')
   }
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
@@ -1257,7 +1335,12 @@ export async function startServer({
     pruneTimer = setInterval(pruneSafely, effectivePruneIntervalMs)
     pruneTimer.unref()
 
-    httpServer = createServer((request, response) => {
+    // Story 4.7: ONE request callback, TWO transports. The callback body is
+    // unchanged from the pre-4.7 inline form; only its name moved. With no
+    // tls option this is byte-identical to today's node:http server; with
+    // operator TLS material https.createServer wraps the SAME callback —
+    // "both paths use the same request handler" is structural, never claimed.
+    const requestHandler = (request, response) => {
       // handleRequest maps its own failures; this guard only contains a
       // failure of the failure path itself.
       handleRequest(request, response, {
@@ -1275,7 +1358,10 @@ export async function startServer({
       }).catch(() => {
         response.destroy()
       })
-    })
+    }
+    httpServer = effectiveTls === undefined
+      ? createHttpServer(requestHandler)
+      : createHttpsServer({ cert: effectiveTls.cert, key: effectiveTls.key }, requestHandler)
     httpServer.on('clientError', (_error, socket) => socket.destroy())
 
     await new Promise((resolvePromise, rejectPromise) => {
@@ -1465,6 +1551,109 @@ export function gateLimitsFromEnv(env = process.env) {
   }
 }
 
+// Story 4.7: the direct launch's TOPOLOGY surface — deliberately STRICT
+// where every earlier *FromEnv knob warns-and-falls-back. The tuning knobs
+// (TTLs, floors, reserves) tune LIMITS: a junk value falling back to its
+// default still leaves the server behaving, just with defaults. HOST, PORT,
+// and the TLS material are TOPOLOGY: a junk AGENT_ROOM_PORT falling back to
+// ephemeral would change WHERE the server is reachable — exactly the failure
+// the start boundary (health answers + bound ports vs non-zero exit with a
+// diagnosable error) defines as not recoverable. So a junk value produces a
+// coded problem line and exit 1, never a fallback, and the ABSENT env is
+// byte-identical to today's loopback/ephemeral launch. The TLS knobs carry
+// PATHS, never content (secrets stay out of environments and process
+// listings), must be absolute, and must arrive together — one knob without
+// its sibling is a problem, not a half-configured listener.
+export function topologyFromEnv(env = process.env) {
+  const problems = []
+  let host = '127.0.0.1'
+  let port = 0
+  let tlsCertPath
+  let tlsKeyPath
+
+  const rawHost = env?.AGENT_ROOM_HOST
+  if (rawHost !== undefined && String(rawHost).trim() !== '') {
+    const candidate = String(rawHost).trim()
+    if (/[\s/@#?]/.test(candidate)) {
+      problems.push(`AGENT_ROOM_HOST "${rawHost}" is not a bindable host: name an interface address or a hostname (for example 127.0.0.1, 0.0.0.0, or room.example.com)`)
+    } else {
+      host = candidate
+    }
+  }
+  const rawPort = env?.AGENT_ROOM_PORT
+  if (rawPort !== undefined && String(rawPort).trim() !== '') {
+    const trimmed = String(rawPort).trim()
+    if (!/^[0-9]+$/.test(trimmed) || !Number.isSafeInteger(Number(trimmed)) || Number(trimmed) > 65535) {
+      problems.push(`AGENT_ROOM_PORT "${rawPort}" must be an integer from 0-65535 (0 asks for an ephemeral port); there is no fallback — a wrong port silently moves where the server is reachable`)
+    } else {
+      port = Number(trimmed)
+    }
+  }
+  const rawCert = env?.AGENT_ROOM_TLS_CERT
+  const rawKey = env?.AGENT_ROOM_TLS_KEY
+  const certPresent = rawCert !== undefined && String(rawCert).trim() !== ''
+  const keyPresent = rawKey !== undefined && String(rawKey).trim() !== ''
+  if (certPresent !== keyPresent) {
+    problems.push(`AGENT_ROOM_TLS_CERT and AGENT_ROOM_TLS_KEY must be given together (both or neither); ${certPresent ? 'AGENT_ROOM_TLS_KEY is missing' : 'AGENT_ROOM_TLS_CERT is missing'}`)
+  }
+  if (certPresent && keyPresent) {
+    for (const [name, raw] of [['AGENT_ROOM_TLS_CERT', rawCert], ['AGENT_ROOM_TLS_KEY', rawKey]]) {
+      const candidate = String(raw).trim()
+      if (!isAbsolute(candidate)) {
+        problems.push(`${name} must be an absolute path to the PEM file`)
+      } else if (name === 'AGENT_ROOM_TLS_CERT') {
+        tlsCertPath = candidate
+      } else {
+        tlsKeyPath = candidate
+      }
+    }
+  }
+  return Object.freeze({
+    host,
+    port,
+    tlsCertPath,
+    tlsKeyPath,
+    problems: Object.freeze(problems),
+  })
+}
+
+// Story 4.7: the operator's TLS material read by PATH (the direct launch's
+// env carries paths; the content strings startServer consumes are read here,
+// through the bounded regular-file reader every private state file uses —
+// never a symlink, never unbounded). Every failure maps to one coded
+// invalid_argument naming the env knob, so the direct launch dies before any
+// listener exists with exactly one diagnosable line. The FILES' permissions
+// are the operator's responsibility (the guide documents 0600) — these are
+// not agent-room state, so the runtime permission gates do not rewrite them;
+// the bounded-regular-file check only refuses what it cannot read safely.
+export function tlsMaterialFromPaths({ certPath, keyPath } = {}) {
+  const read = (path, name) => {
+    try {
+      regularPrivateFile(path)
+    } catch (error) {
+      throw new AgentRoomRuntimeError(
+        'invalid_argument',
+        `${name} ("${path}") is not a readable bounded regular file: ${error?.message ?? error}`,
+      )
+    }
+    try {
+      return readFileSync(path, 'utf8')
+    } catch (error) {
+      throw new AgentRoomRuntimeError(
+        'invalid_argument',
+        `${name} ("${path}") could not be read: ${error?.message ?? error}`,
+      )
+    }
+  }
+  if (typeof certPath !== 'string' || typeof keyPath !== 'string') {
+    throw new AgentRoomRuntimeError('invalid_argument', 'tlsMaterialFromPaths requires both certPath and keyPath')
+  }
+  return Object.freeze({
+    cert: read(certPath, 'AGENT_ROOM_TLS_CERT'),
+    key: read(keyPath, 'AGENT_ROOM_TLS_KEY'),
+  })
+}
+
 // Run the runtime gate before any other work. Direct launches report one
 // diagnosable line and exit 1 with no stack trace; importers get a catchable
 // rejection so harnesses (tests/runtime.test.mjs entrypoint gates) can assert
@@ -1498,8 +1687,39 @@ if (launchedDirectly()) {
   for (const storageWarning of storageWarnings) {
     process.stderr.write(`agent-room-server: ${storageWarning}\n`)
   }
+  // Story 4.7: the STRICT topology surface — junk fails startup with one
+  // coded line per problem, exit 1, no boot (see topologyFromEnv); absent
+  // env keeps today's loopback/ephemeral launch byte-identically.
+  const topology = topologyFromEnv()
+  for (const problem of topology.problems) {
+    process.stderr.write(`agent-room-server: invalid_argument: ${problem}\n`)
+  }
+  if (topology.problems.length > 0) process.exit(1)
+  let tlsMaterial
+  if (topology.tlsCertPath !== undefined) {
+    try {
+      tlsMaterial = tlsMaterialFromPaths({ certPath: topology.tlsCertPath, keyPath: topology.tlsKeyPath })
+    } catch (error) {
+      process.stderr.write(`agent-room-server: ${error?.code ?? 'startup_failed'}: ${error?.message}\n`)
+      process.exit(1)
+    }
+  }
+  // The public-realm advisory (one line, exactly): a non-loopback bind on
+  // the DEFAULT shared data directory would make a public realm share one
+  // store with the local auto-start server — one process, one realm, one
+  // data dir. It is an advisory, not a refusal; a dedicated
+  // AGENT_ROOM_DATA_DIR keeps the launch silent.
+  if (!LOOPBACK_HOSTS.has(topology.host) && process.env.AGENT_ROOM_DATA_DIR === undefined) {
+    process.stderr.write(
+      'agent-room-server: advisory: this server is about to bind a non-loopback host (a public realm) on the default shared data directory;'
+      + ' set AGENT_ROOM_DATA_DIR to a dedicated directory so the public realm never shares state with the local auto-start server (one process, one realm, one data dir)\n',
+    )
+  }
   startServer({
     dataDir: sharedDataDirectory(),
+    host: topology.host,
+    port: topology.port,
+    ...(tlsMaterial === undefined ? {} : { tls: tlsMaterial }),
     claimsTtlMs,
     presenceTtlMs,
     ...gateLimits,

@@ -229,6 +229,43 @@ All notable changes to Agent Room are documented in this file.
   emitted after the append transaction commits (never synchronous I/O under
   the write lock); and the duplicate-gate index verifies its column set at
   open, refusing a same-name squatter with `database_schema_invalid`.
+- Self-hosting deployment (Story 4.7): the standalone TLS half of FR-4 and
+  the one honest guide for both TLS paths. `startServer` accepts
+  `tls: { cert, key }` — the operator's PEM certificate chain and key as
+  content strings, validated at startup (certificate parses, key parses, the
+  pair matches; one coded `invalid_argument` before any listener exists,
+  never a runtime handshake mystery) — and builds
+  `https.createServer({ cert, key }, handler)` around the SAME
+  `handleRequest` callback, so the native `node:https` path and a
+  reverse-proxy front serve one handler structurally. The loopback-only bind
+  refusal now applies exactly when no tls is given: plaintext remains
+  permitted only on loopback (AD-11), while with TLS material the operator
+  may bind any host. The direct launch reads the strict topology env —
+  `AGENT_ROOM_HOST` / `AGENT_ROOM_PORT` / `AGENT_ROOM_TLS_CERT` /
+  `AGENT_ROOM_TLS_KEY` (absolute paths to the PEM files, read through the
+  bounded regular-file reader, both-or-neither): topology never falls back —
+  junk fails startup with one coded line and exit 1 — and a non-loopback
+  bind on the default shared data dir draws one advisory line to use a
+  dedicated `AGENT_ROOM_DATA_DIR`. `agent-room remote enroll <invite-token>`
+  joins the remote command family on the shared CLI host: it requires the
+  configured origin, signs the exact invite-token bytes with the
+  installation keypair (the frozen enroll route's possession proof), POSTs
+  once over default-verification HTTPS, prints one token-redacted JSON
+  receipt (the origin, the fingerprint, the token's digest prefix — never
+  the token), and unlocks the already-live challenge lane (a committed
+  enrollment needs no invite again; refused attempts consume nothing and are
+  retryable). The self-hosting deployment guide lands at
+  `docs/self-hosting-deployment.md` — both TLS paths (the Caddy recipe
+  pinned to v2.11.x, with proxy timeouts ≥ 30 s over the 20 s hold, and the
+  native launch), the loopback-only plaintext backend rule, the start
+  boundary, certificate acquisition/renewal responsibility, key permissions
+  (0600), restart-with-preserved-enrollment, no-secrets-in-logging, a
+  failure-mode appendix with symptom/cause/recovery for every row, and a
+  per-path evidence checklist (the enrollment receipt + the 20-second read
+  capture). The AR-15 pins travel with the MCP surface: the README's tool
+  section now carries the MCP stdio spec revision 2026-07-28, and the stale
+  "remote and multi-host rooms are not part of version 0.2" line is replaced
+  with the shipped Remote Mode reality.
 
 ### Removed
 

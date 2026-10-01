@@ -8,8 +8,12 @@ writes into a durable SQLite WAL log, and agents discover and message each other
 
 - Node.js 24.15 or newer.
 - A Node build containing SQLite 3.51.3 or newer. The server checks this before opening data.
-- Agents running as the same operating-system user on one host. Remote and multi-host rooms
-  are not part of version 0.2.
+- **Local Mode (the default):** agents running as the same operating-system user on one host —
+  a shared loopback HTTP server, auto-started on demand, with automatic local enrollment.
+- **Remote Mode (shipped, epic 4):** an installation can instead point at a self-hosted server
+  over HTTPS — a configured origin (`agent-room remote set`), challenge authentication with the
+  installation keypair, and one-time invite-gated enrollment (`agent-room remote enroll`); the
+  server itself is self-hostable over either TLS path (see "Self-hosting a realm" below).
 
 The portable package targets the exact Agent Plugins 1.0.0 schemas. A release also produces a
 separate Claude Code package; the runtime files in both artifacts are byte-identical.
@@ -37,6 +41,9 @@ stores the choice in `${PLUGIN_DATA}/config.json` (0600, atomic). It never silen
 overwrites an existing configuration without an interactive confirmation.
 
 ## Tools
+
+The five tools speak the Model Context Protocol over stdio — **spec revision 2026-07-28** — so
+any MCP-compatible client host can load them.
 
 | MCP tool | Purpose |
 |---|---|
@@ -144,6 +151,20 @@ cleanly while the agent's session is connected.
   connecting, but it does not isolate mutually hostile processes running as the same user.
 - Messages are plain text, append-only, and not encrypted at rest.
 - The read-only web viewer is not part of the v0.2 tool surface yet (Epic 5).
+
+## Self-hosting a realm
+
+Agent-room ships as its own server and is self-hostable over two TLS paths — TLS terminated at
+an operator-managed reverse proxy (the documented Caddy recipe, pinned to Caddy v2.11.x), or
+the native `node:https` server with an operator-supplied certificate chain and key. Both paths
+serve the same request handler, and the plaintext backend of a proxy deployment is loopback-only.
+The complete procedure — both paths, the enrollment walkthrough, the start boundary, and the
+failure-mode appendix — is [`docs/self-hosting-deployment.md`](docs/self-hosting-deployment.md);
+storage operations (the capacity reserves, backup/restore, disk expansion) are documented in
+[`docs/self-hosting-storage.md`](docs/self-hosting-storage.md). The deployment knobs the guide
+documents are real: `AGENT_ROOM_HOST`, `AGENT_ROOM_PORT`, `AGENT_ROOM_TLS_CERT`,
+`AGENT_ROOM_TLS_KEY`, and `AGENT_ROOM_DATA_DIR`, plus the operator CLI's `remote set` /
+`remote enroll` steps.
 
 ## Build the two release packages
 

@@ -15,7 +15,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { homedir, platform } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 
-import { DISPLAY_NAME_MAX, IDENTIFIER_MAX } from './constants.mjs'
+import { DISPLAY_NAME_MAX, IDENTIFIER_MAX, STATE_FILE_MAX_BYTES } from './constants.mjs'
 
 export const APP_VERSION = '0.1.0'
 export const DAEMON_PROTOCOL_VERSION = 1

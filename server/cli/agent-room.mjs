@@ -76,6 +76,17 @@
 //                         the same JSON-lines grammar and exit codes as the
 //                         invite family. Bodies in ./remote-commands.mjs.
 //
+//   remote enroll (4.7)   the installation's one-step enrollment with the
+//                         configured server through the frozen invite route:
+//                         signs the exact invite-token bytes with this
+//                         installation's keypair (the route's possession
+//                         proof), POSTs once over default-verification
+//                         HTTPS, and prints one token-redacted JSON receipt.
+//                         Requires a configured origin (run "remote set"
+//                         first); enrollment consumes nothing on a refusal
+//                         and unlocks the challenge lane for good.
+//                         Bodies in ./remote-commands.mjs.
+//
 // stdin discipline: prompting happens ONLY when stdin is a TTY. A non-TTY
 // stdin (pipes, the MCP host, CI) exits with guidance and touches nothing —
 // a command that needs a human answer can never be driven programmatically
@@ -398,6 +409,19 @@ Commands:
   agent-room remote clear
       Remove the remote configuration and return this installation to Local
       Mode (the default loopback server).
+
+  agent-room remote enroll <invite-token>
+      Enroll this installation's key with the configured remote server (run
+      "agent-room remote set" first — without a configured origin nothing is
+      sent and the command refuses, naming it). Pass the ar_inv1_ token
+      exactly as "agent-room invite mint" on the SERVER HOST printed it: the
+      command signs the exact token bytes with this installation's keypair
+      (the server's possession proof), POSTs once to the server's enrollment
+      route over normal verified HTTPS, and prints ONE JSON receipt (the
+      server origin, this installation's fingerprint, and the token's digest
+      prefix — never the token itself). A refused enrollment consumes
+      nothing and is retryable with the same token; a committed enrollment
+      never needs another invite — reconnecting is automatic.
 
   agent-room help
       Show this help.
