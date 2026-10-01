@@ -1284,3 +1284,37 @@
         file: "tests/rate-gates.test.mjs"
       - test: "send-status enum and protocol header are the frozen wire contract"
         file: "tests/constants.test.mjs"
+
+  4.7:                       # Self-hosting deployment guide (guide + topology proofs)
+    note: >-
+      Proves the self-hosting topologies the guide documents: native node:https
+      and a TLS-front-to-loopback-backend proxy both serve the full journey
+      (enrollment via the real CLI, the 4.1 challenge lane, a send, a held read)
+      over real TLS with a test CA; the TLS material matrix refuses bad material
+      at startup before any listener binds (two production bugs fixed en route:
+      runtime.mjs's missing STATE_FILE_MAX_BYTES import made refusal rows pass
+      vacuously; the CLI's non-awaited enroll dispatch escaped its catch); the
+      non-loopback advisory draws exactly one line on the default data dir and
+      stays silent on a dedicated one; the remote enroll family surfaces coded
+      refusals through the JSON grammar. Does NOT prove cross-machine wire
+      behaviour under real internet conditions (Story 4.8's dress rehearsal) or
+      multi-hour soak (Story 6.3).
+    evidence:
+      - test: "the native node:https path serves the same handler: enrollment through the real CLI, the challenge lane, a send, and a held read over real TLS"
+        file: "tests/self-hosting-deployment.test.mjs"
+      - test: "the proxy path serves the same handler: the same journey through a real TLS front terminating to the loopback plaintext backend"
+        file: "tests/self-hosting-deployment.test.mjs"
+      - test: "the TLS material matrix fails startup coded invalid_argument before any listener exists"
+        file: "tests/self-hosting-deployment.test.mjs"
+      - test: "a non-loopback bind on the default data dir draws exactly one advisory line; a dedicated data dir stays silent"
+        file: "tests/self-hosting-deployment.test.mjs"
+      - test: "remote enroll against an unreachable origin surfaces the coded transport refusal"
+        file: "tests/self-hosting-deployment.test.mjs"
+
+  4.8:                       # Remote churn & the dress rehearsal *(blocking gate — ruling Q3)*
+    note: >-
+      TODO — the epic's blocking gate. Record what the randomized remote churn
+      proves once it runs, and what it does not.
+    evidence:
+      - test: "TODO exact test name"
+        file: "tests/example.test.mjs"
