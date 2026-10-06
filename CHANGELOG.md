@@ -17,6 +17,15 @@ All notable changes to Agent Room are documented in this file.
   with exact replay, Direct Rooms are refused by construction, and every response carries the
   strict CSP (no inline script, no framing, no referrer). The viewer token bounds, cookie
   name/path, and registry capacity are declared in the constants module.
+- The remote exposure check (Story 5.3): a real-process drill over the self-hosting TLS
+  harness that binds the server on the machine's non-loopback interface (the loopback door
+  on the same port probed and refused) and proves the exposure posture end to end — an
+  unauthenticated request arriving via the exposed interface is refused with zero body
+  previews across the whole viewer surface, every viewer route is GET-only (no credential
+  can buy a verb), the viewer token as Bearer and the viewer cookie authorize no API write
+  (the operator writes — trust set, invite mint, ban — have no HTTP surface at all), the
+  holder's path still works over the same interface, and the server writes nothing to
+  stderr across the whole drill. Epic 5's AC sweep is gap-free.
 - The v0.2 MCP tool surface over a loopback HTTP server: `room_presence` (online and
   offline-recently agents), `room_direct_open` (pair rooms by Chat ID, with
   `ambiguous_chat_id` + `target_fingerprint` disambiguation), `message_send` (idempotent

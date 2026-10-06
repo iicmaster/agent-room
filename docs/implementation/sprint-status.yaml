@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 09-21-2026 08:52
-last_updated: '10-06-2026 (Stories 5.1 + 5.2 closed)'
+last_updated: '10-06-2026 (Story 5.3 closed — Epic 5 complete)'
 project: agent-room
 project_key: NOKEY
 tracking_system: file-system
@@ -77,7 +77,7 @@ development_status:
   epic-5: backlog
   5-1-viewer-auth-bridge-hci-5: done
   5-2-live-room-presence-view: done
-  5-3-remote-exposure-check: backlog
+  5-3-remote-exposure-check: done
   epic-5-retrospective: optional
 
   epic-6: backlog

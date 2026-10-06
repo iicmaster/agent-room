@@ -1392,3 +1392,48 @@
         file: "tests/web-assets.test.mjs"
       - test: "the viewer carries the restrictive CSP in the document and renders only read-only GET transports"
         file: "tests/web-assets.test.mjs"
+
+  5.3:                       # Remote exposure check (1 criterion)
+    note: >-
+      Proves the exposure posture over the reused Story 4.7/4.8 real-TLS
+      harness: one real direct-launch server child on the strict topology env
+      binding the machine's non-loopback IPv4 interface (the loopback door on
+      the same port probed and refused, so the only open door is the exposed
+      one) and one real driver child whose every dial rides Node's DEFAULT
+      TLS verification (chain via NODE_EXTRA_CA_CERTS, hostname check on).
+      An unauthenticated request — no credential, junk credential, or
+      well-formed wrong credential, dialed via the exposed interface — is
+      refused with the canonical coded 401 across the WHOLE viewer surface
+      (static shell, whitelisted assets, boot descriptor, auth bridge, the
+      Broadcast Room page by its real room id, the SSE stream) with zero body
+      previews (no message text, no room or realm names, no presence, no
+      HTML, no asset names) and no Set-Cookie. The viewer surface is GET-only:
+      every viewer route answers every non-GET method the frozen table's 404
+      route_not_found — never executed — including the CORRECT token on the
+      wrong method. The viewer token never authorizes any API write: as
+      Bearer on every write-capable API route (local exchange, session
+      bind/rename/release, direct open, message send) every one refuses; the
+      enrollment route refuses the token in both spellings (shape gate and
+      invite_invalid); the operator writes (trust set, invite mint, ban) are
+      CLI-host commands with NO HTTP route at all (AR-13) and the probed
+      phantom paths answer 404 with the token presented; the privilegeless
+      challenge carries no session and its nonce answers not_enrolled to a
+      fresh key's VALID signature — the viewer credential minted zero
+      authority; and the viewer cookie is equally nothing on the API class. A
+      before/after message count plus the presence snapshot prove nothing was
+      written anywhere. The holder's path still works over the same exposed
+      interface (the correct token mints the exact-flags cookie, and the
+      cookie reads the boot descriptor, the static shell, the Broadcast Room
+      page, and the live stream), and the server child's stderr over the
+      whole drill is EMPTY — no noise, and therefore neither the viewer token
+      nor any cookie value. Does NOT prove the literal physical cross-machine
+      wire (Epic 6's REL-1), hosts with no non-loopback IPv4 address (the
+      drill skips there, the ensure-server precedent), or browser behaviour
+      (REL-1's evidence).
+    evidence:
+      - test: "an unauthenticated request over the non-loopback interface is refused with zero body previews across the whole exposed viewer surface"
+        file: "tests/viewer-exposure.test.mjs"
+      - test: "the exposed viewer surface is GET-only and the viewer token never authorizes any API write"
+        file: "tests/viewer-exposure.test.mjs"
+      - test: "the holder's path still works over the non-loopback interface: the token mints the cookie and sees the broadcast room, and the drill leaves no secrets"
+        file: "tests/viewer-exposure.test.mjs"

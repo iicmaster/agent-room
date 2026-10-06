@@ -1,0 +1,96 @@
+---
+title: 'Remote exposure check'
+type: 'feature'
+created: '2026-10-06'
+status: 'done'
+baseline_revision: 'working-tree (uncommitted; Story 5.3 adds the exposure drill beside the landed 5.1+5.2 viewer surface)'
+context:
+  - 'project context: Node >=24.15, native ESM, node:sqlite STRICT WAL with synchronous=FULL, zero external runtime dependencies, and real-child node:test gates'
+  - '{project-root}/AGENTS.md'
+  - '{project-root}/docs/implementation/spec-5-1-5-2-viewer-auth-bridge-live-view.md'
+  - '{project-root}/docs/implementation/spec-4-7-self-hosting-deployment-guide.md'
+warnings:
+  - 'Story 5.3 is a proof story: the viewer surface it checks landed in Stories 5.1+5.2, and this change set adds NO production code — the deliverables are the drill (tests/viewer-exposure.test.mjs plus its driver child tests/viewer-exposure-driver.mjs) and the evidence records (ac-evidence 5.3, this spec, sprint-status, CHANGELOG).'
+  - 'The drill exposes the server on the machine''s non-loopback IPv4 interface address (the tests/ensure-server.test.mjs discovery pattern); on a host with none the three tests return early — the ensure-server precedent — and the literal cross-machine wire is Epic 6''s REL-1 either way (the 4.7/4.8 honest-scope line).'
+deferred:
+  - 'The dial address is the machine''s LAN address while the verified TLS name is the reused throwaway material''s SAN name (the `servername` dial option — chain and hostname checks stay fully on; no rejectUnauthorized, no NODE_TLS_REJECT_UNAUTHORIZED, no checkServerIdentity anywhere). Connecting to your own LAN address loops back inside the kernel, so "another host" is modeled at the interface level: the exposed door answers, and the loopback door on the SAME port is probed and must refuse — that refusal is what makes the drill''s traffic genuinely non-loopback-shaped.'
+  - 'A 127.0.0.2 loopback alias was evaluated for the exposed interface and rejected: macOS answers EADDRNOTAVAIL unless an explicit `ifconfig lo0 alias` is configured first, and the suite never configures the host. The LAN-address discovery is the established pattern (ensure-server''s non-loopback row).'
+  - 'Already-open SSE streams are not re-gated mid-flight (rotation and refusal apply at next request — 5.1''s recorded discipline) and browser behaviour is not exercised here; both residual risks carry over unchanged from Stories 5.1+5.2, and REL-1 owns the real-browser and physical cross-machine evidence.'
+---
+
+<intent-contract>
+
+## Intent
+
+**Problem:** `docs/epics.md:556-559` — Story 5.3 (the last story of Epic 5). Stories 5.1+5.2 shipped the viewer surface: the Bearer→cookie bridge, the cookie-authenticated Broadcast Room page, and the one SSE stream, all behind the pipeline's viewer slot. What nobody had proven is the exposure posture the story name promises: take that surface OFF loopback — the deployment guide's own AGENT_ROOM_HOST recipe — and show that an unauthenticated request arriving via the exposed interface gets NOTHING (not a preview, not a hint, not a credential), that no verb other than GET exists anywhere on the viewer surface, and that the viewer credential cannot reach a single API write. "Read-only" must also mean "no free previews", and it must be proven where it matters: over real TLS, on a real process, beyond the loopback bind every other test uses.
+
+**Approach:** reuse the Story 4.7/4.8 harness wholesale — one real direct-launch server child started through the strict topology env (`AGENT_ROOM_HOST` naming the machine's non-loopback IPv4 interface address per the ensure-server discovery pattern; `AGENT_ROOM_TLS_CERT`/`AGENT_ROOM_TLS_KEY` pointing at the same throwaway certificates those suites generated) and one real driver child (`tests/viewer-exposure-driver.mjs`) spawned with `NODE_EXTRA_CA_CERTS`, so every dial rides Node's DEFAULT TLS verification: the chain via Node's documented private-root mechanism, the hostname check against the material's SAN name carried by the `servername` dial option. No override exists anywhere in the tree and the structural scan still bans all three escape hatches. The driver walks the drill: the loopback door on the SAME port is probed and must refuse (so the only open door is the exposed interface and every subsequent request genuinely arrives via it); an in-room actor commits one holders-only message; then the three AC legs run — (b) the unauthenticated matrix (no credential, junk credential, well-formed wrong credential × the static shell, a whitelisted asset, the boot descriptor, the auth bridge, the Broadcast Room page BY ITS REAL ROOM ID, the SSE stream) asserting the canonical coded 401, no Set-Cookie, and zero body previews against a fixed marker list (message text, chat id, realm/broadcast names, presence, HTML, asset names, page cursors); (c) the GET-only matrix (five viewer routes × POST/PUT/PATCH/DELETE = the frozen table's 404 `route_not_found`, never executed, including the CORRECT token on the wrong method with no Set-Cookie) and the class-isolation matrix (the viewer token as Bearer on every write-capable API route — local exchange, bind, rename, release, direct open, send — all 401; the enrollment route in both spellings — shape gate `invalid_request` and `invite_invalid`; the phantom operator paths trust/invites/ban answering 404 `route_not_found`, because the operator writes are CLI-host commands with no HTTP surface at all, AR-13; the privilegeless challenge carrying no session in its result while its nonce answers `not_enrolled` to a fresh key's VALID signature — the viewer credential minted zero authority; and the viewer cookie equally nothing on the API class); and (d) the positive control — the correct token mints the exact-flags cookie over the same exposed interface and the cookie reads the boot descriptor, the static shell, the Broadcast Room page carrying the holders-only message, and the live stream delivering it. A before/after message count plus the presence snapshot prove the write matrix wrote nothing anywhere, and the server child's stderr over the whole drill is asserted EMPTY — the strongest form of the no-secrets discipline (no noise, therefore neither the token nor any cookie value). The driver prints one `REPORT:{...json}` line; the parent re-asserts every headline oracle (the 4.8 judged-twice discipline) across three tests sharing one driver run.
+
+## Boundaries & Constraints
+
+**Always:** run the drill over REAL processes — the direct-launch child on the strict topology env, the driver child on default-verified TLS; reuse the 4.7/4.8 certificates byte-identically (zero new crypto, zero deps); probe the loopback door before trusting the topology; dial every request through the exposed interface; assert refusal CODES, not just statuses; check every refusal body against the full preview-marker list; include the real Broadcast Room id in the unauthenticated rows (even KNOWING the id must yield nothing); run the GET-only matrix with credentials presented (the credential cannot buy the verb); cover every write-capable route from the frozen route table both as Bearer and as cookie; prove the operator writes unreachable over HTTP (AR-13) rather than skipping them; prove writes did not happen with state reads (message count + presence), never with the refusals alone; keep the viewer token and cookie values out of the REPORT; leave the working tree uncommitted.
+
+**Block If:** any unauthenticated viewer request answers anything but the coded refusal family, or any refusal body carries a preview marker — halt. Any non-GET method executing on a viewer route (or minting a cookie while refusing) — halt. The viewer token authenticating ANY API write, enrolling anyone, or minting a session via the challenge lane — halt. The loopback door answering (the drill would not be riding the exposed interface) — halt. A credential appearing in the server child's stderr — halt. The write matrix changing the message count or presence — halt.
+
+**Never:** never weaken TLS verification to make the LAN dial convenient (`servername` selects the SAN name the material genuinely carries; the chain check is untouched); never bind the drill server on the default shared data dir (the dedicated AGENT_ROOM_DATA_DIR keeps the advisory silent and the stderr empty); never let the drill trip the declared rate gates (one send, two enrollment probes — the declared defaults hold); never restate a constant (bounds come from the constants module by name); never print the viewer token or cookie value in the report; never skip, `.only`, or todo anything (the no-LAN early return is the ensure-server precedent, not a test.skip).
+
+## I/O & Edge-Case Matrix
+
+| # | Scenario | Input / State | Expected Output / Behavior | Error Handling |
+|---|----------|--------------|---------------------------|----------------|
+| 1 | The exposed topology | direct-launch child, `AGENT_ROOM_HOST=<lan>`, TLS from paths, dedicated data dir | runtime record names the child's pid; `GET /health` over the LAN dial answers 200; the loopback door (127.0.0.1:samePort) refuses `ECONNREFUSED`; stderr stays empty | no LAN IPv4 → the parent skips the drill (ensure-server precedent), never spawns the driver |
+| 2 | Unauthenticated, whole surface | no credential / junk Bearer / well-formed wrong Bearer / garbage cookie × shell, asset, boot.json, auth bridge, broadcast page by its real id, SSE stream | 12 rows, every one 401 `unauthorized`, no `Set-Cookie`, body carries none of the 10 preview markers | the SSE stream refuses as a normal JSON envelope before any stream byte |
+| 3 | GET-only | every viewer route (auth, wildcard, boot.json, messages, events) × POST/PUT/PATCH/DELETE | 20 rows, every one 404 `route_not_found` — never executed | POST /viewer/auth WITH the correct Bearer: 404, no Set-Cookie — the credential cannot buy the verb |
+| 4 | Token as Bearer on API writes | viewer token on local exchange, bind, rename, release, direct open, send | 6 rows, every one 401 `unauthorized` (the session verifier's canonical refusal; the local exchange's constant-time compare) | zero state change behind each refusal (the send row writes nothing — row 7) |
+| 5 | The enrollment route | viewer token as `invite_token`; a well-formed unknown invite beside the token | 400 `invalid_request` (shape gate: not `ar_inv1_`); 403 `invite_invalid` (unknown digest) — nothing enrolls, nothing consumes | the token is not an invite in either spelling |
+| 6 | The operator writes (AR-13) | POST /api/trust, /api/invites, /api/ban (+ POST /api/rooms) with the token as Bearer | 404 `route_not_found` — trust set, invite mint, and ban are CLI-host commands with NO HTTP surface for ANY credential to authorize | the phantom row is the proof, not a gap |
+| 7 | The privilegeless challenge | fresh well-formed key + viewer Bearer on the challenge; then a VALID Ed25519 answer for the nonce | challenge 200 with a nonce and NO session in the result; the answer 403 `not_enrolled` — the viewer credential minted zero authority | junk nonce on the answer route is `challenge_invalid` before any of this matters |
+| 8 | The cookie on the API class | the REAL minted cookie on local exchange, bind, release, direct open, send | 5 rows, every one 401 `unauthorized` — the session verifier reads no cookie jar | cookie rows never carry a Bearer |
+| 9 | Writes did not happen | actor page read + presence read after the full matrix | the room holds exactly the one holders-only message; presence online is exactly the actor's session | a phantom session or a second message fails the drill |
+| 10 | The holder's path (positive control) | correct token → mint over the exposed interface; cookie → boot.json, shell, page, stream | mint 200 with the exact AC flags; boot descriptor names realm + Broadcast Room; shell is HTML; the page carries the holders-only line; the stream opens with presence and delivers the message | the holder sees everything the refusals withheld — on the same interface |
+| 11 | No secrets, no noise | the server child's stderr across the whole drill | EMPTY — which is simultaneously the no-secrets scan (neither token nor cookie can be in an empty buffer) and the no-noise discipline | the dedicated data dir keeps the non-loopbind advisory silent |
+
+## Code Map
+
+- `docs/epics.md:556-559` — the acceptance criterion, verbatim.
+- `tests/viewer-exposure.test.mjs` — **added (3 tests, the parent).** The reused 4.7/4.8 PKI material byte-identically; the ensure-server LAN discovery; one memoized driver run (the journeyReport pattern) serving all three tests; the parent re-asserts every headline oracle from the REPORT — the 4.8 judged-twice discipline — plus a `t.diagnostic` drill summary.
+- `tests/viewer-exposure-driver.mjs` — **added (the driver child).** The real direct-launch server child on the strict topology env; default-verified https dials to the non-loopback address (the `servername` SAN-name note recorded in the header); the loopback-door probe; the actor journey (operator-side token provisioning, local exchange, bind, send); the unauthenticated matrix with the preview-marker list; the GET-only matrix; the class-isolation matrix (Bearer, enrollment, phantom operator routes, privilegeless challenge + valid-signature answer, cookie); the writes-did-not-happen state proof; the positive control; the SIGTERM stop and the empty-stderr assertion; one `REPORT:` line whose payload never carries the viewer token or cookie.
+- `docs/implementation/ac-evidence.yaml` — **extended** with the 5.3 entry (this change set).
+- `docs/implementation/sprint-status.yaml` — **extended:** `5-3-remote-exposure-check` → done; `last_updated` notes Epic 5's completion.
+- `CHANGELOG.md` — **extended** with the exposure-check line under Unreleased/Added.
+- No production file changed: the surface under test landed in Stories 5.1+5.2 and the harness in Stories 4.7/4.8 — Story 5.3 is the proof that binds them.
+
+## Tasks & Acceptance
+
+**Implementation tasks:**
+
+1. The harness: the parent spawns the driver with the reused material and `NODE_EXTRA_CA_CERTS`; the driver starts the real direct-launch child on the machine's non-loopback interface through the strict topology env, proves the loopback door refuses, and waits for readiness through the exposed door.
+2. Leg (b): the unauthenticated matrix across the whole viewer surface — coded refusals, no Set-Cookie, zero preview markers, the real room id included.
+3. Leg (c): the GET-only matrix (5 routes × 4 verbs + the credentialed POST) and the class-isolation matrix (Bearer on every write-capable route; enrollment in both spellings; phantom operator paths; the privilegeless challenge granting nothing; the cookie on the API class) closed by the writes-did-not-happen state proof.
+4. Leg (d): the positive control over the same interface — mint, boot descriptor, shell, page, stream — plus the empty-stderr assertion.
+5. Docs: this spec, the ac-evidence 5.3 entry, sprint-status, the CHANGELOG line.
+
+**Acceptance (binding, verbatim from `docs/epics.md:558-559`):**
+
+> **Given** a viewer exposed on a non-loopback interface, **When** an unauthenticated request arrives from another host, **Then** it is refused; the viewer surface is GET-only and the viewer token never authorizes any API write.
+
+## Spec Change Log
+
+- 2026-10-06 (this story): spec authored with the drill. Design decisions recorded where the story text is silent, all grounded in the landed code: (1) the exposed interface is the machine's LAN IPv4 address via the ensure-server discovery pattern — the 127.0.0.2 alias alternative dies on macOS's EADDRNOTAVAIL and the suite never configures the host; (2) the drill reuses the 4.7/4.8 certificates byte-identically and dials with Node's default verification — the `servername` option carries the material's SAN name over a LAN-address dial, which is a client routing choice, not a verification override (the structural scan's three banned escape hatches stay absent); (3) "arrives from another host" is modeled at the interface level — the loopback door on the same port is probed and must refuse, so the drill's traffic genuinely rides the exposed door (the honest-scope line the 4.7/4.8 suites recorded; the literal cross-machine wire is REL-1); (4) "the viewer token never authorizes any API write" is proven against the FULL write-capable set of the frozen route table plus the enrollment route's two spellings plus the phantom operator paths (trust set, invite mint, ban are CLI-host commands — AR-13 — so the 404 row IS the proof) plus the privilegeless challenge's grant-nothing follow-up, each closed by a state read (message count, presence) rather than the refusals alone; (5) the no-secrets leg is asserted as an EMPTY stderr — strictly stronger than a scan; (6) the drill runs the declared-default rate gates honestly (one send, two enrollment probes — nothing trips); (7) on a host with no non-loopback IPv4 address the three tests return early without spawning the driver (the ensure-server precedent).
+
+## Auto Run Result
+
+Status: done
+
+**Summary:** Story 5-3 (the remote exposure check) implemented as a proof-only change set and closed against the binding AC: a real TLS server child exposed on the machine's non-loopback interface refuses every unauthenticated request with zero body previews, is GET-only on every route and verb, yields nothing to the viewer credential on any API write (operator writes have no HTTP surface at all), still serves the holder over the same interface, and finishes with empty stderr. **Epic 5 is complete with this story** — every story in `docs/epics.md`'s Epic 5 now has a closed spec, green evidence, and a clean AC sweep.
+
+**Files changed:** `tests/viewer-exposure.test.mjs` (new), `tests/viewer-exposure-driver.mjs` (new), `docs/implementation/ac-evidence.yaml`, `docs/implementation/sprint-status.yaml`, `CHANGELOG.md`, this record. No production file changed.
+
+**Verification performed:**
+- `node --test` (full suite) → **544 pass / 0 fail / 0 skipped / 0 cancelled / 0 todo** — the pipeline's gate. Delta vs the pre-story tree (541): +3 in the new `tests/viewer-exposure.test.mjs`.
+- `node --test tests/viewer-exposure.test.mjs` → 3/3 pass, run three times consecutively with zero flakes — stable 3x. The drill's headline counts: 12 unauthenticated refusal rows, 20 GET-only rows, 6 Bearer-isolation rows, 5 cookie-isolation rows, 4 phantom operator rows; broadcast count 1 → 1; presence exactly `['ExposureActor']`.
+- `node scripts/ac-sweep.mjs --epic 5` → **clean: 3 stories, 5 criteria, 21 evidence pointers**, every pointer resolving to a live test name — Epic 5's sweep is now gap-free (5.1/5.2's future-stories gap is closed).
+- `node scripts/ac-sweep.mjs --epic 1` (the in-suite sweep gate) stays clean through the evidence-file edits.
+- The working tree is left uncommitted per the run's instruction.
+
+**Residual risks:** the drill models "another host" at the interface level (the exposed door answers, the loopback door refuses) — the literal physical cross-machine wire is Epic 6's REL-1, unchanged from the 4.7/4.8 honest-scope line; hosts with no non-loopback IPv4 address skip the drill (the ensure-server precedent); browser behaviour and already-open-stream re-gating remain 5.1/5.2's recorded residual risks, carried unchanged.
