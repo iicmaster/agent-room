@@ -126,7 +126,7 @@ import {
   X509Certificate,
 } from 'node:crypto'
 import { readFileSync, realpathSync, unlinkSync } from 'node:fs'
-import { isAbsolute } from 'node:path'
+import { dirname, isAbsolute, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import {
@@ -177,6 +177,7 @@ import {
   ProtocolStage,
   assemblePipeline,
   errorEnvelope,
+  HANDLER_STREAMED,
   internalDetailOf,
   reject,
   runPipeline,
@@ -186,10 +187,25 @@ import { createChallengeRegistry } from './challenge.mjs'
 import { createEnrollRateLimiter } from './enroll-rate-limit.mjs'
 import { createRateGates } from './rate-gates.mjs'
 import { readLocalToken } from './local-token.mjs'
+import {
+  applyViewerSecurityHeaders,
+  createViewerSessionRegistry,
+  createViewerVerifier,
+  mintViewerSession,
+  readViewerToken,
+  serveViewerSurface,
+  streamBroadcastEvents,
+} from './viewer.mjs'
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1'])
 const API_PREFIX = '/api/'
 const SUCCESS_STATUS = 200
+
+// Story 5.2: the viewer's static assets (the v0.1 viewer shell, rebuilt for
+// the cookie-authed live view) live at the plugin's web/ root beside the
+// server tree. Serving stays whitelisted-name-only inside the viewer module;
+// this is only where the directory resolves.
+const DEFAULT_WEB_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'web')
 
 const REGISTERED_HANDLERS = new Map()
 
@@ -882,6 +898,75 @@ registerHandler('POST /api/rooms/:id/messages', function appendMessageRoute(cont
   return { status: 'committed', seq: outcome.message.seq, room_id: outcome.message.room_id }
 }, 'actor')
 
+// --- Story 5.1 + 5.2: the viewer surface (FR-18/HCI-5) --------------------------
+//
+// Four frozen routes, cookie-authenticated through the viewer verifier slot
+// (the real cookie verifier is the slot's default once these routes land; an
+// injected viewerVerifier still overrides it, the session slot's pattern).
+// All are GET-only by the frozen table — there is no viewer write anywhere —
+// and every response carries the viewer security headers (strict CSP,
+// no-referrer, nosniff, DENY framing) applied at dispatch.
+
+// GET /viewer/auth — the Bearer→cookie bridge. The auth stage passes this one
+// route through the viewer verifier (the bridge is where the credential is
+// PRESENTED), so the handler performs the one check it exists for: the
+// presented Bearer must be the current viewer token, compared constant-time.
+// Success mints an HttpOnly, SameSite=Strict, Path=/viewer session cookie
+// whose value is an independent 256-bit random value (never the token); the
+// result body is empty because the cookie IS the result. A credential in the
+// query string is structurally impossible: the route's frozen field set is
+// empty, so ?token=… dies in the field gate as unknown_field before this
+// handler runs.
+registerHandler('GET /viewer/auth', function viewerAuth(context) {
+  return mintViewerSession(context)
+}, 'viewer')
+
+// GET /viewer/ (wildcard) — the static live view: the whitelisted assets
+// (index.html, app.js, styles.css) from the plugin's web/ root plus the
+// generated /viewer/boot.json descriptor (realm id + Broadcast Room id +
+// version — the only discovery a cookie-authenticated viewer gets, and it
+// names the Broadcast Room only). Any other path under /viewer/ is a coded
+// route_not_found — no traversal, no listing, and Direct Room ids are
+// learnable from nothing the viewer serves.
+registerHandler('GET /viewer/', function viewerSurface(context) {
+  return serveViewerSurface(context)
+}, 'viewer')
+
+// GET /viewer/api/rooms/:id/messages — the viewer's cursor page over the
+// Broadcast Room log, the actor read contract's projection (messages,
+// next_after_seq, head_seq) through the store's broadcast-only read: a
+// Direct Room answers room_not_found exactly like a nonexistent id, and
+// after_seq/limit keep the API's strict integer gates (bounded by
+// READ_PAGE_MAX). No wait_ms — the live edge is the SSE stream's job.
+registerHandler('GET /viewer/api/rooms/:id/messages', function viewerMessages(context) {
+  const roomId = context.params?.id
+  const afterSeqQuery = integerQuery(context.query?.after_seq, 'after_seq', {
+    min: 0, max: Number.MAX_SAFE_INTEGER, code: 'invalid_cursor',
+  })
+  if (afterSeqQuery.error) return afterSeqQuery.error
+  const limitQuery = integerQuery(context.query?.limit, 'limit', {
+    min: 1, max: READ_PAGE_MAX, code: 'invalid_limit',
+  })
+  if (limitQuery.error) return limitQuery.error
+
+  const afterSeq = afterSeqQuery.value ?? 0
+  const limit = limitQuery.value ?? READ_PAGE_DEFAULT
+  const messages = context.store.readBroadcastPage({ roomId, afterSeq, limit })
+  return {
+    messages,
+    next_after_seq: messages.length > 0 ? messages[messages.length - 1].seq : afterSeq,
+    head_seq: context.store.headSeq(roomId),
+  }
+}, 'viewer')
+
+// GET /viewer/api/rooms/:id/events — THE one SSE stream (DR-3): room-message
+// events and presence snapshots on a single text/event-stream response,
+// cookie-gated at the stage like every viewer route. See
+// server/api/viewer.mjs for the stream mechanics.
+registerHandler('GET /viewer/api/rooms/:id/events', function viewerEvents(context) {
+  return streamBroadcastEvents(context)
+}, 'viewer')
+
 const UNREGISTERED_ROUTE_HANDLER = () => reject('route_not_found')
 
 function respondJson(response, status, payload, extraHeaders = {}) {
@@ -935,10 +1020,14 @@ async function handleRequest(request, response, options) {  let pathname = null
     remoteAddress: request.socket.remoteAddress,
     encrypted: Boolean(request.socket.encrypted),
     bodyStream: request,
+    request,
+    response,
     dataDir: options.dataDir,
+    webRoot: options.webRoot,
     sessionRegistry: options.sessionRegistry,
     liveSessionRegistry: options.liveSessionRegistry,
     challengeRegistry: options.challengeRegistry,
+    viewerSessions: options.viewerSessions,
     store: options.store,
   }
 
@@ -967,6 +1056,9 @@ async function handleRequest(request, response, options) {  let pathname = null
     const { route, params } = matched
     context.route = route
     context.params = params
+    // Story 5.1: every viewer response — HTML asset, JSON result, JSON
+    // refusal, or SSE stream — carries the strict viewer security headers.
+    if (route.class === 'viewer') applyViewerSecurityHeaders(response)
 
     const stages = assemblePipeline(route.class, {
       sessionVerifier: options.sessionVerifier,
@@ -979,13 +1071,23 @@ async function handleRequest(request, response, options) {  let pathname = null
     const handler = REGISTERED_HANDLERS.get(routeKeyOf(route)) ?? UNREGISTERED_ROUTE_HANDLER
     const outcome = await runPipeline(stages, context, handler)
 
+    if (outcome === HANDLER_STREAMED) {
+      // The SSE handler (and only it) wrote the response itself; the JSON
+      // envelope must stand down.
+      return
+    }
     if (outcome.refusal === true) {
       // Transport refusal (AD-7): refused at the connection, no envelope.
       response.destroy()
       return
     }
     if (outcome.ok) {
-      respondJson(response, SUCCESS_STATUS, outcome, echo)
+      // Handler-declared headers (the auth bridge's Set-Cookie) ride the
+      // success response; a clobbering attempt on the echo or the fixed
+      // no-store/Content-Type pair is impossible — these extras are written
+      // only by viewer handlers on viewer routes, and last-writer-wins in
+      // writeHead keeps the envelope's own fields authoritative.
+      respondJson(response, SUCCESS_STATUS, outcome, { ...echo, ...(context.responseHeaders ?? {}) })
     } else {
       respondFailure(response, outcome, echo)
     }
@@ -1048,8 +1150,10 @@ export async function startServer({
   host = '127.0.0.1',
   port = 0,
   tls,
+  webRoot = DEFAULT_WEB_ROOT,
   sessionVerifier,
   viewerVerifier,
+  viewerSessionRegistry,
   sessionRegistry,
   liveSessionRegistry,
   challengeRegistry,
@@ -1103,6 +1207,22 @@ export async function startServer({
   }
   if (viewerVerifier !== undefined && typeof viewerVerifier !== 'function') {
     throw new AgentRoomRuntimeError('invalid_argument', 'viewerVerifier must be a function when provided')
+  }
+  // Story 5.1: the cookie registry is per server instance (like the rate
+  // gates: admission state is never shared across instances — a cookie minted
+  // on one server must never authenticate another), with an override for
+  // callers that must own it.
+  if (viewerSessionRegistry !== undefined
+    && (typeof viewerSessionRegistry !== 'object' || viewerSessionRegistry === null
+      || typeof viewerSessionRegistry.issue !== 'function'
+      || typeof viewerSessionRegistry.verify !== 'function')) {
+    throw new AgentRoomRuntimeError(
+      'invalid_argument',
+      'viewerSessionRegistry must be a viewer session registry (issue/verify) when provided',
+    )
+  }
+  if (typeof webRoot !== 'string' || webRoot.trim().length === 0) {
+    throw new AgentRoomRuntimeError('invalid_argument', 'webRoot must be a non-empty path')
   }
   if (sessionRegistry !== undefined
     && (typeof sessionRegistry !== 'object' || sessionRegistry === null
@@ -1303,6 +1423,17 @@ export async function startServer({
     }
     return outcome
   }
+  // Story 5.1: the real cookie verifier is the viewer slot's default — the
+  // Story 1.3 reject-all default remains only as the pipeline's structural
+  // fallback, exactly as for the session slot. The registry and the token
+  // reader are this instance's: an injected viewerVerifier overrides the
+  // whole verifier, and an injected viewerSessionRegistry overrides the
+  // registry the mint and this verifier share.
+  const effectiveViewerSessions = viewerSessionRegistry ?? createViewerSessionRegistry()
+  const effectiveViewerVerifier = viewerVerifier ?? createViewerVerifier({
+    registry: effectiveViewerSessions,
+    readToken: () => readViewerToken(dataDir),
+  })
   let httpServer = null
   let pruneTimer = null
   try {
@@ -1345,11 +1476,13 @@ export async function startServer({
       // failure of the failure path itself.
       handleRequest(request, response, {
         sessionVerifier: effectiveSessionVerifier,
-        viewerVerifier,
+        viewerVerifier: effectiveViewerVerifier,
         dataDir,
+        webRoot,
         sessionRegistry: effectiveRegistry,
         liveSessionRegistry: effectiveLiveRegistry,
         challengeRegistry: effectiveChallengeRegistry,
+        viewerSessions: effectiveViewerSessions,
         enrollRateLimiter: effectiveEnrollRateLimiter,
         trustedProxy,
         requestBudgetGate: rateGates.requestBudgetGate,

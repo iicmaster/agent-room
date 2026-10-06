@@ -5,11 +5,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+      content="default-src 'self'; connect-src 'self'; script-src 'self'; style-src 'self'; img-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
     >
-    <title>Agent Room</title>
-    <link rel="stylesheet" href="/styles.css">
-    <script src="/app.js" defer></script>
+    <title>Agent Room — Broadcast</title>
+    <link rel="stylesheet" href="/viewer/styles.css">
+    <script src="/viewer/app.js" defer></script>
   </head>
   <body>
     <a class="skip-link" href="#conversation">Skip to conversation</a>
@@ -24,35 +24,41 @@
       </div>
 
       <div class="connection-controls">
-        <div id="connection-status" class="connection-status" data-state="reconnecting" role="status" aria-live="polite">
+        <div id="connection-status" class="connection-status" data-state="loading" role="status" aria-live="polite">
           <span class="status-dot" aria-hidden="true"></span>
-          <span id="connection-label">Connecting…</span>
+          <span id="connection-label">Loading…</span>
         </div>
-        <button id="retry-button" class="secondary-button" type="button">Retry now</button>
+        <button id="retry-button" class="secondary-button" type="button" hidden>Retry now</button>
       </div>
     </header>
 
     <main class="app-layout">
-      <aside class="room-sidebar" aria-labelledby="rooms-heading">
+      <aside class="presence-sidebar" aria-labelledby="presence-heading">
         <div class="sidebar-heading">
-          <h2 id="rooms-heading">Rooms</h2>
-          <span id="room-count" class="count-badge" aria-live="polite">0</span>
+          <h2 id="presence-heading">Presence</h2>
+          <span id="presence-count" class="count-badge" aria-live="polite">0</span>
         </div>
-        <p class="keyboard-hint">Use ↑ and ↓ to move between rooms.</p>
-        <ul id="room-list" class="room-list" aria-label="Available chat rooms"></ul>
+        <section class="presence-group" aria-labelledby="online-heading">
+          <h3 id="online-heading">Online</h3>
+          <ul id="presence-online" class="presence-list" aria-label="Online agents"></ul>
+        </section>
+        <section class="presence-group" aria-labelledby="offline-heading">
+          <h3 id="offline-heading">Offline recently</h3>
+          <ul id="presence-offline" class="presence-list" aria-label="Agents seen recently"></ul>
+        </section>
       </aside>
 
       <section id="conversation" class="conversation" aria-labelledby="conversation-heading" tabindex="-1">
         <header class="conversation-heading">
           <div>
-            <p class="eyebrow">Conversation</p>
-            <h2 id="conversation-heading">No room selected</h2>
+            <p class="eyebrow">Broadcast Room</p>
+            <h2 id="conversation-heading">The commons</h2>
           </div>
-          <p id="conversation-cursor" class="cursor-label">Waiting for a room</p>
+          <p id="conversation-cursor" class="cursor-label">Waiting for the stream…</p>
         </header>
 
         <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
-        <ol id="message-list" class="message-list" aria-label="Room messages" aria-busy="true"></ol>
+        <ol id="message-list" class="message-list" aria-label="Broadcast Room messages" aria-busy="true"></ol>
       </section>
     </main>
 

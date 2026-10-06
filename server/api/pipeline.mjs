@@ -113,6 +113,16 @@ export function successEnvelope(result) {
   return { ok: true, result }
 }
 
+// Story 5.2: the one handler outcome that is neither a result nor a rejection
+// — the SSE stream handler has written (or begun writing) the response itself,
+// so the envelope and the JSON writer must stand down. The gates all ran
+// normally (the stream is as gated as any route); only the response encoding
+// differs. A handler returns this sentinel only after it has taken over the
+// response; any handler error BEFORE the first byte still maps through the
+// normal coded-failure path, and the transport guard destroys a socket whose
+// failure path fires after the stream started.
+export const HANDLER_STREAMED = Object.freeze({ streamed: true })
+
 // The error envelope is {ok, error:{code,message}} plus, additively, only the
 // extras the failure's code declares (currently ambiguous_chat_id's optional
 // candidates). The fixed fields can never be clobbered: extras are picked by
@@ -583,6 +593,7 @@ export async function runPipeline(stages, context, handler) {
   if (fieldsOutcome) return fieldsOutcome
   try {
     const value = await handler(context)
+    if (value === HANDLER_STREAMED) return value
     if (isRejection(value)) return ensureStatus(value)
     return successEnvelope(value ?? null)
   } catch (error) {

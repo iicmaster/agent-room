@@ -1524,6 +1524,41 @@ export function openRoomLog({
         return rows.map(plainMessage)
       },
 
+      // Story 5.2: the VIEWER's page read — the same projection and cursor
+      // semantics as readPage, but the ACL is the broadcast kind itself: the
+      // room must exist and must BE a broadcast room, and no Actor identity
+      // is involved at all. This is the DM exclusion by construction (FR-18):
+      // the viewer's only read path structurally cannot name a Direct Room —
+      // a direct id answers room_not_found exactly like a nonexistent id, so
+      // the refusal leaks nothing about the pair room's existence — and there
+      // is no fingerprint argument to widen it with. The caller is the
+      // cookie-authenticated viewer surface; pages stay bounded by
+      // requireReadLimit like every other read.
+      readBroadcastPage(options) {
+        assertOpen()
+        const {
+          roomId,
+          afterSeq = 0,
+          limit = READ_PAGE_MAX,
+        } = requireObject(options)
+        const validRoomId = requireRoomId(roomId)
+        const validAfterSeq = requireAfterSeq(afterSeq)
+        const validLimit = requireReadLimit(limit)
+
+        const room = requireRoom(validRoomId)
+        if (room.kind !== BROADCAST_KIND) {
+          fail('room_not_found', `room ${validRoomId} does not exist`)
+        }
+
+        const rows = database.prepare(`
+          ${MESSAGE_PROJECTION}
+          WHERE room_id = ? AND seq > ?
+          ORDER BY seq ASC
+          LIMIT ?
+        `).all(validRoomId, validAfterSeq, validLimit)
+        return rows.map(plainMessage)
+      },
+
       // Story 1.7: the room's head sequence for long-poll responses — the
       // largest allocated room-local seq, or 0 for an empty room. The ACL
       // mirrors getRoom exactly (direct rooms demand a member fingerprint),

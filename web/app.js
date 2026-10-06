@@ -1,180 +1,64 @@
 "use strict";
 
-const TOKEN_KEY = "agent-room.viewer-token";
-const SELECTED_ROOM_KEY = "agent-room.selected-room";
-const PAGE_SIZE = 100;
-const MAX_RECONNECT_DELAY_MS = 10_000;
+// The Agent Room live viewer (Story 5.2, FR-18/HCI-5). Cookie-authenticated
+// only: the browser got its HttpOnly SameSite=Strict session cookie from
+// GET /viewer/auth (Story 5.1's Bearer→cookie bridge) before this page ever
+// loaded, so every request below — the boot descriptor and the one
+// EventSource stream — presents it automatically and NO credential ever
+// appears in a URL, a query string, or storage. All room text renders inert:
+// this script builds the DOM exclusively with createElement/textContent and
+// the served CSP (default-src 'self', no inline script) backstops it.
 
 const elements = Object.freeze({
   connectionStatus: document.getElementById("connection-status"),
   connectionLabel: document.getElementById("connection-label"),
   retryButton: document.getElementById("retry-button"),
-  roomCount: document.getElementById("room-count"),
-  roomList: document.getElementById("room-list"),
-  conversationHeading: document.getElementById("conversation-heading"),
+  presenceCount: document.getElementById("presence-count"),
+  presenceOnline: document.getElementById("presence-online"),
+  presenceOffline: document.getElementById("presence-offline"),
   conversationCursor: document.getElementById("conversation-cursor"),
   notice: document.getElementById("notice"),
   messageList: document.getElementById("message-list"),
 });
 
+// The viewer session's states (FR-18's full set). Each has one defined cause
+// and one label; tests/pin the causes server-side and this mapping in the
+// asset contract:
+//   loading        — the page is open, the boot descriptor not yet answered
+//   live           — the SSE stream is open and current (authenticated)
+//   empty          — live, and the Broadcast Room has no messages yet
+//   reconnecting   — the stream dropped; EventSource is re-establishing it
+//   unreachable    — the server would not answer at all (connection refused,
+//                    a network failure) — reported unreachable, never
+//                    "everyone offline"
+//   expired        — the server answered 401: the viewer session is no
+//                    longer valid (the operator rotated the viewer
+//                    credential); a new cookie must be minted via
+//                    GET /viewer/auth
+const STATE_LABELS = Object.freeze({
+  loading: "Loading…",
+  live: "Live",
+  empty: "Live · no messages yet",
+  reconnecting: "Reconnecting…",
+  unreachable: "Room server unreachable",
+  expired: "Viewer session invalid — mint a new one",
+});
+
 const state = {
-  token: "",
-  rooms: [],
-  selectedRoomId: null,
-  messageBySeq: new Map(),
-  lastSeq: 0,
   stream: null,
-  reconnectTimer: null,
-  reconnectAttempt: 0,
-  roomLoadVersion: 0,
-  requestController: null,
-  busy: false,
+  streamGeneration: 0,
+  broadcastRoomId: null,
+  messagesBySeq: new Map(),
+  presence: { online: [], offline_recently: [] },
+  expired: false,
 };
 
 class ViewerError extends Error {}
 
-function sessionGet(key) {
-  try {
-    return window.sessionStorage.getItem(key);
-  } catch {
-    return null;
-  }
-}
-
-function sessionSet(key, value) {
-  try {
-    window.sessionStorage.setItem(key, value);
-  } catch {
-    // The in-memory value still supports this page when storage is unavailable.
-  }
-}
-
-function readTokenAndCleanAddress() {
-  const currentUrl = new URL(window.location.href);
-  const tokenFromUrl = currentUrl.searchParams.get("token");
-
-  if (tokenFromUrl) {
-    sessionSet(TOKEN_KEY, tokenFromUrl);
-  }
-
-  currentUrl.searchParams.delete("token");
-  const cleanAddress = `${currentUrl.pathname}${currentUrl.search}${currentUrl.hash}`;
-  window.history.replaceState(window.history.state, "", cleanAddress);
-
-  return tokenFromUrl || sessionGet(TOKEN_KEY) || "";
-}
-
-function apiUrl(pathname, parameters = {}) {
-  const url = new URL(pathname, window.location.origin);
-  for (const [key, value] of Object.entries(parameters)) {
-    url.searchParams.set(key, String(value));
-  }
-  url.searchParams.set("token", state.token);
-  return url;
-}
-
-async function getJson(url, signal) {
-  const response = await window.fetch(url, {
-    method: "GET",
-    headers: { Accept: "application/json" },
-    cache: "no-store",
-    credentials: "same-origin",
-    signal,
-  });
-
-  if (!response.ok) {
-    throw new ViewerError(`The server returned HTTP ${response.status}.`);
-  }
-
-  try {
-    return await response.json();
-  } catch {
-    throw new ViewerError("The server returned an unreadable response.");
-  }
-}
-
-function safeSequence(value, allowZero = false) {
-  const sequence = Number(value);
-  const minimum = allowZero ? 0 : 1;
-  return Number.isSafeInteger(sequence) && sequence >= minimum ? sequence : null;
-}
-
-function safeText(value, fallback = "") {
-  return typeof value === "string" ? value : fallback;
-}
-
-function normaliseRooms(payload) {
-  const candidates = Array.isArray(payload) ? payload : payload?.rooms;
-  if (!Array.isArray(candidates)) {
-    throw new ViewerError("The room list has an unexpected shape.");
-  }
-
-  const seen = new Set();
-  const rooms = [];
-  for (const candidate of candidates) {
-    if (!candidate || typeof candidate !== "object") {
-      continue;
-    }
-    const id = safeText(candidate.id || candidate.roomId || candidate.room_id).trim();
-    if (!id || seen.has(id)) {
-      continue;
-    }
-    seen.add(id);
-    rooms.push({
-      id,
-      title: safeText(candidate.title).trim() || `Room ${id}`,
-      createdAt: safeText(candidate.createdAt || candidate.created_at),
-    });
-  }
-  return rooms;
-}
-
-function rawMessagesFrom(payload) {
-  const candidates = Array.isArray(payload) ? payload : payload?.messages;
-  if (!Array.isArray(candidates)) {
-    throw new ViewerError("The message list has an unexpected shape.");
-  }
-  return candidates;
-}
-
-function normaliseMessage(candidate) {
-  if (!candidate || typeof candidate !== "object") {
-    return null;
-  }
-
-  const seq = safeSequence(candidate.seq);
-  if (seq === null || typeof candidate.text !== "string") {
-    return null;
-  }
-
-  const actor = candidate.actor && typeof candidate.actor === "object" ? candidate.actor : {};
-  const actorId = safeText(actor.id || candidate.actorId || candidate.actor_id, "unknown");
-  const actorName = safeText(
-    actor.name || candidate.actorDisplayName || candidate.actor_display_name,
-    actorId || "Unknown actor",
-  );
-  const replyValue = candidate.replyToSeq ?? candidate.reply_to_seq;
-
-  return {
-    seq,
-    roomId: safeText(candidate.roomId || candidate.room_id),
-    actorId,
-    actorName: actorName || "Unknown actor",
-    text: candidate.text,
-    replyToSeq: replyValue === null || replyValue === undefined ? null : safeSequence(replyValue),
-    createdAt: safeText(candidate.createdAt || candidate.created_at),
-  };
-}
-
-function setConnectionState(kind, label) {
+function setConnectionState(kind) {
   elements.connectionStatus.dataset.state = kind;
-  elements.connectionLabel.textContent = label;
-}
-
-function setBusy(busy) {
-  state.busy = busy;
-  elements.retryButton.disabled = busy;
-  elements.messageList.setAttribute("aria-busy", String(busy));
+  elements.connectionLabel.textContent = STATE_LABELS[kind] ?? kind;
+  elements.retryButton.hidden = kind !== "unreachable" && kind !== "expired";
 }
 
 function showNotice(kind, message) {
@@ -191,647 +75,259 @@ function hideNotice() {
   delete elements.notice.dataset.kind;
 }
 
-function renderRooms() {
-  const fragment = document.createDocumentFragment();
-  const focusedRoomId = document.activeElement?.dataset?.roomId || null;
-  let replacementForFocus = null;
-
-  for (const room of state.rooms) {
-    const item = document.createElement("li");
-    const button = document.createElement("button");
-    const isSelected = room.id === state.selectedRoomId;
-
-    button.type = "button";
-    button.className = "room-button";
-    button.dataset.roomId = room.id;
-    button.textContent = room.title;
-    button.setAttribute("aria-current", String(isSelected));
-    button.setAttribute("aria-label", `Open room ${room.title}`);
-    button.addEventListener("click", () => {
-      if (room.id !== state.selectedRoomId || state.messageBySeq.size === 0) {
-        void openRoom(room.id);
-      }
+async function getJson(path) {
+  let response;
+  try {
+    response = await window.fetch(path, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+      credentials: "same-origin",
     });
-    if (room.id === focusedRoomId) {
-      replacementForFocus = button;
-    }
-
-    item.append(button);
-    fragment.append(item);
+  } catch {
+    // A fetch that cannot even complete is an unreachable server — the
+    // caller distinguishes it from an answered refusal.
+    throw new ViewerError("unreachable");
   }
-
-  elements.roomList.replaceChildren(fragment);
-  elements.roomCount.textContent = String(state.rooms.length);
-  replacementForFocus?.focus({ preventScroll: true });
-}
-
-function actorTone(actorId) {
-  let hash = 0;
-  for (const character of actorId) {
-    hash = (hash * 31 + character.codePointAt(0)) >>> 0;
+  if (response.status === 401) {
+    // The cookie no longer authenticates: rotation or expiry server-side.
+    throw new ViewerError("expired");
   }
-  return String(hash % 4);
-}
-
-function actorInitial(actorName) {
-  const initial = Array.from(actorName.trim())[0];
-  return initial ? initial.toLocaleUpperCase() : "?";
-}
-
-function formattedTime(rawTimestamp) {
-  const date = new Date(rawTimestamp);
-  if (!rawTimestamp || Number.isNaN(date.getTime())) {
-    return { machine: "", human: "Unknown time" };
+  if (!response.ok) {
+    throw new ViewerError("unreachable");
   }
-  return {
-    machine: date.toISOString(),
-    human: new Intl.DateTimeFormat(undefined, {
-      dateStyle: "medium",
-      timeStyle: "short",
-    }).format(date),
-  };
-}
-
-function renderInlineMarkdown(text, parent) {
-  const pattern = /(`[^`\n]+`|\*\*\*[^*\n]+\*\*\*|\*\*[^*\n]+\*\*|\*[^*\n]+\*)/g;
-  let lastIndex = 0;
-  let match;
-
-  while ((match = pattern.exec(text)) !== null) {
-    if (match.index > lastIndex) {
-      parent.append(document.createTextNode(text.slice(lastIndex, match.index)));
-    }
-    const token = match[0];
-    if (token.startsWith("`") && token.endsWith("`")) {
-      const code = document.createElement("code");
-      code.textContent = token.slice(1, -1);
-      parent.append(code);
-    } else if (token.startsWith("***") && token.endsWith("***")) {
-      const strong = document.createElement("strong");
-      const em = document.createElement("em");
-      em.textContent = token.slice(3, -3);
-      strong.append(em);
-      parent.append(strong);
-    } else if (token.startsWith("**") && token.endsWith("**")) {
-      const strong = document.createElement("strong");
-      strong.textContent = token.slice(2, -2);
-      parent.append(strong);
-    } else if (token.startsWith("*") && token.endsWith("*")) {
-      const em = document.createElement("em");
-      em.textContent = token.slice(1, -1);
-      parent.append(em);
-    }
-    lastIndex = pattern.lastIndex;
-  }
-  if (lastIndex < text.length) {
-    parent.append(document.createTextNode(text.slice(lastIndex)));
+  try {
+    return await response.json();
+  } catch {
+    throw new ViewerError("unreachable");
   }
 }
 
-function renderMarkdownBody(rawText) {
-  const container = document.createElement("div");
-  container.className = "message-text markdown-body";
-
-  const lines = rawText.split("\n");
-  let inCodeBlock = false;
-  let codeLines = [];
-  let codeLang = "";
-  let currentList = null;
-  let currentListType = null;
-  let currentParagraph = null;
-
-  function flushParagraph() {
-    if (currentParagraph) {
-      container.append(currentParagraph);
-      currentParagraph = null;
-    }
+// One credential-free discovery step: the generated descriptor names the
+// Broadcast Room (and only the Broadcast Room — Direct Rooms are learnable
+// from nothing the viewer serves).
+async function loadBoot() {
+  const boot = await getJson("/viewer/boot.json");
+  const roomId = typeof boot?.broadcast_room_id === "string" ? boot.broadcast_room_id : "";
+  if (!roomId) {
+    throw new ViewerError("unreachable");
   }
-
-  function flushList() {
-    if (currentList) {
-      container.append(currentList);
-      currentList = null;
-      currentListType = null;
-    }
-  }
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-
-    const fenceMatch = line.match(/^```(\w+)?/);
-    if (fenceMatch) {
-      if (!inCodeBlock) {
-        flushParagraph();
-        flushList();
-        inCodeBlock = true;
-        codeLang = fenceMatch[1] || "";
-        codeLines = [];
-      } else {
-        inCodeBlock = false;
-        const pre = document.createElement("pre");
-        pre.className = "code-block";
-        if (codeLang) pre.dataset.lang = codeLang;
-        const code = document.createElement("code");
-        code.textContent = codeLines.join("\n");
-        pre.append(code);
-        container.append(pre);
-        codeLines = [];
-        codeLang = "";
-      }
-      continue;
-    }
-
-    if (inCodeBlock) {
-      codeLines.push(line);
-      continue;
-    }
-
-    if (line.trim() === "") {
-      flushParagraph();
-      flushList();
-      continue;
-    }
-
-    const headingMatch = line.match(/^(#{1,6})\s+(.*)$/);
-    if (headingMatch) {
-      flushParagraph();
-      flushList();
-      const level = Math.min(headingMatch[1].length + 2, 6);
-      const heading = document.createElement(`h${level}`);
-      renderInlineMarkdown(headingMatch[2], heading);
-      container.append(heading);
-      continue;
-    }
-
-    const quoteMatch = line.match(/^>\s?(.*)$/);
-    if (quoteMatch) {
-      flushParagraph();
-      flushList();
-      const blockquote = document.createElement("blockquote");
-      renderInlineMarkdown(quoteMatch[1], blockquote);
-      container.append(blockquote);
-      continue;
-    }
-
-    const ulMatch = line.match(/^[-*]\s+(.*)$/);
-    if (ulMatch) {
-      flushParagraph();
-      if (!currentList || currentListType !== "ul") {
-        flushList();
-        currentList = document.createElement("ul");
-        currentListType = "ul";
-      }
-      const li = document.createElement("li");
-      renderInlineMarkdown(ulMatch[1], li);
-      currentList.append(li);
-      continue;
-    }
-
-    const olMatch = line.match(/^\d+\.\s+(.*)$/);
-    if (olMatch) {
-      flushParagraph();
-      if (!currentList || currentListType !== "ol") {
-        flushList();
-        currentList = document.createElement("ol");
-        currentListType = "ol";
-      }
-      const li = document.createElement("li");
-      renderInlineMarkdown(olMatch[1], li);
-      currentList.append(li);
-      continue;
-    }
-
-    flushList();
-    if (!currentParagraph) {
-      currentParagraph = document.createElement("p");
-      renderInlineMarkdown(line, currentParagraph);
-    } else {
-      currentParagraph.append(document.createElement("br"));
-      renderInlineMarkdown(line, currentParagraph);
-    }
-  }
-
-  if (inCodeBlock && codeLines.length > 0) {
-    const pre = document.createElement("pre");
-    pre.className = "code-block";
-    const code = document.createElement("code");
-    code.textContent = codeLines.join("\n");
-    pre.append(code);
-    container.append(pre);
-  }
-  flushParagraph();
-  flushList();
-
-  return container;
+  return roomId;
 }
 
-function messageCard(message) {
+function safeSequence(value) {
+  const sequence = Number(value);
+  return Number.isSafeInteger(sequence) && sequence >= 1 ? sequence : null;
+}
+
+function safeText(value, fallback = "") {
+  return typeof value === "string" ? value : fallback;
+}
+
+// Inert rendering: text never becomes markup. Every field lands in
+// textContent — hostile text (tags, event handlers, pseudo-markdown) is
+// displayed as the characters it is, nothing more.
+function renderMessage(message) {
   const item = document.createElement("li");
   const article = document.createElement("article");
-  const meta = document.createElement("header");
-  const identity = document.createElement("div");
-  const avatar = document.createElement("span");
-  const actor = document.createElement("span");
-  const time = document.createElement("time");
-  const content = renderMarkdownBody(message.text);
-  const sequence = document.createElement("p");
-  const timestamp = formattedTime(message.createdAt);
-
-  article.id = `message-${message.seq}`;
   article.className = "message-card";
+  article.id = `message-${message.seq}`;
   article.dataset.seq = String(message.seq);
 
+  const meta = document.createElement("header");
   meta.className = "message-meta";
-  identity.className = "actor-identity";
-  avatar.className = "actor-avatar";
-  avatar.dataset.tone = actorTone(message.actorId);
-  avatar.textContent = actorInitial(message.actorName);
-  avatar.setAttribute("aria-hidden", "true");
+  const actor = document.createElement("span");
   actor.className = "actor-name";
-  actor.textContent = message.actorName;
-  time.className = "message-time";
-  time.dateTime = timestamp.machine;
-  time.textContent = timestamp.human;
-
-  identity.append(avatar, actor);
-  meta.append(identity, time);
-  article.append(meta);
-
-  if (message.replyToSeq !== null) {
-    const targetExists = state.messageBySeq.has(message.replyToSeq);
-    const reply = document.createElement(targetExists ? "a" : "span");
-    reply.className = targetExists ? "reply-reference" : "reply-reference missing";
-    reply.textContent = `Reply to message #${message.replyToSeq}`;
-    if (targetExists) {
-      reply.href = `#message-${message.replyToSeq}`;
-    }
-    article.append(reply);
+  actor.textContent = message.chatId;
+  const time = document.createElement("time");
+  const moment = new Date(message.createdAt);
+  if (!Number.isNaN(moment.getTime())) {
+    time.dateTime = moment.toISOString();
+    time.textContent = new Intl.DateTimeFormat(undefined, { timeStyle: "medium" }).format(moment);
+  } else {
+    time.textContent = "unknown time";
   }
+  meta.append(actor, time);
 
+  const sequence = document.createElement("span");
   sequence.className = "message-sequence";
   sequence.textContent = `#${message.seq}`;
-  article.append(content, sequence);
+
+  const body = document.createElement("p");
+  body.className = "message-text";
+  body.textContent = message.text;
+
+  article.append(meta, body, sequence);
   item.append(article);
   return item;
 }
 
-function renderMessages({ forceBottom = false } = {}) {
-  const priorScrollTop = elements.messageList.scrollTop;
-  const distanceFromBottom =
-    elements.messageList.scrollHeight - elements.messageList.scrollTop - elements.messageList.clientHeight;
-  const wasNearBottom = distanceFromBottom < 96;
-  const focusedCard = document.activeElement?.closest?.(".message-card");
-  const focusedSeq = focusedCard?.dataset.seq || null;
-  const messages = [...state.messageBySeq.values()].sort((left, right) => left.seq - right.seq);
+function renderMessages() {
+  const ordered = [...state.messagesBySeq.values()].sort((left, right) => left.seq - right.seq);
   const fragment = document.createDocumentFragment();
-
-  for (const message of messages) {
-    fragment.append(messageCard(message));
+  for (const message of ordered) {
+    fragment.append(renderMessage(message));
   }
   elements.messageList.replaceChildren(fragment);
-
-  elements.conversationCursor.textContent = state.lastSeq > 0 ? `Caught up through #${state.lastSeq}` : "No messages yet";
-
-  if (messages.length === 0) {
-    showNotice("empty", "No messages in this room yet.");
+  elements.messageList.setAttribute("aria-busy", "false");
+  elements.conversationCursor.textContent = ordered.length > 0
+    ? `Caught up through #${ordered[ordered.length - 1].seq}`
+    : "No messages yet";
+  if (ordered.length === 0) {
+    setConnectionState("empty");
+    showNotice("empty", "No messages in the Broadcast Room yet — they will appear here live.");
   } else {
+    if (elements.connectionStatus.dataset.state === "empty") setConnectionState("live");
     hideNotice();
-  }
-
-  if (forceBottom || wasNearBottom) {
     elements.messageList.scrollTop = elements.messageList.scrollHeight;
-  } else {
-    elements.messageList.scrollTop = priorScrollTop;
-  }
-
-  if (focusedSeq) {
-    const focusedTarget = document.getElementById(`message-${focusedSeq}`)?.querySelector("a");
-    focusedTarget?.focus({ preventScroll: true });
   }
 }
 
-function addMessage(message) {
-  if (message.roomId && message.roomId !== state.selectedRoomId) {
-    return false;
-  }
-  if (state.messageBySeq.has(message.seq)) {
-    return false;
-  }
-  state.messageBySeq.set(message.seq, message);
-  state.lastSeq = Math.max(state.lastSeq, message.seq);
-  return true;
+function presenceRow(entry, seenLabel) {
+  const item = document.createElement("li");
+  const name = document.createElement("span");
+  name.className = "presence-name";
+  name.textContent = safeText(entry.chat_id, "unknown");
+  const detail = document.createElement("span");
+  detail.className = "presence-detail";
+  const type = entry.client_type ? ` · ${String(entry.client_type)}` : "";
+  detail.textContent = `${seenLabel}${type}`;
+  item.append(name, detail);
+  return item;
 }
 
-function closeStream() {
-  if (state.stream) {
-    state.stream.close();
+function renderPresence() {
+  const online = Array.isArray(state.presence.online) ? state.presence.online : [];
+  const offline = Array.isArray(state.presence.offline_recently) ? state.presence.offline_recently : [];
+  const onlineFragment = document.createDocumentFragment();
+  for (const entry of online) {
+    onlineFragment.append(presenceRow(entry, "online now"));
+  }
+  elements.presenceOnline.replaceChildren(onlineFragment);
+  const offlineFragment = document.createDocumentFragment();
+  for (const entry of offline) {
+    offlineFragment.append(presenceRow(entry, "seen recently"));
+  }
+  elements.presenceOffline.replaceChildren(offlineFragment);
+  elements.presenceCount.textContent = String(online.length);
+}
+
+function applyPresenceSnapshot(raw) {
+  const snapshot = raw && typeof raw === "object" ? raw : {};
+  state.presence = {
+    online: Array.isArray(snapshot.online) ? snapshot.online : [],
+    offline_recently: Array.isArray(snapshot.offline_recently) ? snapshot.offline_recently : [],
+  };
+  renderPresence();
+}
+
+function handleStreamError() {
+  const generation = state.streamGeneration;
+  const stream = state.stream;
+  if (state.expired) return;
+  if (stream && stream.readyState === 2) {
+    // EventSource gave up (CLOSED): the server refused the reconnection.
+    // Distinguish a rotated/invalidated session from a dead server with one
+    // boot probe, then settle into the matching terminal state.
     state.stream = null;
-  }
-  if (state.reconnectTimer !== null) {
-    window.clearTimeout(state.reconnectTimer);
-    state.reconnectTimer = null;
-  }
-}
-
-async function catchUp(version, signal) {
-  let cursor = state.lastSeq;
-
-  for (;;) {
-    const requestCursor = cursor;
-    const url = apiUrl(`/api/rooms/${encodeURIComponent(state.selectedRoomId)}/messages`, {
-      after: requestCursor,
-      limit: PAGE_SIZE,
-    });
-    const payload = await getJson(url, signal);
-    if (version !== state.roomLoadVersion) {
-      return;
-    }
-
-    const candidates = rawMessagesFrom(payload);
-    let validCount = 0;
-    for (const candidate of candidates) {
-      const message = normaliseMessage(candidate);
-      if (!message) {
-        continue;
-      }
-      validCount += 1;
-      cursor = Math.max(cursor, message.seq);
-      addMessage(message);
-    }
-
-    if (candidates.length > 0 && validCount === 0) {
-      throw new ViewerError("The server returned messages with an unexpected shape.");
-    }
-
-    const responseCursor = safeSequence(payload?.nextSeq ?? payload?.next_seq, true);
-    if (responseCursor !== null) {
-      cursor = Math.max(cursor, responseCursor);
-      state.lastSeq = Math.max(state.lastSeq, responseCursor);
-    }
-
-    if (candidates.length < PAGE_SIZE) {
-      break;
-    }
-    if (cursor <= requestCursor) {
-      throw new ViewerError("The message cursor did not advance.");
-    }
-  }
-}
-
-function reconnectDelay() {
-  const delay = Math.min(1_000 * 2 ** state.reconnectAttempt, MAX_RECONNECT_DELAY_MS);
-  state.reconnectAttempt += 1;
-  return delay;
-}
-
-function scheduleReconnect(version) {
-  if (version !== state.roomLoadVersion || state.reconnectTimer !== null) {
+    void getJson("/viewer/boot.json").then(
+      () => {
+        // The cookie is fine and the server answers: a transient drop —
+        // re-open the stream ourselves.
+        if (generation === state.streamGeneration) openStream();
+      },
+      (error) => {
+        if (generation !== state.streamGeneration) return;
+        if (error instanceof ViewerError && error.message === "expired") {
+          setConnectionState("expired");
+          showNotice("error", "The viewer session is no longer valid. Run “agent-room viewer rotate”, mint a new cookie via GET /viewer/auth, and reload.");
+        } else {
+          setConnectionState("unreachable");
+          showNotice("error", "The room server is unreachable. It will reconnect when the server answers; use Retry to try now.");
+        }
+      },
+    );
     return;
   }
-  setConnectionState("reconnecting", "Reconnecting…");
-  state.reconnectTimer = window.setTimeout(() => {
-    state.reconnectTimer = null;
-    if (version === state.roomLoadVersion) {
-      void resumeRoom();
-    }
-  }, reconnectDelay());
+  // readyState 0 (CONNECTING): EventSource is retrying on its own.
+  setConnectionState("reconnecting");
 }
 
-function openStream(version) {
-  if (version !== state.roomLoadVersion || !state.selectedRoomId) {
-    return;
-  }
+function openStream() {
+  if (!state.broadcastRoomId) return;
+  if (state.stream) state.stream.close();
+  state.streamGeneration += 1;
+  const generation = state.streamGeneration;
 
-  if (state.stream) {
-    state.stream.close();
-  }
-
-  const url = apiUrl(`/api/rooms/${encodeURIComponent(state.selectedRoomId)}/events`, {
-    after: state.lastSeq,
-  });
-  const stream = new EventSource(url);
+  // ONE stream for everything (DR-3): room-message events and presence
+  // snapshots ride the same text/event-stream response. The cookie rides
+  // automatically; there is nothing to append to this URL, ever.
+  const stream = new EventSource(`/viewer/api/rooms/${encodeURIComponent(state.broadcastRoomId)}/events`);
   state.stream = stream;
 
   stream.addEventListener("open", () => {
-    if (stream !== state.stream || version !== state.roomLoadVersion) {
-      return;
+    if (generation !== state.streamGeneration) return;
+    setConnectionState(state.messagesBySeq.size === 0 ? "empty" : "live");
+  });
+
+  stream.addEventListener("presence", (event) => {
+    if (generation !== state.streamGeneration) return;
+    try {
+      applyPresenceSnapshot(JSON.parse(event.data));
+    } catch {
+      // A malformed frame is skipped, not fatal: the next snapshot re-syncs.
     }
-    state.reconnectAttempt = 0;
-    setConnectionState("live", "Live");
   });
 
   stream.addEventListener("message", (event) => {
-    if (stream !== state.stream || version !== state.roomLoadVersion) {
-      return;
-    }
+    if (generation !== state.streamGeneration) return;
+    let raw;
     try {
-      const payload = JSON.parse(event.data);
-      const message = normaliseMessage(payload?.message || payload);
-      if (!message) {
-        throw new ViewerError("The live stream returned an unexpected message.");
-      }
-      if (addMessage(message)) {
-        renderMessages();
-      }
-      setConnectionState("live", "Live");
+      raw = JSON.parse(event.data);
     } catch {
-      stream.close();
-      if (stream === state.stream) {
-        state.stream = null;
-      }
-      showNotice("error", "A live update was unreadable. Reconnecting from the last message…");
-      scheduleReconnect(version);
-    }
-  });
-
-  stream.addEventListener("error", () => {
-    if (stream !== state.stream || version !== state.roomLoadVersion) {
       return;
     }
-    stream.close();
-    state.stream = null;
-    scheduleReconnect(version);
-  });
-}
-
-function errorMessage(error, fallback) {
-  return error instanceof ViewerError ? error.message : fallback;
-}
-
-async function openRoom(roomId) {
-  const room = state.rooms.find((candidate) => candidate.id === roomId);
-  if (!room) {
-    return;
-  }
-
-  state.roomLoadVersion += 1;
-  const version = state.roomLoadVersion;
-  state.requestController?.abort();
-  state.requestController = new AbortController();
-  closeStream();
-
-  state.selectedRoomId = room.id;
-  state.messageBySeq.clear();
-  state.lastSeq = 0;
-  sessionSet(SELECTED_ROOM_KEY, room.id);
-  renderRooms();
-  elements.conversationHeading.textContent = room.title;
-  elements.conversationCursor.textContent = "Loading messages…";
-  elements.messageList.replaceChildren();
-  showNotice("loading", "Loading messages…");
-  setConnectionState("reconnecting", "Connecting…");
-  setBusy(true);
-
-  try {
-    await catchUp(version, state.requestController.signal);
-    if (version !== state.roomLoadVersion) {
-      return;
-    }
-    renderMessages({ forceBottom: true });
-    setConnectionState("caught-up", "Caught up");
-    openStream(version);
-  } catch (error) {
-    if (error?.name === "AbortError" || version !== state.roomLoadVersion) {
-      return;
-    }
-    setConnectionState("error", "Needs retry");
-    showNotice("error", errorMessage(error, "Could not load this room."));
-  } finally {
-    if (version === state.roomLoadVersion) {
-      setBusy(false);
-    }
-  }
-}
-
-async function resumeRoom() {
-  if (!state.selectedRoomId) {
-    await loadRooms();
-    return;
-  }
-
-  state.roomLoadVersion += 1;
-  const version = state.roomLoadVersion;
-  state.requestController?.abort();
-  state.requestController = new AbortController();
-  closeStream();
-  setBusy(true);
-  setConnectionState("reconnecting", "Reconnecting…");
-  hideNotice();
-
-  try {
-    await catchUp(version, state.requestController.signal);
-    if (version !== state.roomLoadVersion) {
-      return;
-    }
+    const seq = safeSequence(raw?.seq);
+    const text = typeof raw?.text === "string" ? raw.text : null;
+    if (seq === null || text === null || state.messagesBySeq.has(seq)) return;
+    state.messagesBySeq.set(seq, {
+      seq,
+      text,
+      chatId: safeText(raw.chat_id, "unknown"),
+      createdAt: safeText(raw.created_at, ""),
+    });
     renderMessages();
-    setConnectionState("caught-up", "Caught up");
-    openStream(version);
-  } catch (error) {
-    if (error?.name === "AbortError" || version !== state.roomLoadVersion) {
-      return;
-    }
-    setConnectionState("error", "Needs retry");
-    showNotice("error", errorMessage(error, "Could not reconnect to this room."));
-  } finally {
-    if (version === state.roomLoadVersion) {
-      setBusy(false);
-    }
-  }
-}
+  });
 
-async function loadRooms() {
-  state.requestController?.abort();
-  state.requestController = new AbortController();
-  closeStream();
-  setBusy(true);
-  setConnectionState("reconnecting", "Connecting…");
-  showNotice("loading", "Loading rooms…");
-
-  try {
-    const payload = await getJson(apiUrl("/api/rooms"), state.requestController.signal);
-    state.rooms = normaliseRooms(payload);
-
-    const savedRoomId = sessionGet(SELECTED_ROOM_KEY);
-    const selected = state.rooms.find((room) => room.id === savedRoomId) || state.rooms[0] || null;
-    state.selectedRoomId = selected?.id || null;
-    renderRooms();
-
-    if (!selected) {
-      state.messageBySeq.clear();
-      state.lastSeq = 0;
-      elements.conversationHeading.textContent = "No room selected";
-      elements.conversationCursor.textContent = "No rooms available";
-      elements.messageList.replaceChildren();
-      showNotice("empty", "No rooms are available yet.");
-      setConnectionState("caught-up", "Caught up");
-      return;
-    }
-
-    await openRoom(selected.id);
-  } catch (error) {
-    if (error?.name === "AbortError") {
-      return;
-    }
-    setConnectionState("error", "Needs retry");
-    showNotice("error", errorMessage(error, "Could not load rooms."));
-  } finally {
-    setBusy(false);
-  }
-}
-
-function handleRoomListKeys(event) {
-  const buttons = [...elements.roomList.querySelectorAll("button")];
-  if (buttons.length === 0) {
-    return;
-  }
-
-  const currentIndex = buttons.indexOf(document.activeElement);
-  let targetIndex = null;
-  if (event.key === "ArrowDown" || event.key === "ArrowRight") {
-    targetIndex = currentIndex < 0 ? 0 : (currentIndex + 1) % buttons.length;
-  } else if (event.key === "ArrowUp" || event.key === "ArrowLeft") {
-    targetIndex = currentIndex <= 0 ? buttons.length - 1 : currentIndex - 1;
-  } else if (event.key === "Home") {
-    targetIndex = 0;
-  } else if (event.key === "End") {
-    targetIndex = buttons.length - 1;
-  }
-
-  if (targetIndex !== null) {
-    event.preventDefault();
-    buttons[targetIndex].focus();
-  }
+  stream.addEventListener("error", handleStreamError);
 }
 
 async function initialise() {
-  state.token = readTokenAndCleanAddress();
-  if (!state.token) {
-    setBusy(false);
-    setConnectionState("error", "Token required");
-    showNotice("error", "Open this viewer with a ?token=… link from agent-roomd.");
-    return;
+  setConnectionState("loading");
+  try {
+    state.broadcastRoomId = await loadBoot();
+    openStream();
+  } catch (error) {
+    if (error instanceof ViewerError && error.message === "expired") {
+      state.expired = true;
+      setConnectionState("expired");
+      showNotice("error", "The viewer session is no longer valid. Run “agent-room viewer rotate”, mint a new cookie via GET /viewer/auth, and reload.");
+    } else {
+      setConnectionState("unreachable");
+      showNotice("error", "The room server is unreachable. It reported no status — retrying keeps trying.");
+    }
   }
-  await loadRooms();
 }
 
 elements.retryButton.addEventListener("click", () => {
-  if (state.busy || !state.token) {
-    return;
-  }
-  void (state.selectedRoomId ? resumeRoom() : loadRooms());
-});
-
-elements.roomList.addEventListener("keydown", handleRoomListKeys);
-
-window.addEventListener("online", () => {
-  if (!state.busy && state.token && state.selectedRoomId && elements.connectionStatus.dataset.state !== "live") {
-    void resumeRoom();
-  }
+  state.expired = false;
+  setConnectionState("reconnecting");
+  void initialise();
 });
 
 window.addEventListener("pagehide", () => {
-  state.requestController?.abort();
-  closeStream();
+  if (state.stream) state.stream.close();
+  state.stream = null;
 });
 
 void initialise();

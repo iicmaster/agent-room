@@ -132,6 +132,7 @@ import { runInviteFamilyCommand } from './invite-commands.mjs'
 import { runRemoteFamilyCommand } from './remote-commands.mjs'
 import { runBanFamilyCommand } from './ban-commands.mjs'
 import { runCapacityFamilyCommand } from './capacity-commands.mjs'
+import { runViewerFamilyCommand } from './viewer-commands.mjs'
 
 const OK_STATUS = 200
 // The collision status is owned by the constants table (chat_id_taken), never restated.
@@ -393,6 +394,18 @@ Commands:
       nothing is ever deleted to free space. See
       docs/self-hosting-storage.md for backup, restore, and disk expansion.
 
+  agent-room viewer rotate
+      Rotate the viewer credential — the Bearer secret the read-only web
+      viewer's auth bridge (GET /viewer/auth) exchanges for its HttpOnly
+      cookie. Run this on the SERVER HOST. Prints ONE JSON line on stdout
+      carrying the NEW credential, shown exactly once (the invite-mint
+      pattern): present it as an "Authorization: Bearer" header to
+      GET /viewer/auth to mint a fresh viewer session. Every previous
+      credential stops minting and every cookie already minted under it is
+      invalid at its next presentation — a running server picks the rotation
+      up at next request without a restart. No secret ever travels in a URL:
+      the viewer is opened at /viewer/ and authenticates entirely by cookie.
+
   agent-room remote set <https-url>
       Point this installation at a remote agent-room server (Remote Mode).
       The URL must be https:// with a hostname — plaintext (http://) remote
@@ -595,14 +608,16 @@ export async function main(argv = process.argv.slice(2), {
   // this printer. (Capacity's refuse state keeps its report on stdout and
   // exits 1 through the outcome's exitCode — the report IS the answer, and
   // the exit code is the severity a script keys on.)
-  if (command === 'invite' || command === 'remote' || command === 'ban' || command === 'unban' || command === 'capacity') {
+  if (command === 'invite' || command === 'remote' || command === 'ban' || command === 'unban' || command === 'capacity' || command === 'viewer') {
     const outcome = command === 'invite'
       ? await runInviteFamilyCommand(subcommand, argv.slice(2), deps)
       : command === 'remote'
         ? await runRemoteFamilyCommand(subcommand, argv.slice(2), deps)
         : command === 'capacity'
           ? await runCapacityFamilyCommand(command, argv.slice(1), deps)
-          : await runBanFamilyCommand(command, argv.slice(1), deps)
+          : command === 'viewer'
+            ? await runViewerFamilyCommand(subcommand, argv.slice(2), deps)
+            : await runBanFamilyCommand(command, argv.slice(1), deps)
     if (outcome.status === 'ok') {
       for (const line of outcome.lines) output.write(`${line}\n`)
       if (outcome.exitCode === 1) process.exitCode = 1

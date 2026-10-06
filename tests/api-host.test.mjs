@@ -1004,20 +1004,18 @@ test('a pre-1.3 v2 store (no realms table, NOT NULL creator) converges on open a
 test('startup enforces the implemented-flag contract in both directions', async t => {
   const dataDir = makeDataDir(t)
 
-  // A registered handler on a route without the implemented mark fails
-  // startup — a live handler the wire contract does not promise. (Every
-  // pre-auth and actor-class route is live now — /api/auth/enroll since
-  // Story 4.2 — so the probe rides the still unimplemented viewer class's
-  // auth bridge, which touches no live handler.)
-  const removeViewerAuth = registerHandler('GET /viewer/auth', () => ({}))
-  try {
-    await assert.rejects(
-      () => startServer({ dataDir }),
-      error => error?.code === 'invalid_argument' && /not marked implemented/.test(error.message),
-    )
-  } finally {
-    removeViewerAuth()
+  // Direction one — a registered handler on a route without the implemented
+  // mark — has been structurally satisfied out of existence since Stories
+  // 5.1+5.2 landed the viewer surface: every route in the frozen table is
+  // now live, and registerHandler refuses any key the table does not hold,
+  // so an unmarked live handler can no longer even be constructed. The
+  // enforcement code remains; the pin below asserts the completed state it
+  // now guards (every frozen route marked and registered), and direction
+  // two still proves the startup check actually runs.
+  for (const route of ROUTE_TABLE) {
+    assert.equal(route.implemented, true, `${route.method} ${route.path} should be marked implemented`)
   }
+  await startServer({ dataDir }).then(server => server.close())
 
   // A marked route without a registered handler fails startup the other way.
   // Re-registering with a stand-in and dropping it unregisters the module's

@@ -6,6 +6,17 @@ All notable changes to Agent Room are documented in this file.
 
 ### Added
 
+- The read-only web viewer (Stories 5.1 + 5.2): `GET /viewer/auth` exchanges the operator's
+  viewer token (Bearer) for an `HttpOnly; SameSite=Strict; Path=/viewer` session cookie whose
+  value is an independent 256-bit random secret — no credential ever travels in a URL, a query
+  string, or a log; `agent-room viewer rotate` replaces the token and every outstanding cookie
+  is invalid at its next request, no restart needed. The cookie-authenticated live view at
+  `/viewer/` renders the Broadcast Room and the presence list from ONE server-sent-events
+  stream (`/viewer/api/rooms/:id/events`) carrying message and presence events — a committed
+  message appears within the 5 s freshness bound, a dropped stream resumes by `Last-Event-ID`
+  with exact replay, Direct Rooms are refused by construction, and every response carries the
+  strict CSP (no inline script, no framing, no referrer). The viewer token bounds, cookie
+  name/path, and registry capacity are declared in the constants module.
 - The v0.2 MCP tool surface over a loopback HTTP server: `room_presence` (online and
   offline-recently agents), `room_direct_open` (pair rooms by Chat ID, with
   `ambiguous_chat_id` + `target_fingerprint` disambiguation), `message_send` (idempotent

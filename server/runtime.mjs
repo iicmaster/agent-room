@@ -15,7 +15,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { homedir, platform } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 
-import { DISPLAY_NAME_MAX, IDENTIFIER_MAX, STATE_FILE_MAX_BYTES } from './constants.mjs'
+import { DISPLAY_NAME_MAX, IDENTIFIER_MAX, STATE_FILE_MAX_BYTES, VIEWER_TOKEN_PATTERN } from './constants.mjs'
 
 export const APP_VERSION = '0.1.0'
 export const DAEMON_PROTOCOL_VERSION = 1
@@ -194,13 +194,24 @@ export function loadOrCreateIdentity(dataDir, suggestedName = 'agent') {
   return read()
 }
 
+// The viewer credential file (0600, shared data dir): the Bearer credential
+// GET /viewer/auth exchanges for the HttpOnly viewer cookie (Story 5.1).
+// loadOrCreateViewerToken creates it on first need; rotateViewerToken is the
+// operator's rotation path (Story 5.1's FR-18 rotation clause) — it atomically
+// replaces the file with a FRESH random token and returns it. Both paths read
+// back through the same validated reader, so the pattern in constants.mjs is
+// the one gate (never restated here). The HTTP surface never creates or
+// rewrites this file: the server side reads it per request through the
+// read-only reader in server/api/viewer.mjs, which is exactly why a rotation
+// committed by the operator CLI process is visible to a running server at the
+// next mint or cookie presentation.
 export function loadOrCreateViewerToken(dataDir) {
   const directory = ensurePrivateDirectory(dataDir)
   const path = join(directory, 'viewer-token')
   const read = () => {
     regularPrivateFile(path, 4096)
     const token = readFileSync(path, 'utf8').trim()
-    if (!/^[A-Za-z0-9_-]{32,256}$/.test(token)) {
+    if (!VIEWER_TOKEN_PATTERN.test(token)) {
       throw new AgentRoomRuntimeError('viewer_token_invalid', 'agent-room viewer token is invalid')
     }
     return token
@@ -218,6 +229,29 @@ export function loadOrCreateViewerToken(dataDir) {
     if (error?.code !== 'EEXIST') throw error
   }
   return read()
+}
+
+// Story 5.1: the rotation path. The existing file (when present) must be a
+// bounded regular non-symlink file before anything touches it; the fresh
+// token is written to a temporary file in the same directory and renamed over
+// the target, so a reader on the other side of the rename sees either the
+// whole old token or the whole new one — never a torn read — and the
+// directory's 0700 discipline keeps the temporary invisible. Like creation,
+// the file lands at 0600 regardless of umask. A rotation the operator runs
+// while the server is up invalidates every outstanding viewer cookie at its
+// next presentation (the bridge re-reads the file per request) and every old
+// token at its next mint.
+export function rotateViewerToken(dataDir) {
+  const directory = ensurePrivateDirectory(dataDir)
+  const path = join(directory, 'viewer-token')
+  if (existsSync(path)) regularPrivateFile(path, 4096)
+  const temporary = join(directory, `.viewer-token.${randomUUID()}.tmp`)
+  const token = randomBytes(32).toString('base64url')
+  writeFileSync(temporary, `${token}\n`, { flag: 'wx', mode: 0o600 })
+  chmodSync(temporary, 0o600)
+  renameSync(temporary, path)
+  chmodSync(path, 0o600)
+  return token
 }
 
 export function sanitizeDisplayName(value) {

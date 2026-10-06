@@ -227,8 +227,10 @@ test('the implemented mark covers exactly the live frozen routes', () => {
   // conversation surface (POST /api/rooms/direct and the messages pair) in
   // 1.7, the enumeration read (GET /api/rooms) in Story 2.2, the remote
   // challenge pair (POST /api/auth/challenge, POST /api/auth/answer) in
-  // Story 4.1, and the invite-gated enrollment route
-  // (POST /api/auth/enroll) in Story 4.2; later stories extend additively.
+  // Story 4.1, the invite-gated enrollment route (POST /api/auth/enroll) in
+  // Story 4.2, and the whole viewer surface — the auth bridge, the static
+  // live view, the broadcast read, and the SSE stream — in Stories 5.1+5.2;
+  // with Epic 5's viewer stories landed every frozen route is live.
   const implemented = ROUTE_TABLE.filter(route => route.implemented === true)
   assert.deepEqual(implemented.map(routeKey), [
     'POST /api/session',
@@ -244,8 +246,24 @@ test('the implemented mark covers exactly the live frozen routes', () => {
     'POST /api/auth/challenge',
     'POST /api/auth/answer',
     'POST /api/auth/local',
+    'GET /viewer/auth',
+    'GET /viewer/',
+    'GET /viewer/api/rooms/:id/messages',
+    'GET /viewer/api/rooms/:id/events',
     'GET /health',
   ])
+  // Story 5.1: the viewer surface takes NO credential field anywhere — the
+  // bridge's Bearer rides the Authorization header, the cookie rides
+  // Set-Cookie, and an empty request-field set makes a query-string
+  // credential structurally impossible (any query key is unknown_field).
+  const viewerAuth = ROUTE_TABLE.find(route => routeKey(route) === 'GET /viewer/auth')
+  const viewerSurface = ROUTE_TABLE.find(route => routeKey(route) === 'GET /viewer/')
+  const viewerEvents = ROUTE_TABLE.find(route => routeKey(route) === 'GET /viewer/api/rooms/:id/events')
+  assert.deepEqual([...viewerAuth.requestFields], [])
+  assert.deepEqual([...viewerSurface.requestFields], [])
+  assert.deepEqual([...viewerEvents.requestFields], [])
+  const viewerMessages = ROUTE_TABLE.find(route => routeKey(route) === 'GET /viewer/api/rooms/:id/messages')
+  assert.deepEqual([...viewerMessages.requestFields], ['after_seq', 'limit'])
   const local = ROUTE_TABLE.find(route => routeKey(route) === 'POST /api/auth/local')
   assert.deepEqual([...local.requestFields], ['public_key'])
   // Story 4.1: identity binds at challenge — the challenge takes exactly the

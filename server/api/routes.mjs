@@ -101,10 +101,26 @@ export const ROUTE_TABLE = Object.freeze([
 
   // viewer (AD-8): GET /viewer/auth · GET /viewer/ + static assets ·
   // GET /viewer/api/rooms/:id/messages · GET /viewer/api/rooms/:id/events (SSE)
-  Object.freeze({ method: 'GET', path: '/viewer/auth', class: 'viewer', requestFields: Object.freeze([]) }),
-  Object.freeze({ method: 'GET', path: '/viewer/', class: 'viewer', wildcard: true, requestFields: Object.freeze([]) }),
-  Object.freeze({ method: 'GET', path: '/viewer/api/rooms/:id/messages', class: 'viewer', requestFields: Object.freeze(['after_seq', 'limit']) }),
-  Object.freeze({ method: 'GET', path: '/viewer/api/rooms/:id/events', class: 'viewer', requestFields: Object.freeze([]) }),
+  //
+  // Stories 5.1 + 5.2: the whole viewer surface is live (handlers in
+  // server.mjs, mechanisms in viewer.mjs). /viewer/auth is the Bearer→cookie
+  // bridge: the auth stage passes it through the viewer verifier and the
+  // handler performs the one credential check it exists for (the pre-auth
+  // discipline — the presented viewer token mints an HttpOnly,
+  // SameSite=Strict, Path=/viewer session cookie; a query-string credential
+  // is structurally impossible with the empty field set below). Every other
+  // viewer route authenticates by that cookie via the real cookie verifier
+  // in the pipeline's viewer slot; session tokens and Bearer viewer tokens
+  // authenticate nothing there. The wildcard serves the whitelisted static
+  // live view plus the generated /viewer/boot.json descriptor (Broadcast
+  // Room id only); the two /viewer/api/rows read the Broadcast Room through
+  // the store's broadcast-only read (DM exclusion by construction), and the
+  // events route is the ONE SSE stream carrying room-message events and
+  // presence snapshots (DR-3).
+  Object.freeze({ method: 'GET', path: '/viewer/auth', class: 'viewer', implemented: true, requestFields: Object.freeze([]) }),
+  Object.freeze({ method: 'GET', path: '/viewer/', class: 'viewer', wildcard: true, implemented: true, requestFields: Object.freeze([]) }),
+  Object.freeze({ method: 'GET', path: '/viewer/api/rooms/:id/messages', class: 'viewer', implemented: true, requestFields: Object.freeze(['after_seq', 'limit']) }),
+  Object.freeze({ method: 'GET', path: '/viewer/api/rooms/:id/events', class: 'viewer', implemented: true, requestFields: Object.freeze([]) }),
 
   // health (AD-8): GET /health — live since Story 1.3.
   Object.freeze({ method: 'GET', path: '/health', class: 'health', implemented: true, requestFields: Object.freeze([]) }),

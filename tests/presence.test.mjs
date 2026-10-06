@@ -753,9 +753,12 @@ test('viewer activity never creates or refreshes presence; an authenticated requ
 
   nowRef.now += 60 * 1000
   for (let index = 0; index < 3; index += 1) {
-    const viewerRequest = await request(server.port, 'GET', '/viewer/auth')
-    // The viewer verifier ran and accepted (the unregistered viewer route
-    // answers 404 after the auth gate, never 401) — and touched nothing.
+    // Since Stories 5.1+5.2 the viewer routes are all live, so the probe
+    // rides a NON-ASSET path under the registered wildcard: the viewer
+    // verifier ran and accepted (the wildcard answers route_not_found for a
+    // name it does not serve, after the auth gate, never 401) — and touched
+    // nothing.
+    const viewerRequest = await request(server.port, 'GET', '/viewer/not-a-viewer-asset')
     assert.equal(viewerRequest.status, 404)
     assert.equal(viewerRequest.json().error.code, 'route_not_found')
   }

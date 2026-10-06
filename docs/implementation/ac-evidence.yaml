@@ -1323,3 +1323,72 @@
     evidence:
       - test: "the remote dress rehearsal: two identity sandboxes run the full governance flow over real TLS with zero local-token requests, and multi-client churn holds the FD corridor with zero leaks"
         file: "tests/drills/remote-dress-rehearsal.test.mjs"
+
+  5.1:                       # Viewer auth bridge (HCI-5) (2 criteria)
+    note: >-
+      Proves the bridge end to end: the minted cookie's exact flags, the
+      structural impossibility of a query-string credential (empty frozen
+      field sets), class isolation in BOTH directions (viewer token/cookie
+      never authenticate an actor route; session tokens never authenticate a
+      viewer route), GET-only by the frozen table, the no-secrets-in-logs
+      scan over a real cross-process journey, no-referrer on the wire, and
+      rotation (CLI receipt, file swap, old-token and old-cookie death at
+      next request, new-token re-mint) without a restart. Does NOT prove
+      browser cookie handling itself (a real browser is Epic 6's REL-1
+      evidence), the Secure-attribute question behind a TLS proxy (4.7's
+      lane), or anything about an ALREADY-OPEN stream after rotation beyond
+      the documented at-next-request discipline.
+    evidence:
+      - test: "the auth bridge mints an HttpOnly SameSite=Strict path-scoped cookie from the Bearer viewer token"
+        file: "tests/viewer.test.mjs"
+      - test: "the viewer token and the cookie are valid on no other route class, and session tokens never authenticate viewer routes"
+        file: "tests/viewer.test.mjs"
+      - test: "no credential ever appears in a query string, a log, or a referrer-leaking link"
+        file: "tests/viewer.test.mjs"
+      - test: "the operator rotates the viewer token: the new token mints, the old token cannot, and every old cookie dies at next request"
+        file: "tests/viewer.test.mjs"
+      - test: "no credential ever rides a URL: the viewer reads no token and builds no query string"
+        file: "tests/web-assets.test.mjs"
+      - test: "session tokens never authenticate viewer routes"
+        file: "tests/local-auth.test.mjs"
+
+  5.2:                       # Live room & presence view (2 criteria)
+    note: >-
+      Proves the live view over real HTTP: one SSE stream carrying both
+      room-message events and presence snapshots (no second feed, no client
+      polling — the server-side wake loop is the long-poll read's bounded
+      re-poll pattern), with every FR-18 state exercised by a
+      trigger-and-assert row (authenticated, loading, empty, online,
+      offline-recently, unreachable, reconnecting-with-Last-Event-ID-replay,
+      token-rotation), the measured sub-5 s delivery of a committed message,
+      the strict CSP on every viewer response (HTML, JSON, and the stream)
+      with hostile text arriving only as data, and DM exclusion by
+      construction (store-level readBroadcastPage plus the wire refusals and
+      the stream). Does NOT prove the browser executing the state machine
+      (pinned by the asset-contract greps; a real browser session is REL-1's
+      evidence) nor multi-hour stream endurance (Epic 6's soak).
+    evidence:
+      - test: "an authenticated viewer session renders the static live view, the boot descriptor, and ONE stream (authenticated)"
+        file: "tests/viewer.test.mjs"
+      - test: "loading then empty: the stream opens with a presence snapshot and an empty room sends no message events"
+        file: "tests/viewer.test.mjs"
+      - test: "online and offline-recently ride the same stream as the room"
+        file: "tests/viewer.test.mjs"
+      - test: "a committed message renders through the stream within the 5 s freshness bound"
+        file: "tests/viewer.test.mjs"
+      - test: "all text renders inert: the strict CSP is on every viewer response and hostile text arrives only as data"
+        file: "tests/viewer.test.mjs"
+      - test: "Direct Rooms never appear in the viewer: the refusal is the same room_not_found a nonexistent id answers"
+        file: "tests/viewer.test.mjs"
+      - test: "unreachable, reconnecting, and replay: a dropped stream resumes by Last-Event-ID without losing a message"
+        file: "tests/viewer.test.mjs"
+      - test: "token-rotation: the old cookie cannot open anything after rotation, and the new token reopens the room"
+        file: "tests/viewer.test.mjs"
+      - test: "the viewer follows one SSE stream carrying room and presence events"
+        file: "tests/web-assets.test.mjs"
+      - test: "viewer communicates the full FR-18 state set"
+        file: "tests/web-assets.test.mjs"
+      - test: "untrusted room and message data never enters an HTML sink"
+        file: "tests/web-assets.test.mjs"
+      - test: "the viewer carries the restrictive CSP in the document and renders only read-only GET transports"
+        file: "tests/web-assets.test.mjs"
