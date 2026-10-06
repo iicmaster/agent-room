@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 09-21-2026 08:52
-last_updated: '10-06-2026 (Story 5.3 closed — Epic 5 complete)'
+last_updated: '09-29-2026 13:10'
 project: agent-room
 project_key: NOKEY
 tracking_system: file-system
@@ -78,7 +78,7 @@ development_status:
   5-1-viewer-auth-bridge-hci-5: done
   5-2-live-room-presence-view: done
   5-3-remote-exposure-check: done
-  epic-5-retrospective: optional
+  epic-5-retrospective: done
 
   epic-6: backlog
   6-1-rel-1-the-cross-everything-demonstration: backlog
@@ -222,3 +222,24 @@ action_items:
     owner: "Story 6.3"
     status: open
     ref: "docs/implementation/epic-4-retro-2026-09-29.md"
+  - id: "epic-5-retro-item-20-workflow-unattended-proof-phases-8-10-th"
+    epic: 5
+    action: "Workflow unattended proof phases 8-10 — third carry; run during a stable
+      provider window"
+    owner: "orchestrator"
+    status: open
+    ref: "docs/implementation/epic-5-retro-2026-09-29.md"
+  - id: "epic-5-retro-item-21-cookie-lifetime-question-session-vs-pers"
+    epic: 5
+    action: "Cookie lifetime question (session vs persistent) is a product question
+      for real viewer use"
+    owner: "Epic 6 / post-launch"
+    status: open
+    ref: "docs/implementation/epic-5-retro-2026-09-29.md"
+  - id: "epic-5-retro-item-22-the-viewer-exposure-zero-preview-scan-pa"
+    epic: 5
+    action: "The viewer-exposure zero-preview scan pattern should guard any future
+      unauthenticated surface"
+    owner: "future surfaces"
+    status: open
+    ref: "docs/implementation/epic-5-retro-2026-09-29.md"
