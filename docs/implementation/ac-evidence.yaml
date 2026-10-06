@@ -1313,8 +1313,13 @@
 
   4.8:                       # Remote churn & the dress rehearsal *(blocking gate — ruling Q3)*
     note: >-
-      TODO — the epic's blocking gate. Record what the randomized remote churn
-      proves once it runs, and what it does not.
+      Proves Epic 4's whole governance chain composed over real HTTPS with zero
+      local-token requests: invite mint → challenge enrollment → second-use
+      refusal → second enrollment → rate-gated DM/broadcast exchange (with an
+      explicit burst probe hitting rate_limited then succeeding) → operator ban
+      terminating B's sends and in-flight long-poll within the window →
+      multi-client churn holding the FD corridor. Does NOT prove physical
+      cross-machine wire behaviour (Epic 6's REL-1) or multi-hour soak (6.3).
     evidence:
-      - test: "TODO exact test name"
-        file: "tests/example.test.mjs"
+      - test: "the remote dress rehearsal: two identity sandboxes run the full governance flow over real TLS with zero local-token requests, and multi-client churn holds the FD corridor with zero leaks"
+        file: "tests/drills/remote-dress-rehearsal.test.mjs"
