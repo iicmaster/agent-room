@@ -1443,6 +1443,60 @@
 # REL-3's formal soak pin the candidate this story froze), so the epic-level
 # sweep stays loud on those two until they carry their own evidence.
 
+  6.2:                       # REL-3 — the formal soak (IN FLIGHT: the 8-hour run
+                             # is launched detached; its results land in
+                             # docs/release-evidence/v0.2.0-soak-results.{json,md}
+                             # when it settles, and this entry's note is finalized
+                             # then — do not mark the story done before reading them)
+    note: >-
+      IN FLIGHT. Proves the soak HARNESS end to end at compressed scale while
+      the formal 8-hour run executes (the harness and its rule evaluations
+      are what a red suite can and should prove now; the endurance verdict
+      itself can only come from the settled 8-hour run): the standalone
+      runner (tests/soak/rel3-soak.mjs — a long-runner, deliberately not a
+      node:test file) materializes the frozen RC by the candidate record's
+      own packager invocation, proves its identity under the
+      candidate-immutability law BEFORE any spawn (frozen-digest compare;
+      on drift, a git runtime-identity proof that every packaged EXECUTING
+      input is byte-identical to the candidate commit — recorded finding: the
+      freeze digests became unreproducible when the 6.3 closeout extended
+      CHANGELOG.md after the digests were written, server/ byte-identical, so
+      the run proceeds as runtime-pinned-docs-drift with the drift recorded),
+      spawns the RC's own server child plus four concurrent MCP children of
+      the SAME artifact (distinct keypairs, converging DM ring + broadcast =
+      5 rooms), runs the defined traffic profile (1 msg/10 s per room +-20%
+      with rotating senders, periodic bursts, the payload ramp to the
+      ARTIFACT's own MESSAGE_TEXT_MAX — 32 KiB as ASCII — holding at the cap
+      from the halfway point, full-client reconnect cycles that must re-bind
+      the SAME Chat ID and fingerprint, cursor-advancing reads), samples
+      RSS/FD through the Story 2.4 harness's external samplers, journals
+      every ack to the external REL-2 recorder, records the REL-4
+      idle-footprint counter-metric (0-Actor floor at start/reconnects/end
+      plus post-resume settled samples — reported, never gated), drains and
+      byte-verifies every room at the end (contiguity from 1, acked ==
+      readable, zero duplicates, foreign rows unwrapped from the literal v1
+      envelope), re-digests the artifact (unchanged by the run), and
+      evaluates THE SINGLE PASS RULE exactly as ratified: the total-growth
+      bound (endRSS − startRSS_of_window)/startRSS ≤ 0.02 over the final four
+      hours (the final half of the wall duration), plus the regression's
+      implied growth under the same bound — the Story 2.4 per-second rate is
+      reported beside the gate and never gates (the advisor review's
+      correction of the brief's "%/s" unit slip). The compressed validation
+      test drives the same runner at 5 minutes into a temporary parent and
+      asserts the mechanics: verdict pass under the same bounds, identity
+      verdict allowed, four distinct keypairs, bursts and reconnects on the
+      compressed schedule, zero loss, REL-4 recorded, both evidence files
+      written 0600. Does NOT (yet) prove the 8-hour endurance itself — that
+      is the detached run's verdict, landing in
+      docs/release-evidence/v0.2.0-soak-results.json; does not prove REL-1's
+      physical demonstration (6.1), the kill path (2.5's drill — the soak
+      deliberately never restarts the server), or the rate gates' refusal
+      behavior (4.4's suite; the soak raises the operator floors by the REL-2
+      precedent so the profile's own point is what is exercised).
+    evidence:
+      - test: "REL-3 compressed validation: the soak harness runs the candidate artifact green on a 5-minute compressed profile"
+        file: "tests/soak/rel3-soak.test.mjs"
+
   6.3:                       # Release packaging & client smoke tests (2 criteria)
     note: >-
       Proves the SHIPPABLE thing, not the repo tree: both packages materialize

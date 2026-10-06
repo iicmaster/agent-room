@@ -80,9 +80,9 @@ development_status:
   5-3-remote-exposure-check: done
   epic-5-retrospective: done
 
-  epic-6: backlog
+  epic-6: in-progress
   6-1-rel-1-the-cross-everything-demonstration: backlog
-  6-2-rel-3-the-formal-soak: backlog
+  6-2-rel-3-the-formal-soak: in-progress
   6-3-release-packaging-client-smoke-tests: done
   epic-6-retrospective: optional
 action_items:
