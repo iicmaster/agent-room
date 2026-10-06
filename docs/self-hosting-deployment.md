@@ -217,6 +217,7 @@ re-enrollment** — and re-binds its Chat ID.
 | `agent-room remote enroll` answers `rate_limited` | More than 5 enrollment attempts in a minute from one address (the route's admission gate) | Wait a minute and retry the same token; the refused attempts consumed nothing |
 | `agent-room remote enroll` refuses with "no remote server is configured" | No origin yet on this installation | `agent-room remote set https://…` first (§5), then enroll |
 | The server prints `agent-room-server: advisory: this server is about to bind a non-loopback host …` | A public realm is launching on the **default** shared data dir | Stop, set `AGENT_ROOM_DATA_DIR` to a dedicated directory (§1), start again — one process, one realm, one data dir |
+| A v0.1 data directory fails at first boot with a SQLite disk/full error during the **one-time upgrade** (the startup failure names the store, and the file's `user_version` is still 1) | The v1→v2 upgrade re-sequences and reshapes the whole database inside one `BEGIN IMMEDIATE` transaction (index rebuilds included), and the volume ran out of space mid-copy | Free disk space (at least the storage reserves' worth — see `docs/self-hosting-storage.md` for the reserves and the `AGENT_ROOM_STORAGE_*` knobs), then start again. Nothing partial persists: the transaction rolled back, the file is still v1 and byte-untouched, and the retry re-runs the same single transaction (Story 2.3's idempotency proof) |
 
 ## 9. The per-path evidence checklist
 

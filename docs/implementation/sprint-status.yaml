@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 09-21-2026 08:52
-last_updated: '09-29-2026 13:10'
+last_updated: '10-06-2026 01:20'
 project: agent-room
 project_key: NOKEY
 tracking_system: file-system
@@ -83,7 +83,7 @@ development_status:
   epic-6: backlog
   6-1-rel-1-the-cross-everything-demonstration: backlog
   6-2-rel-3-the-formal-soak: backlog
-  6-3-release-packaging-client-smoke-tests: backlog
+  6-3-release-packaging-client-smoke-tests: done
   epic-6-retrospective: optional
 action_items:
   - id: "epic-1-retro-item-1-add-a-per-epic-ac-sweep-to-the-build-loo"
@@ -220,7 +220,7 @@ action_items:
     action: "Deploy guide gains the upgrade-time index-rebuild-on-full-disk failure-mode
       row"
     owner: "Story 6.3"
-    status: open
+    status: done
     ref: "docs/implementation/epic-4-retro-2026-09-29.md"
   - id: "epic-5-retro-item-20-workflow-unattended-proof-phases-8-10-th"
     epic: 5

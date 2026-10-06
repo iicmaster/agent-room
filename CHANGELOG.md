@@ -6,6 +6,26 @@ All notable changes to Agent Room are documented in this file.
 
 ### Added
 
+- The release gate and the frozen v0.2 candidate (Story 6.3): a new suite gate
+  (`tests/release-smoke.test.mjs`) that judges only the MATERIALIZED release
+  artifact — the dual packages are proven to materialize deterministically, the
+  materialized Claude Code package passes the real `claude plugin validate
+  --strict`, each claimed client's smoke installs a fresh copy of the
+  materialized artifact into an emulated host plugin directory (resolving the
+  installed manifest against its frozen `${CLAUDE_PLUGIN_ROOT}` /
+  `${CLAUDE_PLUGIN_DATA}` and `${PLUGIN_ROOT}` / `${PLUGIN_DATA}` contract),
+  performs the real one-time `agent-room setup` Chat ID choice from the
+  installed tree, and completes a full DM round-trip through the installed
+  entrypoint — plus the SM-C1 re-measurement on five fresh installs: zero
+  failures, the step delta exactly the two Chat ID choices, and the ladder
+  with those choices priced out at 0.264 s mean versus v0.1's 0.352 s anchor
+  (raw mean 0.459 s). The candidate is frozen in
+  `docs/release-evidence/v0.2.0-candidate.json` (commit, both package SHA-256
+  tree digests, Node/SQLite versions) for the soak and the REL-1 demonstration
+  to pin; the release notes live in `docs/release-notes-v0.2.md` (the one-time
+  v1→v2 cursor reset, the SM-C1 numbers, the claimed-clients table). The
+  self-hosting deployment guide's failure-mode table gains the upgrade-time
+  index-rebuild-on-full-disk row.
 - The read-only web viewer (Stories 5.1 + 5.2): `GET /viewer/auth` exchanges the operator's
   viewer token (Bearer) for an `HttpOnly; SameSite=Strict; Path=/viewer` session cookie whose
   value is an independent 256-bit random secret — no credential ever travels in a URL, a query

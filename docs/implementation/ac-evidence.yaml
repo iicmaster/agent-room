@@ -1437,3 +1437,53 @@
         file: "tests/viewer-exposure.test.mjs"
       - test: "the holder's path still works over the non-loopback interface: the token mints the cookie and sees the broadcast room, and the drill leaves no secrets"
         file: "tests/viewer-exposure.test.mjs"
+
+# --- Epic 6 (Release) -----------------------------------------------------------
+# Story 6.3 is closed; 6.1 and 6.2 are open (REL-1's human demonstration and
+# REL-3's formal soak pin the candidate this story froze), so the epic-level
+# sweep stays loud on those two until they carry their own evidence.
+
+  6.3:                       # Release packaging & client smoke tests (2 criteria)
+    note: >-
+      Proves the SHIPPABLE thing, not the repo tree: both packages materialize
+      deterministically (two independent packager runs agree byte-for-byte
+      under a metadata-free tree digest, so the frozen candidate's hashes are
+      reproducible forever); the materialized Claude Code package passes the
+      real `claude plugin validate --strict` (binary identity established
+      structurally, the machine-readable report asserted, the report target
+      naming the materialized manifest); and each claimed client's smoke
+      INSTALLS a fresh copy of the materialized artifact into an emulated host
+      plugin directory, resolves the installed manifest against the frozen
+      contract (${CLAUDE_PLUGIN_ROOT}/${CLAUDE_PLUGIN_DATA} for Claude Code,
+      ${PLUGIN_ROOT}/${PLUGIN_DATA} for the portable package), performs the
+      real one-time `agent-room setup` Chat ID choice imported FROM THE
+      INSTALLED TREE (TTY fixtures replace only the keystrokes — the installed
+      CLI, its ensureServer boot of the installed server entry, the claimable
+      probe, and the 0600 config write are all inside the smoke), and drives
+      one full DM round-trip through two real MCP children of the installed
+      entrypoint (distinct keypairs, one realm, presence, converging pair
+      room, committed sends, delivery inside the literal v1 untrusted
+      envelope). The SM-C1 row re-measures the v0.1 baseline protocol on five
+      fresh installs of the materialized package: zero failures, the ladder
+      delta exactly the two Chat ID choices, and the rule's own time
+      comparison — end-to-end minus the added choice rows' own durations — at
+      0.264 s mean versus the 0.352 s anchor (faster than v0.1 once the choice
+      is priced in; raw mean 0.459 s recorded with declared in-suite noise
+      bounds). Does NOT prove the real Zcode host (the portable entrypoint's
+      wire-identity is what is proven; the vendor host is REL-1's evidence),
+      the 8-hour soak (6.2), or the physical two-machine demonstration
+      (6.1) — both of which pin the candidate this story froze in
+      docs/release-evidence/v0.2.0-candidate.json.
+    evidence:
+      - test: "the final dual packages materialize deterministically for the release candidate"
+        file: "tests/release-smoke.test.mjs"
+      - test: "the materialized Claude Code package passes the real `claude plugin validate --strict`"
+        file: "tests/release-smoke.test.mjs"
+      - test: "the installed Claude Code package completes one DM round-trip through the materialized entrypoint"
+        file: "tests/release-smoke.test.mjs"
+      - test: "the installed portable package completes one DM round-trip over the same wire (the Zcode-class artifact)"
+        file: "tests/release-smoke.test.mjs"
+      - test: "SM-C1 re-measurement: five fresh installs of the materialized package reach the first exchanged message"
+        file: "tests/release-smoke.test.mjs"
+      - test: "the one-time cursor reset is documented exactly once in production code"
+        file: "tests/migration.test.mjs"

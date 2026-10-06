@@ -1,0 +1,95 @@
+{
+  "candidate": "v0.2.0",
+  "record_type": "release-candidate-freeze",
+  "created": "2026-10-06",
+  "status": "frozen-pending-6-2-soak-and-6-1-rel1",
+  "binding": "Stories 6.2 (REL-3 formal soak) and 6.1 (REL-1 physical two-machine demonstration) pin THIS candidate. Any change to server/ or the packaging inputs voids the candidate: cut a new one (re-materialize), rerun the Story 6.3 gates, and restart the soak (docs/implementation/reviews/epic-6-execution-agy.md, 'The Candidate Immutability Law').",
+  "source": {
+    "git_commit": "7dc980fdc379c9a9822979fdd0e3c73401ed12af",
+    "git_branch": "main",
+    "working_tree_note": "Story 6.3's own artifacts (tests/release-smoke.test.mjs, release notes, this record, spec, evidence entries) are uncommitted on top of the recorded commit; the package tree digests below are the binding artifact identity and are reproducible from the tree at any time (deterministic-materialization row in tests/release-smoke.test.mjs).",
+    "packager": "scripts/package-release.mjs",
+    "packager_invocation": "node scripts/package-release.mjs --out <fresh-absolute-dir>"
+  },
+  "artifacts": {
+    "digest_algorithm": "SHA-256 folded over every regular file in package-relative path-sorted order: for each file, update with hex(sha256(relative_path)) + '\\n' + hex(sha256(file_bytes)) + '\\n'; the final hex digest is the tree digest (tests/release-smoke.test.mjs, treeDigest). No metadata (mtimes, modes, inodes) enters the digest.",
+    "deterministic": true,
+    "portable": {
+      "package": "agent-room-agent-plugin",
+      "files": 45,
+      "bytes": 752073,
+      "sha256": "579bbff2706768311f01739eaac3ace6ad98691743e9de933e2ba7deb289e237"
+    },
+    "claude_code": {
+      "package": "agent-room-claude-code",
+      "files": 45,
+      "bytes": 751933,
+      "sha256": "8d2924c9f9e279717cc2491f4501a61ab7953fd5f2b9c8c504a4cc897604df51"
+    }
+  },
+  "environment": {
+    "node": "v24.18.1",
+    "sqlite": "3.53.4",
+    "runtime_floor": { "node": ">=24.15", "sqlite": ">=3.51.3" },
+    "os": "Darwin arm64 (macOS)",
+    "measured_on": "2026-10-06"
+  },
+  "gates": {
+    "claude_plugin_validate_strict": {
+      "validator": "claude plugin validate <materialized agent-room-claude-code> --strict --json",
+      "validator_version": "2.1.286 (Claude Code)",
+      "result": "pass",
+      "detail": "exit 0, success=true, strict=true, manifest.errors=[], manifest.warnings=[], target=the materialized .claude-plugin/plugin.json"
+    },
+    "claude_code_client_smoke": {
+      "artifact_installed": "materialized agent-room-claude-code copy",
+      "install_contract": ".mcp.json: node ${CLAUDE_PLUGIN_ROOT}/server/mcp-stdio.mjs, cwd ${CLAUDE_PLUGIN_DATA}",
+      "result": "pass",
+      "detail": "install, connect, one DM round-trip (Smoke-A -> Smoke-B -> Smoke-A) through real MCP children of the installed entrypoint, including the real agent-room setup flow; distinct keypairs, one realm, presence, converging pair room, untrusted-envelope delivery"
+    },
+    "portable_client_smoke": {
+      "artifact_installed": "materialized agent-room-agent-plugin copy",
+      "install_contract": "mcp.json: node ${PLUGIN_ROOT}/server/mcp-stdio.mjs, cwd ${PLUGIN_DATA}",
+      "result": "pass",
+      "detail": "the portable package's installed entrypoint completes the identical DM round-trip over the same wire; the real Zcode HOST is REL-1 evidence and is claimed nowhere (honest scope recorded in the test)",
+      "claim_status": "portable-half proven; vendor-host half deferred to REL-1"
+    },
+    "sm_c1_remeasurement": {
+      "rule_source": "docs/prds/prd-agent-room-2026-09-20/prd.md:364",
+      "anchor": "docs/v01-baseline.md (v0.1.0, 2026-09-25): mean 0.352 s, per-run 0.351/0.342/0.347/0.366/0.353 s",
+      "installs": 5,
+      "failures": 0,
+      "verdict": "pass",
+      "frozen_run": {
+        "per_run_s": [0.458, 0.458, 0.463, 0.458, 0.457],
+        "mean_s": 0.459,
+        "median_s": 0.458,
+        "adjusted_per_run_s": [0.265, 0.265, 0.265, 0.266, 0.26],
+        "adjusted_mean_s": 0.264,
+        "milestone_medians_s": {
+          "install": 0.009,
+          "A initialized": 0.12,
+          "A Chat ID chosen": 0.301,
+          "B initialized": 0.412,
+          "B Chat ID chosen": 0.426,
+          "A DM opened": 0.44,
+          "A message sent": 0.441,
+          "B DM opened": 0.454,
+          "B received A's message": 0.458
+        },
+        "milestone_order_note": "execution order: a DM addresses the peer's claimed Chat ID, so B's choice precedes A's open; medians are per-milestone, cumulative from install start"
+      },
+      "three_run_means_s": [0.465, 0.459, 0.459],
+      "all_verification_run_means_s": [0.465, 0.459, 0.459, 0.497, 0.5, 0.489],
+      "all_verification_adjusted_means_s": [0.266, 0.262, 0.264, 0.296, 0.291, 0.289],
+      "verification_note": "six five-install runs of the final gate, thirty fresh installs, zero failures, every run inside the rule; the first three fixed the frozen record, the last three are the final-session re-verification on a slightly busier machine",
+      "rule_reading": "the ladder delta is exactly the two Chat ID choices (v0.1's room_create/room_join collapse into the two room_direct_open calls); the added choice rows cost 0.181 s + 0.014 s (median), and the ladder with those rows priced out is 0.264 s mean - faster than the 0.352 s anchor; 0 failures. No regression beyond the choice.",
+      "noise_bounds": "declared in tests/release-smoke.test.mjs: adjusted-mean gate at 3x the anchor, raw-mean gate at 5x, both absorbing in-suite parallel-load noise (raw means reach ~1.26 s when the full suite runs concurrently); the recorded numbers above are the quiet-machine human-verdict comparison"
+    }
+  },
+  "evidence": {
+    "release_notes": "docs/release-notes-v0.2.md",
+    "gate_tests": "tests/release-smoke.test.mjs",
+    "spec": "docs/implementation/spec-6-3-release-packaging-client-smoke-tests.md"
+  }
+}
