@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 09-21-2026 08:52
-last_updated: '2026-09-30'
+last_updated: '09-29-2026 12:40'
 project: agent-room
 project_key: NOKEY
 tracking_system: file-system
@@ -72,7 +72,7 @@ development_status:
   4-6-storage-admission-control: done
   4-7-self-hosting-deployment-guide: backlog
   4-8-remote-churn-the-dress-rehearsal-blocking-gate-ruling-q3: backlog
-  epic-4-retrospective: optional
+  epic-4-retrospective: done
 
   epic-5: backlog
   5-1-viewer-auth-bridge-hci-5: backlog
@@ -201,3 +201,24 @@ action_items:
     owner: "Epic 4/6"
     status: open
     ref: "docs/implementation/epic-3-completion-audit.md"
+  - id: "epic-4-retro-item-17-complete-the-workflow-unattended-proof-p"
+    epic: 4
+    action: "Complete the workflow unattended proof phases 8-10 on a non-gate story
+      during a stable provider window"
+    owner: "orchestrator"
+    status: open
+    ref: "docs/implementation/epic-4-retro-2026-09-29.md"
+  - id: "epic-4-retro-item-18-the-vacuous-pass-test-smell-joins-the-ve"
+    epic: 4
+    action: "The vacuous-pass test smell joins the verification-gap lens watchlist:
+      a test that fails must fail for the reason the spec names"
+    owner: "orchestrator"
+    status: open
+    ref: "docs/implementation/epic-4-retro-2026-09-29.md"
+  - id: "epic-4-retro-item-19-deploy-guide-gains-the-upgrade-time-inde"
+    epic: 4
+    action: "Deploy guide gains the upgrade-time index-rebuild-on-full-disk failure-mode
+      row"
+    owner: "Story 6.3"
+    status: open
+    ref: "docs/implementation/epic-4-retro-2026-09-29.md"
