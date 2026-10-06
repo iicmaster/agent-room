@@ -4,8 +4,8 @@
   "rule_source": "docs/epics.md Story 6.2 (the total-growth reading per docs/implementation/reviews/epic-6-execution-agy.md)",
   "status": "running",
   "startedAt": "2026-10-06T20:22:08.454Z",
-  "endedAt": "2026-10-06T21:00:14.556Z",
-  "wallMinutes": 38.1,
+  "endedAt": "2026-10-06T21:01:14.555Z",
+  "wallMinutes": 39.1,
   "requestedDurationMs": 28800000,
   "schedule": {
     "durationMs": 28800000,
@@ -79,7 +79,7 @@
       "stats": {
         "sent": 316,
         "retried": 0,
-        "reads": 75,
+        "reads": 77,
         "readErrors": 0,
         "maxAttempts": 1
       }
@@ -90,7 +90,7 @@
       "stats": {
         "sent": 315,
         "retried": 0,
-        "reads": 75,
+        "reads": 77,
         "readErrors": 0,
         "maxAttempts": 1
       }
@@ -101,7 +101,7 @@
       "stats": {
         "sent": 307,
         "retried": 0,
-        "reads": 75,
+        "reads": 77,
         "readErrors": 0,
         "maxAttempts": 1
       }
@@ -112,7 +112,7 @@
       "stats": {
         "sent": 307,
         "retried": 0,
-        "reads": 75,
+        "reads": 77,
         "readErrors": 0,
         "maxAttempts": 1
       }
@@ -129,7 +129,7 @@
     },
     "bursts": 0,
     "burstMessagesPerRoom": 30,
-    "reads": 300,
+    "reads": 308,
     "reconnects": [],
     "loopErrors": [
       "dm-soak-4-soak-1: soak-1: rel3-dm-soak-4-soak-1-n000010-z448 did not resolve within 120000 ms after 3975 attempts (last error {\"ok\":false,\"error\":{\"code\":\"request_failed\",\"message\":\"agent-room request failed\"}})",
@@ -142,7 +142,7 @@
   },
   "samples": {
     "intervalMs": 60000,
-    "count": 38,
+    "count": 39,
     "data": [
       {
         "atMs": 1791318134490,
@@ -333,20 +333,25 @@
         "atMs": 1791320354548,
         "rssBytes": 52412416,
         "fdCount": 18
+      },
+      {
+        "atMs": 1791320414550,
+        "rssBytes": 52936704,
+        "fdCount": 18
       }
     ]
   },
   "rules": {
     "finalWindowRss": {
       "windowMs": 14400000,
-      "samples": 38,
-      "elapsedMs": 2220058,
+      "samples": 39,
+      "elapsedMs": 2280060,
       "startRssBytes": 107839488,
-      "endRssBytes": 52412416,
-      "growthRatio": -0.513977514433303,
-      "slopeBytesPerMs": -33.500271171695154,
-      "impliedGrowthRatio": -0.6896596636001388,
-      "slopePctOfStartPerSecond_reportedNotGated": -0.03106493900610429,
+      "endRssBytes": 52936704,
+      "growthRatio": -0.5091157702825889,
+      "slopeBytesPerMs": -32.130737129331244,
+      "impliedGrowthRatio": -0.679343066791109,
+      "slopePctOfStartPerSecond_reportedNotGated": -0.029794964465457444,
       "bound": 0.02,
       "rule": "(endRSS - startRSS_of_window) / RSS_at_window_start <= 0.02, and the least-squares slope's implied growth across the window <= 0.02 — a total-growth bound (the final four hours at the default 8-hour duration), not the Story 2.4 per-second rate"
     },
