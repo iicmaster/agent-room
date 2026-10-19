@@ -7,3 +7,8 @@ coverage/
 *.sqlite-wal
 .mailbox-out/
 .tmux-teams/
+
+# Soak / candidate verification scratch (never commit)
+.soak-world/
+.candidate-checkout/
+.candidate-packages/
