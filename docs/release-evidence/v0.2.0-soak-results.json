@@ -2,10 +2,10 @@
   "story": "6.2",
   "requirement": "REL-3 — the formal soak",
   "rule_source": "docs/epics.md Story 6.2 (the total-growth reading per docs/implementation/reviews/epic-6-execution-agy.md)",
-  "status": "running",
+  "status": "fail",
   "startedAt": "2026-10-06T20:22:08.454Z",
-  "endedAt": "2026-10-06T21:01:14.555Z",
-  "wallMinutes": 39.1,
+  "endedAt": "2026-10-06T21:22:16.562Z",
+  "wallMinutes": 60.14,
   "requestedDurationMs": 28800000,
   "schedule": {
     "durationMs": 28800000,
@@ -79,7 +79,7 @@
       "stats": {
         "sent": 316,
         "retried": 0,
-        "reads": 77,
+        "reads": 119,
         "readErrors": 0,
         "maxAttempts": 1
       }
@@ -90,7 +90,7 @@
       "stats": {
         "sent": 315,
         "retried": 0,
-        "reads": 77,
+        "reads": 119,
         "readErrors": 0,
         "maxAttempts": 1
       }
@@ -101,7 +101,7 @@
       "stats": {
         "sent": 307,
         "retried": 0,
-        "reads": 77,
+        "reads": 119,
         "readErrors": 0,
         "maxAttempts": 1
       }
@@ -112,7 +112,7 @@
       "stats": {
         "sent": 307,
         "retried": 0,
-        "reads": 77,
+        "reads": 119,
         "readErrors": 0,
         "maxAttempts": 1
       }
@@ -129,7 +129,7 @@
     },
     "bursts": 0,
     "burstMessagesPerRoom": 30,
-    "reads": 308,
+    "reads": 476,
     "reconnects": [],
     "loopErrors": [
       "dm-soak-4-soak-1: soak-1: rel3-dm-soak-4-soak-1-n000010-z448 did not resolve within 120000 ms after 3975 attempts (last error {\"ok\":false,\"error\":{\"code\":\"request_failed\",\"message\":\"agent-room request failed\"}})",
@@ -142,7 +142,7 @@
   },
   "samples": {
     "intervalMs": 60000,
-    "count": 39,
+    "count": 61,
     "data": [
       {
         "atMs": 1791318134490,
@@ -338,29 +338,146 @@
         "atMs": 1791320414550,
         "rssBytes": 52936704,
         "fdCount": 18
+      },
+      {
+        "atMs": 1791320474552,
+        "rssBytes": 53510144,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1791320534554,
+        "rssBytes": 53542912,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1791320594555,
+        "rssBytes": 49496064,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1791320654556,
+        "rssBytes": 49643520,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1791320714559,
+        "rssBytes": 49414144,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1791320774560,
+        "rssBytes": 43630592,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1791320834562,
+        "rssBytes": 49692672,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1791320894563,
+        "rssBytes": 50135040,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1791320954560,
+        "rssBytes": 45400064,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1791321014561,
+        "rssBytes": 50069504,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1791321074562,
+        "rssBytes": 50364416,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1791321134563,
+        "rssBytes": 49872896,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1791321194563,
+        "rssBytes": 50331648,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1791321254565,
+        "rssBytes": 50626560,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1791321314567,
+        "rssBytes": 51167232,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1791321374569,
+        "rssBytes": 50593792,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1791321434569,
+        "rssBytes": 50757632,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1791321494569,
+        "rssBytes": 51314688,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1791321554571,
+        "rssBytes": 50249728,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1791321614571,
+        "rssBytes": 50184192,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1791321674572,
+        "rssBytes": 50839552,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1791321734572,
+        "rssBytes": 51609600,
+        "fdCount": 18
       }
     ]
   },
   "rules": {
     "finalWindowRss": {
       "windowMs": 14400000,
-      "samples": 39,
-      "elapsedMs": 2280060,
+      "samples": 61,
+      "elapsedMs": 3600082,
       "startRssBytes": 107839488,
-      "endRssBytes": 52936704,
-      "growthRatio": -0.5091157702825889,
-      "slopeBytesPerMs": -32.130737129331244,
-      "impliedGrowthRatio": -0.679343066791109,
-      "slopePctOfStartPerSecond_reportedNotGated": -0.029794964465457444,
+      "endRssBytes": 51609600,
+      "growthRatio": -0.5214220601640839,
+      "slopeBytesPerMs": -15.998319537204704,
+      "impliedGrowthRatio": -0.5340832311457097,
+      "slopePctOfStartPerSecond_reportedNotGated": -0.014835307394267956,
       "bound": 0.02,
-      "rule": "(endRSS - startRSS_of_window) / RSS_at_window_start <= 0.02, and the least-squares slope's implied growth across the window <= 0.02 — a total-growth bound (the final four hours at the default 8-hour duration), not the Story 2.4 per-second rate"
+      "rule": "(endRSS - startRSS_of_window) / RSS_at_window_start <= 0.02, and the least-squares slope's implied growth across the window <= 0.02 — a total-growth bound (the final four hours at the default 8-hour duration), not the Story 2.4 per-second rate",
+      "pass": true
     },
     "fdStability": {
       "baselineAfterMs": 3600000,
-      "note": "no sample exists after the FD baseline point yet"
+      "baselineFd": 18,
+      "samplesAfterBaseline": 1,
+      "worstAbsDrift": 0,
+      "corridor": 5,
+      "rule": "every sample at or after duration/8 (one hour at the default 8) sits within +-5 of the hour-one baseline",
+      "pass": true
     },
     "zeroMessageLoss": {
       "pending": true,
+      "pass": false,
       "note": "the run ended before the final drain"
     }
   },
@@ -375,10 +492,20 @@
         "rssBytes": 65536000,
         "fdCount": 18,
         "cpuSeconds": 0.13
+      },
+      {
+        "at": "2026-10-06T21:22:14.532Z",
+        "actors": 0,
+        "rssBytes": 51609600,
+        "fdCount": 18,
+        "cpuSeconds": 46.92
       }
     ]
   },
-  "failureReasons": [],
+  "failureReasons": [
+    "ENOENT: no such file or directory, open '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared/local-token'",
+    "zero message loss failed"
+  ],
   "world": {
     "dir": "/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx",
     "ackLog": "/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/recorder/acked-sends.ndjson",
