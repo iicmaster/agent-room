@@ -1443,6 +1443,46 @@
 # REL-3's formal soak pin the candidate this story froze), so the epic-level
 # sweep stays loud on those two until they carry their own evidence.
 
+  6.1:                       # REL-1 — the cross-everything demonstration
+    note: >-
+      A REAL two-machine demonstration (docs/release-evidence/v0.2.0-cross-machine/):
+      the Room Server in Docker on ngs-2 (Ubuntu, TLS with a private CA, published
+      through the host's docker proxy and reachable over the PUBLIC INTERNET at
+      43.229.78.103:18443), a Claude Code client on the Mac, and a Codex client on
+      ngs-staging (driven by that host's own 9Router). Both clients enrolled over
+      the wire through the challenge/answer lane with one-use invites minted on the
+      server host, each with a distinct Ed25519 keypair and fingerprint. Proved:
+      one realm across machines (both clients' room_status returned the same
+      realm_id and broadcast room id); presence listing BOTH clients as online
+      with client_type mcp; DMs crossing the wire in BOTH directions in the same
+      pair room, the receiving side reading the message inside the full
+      <untrusted_message version="1"> envelope naming the sender's chat id and
+      fingerprint; the client-side TRUST MATRIX holding a cross-machine message
+      (body withheld, metadata only, reason not_allowlisted) and releasing it
+      after an allowlist entry was added by room_trust_set; broadcasts crossing in
+      both directions; and the AUTHENTICATED VIEWER observed live in a real
+      browser against the remote server (presence updating live, a newly sent
+      broadcast visible in the DOM 3.87 s after the send — inside REL-1's 5 s
+      rule — and zero DM content anywhere in the rendered page). That run is also
+      what FOUND the shipped viewer's boot-descriptor read (it read the
+      descriptor at the top level of the API's {ok,result} envelope, so the viewer
+      reported "Room server unreachable" on every load) — fixed in cc7eb6e, with
+      tests/viewer-app.test.mjs running the shipped script against the real boot
+      envelope. Does NOT prove the physical two-machine demo with the REAL Zcode
+      host (this run's two clients are Claude Code and Codex; the Zcode host
+      itself is still REL-1's human step), the recorded browser session, or the
+      REL-1 evidence bundle's own verifier (scripts/rel1-verify-evidence.mjs
+      passes only the operator's captured bundle).
+    evidence:
+      - test: "the shipped viewer reads the boot descriptor the server actually sends"
+        file: "tests/viewer-app.test.mjs"
+      - test: "the viewer opens the ONE SSE stream for the Broadcast Room the boot descriptor named"
+        file: "tests/viewer-app.test.mjs"
+      - test: "the viewer still refuses a boot descriptor with no Broadcast Room"
+        file: "tests/viewer-app.test.mjs"
+      - test: "the viewer still accepts a bare (un-enveloped) boot descriptor"
+        file: "tests/viewer-app.test.mjs"
+
   6.2:                       # REL-3 — the formal soak (IN FLIGHT: the 8-hour run
                              # is launched detached; its results land in
                              # docs/release-evidence/v0.2.0-soak-results.{json,md}
