@@ -3,7 +3,9 @@
 ## 1. READ THIS FIRST
 
 - Branch `main`, **not pushed** (42+ commits ahead of `origin/main`).
-- **The REL-3 8-hour soak PASSED** (commit `3aec7ed`; ran 481.5 min; `docs/release-evidence/v0.2.0-soak-results.json`, `status: pass`). Zero loss (22625 acked==readable), FD stable, final-window RSS pass, candidate-exact identity (`7dc980f`). **Epic 6 is now blocked only on the human REL-1 demo.**
+- **The REL-3 8-hour soak PASSED** against candidate `7dc980f` (commit `3aec7ed`; 481.5 min; zero loss over 22625 messages; FD stable; final-window RSS pass). That PASS belongs to `7dc980f`.
+- **The candidate was RE-CUT** (`2c9cfe7`, record at `docs/release-evidence/v0.2.0-candidate.json`, commit `89c8477`, version `0.2.0`): a real cross-machine demo found that the shipped viewer could NEVER connect (it read the boot descriptor at the wrong level of the API envelope — fixed in `cc7eb6e`, regression test `tests/viewer-app.test.mjs`), and the v0.2.0 version stamp was applied BEFORE the re-cut so the shipped bytes and the frozen bytes are the same. All 5 Story 6.3 gate rows pass against the re-cut artifact; SM-C1 adjusted mean 0.318 s (below v0.1's 0.352 s anchor).
+- **A fresh 8-hour soak is RUNNING** against the re-cut candidate (launched 2026-10-20T19:52Z, PID 41495, `candidate-exact` at launch, world under `.soak-world/`, evidence in `.soak-world/evidence/`). **Epic 6 is blocked on that run and then on the human REL-1 demo.**
 - **The soak's temp world must NOT live in `/tmp`** — macOS temp cleanup ate its credential file. Re-locate the soak world to a repo-ignored dir (e.g. `.soak-world/`) before re-running.
 - Working tree: currently has Story 4.7's fix-loop output committed (`0eb3e94`+`562ea81`) plus 4.7/4.8 evidence entries — verify with `git status`.
 - The story-build workflow is **PARKED** (see DO NOT #1).
