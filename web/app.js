@@ -104,10 +104,15 @@ async function getJson(path) {
 }
 
 // One credential-free discovery step: the generated descriptor names the
-// Broadcast Room (and only the Broadcast Room — Direct Rooms are learnable
+// Broadcast Room (and only the Broadcast Room — Direct Room ids are learnable
 // from nothing the viewer serves).
 async function loadBoot() {
-  const boot = await getJson("/viewer/boot.json");
+  // The API answers in the standard envelope — { ok: true, result: { … } } —
+  // so the descriptor lives under `result`, not at the top level. (The SSE
+  // frames are the opposite: raw payloads, no envelope. See applyPresenceSnapshot
+  // and the message handler, which read the event data directly.)
+  const body = await getJson("/viewer/boot.json");
+  const boot = body?.ok === true ? body?.result : body;
   const roomId = typeof boot?.broadcast_room_id === "string" ? boot.broadcast_room_id : "";
   if (!roomId) {
     throw new ViewerError("unreachable");
