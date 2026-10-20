@@ -1,0 +1,98 @@
+{
+  "realm": "f7928a1a-ce00-446d-905d-2a4af5d8dc40",
+  "rooms": [
+    {
+      "id": "IN-rLCpQ-5gGWIz9d9tE2Q",
+      "kind": "broadcast"
+    },
+    {
+      "id": "yRs6KbLRK6nhWPQejKQ5BA",
+      "kind": "direct"
+    },
+    {
+      "id": "egfBOf65MMx07rLnrmdMLg",
+      "kind": "direct"
+    },
+    {
+      "id": "ZOuH88imQfiSULPXAq-I6A",
+      "kind": "direct"
+    }
+  ],
+  "direct_members": [
+    {
+      "room_id": "ZOuH88imQfiSULPXAq-I6A",
+      "actor_fingerprint": "sha256:4053dbc4f7312e50b0dc3f954d5221fe3840fe89393ed1ee6a6ca76d6665c6e4"
+    },
+    {
+      "room_id": "ZOuH88imQfiSULPXAq-I6A",
+      "actor_fingerprint": "sha256:ed9596e73ba16838031323504c430312b4f58b95427012bc26f39f8bb131c36d"
+    },
+    {
+      "room_id": "egfBOf65MMx07rLnrmdMLg",
+      "actor_fingerprint": "sha256:ed9596e73ba16838031323504c430312b4f58b95427012bc26f39f8bb131c36d"
+    },
+    {
+      "room_id": "egfBOf65MMx07rLnrmdMLg",
+      "actor_fingerprint": "sha256:ef1ded8406f230ae1cbbbb8ea52c944e5e1678496074339a0bc1f5654a6c3131"
+    },
+    {
+      "room_id": "yRs6KbLRK6nhWPQejKQ5BA",
+      "actor_fingerprint": "sha256:4053dbc4f7312e50b0dc3f954d5221fe3840fe89393ed1ee6a6ca76d6665c6e4"
+    },
+    {
+      "room_id": "yRs6KbLRK6nhWPQejKQ5BA",
+      "actor_fingerprint": "sha256:ef1ded8406f230ae1cbbbb8ea52c944e5e1678496074339a0bc1f5654a6c3131"
+    }
+  ],
+  "messages": [
+    {
+      "seq": 1,
+      "room_id": "IN-rLCpQ-5gGWIz9d9tE2Q",
+      "chat_id": "CLAUDE-TMUX",
+      "client_message_id": "claude-bc-001",
+      "text": "BCAST-1-CLAUDE: broadcast from Claude Code"
+    },
+    {
+      "seq": 1,
+      "room_id": "ZOuH88imQfiSULPXAq-I6A",
+      "chat_id": "AGY-TMUX",
+      "client_message_id": "agy-msg-002",
+      "text": "MSG-4-AGY: hello from Gemini to Claude Code via agent-room"
+    },
+    {
+      "seq": 1,
+      "room_id": "egfBOf65MMx07rLnrmdMLg",
+      "chat_id": "AGY-TMUX",
+      "client_message_id": "agy-msg-001",
+      "text": "MSG-3-AGY: hello from Gemini via agent-room"
+    },
+    {
+      "seq": 1,
+      "room_id": "yRs6KbLRK6nhWPQejKQ5BA",
+      "chat_id": "CLAUDE-TMUX",
+      "client_message_id": "claude-msg-001",
+      "text": "MSG-1-CLAUDE: hello from Claude Code via agent-room"
+    },
+    {
+      "seq": 2,
+      "room_id": "yRs6KbLRK6nhWPQejKQ5BA",
+      "chat_id": "CODEX-TMUX",
+      "client_message_id": "codex-msg-001",
+      "text": "MSG-2-CODEX: reply from Codex via agent-room"
+    }
+  ],
+  "claims": [
+    {
+      "chat_id_normalized": "agy-tmux",
+      "actor_fingerprint": "sha256:ed9596e73ba16838031323504c430312b4f58b95427012bc26f39f8bb131c36d"
+    },
+    {
+      "chat_id_normalized": "claude-tmux",
+      "actor_fingerprint": "sha256:4053dbc4f7312e50b0dc3f954d5221fe3840fe89393ed1ee6a6ca76d6665c6e4"
+    },
+    {
+      "chat_id_normalized": "codex-tmux",
+      "actor_fingerprint": "sha256:ef1ded8406f230ae1cbbbb8ea52c944e5e1678496074339a0bc1f5654a6c3131"
+    }
+  ]
+}

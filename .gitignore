@@ -12,3 +12,6 @@ coverage/
 .soak-world/
 .candidate-checkout/
 .candidate-packages/
+
+# 3-vendor tmux lab (never commit)
+.vendor-lab/
