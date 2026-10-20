@@ -3,7 +3,7 @@
 ## 1. READ THIS FIRST
 
 - Branch `main`, **not pushed** (42+ commits ahead of `origin/main`).
-- **The REL-3 8-hour soak FAILED** (ran 60 min of 8 h; `docs/release-evidence/v0.2.0-soak-results.json`, `status: fail`). Cause: the machine's disk filled (ENOSPC) mid-run — the soak world's `local-token` vanished and in-flight sends never resolved. **Epic 6 is blocked on re-running it** with ≥5 GB free. This is the first thing to do.
+- **The REL-3 8-hour soak PASSED** (commit `3aec7ed`; ran 481.5 min; `docs/release-evidence/v0.2.0-soak-results.json`, `status: pass`). Zero loss (22625 acked==readable), FD stable, final-window RSS pass, candidate-exact identity (`7dc980f`). **Epic 6 is now blocked only on the human REL-1 demo.**
 - **The soak's temp world must NOT live in `/tmp`** — macOS temp cleanup ate its credential file. Re-locate the soak world to a repo-ignored dir (e.g. `.soak-world/`) before re-running.
 - Working tree: currently has Story 4.7's fix-loop output committed (`0eb3e94`+`562ea81`) plus 4.7/4.8 evidence entries — verify with `git status`.
 - The story-build workflow is **PARKED** (see DO NOT #1).
@@ -22,7 +22,7 @@ claude plugin validate <materialized-pkg> --strict   # release gate; needs the `
 - **Epics 1–5: accepted**, each with audit + retro in `docs/implementation/epic-{1..5}-{completion-audit,retro}-*.md`. Per-story specs live in `docs/implementation/spec-*.md`, each ending with a Review Triage Log + Auto Run Result.
 - **Epic 6 (in progress)** — state record: `docs/implementation/epic-6-state-in-progress.md`.
   - 6.3 **done**: RC frozen — `docs/release-evidence/v0.2.0-candidate.json` (commit `7dc980f`, tree digests, Node v24.18.1 / SQLite 3.53.4); SM-C1 PASS (0.459 s mean, 0.264 s adjusted vs v0.1's 0.352 s); release notes at `docs/release-notes-v0.2.md`.
-  - 6.2 **FAILED — re-run first**: runner `tests/soak/rel3-soak.mjs` (validated: compressed profile green 2×). The failure was environmental (ENOSPC), not a product defect: the server held all 1,245 acknowledged messages and the final-window RSS rule passed. Re-run: `node tests/soak/rel3-soak.mjs --duration-hours 8` with ≥5 GB free and the world outside `/tmp`.
+  - 6.2 **PASS**: runner `tests/soak/rel3-soak.mjs` (8h tracked, 481.5 min; candidate-exact `7dc980f`; zero loss 22625; FD stable; RSS pass; 47 bursts; 7 reconnects; 481 samples). Evidence: `docs/release-evidence/v0.2.0-soak-results.{json,md}` (commit `3aec7ed`).
   - 6.1 **prepared, awaiting the human**: `scripts/rel1-preflight.mjs` + `docs/rel1-runbook.md` + `scripts/rel1-verify-evidence.mjs` (the Operator Flight Kit). The physical two-machine demo is the human's — it cannot be simulated (see DECIDED).
 - **Advisor verdicts on Epic 6 execution** (consensus: RC-first ordering, flight kit, human demo last): `docs/implementation/reviews/epic-6-execution-{luna,agy}.md`.
 
