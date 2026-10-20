@@ -2,10 +2,10 @@
   "story": "6.2",
   "requirement": "REL-3 — the formal soak",
   "rule_source": "docs/epics.md Story 6.2 (the total-growth reading per docs/implementation/reviews/epic-6-execution-agy.md)",
-  "status": "fail",
-  "startedAt": "2026-10-06T20:22:08.454Z",
-  "endedAt": "2026-10-06T21:22:16.562Z",
-  "wallMinutes": 60.14,
+  "status": "pass",
+  "startedAt": "2026-10-19T21:08:50.213Z",
+  "endedAt": "2026-10-20T05:10:21.613Z",
+  "wallMinutes": 481.52,
   "requestedDurationMs": 28800000,
   "schedule": {
     "durationMs": 28800000,
@@ -21,11 +21,11 @@
     "sessionEvictionMints": 1008
   },
   "candidate": {
-    "record": "/Users/ngs/agent-skills/plugins/agent-room/docs/release-evidence/v0.2.0-candidate.json",
+    "record": "/Users/ngs/agent-skills/plugins/agent-room/.candidate-checkout/docs/release-evidence/v0.2.0-candidate.json",
     "candidateCommit": "7dc980fdc379c9a9822979fdd0e3c73401ed12af",
-    "launchHead": "48bbf0d73e3d0bdf7e300572d999eb4c2106c72b",
-    "launchBranch": "main",
-    "identityVerdict": "runtime-pinned-docs-drift",
+    "launchHead": "7dc980fdc379c9a9822979fdd0e3c73401ed12af",
+    "launchBranch": "HEAD",
+    "identityVerdict": "candidate-exact",
     "frozenDigests": {
       "portable": {
         "package": "agent-room-agent-plugin",
@@ -43,19 +43,17 @@
     "actualDigests": {
       "portable": {
         "files": 45,
-        "bytes": 753522,
-        "sha256": "03799c81bd32046b949309cbf04cea62c94572658de3869d6b005484005733bb"
+        "bytes": 752073,
+        "sha256": "579bbff2706768311f01739eaac3ace6ad98691743e9de933e2ba7deb289e237"
       },
       "claude_code": {
         "files": 45,
-        "bytes": 753382,
-        "sha256": "dfb20b1346fd59973d72dbeb0e06bc67dea54085a8e67eb7296f9e60f6835a32"
+        "bytes": 751933,
+        "sha256": "8d2924c9f9e279717cc2491f4501a61ab7953fd5f2b9c8c504a4cc897604df51"
       }
     },
-    "drift": [
-      "CHANGELOG.md"
-    ],
-    "note": "the frozen digests are unreproducible from any committed tree (the Story 6.3 closeout extended CHANGELOG.md after the digests were written), but every packaged EXECUTING input (server/, web/, manifests, package.json) is byte-identical between the candidate commit 7dc980f and HEAD — the immutability law's substance holds: the bytes this soak executes are the candidate's bytes. Frozen portable 579bbff27067 vs actual 03799c81bd32 (1449 bytes of docs drift)."
+    "drift": [],
+    "note": "the fresh materialization reproduces the frozen candidate digests byte-for-byte"
   },
   "environment": {
     "host": "NSG-Mac-mini.local",
@@ -64,389 +62,2525 @@
     "sqlite": "3.53.4",
     "cpus": 8,
     "totalMemoryBytes": 17179869184,
-    "serverEntry": "/private/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/release/agent-room-agent-plugin/server/api/server.mjs",
-    "mcpEntry": "/private/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/release/agent-room-agent-plugin/server/mcp-stdio.mjs",
-    "releaseDir": "/private/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/release",
-    "serverPid": 57293,
-    "serverPort": 55850,
+    "serverEntry": "/Users/ngs/agent-skills/plugins/agent-room/.soak-world/agent-room-rel3-soak-MTetAU/release/agent-room-agent-plugin/server/api/server.mjs",
+    "mcpEntry": "/Users/ngs/agent-skills/plugins/agent-room/.soak-world/agent-room-rel3-soak-MTetAU/release/agent-room-agent-plugin/server/mcp-stdio.mjs",
+    "releaseDir": "/Users/ngs/agent-skills/plugins/agent-room/.soak-world/agent-room-rel3-soak-MTetAU/release",
+    "serverPid": 20781,
+    "serverPort": 57714,
     "serverVersion": "0.1.0",
-    "serverStderrTail": "x90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\nagent-room-server: ENOENT: ENOENT: no such file or directory, statfs '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared'\n"
+    "serverStderrTail": ""
   },
   "clients": [
     {
       "chatId": "soak-1",
-      "fingerprint": "sha256:5b46eff7bfc48f573d5fe91b4cb475d7eef2cbe007934a611b0d54913d573db1",
+      "fingerprint": "sha256:0a28ee89e394de59e8228a7d2f0df37598869ab46c94a65012a2198410187b68",
       "stats": {
-        "sent": 316,
+        "sent": 5684,
         "retried": 0,
-        "reads": 119,
+        "reads": 959,
         "readErrors": 0,
         "maxAttempts": 1
       }
     },
     {
       "chatId": "soak-2",
-      "fingerprint": "sha256:d055090bcb6d76f39ad7d9dfee63077b69ce8cabbd0c3a89f556a0b23fea0f48",
+      "fingerprint": "sha256:48a01b9a282dc4584bc5da62c01ba61044fbe80a3ec6e17cdcc669099833fdde",
       "stats": {
-        "sent": 315,
+        "sent": 5684,
         "retried": 0,
-        "reads": 119,
+        "reads": 959,
         "readErrors": 0,
         "maxAttempts": 1
       }
     },
     {
       "chatId": "soak-3",
-      "fingerprint": "sha256:5dc0b741184e215047947d14a4d25ac38f5e6c4a3b88ae05593e430a7800c5b2",
+      "fingerprint": "sha256:abb0ee51d2dd07f20c2d84d3e987692da6b3282e523de10bf60e64217c2974a5",
       "stats": {
-        "sent": 307,
+        "sent": 5629,
         "retried": 0,
-        "reads": 119,
+        "reads": 959,
         "readErrors": 0,
         "maxAttempts": 1
       }
     },
     {
       "chatId": "soak-4",
-      "fingerprint": "sha256:d31cc988a4c6a9bca4f1939195c3fcc889a41a89a44d584b3f674168b7de7838",
+      "fingerprint": "sha256:e3f34f576c581316e9c05983dc1aa2599ef785a553743522af15f2b09b0ad828",
       "stats": {
-        "sent": 307,
+        "sent": 5628,
         "retried": 0,
-        "reads": 119,
+        "reads": 959,
         "readErrors": 0,
         "maxAttempts": 1
       }
     }
   ],
   "traffic": {
-    "acknowledged": 1245,
+    "acknowledged": 22625,
     "perRoom": {
-      "5wJF-xOL9k944XQI0SRJLg": 249,
-      "lxiylFF75e50MePtci5M_A": 249,
-      "2-dZdMh_nn5ObSlhENSsBw": 249,
-      "-7VKxoVsbME28vaBvfcuJQ": 249,
-      "6OPN3vBJRv1IRihymcXZlQ": 249
+      "AxPan4iEJUTxpy_Z2bTaNQ": 4525,
+      "BpXMeffbicWSel4culIQcA": 4525,
+      "Pa8zK5JpglIZbpMhQUqy7A": 4525,
+      "MMzZdT0TUDmVe7FpYR_dRg": 4525,
+      "E1f8NLanuhExtwwCF8n6tg": 4525
     },
-    "bursts": 0,
+    "bursts": 47,
     "burstMessagesPerRoom": 30,
-    "reads": 476,
-    "reconnects": [],
-    "loopErrors": [
-      "dm-soak-4-soak-1: soak-1: rel3-dm-soak-4-soak-1-n000010-z448 did not resolve within 120000 ms after 3975 attempts (last error {\"ok\":false,\"error\":{\"code\":\"request_failed\",\"message\":\"agent-room request failed\"}})",
-      "dm-soak-3-soak-4: soak-4: rel3-dm-soak-3-soak-4-n000010-z448 did not resolve within 120000 ms after 3976 attempts (last error {\"ok\":false,\"error\":{\"code\":\"request_failed\",\"message\":\"agent-room request failed\"}})",
-      "broadcast: soak-2: rel3-broadcast-n000010-z448 did not resolve within 120000 ms after 3976 attempts (last error {\"ok\":false,\"error\":{\"code\":\"request_failed\",\"message\":\"agent-room request failed\"}})",
-      "dm-soak-1-soak-2: soak-2: rel3-dm-soak-1-soak-2-n000010-z448 did not resolve within 120000 ms after 3976 attempts (last error {\"ok\":false,\"error\":{\"code\":\"request_failed\",\"message\":\"agent-room request failed\"}})",
-      "dm-soak-2-soak-3: soak-3: rel3-dm-soak-2-soak-3-n000010-z448 did not resolve within 120000 ms after 3982 attempts (last error {\"ok\":false,\"error\":{\"code\":\"request_failed\",\"message\":\"agent-room request failed\"}})",
-      "bursts: soak-4: rel3-burst-dm-soak-4-soak-1-b0000-000-z1600 did not resolve within 120000 ms after 3991 attempts (last error {\"ok\":false,\"error\":{\"code\":\"request_failed\",\"message\":\"agent-room request failed\"}})"
-    ]
+    "reads": 3836,
+    "reconnects": [
+      {
+        "at": "2026-10-19T22:08:56.403Z",
+        "ms": 7533,
+        "clients": 4,
+        "evictionMints": 1008
+      },
+      {
+        "at": "2026-10-19T23:08:56.403Z",
+        "ms": 7636,
+        "clients": 4,
+        "evictionMints": 1008
+      },
+      {
+        "at": "2026-10-20T00:08:56.403Z",
+        "ms": 7548,
+        "clients": 4,
+        "evictionMints": 1008
+      },
+      {
+        "at": "2026-10-20T01:08:56.404Z",
+        "ms": 7574,
+        "clients": 4,
+        "evictionMints": 1008
+      },
+      {
+        "at": "2026-10-20T02:08:56.404Z",
+        "ms": 7643,
+        "clients": 4,
+        "evictionMints": 1008
+      },
+      {
+        "at": "2026-10-20T03:08:56.406Z",
+        "ms": 7674,
+        "clients": 4,
+        "evictionMints": 1008
+      },
+      {
+        "at": "2026-10-20T04:08:56.404Z",
+        "ms": 7664,
+        "clients": 4,
+        "evictionMints": 1008
+      }
+    ],
+    "loopErrors": []
   },
   "samples": {
     "intervalMs": 60000,
-    "count": 61,
+    "count": 481,
     "data": [
       {
-        "atMs": 1791318134490,
-        "rssBytes": 107839488,
+        "atMs": 1792444136399,
+        "rssBytes": 100270080,
         "fdCount": 18
       },
       {
-        "atMs": 1791318194491,
-        "rssBytes": 109428736,
+        "atMs": 1792444196399,
+        "rssBytes": 104185856,
         "fdCount": 18
       },
       {
-        "atMs": 1791318254491,
-        "rssBytes": 117260288,
+        "atMs": 1792444256400,
+        "rssBytes": 101253120,
         "fdCount": 18
       },
       {
-        "atMs": 1791318314492,
-        "rssBytes": 165855232,
+        "atMs": 1792444316399,
+        "rssBytes": 122421248,
         "fdCount": 18
       },
       {
-        "atMs": 1791318374494,
-        "rssBytes": 152780800,
+        "atMs": 1792444376400,
+        "rssBytes": 120930304,
         "fdCount": 18
       },
       {
-        "atMs": 1791318434495,
-        "rssBytes": 71548928,
+        "atMs": 1792444436401,
+        "rssBytes": 77578240,
         "fdCount": 18
       },
       {
-        "atMs": 1791318494497,
-        "rssBytes": 65421312,
+        "atMs": 1792444496401,
+        "rssBytes": 82706432,
         "fdCount": 18
       },
       {
-        "atMs": 1791318554499,
-        "rssBytes": 65470464,
+        "atMs": 1792444556401,
+        "rssBytes": 66617344,
         "fdCount": 18
       },
       {
-        "atMs": 1791318614501,
-        "rssBytes": 59998208,
+        "atMs": 1792444616401,
+        "rssBytes": 68452352,
         "fdCount": 18
       },
       {
-        "atMs": 1791318674502,
-        "rssBytes": 54607872,
+        "atMs": 1792444676403,
+        "rssBytes": 68026368,
         "fdCount": 18
       },
       {
-        "atMs": 1791318734501,
+        "atMs": 1792444736402,
+        "rssBytes": 68304896,
+        "fdCount": 20
+      },
+      {
+        "atMs": 1792444796403,
+        "rssBytes": 70402048,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792444856402,
+        "rssBytes": 70516736,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792444916403,
+        "rssBytes": 70696960,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792444976404,
+        "rssBytes": 70762496,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792445036408,
+        "rssBytes": 70795264,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792445096408,
+        "rssBytes": 63782912,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792445156407,
+        "rssBytes": 63995904,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792445216408,
+        "rssBytes": 65011712,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792445276409,
+        "rssBytes": 65372160,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792445336410,
+        "rssBytes": 65536000,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792445396411,
+        "rssBytes": 67944448,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792445456414,
+        "rssBytes": 68157440,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792445516415,
+        "rssBytes": 66633728,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792445576416,
+        "rssBytes": 66748416,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792445636417,
+        "rssBytes": 66912256,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792445696419,
+        "rssBytes": 67059712,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792445756420,
+        "rssBytes": 67125248,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792445816418,
+        "rssBytes": 67289088,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792445876419,
+        "rssBytes": 67633152,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792445936420,
+        "rssBytes": 65241088,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792445996425,
+        "rssBytes": 69173248,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792446056427,
+        "rssBytes": 69222400,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792446116428,
+        "rssBytes": 69271552,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792446176429,
+        "rssBytes": 69435392,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792446236432,
+        "rssBytes": 69435392,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792446296434,
+        "rssBytes": 69664768,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792446356435,
+        "rssBytes": 65847296,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792446416437,
+        "rssBytes": 66109440,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792446476436,
+        "rssBytes": 66174976,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792446536440,
+        "rssBytes": 66502656,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792446596441,
+        "rssBytes": 72925184,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792446656441,
+        "rssBytes": 72482816,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792446716441,
+        "rssBytes": 72728576,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792446776443,
+        "rssBytes": 69632000,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792446836444,
+        "rssBytes": 69910528,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792446896445,
+        "rssBytes": 69992448,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792446956445,
+        "rssBytes": 70090752,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792447016445,
+        "rssBytes": 70156288,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792447076452,
+        "rssBytes": 70172672,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792447136453,
+        "rssBytes": 68403200,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792447196454,
+        "rssBytes": 69812224,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792447256456,
+        "rssBytes": 69074944,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792447316458,
+        "rssBytes": 69369856,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792447376457,
+        "rssBytes": 69451776,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792447436457,
+        "rssBytes": 69468160,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792447496459,
+        "rssBytes": 69533696,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792447556458,
+        "rssBytes": 69566464,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792447616459,
+        "rssBytes": 63078400,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792447676461,
+        "rssBytes": 63864832,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792447736460,
+        "rssBytes": 65388544,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792447796460,
+        "rssBytes": 79298560,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792447856462,
+        "rssBytes": 78839808,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792447916463,
+        "rssBytes": 78839808,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792447976463,
+        "rssBytes": 78856192,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792448036474,
+        "rssBytes": 71761920,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792448096475,
+        "rssBytes": 71860224,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792448156475,
+        "rssBytes": 72056832,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792448216476,
+        "rssBytes": 72318976,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792448276477,
+        "rssBytes": 72417280,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792448336477,
+        "rssBytes": 72482816,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792448396478,
+        "rssBytes": 77791232,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792448456479,
+        "rssBytes": 73170944,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792448516481,
+        "rssBytes": 73236480,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792448576483,
+        "rssBytes": 73629696,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792448636486,
+        "rssBytes": 74022912,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792448696487,
+        "rssBytes": 74203136,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792448756489,
+        "rssBytes": 74416128,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792448816492,
+        "rssBytes": 74579968,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792448876494,
+        "rssBytes": 66633728,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792448936496,
+        "rssBytes": 70418432,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792448996495,
+        "rssBytes": 75792384,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792449056497,
+        "rssBytes": 76087296,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792449116498,
+        "rssBytes": 59392000,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792449176500,
+        "rssBytes": 60014592,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792449236501,
+        "rssBytes": 60784640,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792449296501,
+        "rssBytes": 59867136,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792449356503,
+        "rssBytes": 60440576,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792449416505,
+        "rssBytes": 60899328,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792449476506,
+        "rssBytes": 61489152,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792449536505,
+        "rssBytes": 62177280,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792449596506,
+        "rssBytes": 75431936,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792449656506,
+        "rssBytes": 75153408,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792449716506,
+        "rssBytes": 69320704,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792449776508,
+        "rssBytes": 69484544,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792449836509,
+        "rssBytes": 69648384,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792449896511,
+        "rssBytes": 69713920,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792449956513,
+        "rssBytes": 69828608,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792450016519,
+        "rssBytes": 69812224,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792450076526,
+        "rssBytes": 69844992,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792450136528,
+        "rssBytes": 68599808,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792450196529,
+        "rssBytes": 77561856,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792450256530,
+        "rssBytes": 76595200,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792450316531,
+        "rssBytes": 75415552,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792450376533,
+        "rssBytes": 74907648,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792450436535,
+        "rssBytes": 75120640,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792450496537,
+        "rssBytes": 75284480,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792450556538,
+        "rssBytes": 68337664,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792450616539,
+        "rssBytes": 68419584,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792450676541,
+        "rssBytes": 68698112,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792450736543,
+        "rssBytes": 68796416,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792450796545,
+        "rssBytes": 80035840,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792450856547,
+        "rssBytes": 62668800,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792450916549,
+        "rssBytes": 63012864,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792450976547,
+        "rssBytes": 62373888,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792451036545,
+        "rssBytes": 62750720,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792451096547,
+        "rssBytes": 63242240,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792451156547,
+        "rssBytes": 63750144,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792451216548,
+        "rssBytes": 64061440,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792451276551,
+        "rssBytes": 64569344,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792451336551,
+        "rssBytes": 68730880,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792451396553,
+        "rssBytes": 83722240,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792451456554,
+        "rssBytes": 81870848,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792451516554,
+        "rssBytes": 81887232,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792451576556,
+        "rssBytes": 81887232,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792451636558,
+        "rssBytes": 81887232,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792451696558,
+        "rssBytes": 81887232,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792451756560,
+        "rssBytes": 81887232,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792451816562,
+        "rssBytes": 72695808,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792451876563,
+        "rssBytes": 73564160,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792451936565,
+        "rssBytes": 73629696,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792451996553,
+        "rssBytes": 84426752,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792452056552,
+        "rssBytes": 75333632,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792452116554,
+        "rssBytes": 75038720,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792452176555,
+        "rssBytes": 75284480,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792452236556,
+        "rssBytes": 71647232,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792452296558,
+        "rssBytes": 71680000,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792452356559,
+        "rssBytes": 71761920,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792452416560,
+        "rssBytes": 71909376,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792452476562,
+        "rssBytes": 72318976,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792452536563,
+        "rssBytes": 72925184,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792452596563,
+        "rssBytes": 85196800,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792452656564,
+        "rssBytes": 67207168,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792452716566,
+        "rssBytes": 67354624,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792452776568,
+        "rssBytes": 68059136,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792452836568,
+        "rssBytes": 68108288,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792452896570,
+        "rssBytes": 68501504,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792452956570,
+        "rssBytes": 68517888,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792453016572,
+        "rssBytes": 68632576,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792453076572,
+        "rssBytes": 66256896,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792453136573,
+        "rssBytes": 67190784,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792453196575,
+        "rssBytes": 84164608,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792453256575,
+        "rssBytes": 84328448,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792453316575,
+        "rssBytes": 84475904,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792453376576,
+        "rssBytes": 78315520,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792453436577,
+        "rssBytes": 75104256,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792453496578,
+        "rssBytes": 71352320,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792453556578,
+        "rssBytes": 71925760,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792453616580,
+        "rssBytes": 70729728,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792453676582,
+        "rssBytes": 70795264,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792453736584,
+        "rssBytes": 66306048,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792453796585,
+        "rssBytes": 82264064,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792453856587,
+        "rssBytes": 79544320,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792453916588,
+        "rssBytes": 72089600,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792453976589,
+        "rssBytes": 72318976,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792454036594,
+        "rssBytes": 72417280,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792454096603,
+        "rssBytes": 72679424,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792454156605,
+        "rssBytes": 72744960,
+        "fdCount": 20
+      },
+      {
+        "atMs": 1792454216606,
+        "rssBytes": 73023488,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792454276606,
+        "rssBytes": 72990720,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792454336605,
+        "rssBytes": 61423616,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792454396605,
+        "rssBytes": 78413824,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792454456606,
+        "rssBytes": 74481664,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792454516607,
+        "rssBytes": 72794112,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792454576609,
+        "rssBytes": 73089024,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792454636610,
+        "rssBytes": 73662464,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792454696611,
+        "rssBytes": 73449472,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792454756614,
+        "rssBytes": 59768832,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792454816614,
+        "rssBytes": 61685760,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792454876616,
+        "rssBytes": 62226432,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792454936616,
+        "rssBytes": 69255168,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792454996617,
+        "rssBytes": 84508672,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792455056614,
+        "rssBytes": 83574784,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792455116614,
+        "rssBytes": 83574784,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792455176613,
+        "rssBytes": 76169216,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792455236615,
+        "rssBytes": 76234752,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792455296617,
+        "rssBytes": 72433664,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792455356618,
+        "rssBytes": 73187328,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792455416619,
+        "rssBytes": 74252288,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792455476619,
+        "rssBytes": 64536576,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792455536619,
+        "rssBytes": 64176128,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792455596620,
+        "rssBytes": 90357760,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792455656622,
+        "rssBytes": 84606976,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792455716624,
+        "rssBytes": 83443712,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792455776624,
+        "rssBytes": 78381056,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792455836626,
+        "rssBytes": 74465280,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792455896627,
+        "rssBytes": 74432512,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792455956629,
+        "rssBytes": 74596352,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792456016629,
+        "rssBytes": 64077824,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792456076630,
+        "rssBytes": 64471040,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792456136628,
+        "rssBytes": 64716800,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792456196628,
+        "rssBytes": 80084992,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792456256628,
+        "rssBytes": 86687744,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792456316630,
+        "rssBytes": 83558400,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792456376632,
+        "rssBytes": 79724544,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792456436634,
+        "rssBytes": 75497472,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792456496636,
+        "rssBytes": 74661888,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792456556638,
+        "rssBytes": 72433664,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792456616639,
+        "rssBytes": 72728576,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792456676641,
+        "rssBytes": 67518464,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792456736642,
+        "rssBytes": 68157440,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792456796644,
+        "rssBytes": 88227840,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792456856646,
+        "rssBytes": 78544896,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792456916648,
+        "rssBytes": 79675392,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792456976650,
+        "rssBytes": 79724544,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792457036651,
+        "rssBytes": 81002496,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792457096650,
+        "rssBytes": 81379328,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792457156651,
+        "rssBytes": 80756736,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792457216653,
+        "rssBytes": 77774848,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792457276656,
+        "rssBytes": 67780608,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792457336656,
+        "rssBytes": 69287936,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792457396657,
+        "rssBytes": 91127808,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792457456657,
+        "rssBytes": 83050496,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792457516659,
+        "rssBytes": 79527936,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792457576661,
+        "rssBytes": 74989568,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792457636664,
+        "rssBytes": 68927488,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792457696665,
+        "rssBytes": 62390272,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792457756667,
+        "rssBytes": 65994752,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792457816669,
+        "rssBytes": 67452928,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792457876670,
+        "rssBytes": 67633152,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792457936670,
+        "rssBytes": 67600384,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792457996672,
+        "rssBytes": 91504640,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792458056673,
+        "rssBytes": 79462400,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792458116675,
+        "rssBytes": 73449472,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792458176677,
+        "rssBytes": 60325888,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792458236677,
+        "rssBytes": 60768256,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792458296679,
+        "rssBytes": 62668800,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792458356680,
+        "rssBytes": 62996480,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792458416682,
+        "rssBytes": 63651840,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792458476685,
+        "rssBytes": 62275584,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792458536683,
+        "rssBytes": 68960256,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792458596684,
+        "rssBytes": 78594048,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792458656686,
+        "rssBytes": 80740352,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792458716687,
+        "rssBytes": 81510400,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792458776689,
+        "rssBytes": 80281600,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792458836690,
+        "rssBytes": 63782912,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792458896691,
+        "rssBytes": 61997056,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792458956692,
+        "rssBytes": 63438848,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792459016694,
+        "rssBytes": 68059136,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792459076694,
+        "rssBytes": 69369856,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792459136695,
+        "rssBytes": 68993024,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792459196694,
+        "rssBytes": 96960512,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792459256697,
+        "rssBytes": 69140480,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792459316697,
+        "rssBytes": 71712768,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792459376699,
+        "rssBytes": 67305472,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792459436700,
+        "rssBytes": 70844416,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792459496701,
+        "rssBytes": 70500352,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792459556702,
+        "rssBytes": 72007680,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792459616703,
+        "rssBytes": 71974912,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792459676704,
+        "rssBytes": 68206592,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792459736705,
+        "rssBytes": 68222976,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792459796706,
+        "rssBytes": 85360640,
+        "fdCount": 19
+      },
+      {
+        "atMs": 1792459856707,
+        "rssBytes": 78315520,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792459916706,
+        "rssBytes": 78184448,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792459976708,
+        "rssBytes": 72826880,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792460036709,
+        "rssBytes": 74596352,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792460096713,
+        "rssBytes": 74842112,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792460156721,
+        "rssBytes": 63340544,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792460216722,
+        "rssBytes": 63717376,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792460276723,
+        "rssBytes": 63111168,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792460336723,
+        "rssBytes": 62816256,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792460396724,
+        "rssBytes": 82231296,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792460456725,
+        "rssBytes": 73269248,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792460516727,
+        "rssBytes": 73482240,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792460576728,
+        "rssBytes": 61702144,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792460636730,
+        "rssBytes": 61456384,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792460696730,
+        "rssBytes": 59473920,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792460756732,
+        "rssBytes": 61636608,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792460816732,
+        "rssBytes": 59801600,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792460876733,
+        "rssBytes": 59981824,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792460936735,
+        "rssBytes": 62160896,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792460996737,
+        "rssBytes": 73187328,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792461056742,
+        "rssBytes": 68812800,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792461116747,
+        "rssBytes": 64487424,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792461176748,
+        "rssBytes": 61833216,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792461236749,
+        "rssBytes": 59834368,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792461296750,
+        "rssBytes": 60817408,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792461356751,
+        "rssBytes": 61882368,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792461416752,
+        "rssBytes": 59146240,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792461476754,
+        "rssBytes": 61095936,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792461536757,
+        "rssBytes": 67862528,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792461596758,
+        "rssBytes": 78643200,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792461656759,
+        "rssBytes": 76890112,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792461716761,
+        "rssBytes": 76464128,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792461776763,
+        "rssBytes": 74383360,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792461836765,
+        "rssBytes": 69189632,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792461896765,
+        "rssBytes": 62701568,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792461956765,
+        "rssBytes": 63324160,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792462016767,
+        "rssBytes": 65126400,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792462076766,
+        "rssBytes": 63455232,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792462136766,
+        "rssBytes": 68419584,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792462196771,
+        "rssBytes": 90128384,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792462256772,
+        "rssBytes": 85114880,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792462316773,
+        "rssBytes": 67092480,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792462376773,
+        "rssBytes": 68894720,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792462436773,
+        "rssBytes": 66174976,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792462496775,
+        "rssBytes": 64208896,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792462556774,
+        "rssBytes": 67452928,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792462616773,
+        "rssBytes": 69287936,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792462676774,
+        "rssBytes": 68599808,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792462736775,
+        "rssBytes": 61145088,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792462796776,
+        "rssBytes": 86769664,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792462856776,
+        "rssBytes": 77594624,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792462916780,
+        "rssBytes": 69255168,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792462976781,
+        "rssBytes": 59965440,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792463036782,
+        "rssBytes": 61063168,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792463096783,
+        "rssBytes": 61161472,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792463156774,
         "rssBytes": 60260352,
         "fdCount": 18
       },
       {
-        "atMs": 1791318794501,
-        "rssBytes": 116457472,
+        "atMs": 1792463216776,
+        "rssBytes": 61063168,
         "fdCount": 18
       },
       {
-        "atMs": 1791318854503,
-        "rssBytes": 160432128,
+        "atMs": 1792463276777,
+        "rssBytes": 61669376,
         "fdCount": 18
       },
       {
-        "atMs": 1791318914505,
-        "rssBytes": 160120832,
+        "atMs": 1792463336778,
+        "rssBytes": 61882368,
         "fdCount": 18
       },
       {
-        "atMs": 1791318974520,
-        "rssBytes": 54132736,
+        "atMs": 1792463396779,
+        "rssBytes": 85622784,
         "fdCount": 18
       },
       {
-        "atMs": 1791319034521,
-        "rssBytes": 51019776,
+        "atMs": 1792463456781,
+        "rssBytes": 77758464,
         "fdCount": 18
       },
       {
-        "atMs": 1791319094522,
-        "rssBytes": 51314688,
+        "atMs": 1792463516783,
+        "rssBytes": 67993600,
         "fdCount": 18
       },
       {
-        "atMs": 1791319154524,
-        "rssBytes": 51380224,
+        "atMs": 1792463576785,
+        "rssBytes": 64995328,
         "fdCount": 18
       },
       {
-        "atMs": 1791319214525,
-        "rssBytes": 51331072,
+        "atMs": 1792463636787,
+        "rssBytes": 66322432,
         "fdCount": 18
       },
       {
-        "atMs": 1791319274525,
-        "rssBytes": 50741248,
+        "atMs": 1792463696789,
+        "rssBytes": 63684608,
         "fdCount": 18
       },
       {
-        "atMs": 1791319334527,
-        "rssBytes": 50364416,
+        "atMs": 1792463756791,
+        "rssBytes": 67256320,
         "fdCount": 18
       },
       {
-        "atMs": 1791319394528,
-        "rssBytes": 50937856,
+        "atMs": 1792463816793,
+        "rssBytes": 62832640,
         "fdCount": 18
       },
       {
-        "atMs": 1791319454529,
-        "rssBytes": 52199424,
+        "atMs": 1792463876794,
+        "rssBytes": 61423616,
         "fdCount": 18
       },
       {
-        "atMs": 1791319514531,
-        "rssBytes": 53133312,
+        "atMs": 1792463936795,
+        "rssBytes": 59588608,
         "fdCount": 18
       },
       {
-        "atMs": 1791319574532,
-        "rssBytes": 53805056,
+        "atMs": 1792463996796,
+        "rssBytes": 80429056,
         "fdCount": 18
       },
       {
-        "atMs": 1791319634532,
-        "rssBytes": 53035008,
+        "atMs": 1792464056797,
+        "rssBytes": 78495744,
         "fdCount": 18
       },
       {
-        "atMs": 1791319694532,
-        "rssBytes": 50806784,
+        "atMs": 1792464116792,
+        "rssBytes": 72925184,
         "fdCount": 18
       },
       {
-        "atMs": 1791319754535,
-        "rssBytes": 51134464,
+        "atMs": 1792464176793,
+        "rssBytes": 67944448,
         "fdCount": 18
       },
       {
-        "atMs": 1791319814537,
-        "rssBytes": 51462144,
+        "atMs": 1792464236794,
+        "rssBytes": 62898176,
         "fdCount": 18
       },
       {
-        "atMs": 1791319874539,
-        "rssBytes": 51691520,
+        "atMs": 1792464296796,
+        "rssBytes": 63324160,
         "fdCount": 18
       },
       {
-        "atMs": 1791319934540,
-        "rssBytes": 42975232,
+        "atMs": 1792464356798,
+        "rssBytes": 61685760,
         "fdCount": 18
       },
       {
-        "atMs": 1791319994539,
-        "rssBytes": 42975232,
+        "atMs": 1792464416798,
+        "rssBytes": 60538880,
         "fdCount": 18
       },
       {
-        "atMs": 1791320054539,
-        "rssBytes": 50020352,
+        "atMs": 1792464476800,
+        "rssBytes": 60473344,
         "fdCount": 18
       },
       {
-        "atMs": 1791320114541,
-        "rssBytes": 50577408,
+        "atMs": 1792464536802,
+        "rssBytes": 61964288,
         "fdCount": 18
       },
       {
-        "atMs": 1791320174541,
-        "rssBytes": 50970624,
+        "atMs": 1792464596802,
+        "rssBytes": 79986688,
         "fdCount": 18
       },
       {
-        "atMs": 1791320234543,
-        "rssBytes": 51412992,
+        "atMs": 1792464656802,
+        "rssBytes": 75857920,
         "fdCount": 18
       },
       {
-        "atMs": 1791320294545,
-        "rssBytes": 51855360,
+        "atMs": 1792464716803,
+        "rssBytes": 53706752,
         "fdCount": 18
       },
       {
-        "atMs": 1791320354548,
-        "rssBytes": 52412416,
+        "atMs": 1792464776806,
+        "rssBytes": 61210624,
         "fdCount": 18
       },
       {
-        "atMs": 1791320414550,
-        "rssBytes": 52936704,
+        "atMs": 1792464836806,
+        "rssBytes": 60882944,
         "fdCount": 18
       },
       {
-        "atMs": 1791320474552,
-        "rssBytes": 53510144,
+        "atMs": 1792464896807,
+        "rssBytes": 61767680,
         "fdCount": 18
       },
       {
-        "atMs": 1791320534554,
-        "rssBytes": 53542912,
+        "atMs": 1792464956808,
+        "rssBytes": 60981248,
         "fdCount": 18
       },
       {
-        "atMs": 1791320594555,
-        "rssBytes": 49496064,
+        "atMs": 1792465016810,
+        "rssBytes": 61194240,
         "fdCount": 18
       },
       {
-        "atMs": 1791320654556,
-        "rssBytes": 49643520,
+        "atMs": 1792465076809,
+        "rssBytes": 60882944,
         "fdCount": 18
       },
       {
-        "atMs": 1791320714559,
-        "rssBytes": 49414144,
+        "atMs": 1792465136807,
+        "rssBytes": 69058560,
         "fdCount": 18
       },
       {
-        "atMs": 1791320774560,
-        "rssBytes": 43630592,
+        "atMs": 1792465196807,
+        "rssBytes": 79970304,
         "fdCount": 18
       },
       {
-        "atMs": 1791320834562,
-        "rssBytes": 49692672,
+        "atMs": 1792465256809,
+        "rssBytes": 65044480,
         "fdCount": 18
       },
       {
-        "atMs": 1791320894563,
-        "rssBytes": 50135040,
+        "atMs": 1792465316810,
+        "rssBytes": 61472768,
         "fdCount": 18
       },
       {
-        "atMs": 1791320954560,
-        "rssBytes": 45400064,
+        "atMs": 1792465376812,
+        "rssBytes": 60538880,
         "fdCount": 18
       },
       {
-        "atMs": 1791321014561,
-        "rssBytes": 50069504,
+        "atMs": 1792465436813,
+        "rssBytes": 63127552,
         "fdCount": 18
       },
       {
-        "atMs": 1791321074562,
-        "rssBytes": 50364416,
+        "atMs": 1792465496815,
+        "rssBytes": 62210048,
         "fdCount": 18
       },
       {
-        "atMs": 1791321134563,
-        "rssBytes": 49872896,
+        "atMs": 1792465556816,
+        "rssBytes": 63029248,
         "fdCount": 18
       },
       {
-        "atMs": 1791321194563,
-        "rssBytes": 50331648,
+        "atMs": 1792465616818,
+        "rssBytes": 65404928,
         "fdCount": 18
       },
       {
-        "atMs": 1791321254565,
-        "rssBytes": 50626560,
+        "atMs": 1792465676819,
+        "rssBytes": 66322432,
         "fdCount": 18
       },
       {
-        "atMs": 1791321314567,
-        "rssBytes": 51167232,
+        "atMs": 1792465736818,
+        "rssBytes": 70434816,
+        "fdCount": 19
+      },
+      {
+        "atMs": 1792465796818,
+        "rssBytes": 80789504,
         "fdCount": 18
       },
       {
-        "atMs": 1791321374569,
-        "rssBytes": 50593792,
+        "atMs": 1792465856820,
+        "rssBytes": 72417280,
         "fdCount": 18
       },
       {
-        "atMs": 1791321434569,
-        "rssBytes": 50757632,
+        "atMs": 1792465916821,
+        "rssBytes": 60899328,
         "fdCount": 18
       },
       {
-        "atMs": 1791321494569,
-        "rssBytes": 51314688,
+        "atMs": 1792465976823,
+        "rssBytes": 59424768,
         "fdCount": 18
       },
       {
-        "atMs": 1791321554571,
-        "rssBytes": 50249728,
+        "atMs": 1792466036824,
+        "rssBytes": 61718528,
         "fdCount": 18
       },
       {
-        "atMs": 1791321614571,
-        "rssBytes": 50184192,
+        "atMs": 1792466096835,
+        "rssBytes": 59965440,
         "fdCount": 18
       },
       {
-        "atMs": 1791321674572,
-        "rssBytes": 50839552,
+        "atMs": 1792466156837,
+        "rssBytes": 58949632,
         "fdCount": 18
       },
       {
-        "atMs": 1791321734572,
-        "rssBytes": 51609600,
+        "atMs": 1792466216839,
+        "rssBytes": 60309504,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792466276840,
+        "rssBytes": 60194816,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792466336842,
+        "rssBytes": 58949632,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792466396844,
+        "rssBytes": 75874304,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792466456846,
+        "rssBytes": 63029248,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792466516846,
+        "rssBytes": 58277888,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792466576849,
+        "rssBytes": 59785216,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792466636851,
+        "rssBytes": 58802176,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792466696851,
+        "rssBytes": 60555264,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792466756853,
+        "rssBytes": 59899904,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792466816855,
+        "rssBytes": 57524224,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792466876857,
+        "rssBytes": 61587456,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792466936859,
+        "rssBytes": 60932096,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792466996860,
+        "rssBytes": 81444864,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792467056849,
+        "rssBytes": 81559552,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792467116845,
+        "rssBytes": 65585152,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792467176847,
+        "rssBytes": 61128704,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792467236848,
+        "rssBytes": 61718528,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792467296849,
+        "rssBytes": 60276736,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792467356850,
+        "rssBytes": 61571072,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792467416852,
+        "rssBytes": 61341696,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792467476853,
+        "rssBytes": 60538880,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792467536855,
+        "rssBytes": 60456960,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792467596857,
+        "rssBytes": 85278720,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792467656858,
+        "rssBytes": 60358656,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792467716860,
+        "rssBytes": 66306048,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792467776861,
+        "rssBytes": 60669952,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792467836862,
+        "rssBytes": 67600384,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792467896864,
+        "rssBytes": 63864832,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792467956866,
+        "rssBytes": 61997056,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792468016866,
+        "rssBytes": 59342848,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792468076868,
+        "rssBytes": 59342848,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792468136876,
+        "rssBytes": 59703296,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792468196886,
+        "rssBytes": 88784896,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792468256888,
+        "rssBytes": 65814528,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792468316890,
+        "rssBytes": 59883520,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792468376892,
+        "rssBytes": 60243968,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792468436898,
+        "rssBytes": 60358656,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792468496899,
+        "rssBytes": 60276736,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792468556902,
+        "rssBytes": 60768256,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792468616902,
+        "rssBytes": 63078400,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792468676903,
+        "rssBytes": 66371584,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792468736904,
+        "rssBytes": 59015168,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792468796904,
+        "rssBytes": 79937536,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792468856905,
+        "rssBytes": 67305472,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792468916907,
+        "rssBytes": 68190208,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792468976907,
+        "rssBytes": 60375040,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792469036908,
+        "rssBytes": 62980096,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792469096913,
+        "rssBytes": 62636032,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792469156920,
+        "rssBytes": 59293696,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792469216920,
+        "rssBytes": 58441728,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792469276921,
+        "rssBytes": 60964864,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792469336920,
+        "rssBytes": 70991872,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792469396923,
+        "rssBytes": 81199104,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792469456924,
+        "rssBytes": 59424768,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792469516925,
+        "rssBytes": 62160896,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792469576927,
+        "rssBytes": 57229312,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792469636929,
+        "rssBytes": 58720256,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792469696931,
+        "rssBytes": 60686336,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792469756933,
+        "rssBytes": 60375040,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792469816934,
+        "rssBytes": 59179008,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792469876937,
+        "rssBytes": 61259776,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792469936938,
+        "rssBytes": 60194816,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792469996937,
+        "rssBytes": 82165760,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792470056937,
+        "rssBytes": 63160320,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792470116935,
+        "rssBytes": 61554688,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792470176936,
+        "rssBytes": 60866560,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792470236935,
+        "rssBytes": 59998208,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792470296936,
+        "rssBytes": 60162048,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792470356937,
+        "rssBytes": 64045056,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792470416937,
+        "rssBytes": 59179008,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792470476938,
+        "rssBytes": 60948480,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792470536939,
+        "rssBytes": 58785792,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792470596939,
+        "rssBytes": 76840960,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792470656941,
+        "rssBytes": 67141632,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792470716941,
+        "rssBytes": 59424768,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792470776943,
+        "rssBytes": 58572800,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792470836943,
+        "rssBytes": 60211200,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792470896942,
+        "rssBytes": 59015168,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792470956944,
+        "rssBytes": 60309504,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792471016943,
+        "rssBytes": 59801600,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792471076939,
+        "rssBytes": 60932096,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792471136941,
+        "rssBytes": 58310656,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792471196942,
+        "rssBytes": 86048768,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792471256944,
+        "rssBytes": 61046784,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792471316945,
+        "rssBytes": 64176128,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792471376945,
+        "rssBytes": 58376192,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792471436947,
+        "rssBytes": 60637184,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792471496949,
+        "rssBytes": 55721984,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792471556950,
+        "rssBytes": 60358656,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792471616951,
+        "rssBytes": 57458688,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792471676950,
+        "rssBytes": 61472768,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792471736952,
+        "rssBytes": 58327040,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792471796952,
+        "rssBytes": 80019456,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792471856954,
+        "rssBytes": 67944448,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792471916955,
+        "rssBytes": 59129856,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792471976955,
+        "rssBytes": 59342848,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792472036953,
+        "rssBytes": 59506688,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792472096952,
+        "rssBytes": 59981824,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792472156953,
+        "rssBytes": 61964288,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792472216955,
+        "rssBytes": 58638336,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792472276958,
+        "rssBytes": 60506112,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792472336959,
+        "rssBytes": 56786944,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792472396961,
+        "rssBytes": 84803584,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792472456963,
+        "rssBytes": 62816256,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792472516964,
+        "rssBytes": 64487424,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792472576966,
+        "rssBytes": 59375616,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792472636967,
+        "rssBytes": 63307776,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792472696969,
+        "rssBytes": 60391424,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792472756969,
+        "rssBytes": 58195968,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792472816970,
+        "rssBytes": 60145664,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792472876970,
+        "rssBytes": 58769408,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792472936966,
+        "rssBytes": 55427072,
         "fdCount": 18
       }
     ]
@@ -454,14 +2588,14 @@
   "rules": {
     "finalWindowRss": {
       "windowMs": 14400000,
-      "samples": 61,
-      "elapsedMs": 3600082,
-      "startRssBytes": 107839488,
-      "endRssBytes": 51609600,
-      "growthRatio": -0.5214220601640839,
-      "slopeBytesPerMs": -15.998319537204704,
-      "impliedGrowthRatio": -0.5340832311457097,
-      "slopePctOfStartPerSecond_reportedNotGated": -0.014835307394267956,
+      "samples": 240,
+      "elapsedMs": 14340282,
+      "startRssBytes": 78594048,
+      "endRssBytes": 55427072,
+      "growthRatio": -0.294767563060246,
+      "slopeBytesPerMs": -0.6901535873474748,
+      "impliedGrowthRatio": -0.12592552893921968,
+      "slopePctOfStartPerSecond_reportedNotGated": -0.0008781244953148039,
       "bound": 0.02,
       "rule": "(endRSS - startRSS_of_window) / RSS_at_window_start <= 0.02, and the least-squares slope's implied growth across the window <= 0.02 — a total-growth bound (the final four hours at the default 8-hour duration), not the Story 2.4 per-second rate",
       "pass": true
@@ -469,16 +2603,28 @@
     "fdStability": {
       "baselineAfterMs": 3600000,
       "baselineFd": 18,
-      "samplesAfterBaseline": 1,
-      "worstAbsDrift": 0,
+      "samplesAfterBaseline": 421,
+      "worstAbsDrift": 2,
       "corridor": 5,
       "rule": "every sample at or after duration/8 (one hour at the default 8) sits within +-5 of the hour-one baseline",
       "pass": true
     },
     "zeroMessageLoss": {
-      "pending": true,
-      "pass": false,
-      "note": "the run ended before the final drain"
+      "ackedCount": 22625,
+      "readableCount": 22625,
+      "duplicates": 0,
+      "lostOrPhantom": 0,
+      "unreadAcknowledged": 0,
+      "perRoom": {
+        "AxPan4iEJUTxpy_Z2bTaNQ": 4525,
+        "BpXMeffbicWSel4culIQcA": 4525,
+        "Pa8zK5JpglIZbpMhQUqy7A": 4525,
+        "MMzZdT0TUDmVe7FpYR_dRg": 4525,
+        "E1f8NLanuhExtwwCF8n6tg": 4525
+      },
+      "payloadFailures": [],
+      "pass": true,
+      "rule": "every acknowledged (room, seq, client_message_id) readable at the end; sequences contiguous from 1; readable set == acknowledged set; zero duplicates; payloads byte-exact"
     }
   },
   "idleFootprint": {
@@ -487,29 +2633,124 @@
     "note": "REL-4 counter-metric: server RSS/FD/CPU with 0 Actors (start, each reconnect window, end) and the post-resume settled sample with the run's 4 Actors — reported, not optimized.",
     "samples": [
       {
-        "at": "2026-10-06T20:22:08.910Z",
+        "at": "2026-10-19T21:08:50.649Z",
         "actors": 0,
-        "rssBytes": 65536000,
+        "rssBytes": 65748992,
         "fdCount": 18,
-        "cpuSeconds": 0.13
+        "cpuSeconds": 0.14
       },
       {
-        "at": "2026-10-06T21:22:14.532Z",
+        "at": "2026-10-19T22:08:56.410Z",
         "actors": 0,
-        "rssBytes": 51609600,
+        "rssBytes": 64667648,
         "fdCount": 18,
-        "cpuSeconds": 46.92
+        "cpuSeconds": 6.77
+      },
+      {
+        "at": "2026-10-19T22:09:03.893Z",
+        "actors": 4,
+        "rssBytes": 77742080,
+        "fdCount": 18,
+        "cpuSeconds": 7.16
+      },
+      {
+        "at": "2026-10-19T23:08:56.411Z",
+        "actors": 0,
+        "rssBytes": 65339392,
+        "fdCount": 18,
+        "cpuSeconds": 12.13
+      },
+      {
+        "at": "2026-10-19T23:09:03.995Z",
+        "actors": 4,
+        "rssBytes": 80003072,
+        "fdCount": 18,
+        "cpuSeconds": 12.58
+      },
+      {
+        "at": "2026-10-20T00:08:56.412Z",
+        "actors": 0,
+        "rssBytes": 64585728,
+        "fdCount": 18,
+        "cpuSeconds": 18.22
+      },
+      {
+        "at": "2026-10-20T00:09:03.910Z",
+        "actors": 4,
+        "rssBytes": 74055680,
+        "fdCount": 20,
+        "cpuSeconds": 18.52
+      },
+      {
+        "at": "2026-10-20T01:08:56.413Z",
+        "actors": 0,
+        "rssBytes": 62013440,
+        "fdCount": 18,
+        "cpuSeconds": 24.85
+      },
+      {
+        "at": "2026-10-20T01:09:03.937Z",
+        "actors": 4,
+        "rssBytes": 73269248,
+        "fdCount": 18,
+        "cpuSeconds": 25.12
+      },
+      {
+        "at": "2026-10-20T02:08:56.411Z",
+        "actors": 0,
+        "rssBytes": 62963712,
+        "fdCount": 18,
+        "cpuSeconds": 32.07
+      },
+      {
+        "at": "2026-10-20T02:09:04.013Z",
+        "actors": 4,
+        "rssBytes": 73809920,
+        "fdCount": 18,
+        "cpuSeconds": 32.39
+      },
+      {
+        "at": "2026-10-20T03:08:56.415Z",
+        "actors": 0,
+        "rssBytes": 60833792,
+        "fdCount": 18,
+        "cpuSeconds": 39.49
+      },
+      {
+        "at": "2026-10-20T03:09:04.033Z",
+        "actors": 4,
+        "rssBytes": 71516160,
+        "fdCount": 18,
+        "cpuSeconds": 39.78
+      },
+      {
+        "at": "2026-10-20T04:08:56.413Z",
+        "actors": 0,
+        "rssBytes": 59719680,
+        "fdCount": 18,
+        "cpuSeconds": 46.95
+      },
+      {
+        "at": "2026-10-20T04:09:04.029Z",
+        "actors": 4,
+        "rssBytes": 71172096,
+        "fdCount": 18,
+        "cpuSeconds": 47.26
+      },
+      {
+        "at": "2026-10-20T05:10:21.575Z",
+        "actors": 0,
+        "rssBytes": 171868160,
+        "fdCount": 18,
+        "cpuSeconds": 56.72
       }
     ]
   },
-  "failureReasons": [
-    "ENOENT: no such file or directory, open '/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared/local-token'",
-    "zero message loss failed"
-  ],
+  "failureReasons": [],
   "world": {
-    "dir": "/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx",
-    "ackLog": "/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/recorder/acked-sends.ndjson",
-    "database": "/var/folders/87/48nz0cx90pz9knsvv8205cnw0000gq/T/agent-room-rel3-soak-rKEmEx/shared/agent-room.sqlite",
-    "kept": false
+    "dir": "/Users/ngs/agent-skills/plugins/agent-room/.soak-world/agent-room-rel3-soak-MTetAU",
+    "ackLog": "/Users/ngs/agent-skills/plugins/agent-room/.soak-world/agent-room-rel3-soak-MTetAU/recorder/acked-sends.ndjson",
+    "database": "/Users/ngs/agent-skills/plugins/agent-room/.soak-world/agent-room-rel3-soak-MTetAU/shared/agent-room.sqlite",
+    "kept": true
   }
 }
