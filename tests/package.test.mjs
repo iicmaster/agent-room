@@ -23,7 +23,7 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
-import { MIN_NODE_VERSION } from '../server/runtime.mjs';
+import { APP_VERSION, MIN_NODE_VERSION } from '../server/runtime.mjs';
 
 const execFile = promisify(execFileCallback);
 const repoRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
@@ -59,7 +59,7 @@ const requiredSharedPaths = [
 const expectedPluginManifest = {
   $schema: PLUGIN_SCHEMA,
   name: 'agent-room',
-  version: '0.1.0',
+  version: APP_VERSION,
   description: 'Vendor-neutral agent chat rooms over MCP with a live web viewer',
   author: { name: 'NGS' },
   license: 'MIT',
@@ -79,7 +79,7 @@ const expectedMcpConfig = {
 
 const expectedClaudeManifest = {
   name: 'agent-room',
-  version: '0.1.0',
+  version: APP_VERSION,
   description: 'Vendor-neutral agent chat rooms over MCP with a live web viewer',
   author: { name: 'NGS' },
   license: 'MIT',
@@ -257,7 +257,7 @@ test('portable manifests and package metadata have exact closed shapes', async (
 
   assert.deepEqual(packageJson, {
     name: 'agent-room',
-    version: '0.1.0',
+    version: APP_VERSION,
     private: true,
     type: 'module',
     bin: { 'agent-room': './server/cli/agent-room.mjs' },
