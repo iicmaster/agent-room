@@ -122,6 +122,26 @@ node "$PKG_ZCODE/server/cli/agent-room.mjs" remote set "https://192.168.1.20:844
 node "$PKG_ZCODE/server/cli/agent-room.mjs" remote enroll "ar_inv1_…"   # paste the token; receipt shows this install's fingerprint
 ```
 
+  **The Zcode host installs the package as a PLUGIN, not as a bare script.** The
+  materialized portable package is an Agent Plugins 1.0.0 plugin (`plugin.json`
+  + `mcp.json`): install it into Zcode the way Zcode consumes plugins, and the
+  host resolves the MCP server from the plugin's own `mcp.json` — which points
+  at `${PLUGIN_ROOT}/server/mcp-stdio.mjs` with `cwd: ${PLUGIN_DATA}`. The
+  `PLUGIN_DATA` the MCP server sees is the INSTALLATION's data dir, so that is
+  the same directory §2 above enrolls. If the host does not substitute
+  `${PLUGIN_DATA}`, the plugin's `mcp.json` can set it explicitly in its `env`
+  block (`${HOME}` expands in Zcode's plugin config, as the artifact-sftp
+  plugin's own config does).
+
+  Two facts worth knowing before you start, both measured on a real run:
+  - **`agent-room setup` needs a TTY.** Run it in a terminal (or a tmux pane),
+    not in a pipeline — a piped stdin closes before readline reads it, and the
+    command answers "setup ended before a Chat ID was chosen".
+  - **Mint and redeem the invite in one step.** An invite has exactly one use;
+    minting a spare and redeeming the wrong one leaves the server holding an
+    invite the client cannot use (`invite is unknown to this server` when the
+    token came from a different realm's server).
+
 - [ ] On DESKTOP — preflight (same shell, so PLUGIN_DATA matches the enrollment):
 
 ```sh
