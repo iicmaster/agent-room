@@ -136,9 +136,11 @@ SM-C1 numbers above, and the binding statement for Stories 6.2 and 6.1.
 
 ## Notes for the RC window
 
-- The plugin manifest version remains `0.1.0` in `plugin.json` (the packager
-  validates it against a frozen canonical shape). The v0.2.0 version stamp and
-  release tag belong to the Phase 5 closeout, after REL-1 passes.
+- The plugin manifest version is `0.2.0` in `plugin.json` (the packager
+  validates the manifest against a frozen canonical shape; the version literal
+  moved with the release). The stamp is applied **before** the candidate is
+  re-cut, so the frozen artifact and the shipped artifact are the same bytes —
+  stamping after the soak would have voided the candidate a second time.
 - Package size grew from v0.1's 136 KiB / 13 files to 734 KiB / 45 files per
   package (remote mode, viewer assets, trust/held pipeline, migration, drills'
   runtime surface) — no external dependencies were added.

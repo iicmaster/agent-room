@@ -307,6 +307,19 @@ All notable changes to Agent Room are documented in this file.
   "remote and multi-host rooms are not part of version 0.2" line is replaced
   with the shipped Remote Mode reality.
 
+### Fixed
+
+- The live web viewer could never connect. `web/app.js` read the boot
+  descriptor's `broadcast_room_id` from the TOP LEVEL of the response, but the
+  API answers in the standard `{ ok: true, result: { … } }` envelope — so every
+  viewer load reported "Room server unreachable" against a perfectly healthy
+  server. The client half and the server half disagreed on the response shape,
+  and no test ran the shipped script to notice. The viewer now reads the
+  descriptor from the envelope (and still accepts a bare one); the SSE frames
+  were always the opposite shape — raw payloads — and were already read
+  correctly. `tests/viewer-app.test.mjs` runs the shipped script against the
+  real boot envelope and fails without the fix.
+
 ### Removed
 
 - The v0.1 MCP tool surface (`room_create`/`room_join`) that spoke the unix-socket daemon.
