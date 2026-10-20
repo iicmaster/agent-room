@@ -13,11 +13,11 @@
 ## 2. HOW TO VERIFY
 
 ```bash
-node --test --test-timeout=300000        # expect ~529+ pass, 0 fail (some storage-gate tests need >1 GiB free — see DO NOT #4)
+node --test --test-timeout=600000        # expect ~554+ pass, 0 fail (some storage-gate tests need >1 GiB free — see DO NOT #4)
 node scripts/ac-sweep.mjs --epic N       # per epic 1..6; verdict must be `clean` (epic 6 currently `gaps` — 6.1/6.2 open by design)
 claude plugin validate <materialized-pkg> --strict   # release gate; needs the `claude` CLI
 ```
-`--test-timeout` is required: several real-child integration tests exceed the 120 s default under load.
+`--test-timeout` is required: several real-child integration tests exceed the 120 s default under load. Use **600000**, not 300000 — the REL-3 compressed-soak validation runs a 5-minute profile that takes ~327 s on its own, so a 300 s cap cancels it and reports a `not ok` that is a timeout, not a failure.
 
 ## 3. STATE
 
