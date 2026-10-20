@@ -67,6 +67,30 @@ shipped script to notice. Fixed in `cc7eb6e`; `tests/viewer-app.test.mjs` now
 runs the shipped script against the real boot envelope and fails without the
 fix.
 
+## The Zcode host — installed, enrolled, and blocked by the operator's quota
+
+REL-1 names **Claude Code + Zcode** as the two client vendors. The Zcode half
+was prepared too, and the preparation is complete:
+
+- The materialized candidate's **portable** package was installed as a local
+  Zcode plugin (`plugin.json` + `mcp.json` — the Agent Plugins 1.0.0 contract
+  Zcode consumes), registered in `~/.zcode/cli/plugins/installed_plugins.json`.
+- The plugin's `mcp.json` resolves the MCP server to the materialized
+  `server/mcp-stdio.mjs` with the installation's own `PLUGIN_DATA`, exactly as
+  the portable package's contract specifies.
+- That client instance was **enrolled over the wire** against the remote
+  server (challenge/answer, one-use invite) as `ZCODE-TMUX-1`, fingerprint
+  `sha256:1e5b6d40…` — a third distinct Actor, on the same realm.
+
+**What is blocked is the operator's own model quota, not the product.** The
+`zcode` CLI's own provider (`opencode-go-messages`) answers
+`GoUsageLimitError: Go usage limit exceeded — limitName: monthly` for this
+workspace, so the Zcode **agent** could not take a turn. The agent-host side
+of the Zcode path — the plugin install, the MCP wiring, the enrollment, the
+Chat ID, the identity — is proven; the LLM turn is blocked by a subscription
+limit on the operator's account, which is not something this work can or
+should change.
+
 ## Caveats, stated not hidden
 
 - **The candidate changed.** The fix is a packaged runtime input (`web/app.js`),
@@ -80,5 +104,8 @@ fix.
 - The Codex client on staging was driven by that machine's own 9Router
   (`thinker`), not by a cloud model — the vendor host and the MCP path are real;
   the model is local to that host.
+- The Zcode client is prepared and enrolled but could not take a turn: the
+  operator's `opencode-go-messages` quota reports a monthly usage limit. The
+  host side is proven; the LLM turn is blocked by the account's limit.
 - No screen recording was made; the evidence is the transcripts, the browser
   screenshots, and the server's own durable state.
