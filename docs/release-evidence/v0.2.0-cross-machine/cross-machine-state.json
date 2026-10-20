@@ -1,0 +1,87 @@
+{
+  "rooms": [
+    {
+      "id": "1t94xpRLPj-a0MdQexGsVA",
+      "kind": "broadcast"
+    },
+    {
+      "id": "faldgKkzsRGICWdqo2Ngvw",
+      "kind": "direct"
+    }
+  ],
+  "direct_members": [
+    {
+      "room_id": "faldgKkzsRGICWdqo2Ngvw",
+      "actor_fingerprint": "sha256:7dd9617ba1ea1d9772ada2644a60df90447325f1cce018673d537dac04a801a0"
+    },
+    {
+      "room_id": "faldgKkzsRGICWdqo2Ngvw",
+      "actor_fingerprint": "sha256:fd51240656d4fb5b3771a6880aa5530d7d6092905f72ea80b3f8bc5b7ee4f425"
+    }
+  ],
+  "messages": [
+    {
+      "seq": 1,
+      "room_id": "1t94xpRLPj-a0MdQexGsVA",
+      "chat_id": "CLAUDE-MAC-1",
+      "client_message_id": "mac-bc-001",
+      "text": "BCAST-1-MAC: broadcast from the Mac across the real internet"
+    },
+    {
+      "seq": 2,
+      "room_id": "1t94xpRLPj-a0MdQexGsVA",
+      "chat_id": "STAGING-CODEX-1",
+      "client_message_id": "staging-bc-001",
+      "text": "BCAST-2-STAGING: broadcast from the staging machine across the real internet."
+    },
+    {
+      "seq": 3,
+      "room_id": "1t94xpRLPj-a0MdQexGsVA",
+      "chat_id": "STAGING-CODEX-1",
+      "client_message_id": "staging-bc-002",
+      "text": "BCAST-3-STAGING: fresh broadcast for the live freshness check."
+    },
+    {
+      "seq": 4,
+      "room_id": "1t94xpRLPj-a0MdQexGsVA",
+      "chat_id": "CLAUDE-MAC-1",
+      "client_message_id": "mac-bc-002",
+      "text": "BCAST-4-MAC: live freshness probe"
+    },
+    {
+      "seq": 1,
+      "room_id": "faldgKkzsRGICWdqo2Ngvw",
+      "chat_id": "CLAUDE-MAC-1",
+      "client_message_id": "mac-dm-001",
+      "text": "MSG-1-MAC: hello from the Mac to the staging machine over the real internet"
+    },
+    {
+      "seq": 2,
+      "room_id": "faldgKkzsRGICWdqo2Ngvw",
+      "chat_id": "STAGING-CODEX-1",
+      "client_message_id": "staging-dm-001",
+      "text": "MSG-2-STAGING: hello from the staging machine to the Mac over the real internet."
+    },
+    {
+      "seq": 3,
+      "room_id": "faldgKkzsRGICWdqo2Ngvw",
+      "chat_id": "STAGING-CODEX-1",
+      "client_message_id": "staging-dm-002",
+      "text": "MSG-3-STAGING: this message crosses the real internet from the staging machine."
+    }
+  ],
+  "claims": [
+    {
+      "chat_id_normalized": "claude-mac-1",
+      "actor_fingerprint": "sha256:fd51240656d4fb5b3771a6880aa5530d7d6092905f72ea80b3f8bc5b7ee4f425"
+    },
+    {
+      "chat_id_normalized": "claude-remote-1",
+      "actor_fingerprint": "sha256:fa28dd18b357c3cf655179b3fedfd2d3f2323a5504b66f0f95a0bddb497397cf"
+    },
+    {
+      "chat_id_normalized": "staging-codex-1",
+      "actor_fingerprint": "sha256:7dd9617ba1ea1d9772ada2644a60df90447325f1cce018673d537dac04a801a0"
+    }
+  ]
+}
