@@ -24,11 +24,29 @@ review had warned against exactly that ("do not start heavy concurrent
 qualification work on the soak host without establishing that contention will
 not distort the run"). Attempt 1 ran on a quiet host.
 
-The RSS series of BOTH attempts shows the same sawtooth: the hourly reconnect
-cycle (which mints ~1008 session tokens to arm the eviction path) is followed by
-a step up of roughly 25 MiB and a decay back over the hour. Attempt 1's final
-four-hour window happened to open near a peak and close near a trough (growth
-−29.5%); attempt 2's window opened one minute after a reconnect (trough, 30.5
-MiB) and closed on the next reconnect (peak, 82.4 MiB), so the same rule read
-+170%. See `docs/implementation/reviews/epic-6-soak-rss-astra.md` for the
-advisor's reading of that.
+**What the samples do and do not show.** Both runs' RSS is a 60-sample sawtooth
+(~25 MiB) whose step up lands exactly on the hourly reconnect's ~1008 token
+mints, and attempt 1's final window opened at 74.95 MiB and closed at 52.9 MiB
+(−29.5%) while attempt 2's opened at 30.5 MiB and closed at 82.4 MiB (+170%).
+An earlier note in this file explained attempt 2's failure as "unlucky phase"
+between two endpoints of a sawtooth. **The advisor's statistical review
+refutes that explanation** (see
+`docs/implementation/reviews/epic-6-soak-rss-astra.md`): comparing attempt 2's
+last sixty samples against its first sixty at MATCHED phase, every one of the
+sixty differences is positive (minimum +24.33 MiB, mean +45.15 MiB) — a
+sustained rise, not a phase artifact. A median would not remove it either.
+
+Two things are therefore established and two are not:
+
+- **Established:** the rule was applied correctly (both verdicts replay
+  exactly from the stored samples with the shipped evaluator); the server's
+  identity was candidate-exact; zero message loss and FD stability held in both
+  attempts; and the server-side diff between the two candidates is one line —
+  `APP_VERSION`'s literal in `server/runtime.mjs`.
+- **Not established:** whether the rise is a product defect (memory retained by
+  the server's session-token handling) or a host artifact (the workstation was
+  running the full test suite, a second compressed soak, and a vendor-CLI demo
+  during attempt 2 — the same interference the prior review warned against).
+  Neither a leak nor benign reclamation is proven, and the GC hypothesis is
+  currently a hypothesis: the tracker records the server PID's OS RSS and FD
+  count, and no GC events, retained heap, or external allocation series.
