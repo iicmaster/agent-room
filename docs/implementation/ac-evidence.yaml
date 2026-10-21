@@ -1610,7 +1610,17 @@
       prove automatic unattended crash recovery — the successor process
       cannot be identified from the Actor key alone, and the session-resume
       design that would answer it is explicitly deferred in
-      docs/implementation/spec-6-4-reconnect-recovery-takeover.md.
+      docs/implementation/spec-6-4-reconnect-recovery-takeover.md. DOES NOT prove the
+      stronger ownership guarantee the design round-table named: the fence is checked
+      at the authorization stage, which runs BEFORE the request body is read, so a
+      request admitted before a handoff whose body was still streaming can still
+      reach the handler - the release-gate review EXECUTED that path, and the gap
+      is pinned by a named row in the test file that flips when it is fixed. The
+      takeover's intent also binds to whoever holds the name at that moment rather
+      than to an incumbent the operator observed earlier (a documented contract
+      amendment, with the stronger form - an opaque conflict ticket - scheduled
+      for the next release). The evidence verifier for REL-1 is a structural check,
+      not an adjudicator; the record states what each artifact IS.
     evidence:
       - test: "the defect: a client whose process died keeps the name, and the ordinary re-bind is refused; the explicit same-Actor takeover recovers it"
         file: "tests/session-replacement.test.mjs"
