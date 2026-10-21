@@ -271,7 +271,9 @@ be a human decision). The receipt is one JSON line: `replaced` says whether a
 live holder was actually displaced, `released` says whether the name was handed
 back.
 
-- [ ] Restart the client that uses that Chat ID. It binds the name at once.
+- [ ] The client that uses that Chat ID now binds it again — no restart needed: the
+  live client re-binds on its next tool call (the REL-1 run showed exactly that).
+  A restart is harmless, just slower.
 
 - [ ] **Never** do this to recover from a transient failure of a LIVE client:
   the takeover displaces a healthy session. If the other client is still running
@@ -281,6 +283,13 @@ back.
   that session cannot be displaced by this installation, and nothing here will
   change that. The name stays with its owner; pick another Chat ID for this
   installation (`agent-room setup`).
+
+- [ ] **Expect a squat after a one-shot vendor CLI exits.** The MCP adapter hands
+  its name back when its channel closes, but a vendor CLI that tears the MCP
+  child down kills it while that release is still crossing the internet — the
+  REL-1 run saw `ZCODE-MAC-2` stay reserved after three clean `zcode -p` exits.
+  So a squat right after a normal exit is EXPECTED, not a symptom: run the
+  takeover. (The repair for that race is open work for the next release.)
 
 ## 5. The five verifications — while the demo is live
 
