@@ -1,0 +1,69 @@
+{
+  "kit": "rel1-preflight",
+  "schema_version": 1,
+  "timestamp": "2026-10-21T11:13:54.919Z",
+  "host": {
+    "hostname": "NSG-Mac-mini.local",
+    "platform": "darwin",
+    "arch": "arm64",
+    "node": "24.18.1",
+    "sqlite": "3.53.4"
+  },
+  "role": "zcode",
+  "server": "https://43.229.78.103:18444",
+  "actor_fingerprint": "sha256:9c7848ebcc8241e00ccd109dd09c790d4e5f6b9d8448f45a78e87b9f7c1c94e7",
+  "plugin": {
+    "root": "/Users/ngs/agent-skills/plugins/agent-room/.candidate-packages/portable/agent-room-agent-plugin",
+    "kind": "portable",
+    "manifestVersion": "0.2.0",
+    "files": 46,
+    "bytes": 784256,
+    "sha256": "ad08240b847d970233fff44e182cd3c8787ded45e66751796672082c03d4fceb"
+  },
+  "plugin_data": "/Users/ngs/agent-skills/plugins/agent-room/.vendor-lab/rel1-zcode",
+  "checks": [
+    {
+      "id": "RT",
+      "title": "runtime floor (Node >= 24.15, bundled SQLite >= 3.51.3)",
+      "status": "pass",
+      "gating": true,
+      "detail": "Node 24.18.1, bundled SQLite 3.53.4"
+    },
+    {
+      "id": "SU",
+      "title": "server origin is the LAN https origin",
+      "status": "pass",
+      "gating": true,
+      "detail": "origin https://43.229.78.103:18444 is https and non-loopback (43.229.78.103)"
+    },
+    {
+      "id": "RC",
+      "title": "HTTPS reachability + GET /health (https://43.229.78.103:18444)",
+      "status": "pass",
+      "gating": true,
+      "detail": "verified TLS handshake + /health answered ok (version 0.2.0)"
+    },
+    {
+      "id": "VC",
+      "title": "vendor CLI (zcode) present",
+      "status": "pass",
+      "gating": true,
+      "detail": "found zcode at /Users/ngs/.local/bin/zcode; answers --version: 0.17.0"
+    },
+    {
+      "id": "AK",
+      "title": "installation Actor keypair (distinct per machine)",
+      "status": "pass",
+      "gating": true,
+      "detail": "Actor fingerprint sha256:9c7848ebcc8241e00ccd109dd09c790d4e5f6b9d8448f45a78e87b9f7c1c94e7 (/Users/ngs/agent-skills/plugins/agent-room/.vendor-lab/rel1-zcode/identity.key, 0600)"
+    },
+    {
+      "id": "CA",
+      "title": "installed artifact is the frozen v0.2.0 candidate",
+      "status": "pass",
+      "gating": true,
+      "detail": "installed portable package at /Users/ngs/agent-skills/plugins/agent-room/.candidate-packages/portable/agent-room-agent-plugin matches the frozen candidate (46 files, 784256 bytes, sha256 ad08240b847d9702…)"
+    }
+  ],
+  "all_pass": true
+}

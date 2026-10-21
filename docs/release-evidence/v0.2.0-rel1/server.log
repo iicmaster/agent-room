@@ -1,0 +1,20 @@
+# The Room Server's own record for this REL-1 run — ngs-2 (43.229.78.103), container agroom-rel1-64
+
+## container
+/agroom-rel1-64 | image node:24-alpine | created 2026-10-21T10:49:16.80710656Z | status running | cmd ["node","/app/server/api/server.mjs"] | env ["AGENT_ROOM_DATA_DIR=/data","AGENT_ROOM_HOST=0.0.0.0","AGENT_ROOM_PORT=8443","AGENT_ROOM_TLS_CERT=/tls/server-cert.pem","AGENT_ROOM_TLS_KEY=/tls/server-key.pem","PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin","NODE_VERSION=24.22.0","YARN_VERSION=1.22.22"] | mounts [{"Type":"bind","Source":"/home/forge/rel1-64/agent-room-claude-code","Destination":"/app","Mode":"ro","RW":false,"Propagation":"rprivate"},{"Type":"bind","Source":"/home/forge/rel1-64-data","Destination":"/data","Mode":"","RW":true,"Propagation":"rprivate"},{"Type":"bind","Source":"/home/forge/rel1/server-cert.pem","Destination":"/tls/server-cert.pem","Mode":"ro","RW":false,"Propagation":"rprivate"},{"Type":"bind","Source":"/home/forge/rel1/server-key.pem","Destination":"/tls/server-key.pem","Mode":"ro","RW":false,"Propagation":"rprivate"}]
+
+## the server process (its own stderr — one line per fault; EMPTY means no fault)
+  (no server-side fault line was written during this run)
+
+## live identity probes (the server answering)
+  2026-10-21T11:25:57Z  GET /health -> {"ok":true,"result":{"version":"0.2.0"}}
+
+  2026-10-21T11:25:58Z  GET /health -> {"ok":true,"result":{"version":"0.2.0"}}
+
+  2026-10-21T11:25:59Z  GET /health -> {"ok":true,"result":{"version":"0.2.0"}}
+
+
+## the server's runtime record (the container's data dir)
+
+## the installed artifact the server executed (its own tree)
+  installed claude_code tree: 46 files, 784116 bytes, sha256 fe4d2aaa2520e0031538c07a28b4b24e6439d6ecf92514ce8ea735e44f378d88

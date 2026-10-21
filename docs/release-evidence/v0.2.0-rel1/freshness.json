@@ -1,0 +1,49 @@
+{
+  "story": "6.1",
+  "requirement": "REL-1 \u2014 the physical two-machine demonstration; the viewer's broadcast freshness within 5 seconds",
+  "bound_seconds": 5,
+  "method": "The browser's DOM carries a MutationObserver installed on the viewer's message list; it records the wall-clock instant each message card FIRST appears (a per-sequence set, so a catch-up page is recorded once and a live SSE frame is recorded at its arrival). The sender records the instant the server acknowledged its send (the api-client's own clock, immediately after the committed answer). The difference is the viewer's freshness.",
+  "same_clock_measurement": {
+    "why": "the sender and the viewer are the SAME machine (NSG-Mac-mini.local), so the difference carries NO clock-skew term at all",
+    "sender": "CLAUDE-MAC-1 (the Mac installation of the frozen portable package)",
+    "sender_clock": "NSG-Mac-mini.local",
+    "seq": 7,
+    "text": "REL1-FRESH-MAC-1792581836",
+    "send_acked_iso": "2026-10-21T11:23:56.948Z",
+    "send_acked_epoch_ms": 1792581836948,
+    "dom_arrival_iso": "2026-10-21T11:23:57.055Z",
+    "dom_arrival_epoch_ms": 1792581837055,
+    "freshness_ms": 107,
+    "freshness_seconds": 0.107,
+    "verdict": "pass \u2014 0.107 s against the 5 s bound"
+  },
+  "cross_machine_measurement": {
+    "why": "the sender is the OTHER physical machine (ngs-staging), so the two clocks differ; the offset is measured, not assumed",
+    "sender": "CLAUDE-STAGING-1 (the staging installation of the frozen Claude Code package)",
+    "sender_clock": "ngs-staging",
+    "viewer_clock": "NSG-Mac-mini.local",
+    "seq": 8,
+    "text": "REL1-FRESH-STAGING-1792581865",
+    "send_acked_iso": "2026-10-21T11:24:26.129Z",
+    "send_acked_epoch_ms": 1792581866129,
+    "dom_arrival_iso": "2026-10-21T11:24:26.231Z",
+    "dom_arrival_epoch_ms": 1792581866231,
+    "raw_difference_ms": 102,
+    "clock_offset_method": "the server's HTTP Date header is the common reference: 9 samples per client, the median of (client midpoint - server epoch). The header has 1-second resolution, so each median carries about +/-450 ms of quantization uncertainty.",
+    "clock_offsets_vs_server_ms": {
+      "mac": 376,
+      "staging": 491,
+      "samples_per_client": 9
+    },
+    "offset_staging_minus_mac_ms": 115,
+    "corrected_freshness_ms": -13,
+    "corrected_freshness_seconds": -0.013,
+    "reported_as": "0.00 s +/- 0.45 s (the raw difference is 0.102 s; the offset correction is within its own quantization)",
+    "verdict": "pass \u2014 far inside the 5 s bound on any reading of the offset"
+  },
+  "honest_limits": [
+    "The measurement is the DOM arrival of the message card, not the network arrival of the SSE frame; the SSE frame itself lands slightly earlier (the server polls the store every 250 ms and writes the frame immediately).",
+    "The cross-machine number carries the clock-offset uncertainty stated above; the same-clock number carries none.",
+    "Two canary measurements were taken per path; the earlier pair (seq 2 and seq 3) gave 120 ms and 113 ms raw \u2014 the same order of magnitude, so the result is not a single lucky sample."
+  ]
+}
