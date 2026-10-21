@@ -1,0 +1,2758 @@
+{
+  "story": "6.2",
+  "requirement": "REL-3 — the formal soak",
+  "rule_source": "docs/epics.md Story 6.2 (the total-growth reading per docs/implementation/reviews/epic-6-execution-agy.md)",
+  "status": "fail",
+  "startedAt": "2026-10-20T19:52:23.300Z",
+  "endedAt": "2026-10-21T03:53:53.861Z",
+  "wallMinutes": 481.51,
+  "requestedDurationMs": 28800000,
+  "schedule": {
+    "durationMs": 28800000,
+    "sampleIntervalMs": 60000,
+    "burstEveryMs": 600000,
+    "burstMessagesPerRoom": 30,
+    "reconnectEveryMs": 3600000,
+    "fdBaselineAfterMs": 3600000,
+    "finalWindowMs": 14400000,
+    "readEveryMs": 30000,
+    "steadyRoomIntervalMs": 10000,
+    "payloadCapChars": 32768,
+    "sessionEvictionMints": 1008
+  },
+  "candidate": {
+    "record": "/Users/ngs/agent-skills/plugins/agent-room/docs/release-evidence/v0.2.0-candidate.json",
+    "candidateCommit": "89c847787357be9e0ede135337eee4a1a29f48bf",
+    "launchHead": "2c9cfe783c0fef8f4734ab16377bd0fd54fa62d0",
+    "launchBranch": "main",
+    "identityVerdict": "candidate-exact",
+    "frozenDigests": {
+      "portable": {
+        "package": "agent-room-agent-plugin",
+        "files": 45,
+        "bytes": 754644,
+        "sha256": "fa2ede8a8465a6f779bc85e51d5585794b357925505896f7922d7188e7181d51"
+      },
+      "claude_code": {
+        "package": "agent-room-claude-code",
+        "files": 45,
+        "bytes": 754504,
+        "sha256": "466874d18c7ae1b5753a210219a0b5e9ea540fd830b4d81413a28114fe386e7c"
+      }
+    },
+    "actualDigests": {
+      "portable": {
+        "files": 45,
+        "bytes": 754644,
+        "sha256": "fa2ede8a8465a6f779bc85e51d5585794b357925505896f7922d7188e7181d51"
+      },
+      "claude_code": {
+        "files": 45,
+        "bytes": 754504,
+        "sha256": "466874d18c7ae1b5753a210219a0b5e9ea540fd830b4d81413a28114fe386e7c"
+      }
+    },
+    "drift": [],
+    "note": "the fresh materialization reproduces the frozen candidate digests byte-for-byte"
+  },
+  "environment": {
+    "host": "NSG-Mac-mini.local",
+    "platform": "darwin 25.6.0 arm64",
+    "node": "v24.18.1",
+    "sqlite": "3.53.4",
+    "cpus": 8,
+    "totalMemoryBytes": 17179869184,
+    "serverEntry": "/Users/ngs/agent-skills/plugins/agent-room/.soak-world/agent-room-rel3-soak-WSjrfs/release/agent-room-agent-plugin/server/api/server.mjs",
+    "mcpEntry": "/Users/ngs/agent-skills/plugins/agent-room/.soak-world/agent-room-rel3-soak-WSjrfs/release/agent-room-agent-plugin/server/mcp-stdio.mjs",
+    "releaseDir": "/Users/ngs/agent-skills/plugins/agent-room/.soak-world/agent-room-rel3-soak-WSjrfs/release",
+    "serverPid": 41533,
+    "serverPort": 51401,
+    "serverVersion": "0.2.0",
+    "serverStderrTail": ""
+  },
+  "clients": [
+    {
+      "chatId": "soak-1",
+      "fingerprint": "sha256:f753450a1697c3888e284102c76f124c856de9596df9c9e71f9f73979c7f7a58",
+      "stats": {
+        "sent": 5682,
+        "retried": 0,
+        "reads": 958,
+        "readErrors": 0,
+        "maxAttempts": 1
+      }
+    },
+    {
+      "chatId": "soak-2",
+      "fingerprint": "sha256:2219f25b2a40bb17f65e8ba072bd6d7482bc6ecdf1bb714fa3c09df9ac9a60a3",
+      "stats": {
+        "sent": 5681,
+        "retried": 0,
+        "reads": 958,
+        "readErrors": 0,
+        "maxAttempts": 1
+      }
+    },
+    {
+      "chatId": "soak-3",
+      "fingerprint": "sha256:c06e7af400e183b8a2d47ffb7dc17dfccd03298e09db66593d228e3b40c01eb6",
+      "stats": {
+        "sent": 5626,
+        "retried": 0,
+        "reads": 958,
+        "readErrors": 0,
+        "maxAttempts": 1
+      }
+    },
+    {
+      "chatId": "soak-4",
+      "fingerprint": "sha256:6af9b84d30ae0a35cc91155fe34657732adcad549434bfd4f724fdd3b36c39a1",
+      "stats": {
+        "sent": 5626,
+        "retried": 0,
+        "reads": 958,
+        "readErrors": 0,
+        "maxAttempts": 1
+      }
+    }
+  ],
+  "traffic": {
+    "acknowledged": 22615,
+    "perRoom": {
+      "go-w6K76XgRosqqjP4Ge2g": 4523,
+      "VgmirJI4kSi2Ol6YjDMtpw": 4523,
+      "BtP-AW-j44F0OPA2Y9LgwQ": 4523,
+      "TPqvyurpryV2ABseRCRJaA": 4523,
+      "CSfJqXsP71DKCstVeWBCvw": 4523
+    },
+    "bursts": 47,
+    "burstMessagesPerRoom": 30,
+    "reads": 3832,
+    "reconnects": [
+      {
+        "at": "2026-10-20T20:52:31.369Z",
+        "ms": 7714,
+        "clients": 4,
+        "evictionMints": 1008
+      },
+      {
+        "at": "2026-10-20T21:52:31.363Z",
+        "ms": 7711,
+        "clients": 4,
+        "evictionMints": 1008
+      },
+      {
+        "at": "2026-10-20T22:52:31.364Z",
+        "ms": 7695,
+        "clients": 4,
+        "evictionMints": 1008
+      },
+      {
+        "at": "2026-10-20T23:52:31.386Z",
+        "ms": 8082,
+        "clients": 4,
+        "evictionMints": 1008
+      },
+      {
+        "at": "2026-10-21T00:52:31.366Z",
+        "ms": 8040,
+        "clients": 4,
+        "evictionMints": 1008
+      },
+      {
+        "at": "2026-10-21T01:52:31.366Z",
+        "ms": 7749,
+        "clients": 4,
+        "evictionMints": 1008
+      },
+      {
+        "at": "2026-10-21T02:52:31.362Z",
+        "ms": 7573,
+        "clients": 4,
+        "evictionMints": 1008
+      }
+    ],
+    "loopErrors": []
+  },
+  "samples": {
+    "intervalMs": 60000,
+    "count": 481,
+    "data": [
+      {
+        "atMs": 1792525951356,
+        "rssBytes": 85131264,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792526011358,
+        "rssBytes": 42942464,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792526071361,
+        "rssBytes": 41418752,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792526131364,
+        "rssBytes": 42401792,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792526191367,
+        "rssBytes": 53084160,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792526251370,
+        "rssBytes": 41435136,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792526311374,
+        "rssBytes": 41385984,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792526371376,
+        "rssBytes": 41369600,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792526431376,
+        "rssBytes": 54099968,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792526491377,
+        "rssBytes": 54476800,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792526551378,
+        "rssBytes": 51478528,
+        "fdCount": 20
+      },
+      {
+        "atMs": 1792526611379,
+        "rssBytes": 41369600,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792526671380,
+        "rssBytes": 41402368,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792526731380,
+        "rssBytes": 41369600,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792526791383,
+        "rssBytes": 41385984,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792526851385,
+        "rssBytes": 41369600,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792526911387,
+        "rssBytes": 40845312,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792526971389,
+        "rssBytes": 40861696,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792527031390,
+        "rssBytes": 40828928,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792527091393,
+        "rssBytes": 51953664,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792527151394,
+        "rssBytes": 40845312,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792527211396,
+        "rssBytes": 40861696,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792527271397,
+        "rssBytes": 40845312,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792527331398,
+        "rssBytes": 40861696,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792527391399,
+        "rssBytes": 40845312,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792527451402,
+        "rssBytes": 40861696,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792527511404,
+        "rssBytes": 52002816,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792527571406,
+        "rssBytes": 40861696,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792527631410,
+        "rssBytes": 40861696,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792527691410,
+        "rssBytes": 40861696,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792527751412,
+        "rssBytes": 40861696,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792527811415,
+        "rssBytes": 40878080,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792527871418,
+        "rssBytes": 40861696,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792527931423,
+        "rssBytes": 40878080,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792527991424,
+        "rssBytes": 40861696,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792528051427,
+        "rssBytes": 40861696,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792528111430,
+        "rssBytes": 40861696,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792528171461,
+        "rssBytes": 40878080,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792528231463,
+        "rssBytes": 40861696,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792528291464,
+        "rssBytes": 40910848,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792528351465,
+        "rssBytes": 40861696,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792528411468,
+        "rssBytes": 40550400,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792528471469,
+        "rssBytes": 40550400,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792528531472,
+        "rssBytes": 40550400,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792528591476,
+        "rssBytes": 40566784,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792528651489,
+        "rssBytes": 40566784,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792528711492,
+        "rssBytes": 40550400,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792528771496,
+        "rssBytes": 40566784,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792528831498,
+        "rssBytes": 40566784,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792528891501,
+        "rssBytes": 40550400,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792528951503,
+        "rssBytes": 40566784,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792529011504,
+        "rssBytes": 40583168,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792529071506,
+        "rssBytes": 40583168,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792529131509,
+        "rssBytes": 40583168,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792529191518,
+        "rssBytes": 40566784,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792529251521,
+        "rssBytes": 40583168,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792529311522,
+        "rssBytes": 42385408,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792529371524,
+        "rssBytes": 40730624,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792529431526,
+        "rssBytes": 40599552,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792529491530,
+        "rssBytes": 40779776,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792529551531,
+        "rssBytes": 56852480,
+        "fdCount": 20
+      },
+      {
+        "atMs": 1792529611550,
+        "rssBytes": 40796160,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792529671560,
+        "rssBytes": 40697856,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792529731562,
+        "rssBytes": 52936704,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792529791565,
+        "rssBytes": 40714240,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792529851568,
+        "rssBytes": 40681472,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792529911571,
+        "rssBytes": 40681472,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792529971574,
+        "rssBytes": 54476800,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792530031576,
+        "rssBytes": 40779776,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792530091578,
+        "rssBytes": 40681472,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792530151581,
+        "rssBytes": 40697856,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792530211584,
+        "rssBytes": 40796160,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792530271589,
+        "rssBytes": 40730624,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792530331592,
+        "rssBytes": 40747008,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792530391595,
+        "rssBytes": 52592640,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792530451598,
+        "rssBytes": 40812544,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792530511602,
+        "rssBytes": 55164928,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792530571591,
+        "rssBytes": 40730624,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792530631593,
+        "rssBytes": 40861696,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792530691596,
+        "rssBytes": 55164928,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792530751600,
+        "rssBytes": 40730624,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792530811603,
+        "rssBytes": 40681472,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792530871607,
+        "rssBytes": 52756480,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792530931609,
+        "rssBytes": 40697856,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792530991611,
+        "rssBytes": 40697856,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792531051613,
+        "rssBytes": 42287104,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792531111616,
+        "rssBytes": 40697856,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792531171618,
+        "rssBytes": 40665088,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792531231621,
+        "rssBytes": 40665088,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792531291625,
+        "rssBytes": 40648704,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792531351627,
+        "rssBytes": 40665088,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792531411629,
+        "rssBytes": 40681472,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792531471632,
+        "rssBytes": 54575104,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792531531625,
+        "rssBytes": 40665088,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792531591628,
+        "rssBytes": 40665088,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792531651630,
+        "rssBytes": 40681472,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792531711634,
+        "rssBytes": 40665088,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792531771637,
+        "rssBytes": 40665088,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792531831638,
+        "rssBytes": 40697856,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792531891642,
+        "rssBytes": 40681472,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792531951645,
+        "rssBytes": 40648704,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792532011648,
+        "rssBytes": 40665088,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792532071651,
+        "rssBytes": 40665088,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792532131654,
+        "rssBytes": 40681472,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792532191656,
+        "rssBytes": 40665088,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792532251659,
+        "rssBytes": 40665088,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792532311662,
+        "rssBytes": 40665088,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792532371664,
+        "rssBytes": 40681472,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792532431667,
+        "rssBytes": 40697856,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792532491670,
+        "rssBytes": 40665088,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792532551673,
+        "rssBytes": 40665088,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792532611675,
+        "rssBytes": 40697856,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792532671679,
+        "rssBytes": 40681472,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792532731680,
+        "rssBytes": 40665088,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792532791682,
+        "rssBytes": 40648704,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792532851687,
+        "rssBytes": 40714240,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792532911690,
+        "rssBytes": 40665088,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792532971690,
+        "rssBytes": 40681472,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792533031691,
+        "rssBytes": 40681472,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792533091694,
+        "rssBytes": 40697856,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792533151694,
+        "rssBytes": 63832064,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792533211697,
+        "rssBytes": 40353792,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792533271701,
+        "rssBytes": 40206336,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792533331702,
+        "rssBytes": 40222720,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792533391706,
+        "rssBytes": 40206336,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792533451693,
+        "rssBytes": 40206336,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792533511695,
+        "rssBytes": 40189952,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792533571697,
+        "rssBytes": 40239104,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792533631700,
+        "rssBytes": 40189952,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792533691702,
+        "rssBytes": 54689792,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792533751704,
+        "rssBytes": 40321024,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792533811706,
+        "rssBytes": 52789248,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792533871709,
+        "rssBytes": 40222720,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792533931711,
+        "rssBytes": 40206336,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792533991711,
+        "rssBytes": 56803328,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792534051714,
+        "rssBytes": 52527104,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792534111717,
+        "rssBytes": 40189952,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792534171726,
+        "rssBytes": 54214656,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792534231729,
+        "rssBytes": 54427648,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792534291730,
+        "rssBytes": 40255488,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792534351732,
+        "rssBytes": 40189952,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792534411734,
+        "rssBytes": 40189952,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792534471737,
+        "rssBytes": 54149120,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792534531738,
+        "rssBytes": 40206336,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792534591741,
+        "rssBytes": 40206336,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792534651745,
+        "rssBytes": 40189952,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792534711747,
+        "rssBytes": 52789248,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792534771748,
+        "rssBytes": 40206336,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792534831752,
+        "rssBytes": 40189952,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792534891754,
+        "rssBytes": 40189952,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792534951758,
+        "rssBytes": 40189952,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792535011760,
+        "rssBytes": 40222720,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792535071763,
+        "rssBytes": 40255488,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792535131766,
+        "rssBytes": 40206336,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792535191768,
+        "rssBytes": 40222720,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792535251772,
+        "rssBytes": 40222720,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792535311775,
+        "rssBytes": 40239104,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792535371784,
+        "rssBytes": 40222720,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792535431787,
+        "rssBytes": 40206336,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792535491790,
+        "rssBytes": 40222720,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792535551792,
+        "rssBytes": 40239104,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792535611794,
+        "rssBytes": 40189952,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792535671797,
+        "rssBytes": 40189952,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792535731800,
+        "rssBytes": 40206336,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792535791802,
+        "rssBytes": 40189952,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792535851804,
+        "rssBytes": 40206336,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792535911806,
+        "rssBytes": 40189952,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792535971809,
+        "rssBytes": 40189952,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792536031812,
+        "rssBytes": 40189952,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792536091814,
+        "rssBytes": 40206336,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792536151817,
+        "rssBytes": 40206336,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792536211818,
+        "rssBytes": 40075264,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792536271819,
+        "rssBytes": 40075264,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792536331825,
+        "rssBytes": 40058880,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792536391828,
+        "rssBytes": 40042496,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792536451830,
+        "rssBytes": 40075264,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792536511832,
+        "rssBytes": 40173568,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792536571834,
+        "rssBytes": 40075264,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792536631838,
+        "rssBytes": 40108032,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792536691841,
+        "rssBytes": 40009728,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792536751841,
+        "rssBytes": 67125248,
+        "fdCount": 20
+      },
+      {
+        "atMs": 1792536811843,
+        "rssBytes": 40075264,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792536871844,
+        "rssBytes": 40091648,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792536931845,
+        "rssBytes": 40124416,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792536991850,
+        "rssBytes": 40075264,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792537051853,
+        "rssBytes": 40124416,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792537111856,
+        "rssBytes": 40075264,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792537171859,
+        "rssBytes": 40091648,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792537231859,
+        "rssBytes": 40091648,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792537291842,
+        "rssBytes": 40173568,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792537351843,
+        "rssBytes": 41582592,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792537411846,
+        "rssBytes": 40632320,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792537471849,
+        "rssBytes": 52740096,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792537531851,
+        "rssBytes": 52920320,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792537591853,
+        "rssBytes": 40091648,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792537651860,
+        "rssBytes": 40157184,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792537711861,
+        "rssBytes": 49872896,
+        "fdCount": 20
+      },
+      {
+        "atMs": 1792537771862,
+        "rssBytes": 42336256,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792537831864,
+        "rssBytes": 31768576,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792537891865,
+        "rssBytes": 44613632,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792537951867,
+        "rssBytes": 31784960,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792538011869,
+        "rssBytes": 44105728,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792538071870,
+        "rssBytes": 46022656,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792538131873,
+        "rssBytes": 31883264,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792538191887,
+        "rssBytes": 31883264,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792538251891,
+        "rssBytes": 31965184,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792538311893,
+        "rssBytes": 31866880,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792538371896,
+        "rssBytes": 31850496,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792538431899,
+        "rssBytes": 31866880,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792538491899,
+        "rssBytes": 31850496,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792538551902,
+        "rssBytes": 31916032,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792538611904,
+        "rssBytes": 31916032,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792538671906,
+        "rssBytes": 44974080,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792538731907,
+        "rssBytes": 31883264,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792538791908,
+        "rssBytes": 32374784,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792538851909,
+        "rssBytes": 31883264,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792538911912,
+        "rssBytes": 31883264,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792538971915,
+        "rssBytes": 31965184,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792539031917,
+        "rssBytes": 31883264,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792539091919,
+        "rssBytes": 31965184,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792539151921,
+        "rssBytes": 31834112,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792539211900,
+        "rssBytes": 32227328,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792539271900,
+        "rssBytes": 31834112,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792539331901,
+        "rssBytes": 31817728,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792539391903,
+        "rssBytes": 31817728,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792539451905,
+        "rssBytes": 31817728,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792539511908,
+        "rssBytes": 31817728,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792539571910,
+        "rssBytes": 31834112,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792539631911,
+        "rssBytes": 31834112,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792539691913,
+        "rssBytes": 31834112,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792539751913,
+        "rssBytes": 32030720,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792539811915,
+        "rssBytes": 32063488,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792539871917,
+        "rssBytes": 32325632,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792539931919,
+        "rssBytes": 31850496,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792539991922,
+        "rssBytes": 31850496,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792540051924,
+        "rssBytes": 31522816,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792540111928,
+        "rssBytes": 31621120,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792540171925,
+        "rssBytes": 31555584,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792540231925,
+        "rssBytes": 31571968,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792540291928,
+        "rssBytes": 31571968,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792540351928,
+        "rssBytes": 58179584,
+        "fdCount": 19
+      },
+      {
+        "atMs": 1792540411929,
+        "rssBytes": 31981568,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792540471931,
+        "rssBytes": 31899648,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792540531932,
+        "rssBytes": 31735808,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792540591934,
+        "rssBytes": 32899072,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792540651935,
+        "rssBytes": 31866880,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792540711936,
+        "rssBytes": 46153728,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792540771937,
+        "rssBytes": 32161792,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792540831941,
+        "rssBytes": 44417024,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792540891953,
+        "rssBytes": 31735808,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792540951954,
+        "rssBytes": 32931840,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792541011955,
+        "rssBytes": 44515328,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792541071956,
+        "rssBytes": 45105152,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792541131957,
+        "rssBytes": 31735808,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792541191957,
+        "rssBytes": 46972928,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792541251957,
+        "rssBytes": 44843008,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792541311957,
+        "rssBytes": 31719424,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792541371959,
+        "rssBytes": 33161216,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792541431960,
+        "rssBytes": 31916032,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792541491963,
+        "rssBytes": 46186496,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792541551965,
+        "rssBytes": 31834112,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792541611967,
+        "rssBytes": 31916032,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792541671967,
+        "rssBytes": 31735808,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792541731969,
+        "rssBytes": 31752192,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792541791970,
+        "rssBytes": 44728320,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792541851972,
+        "rssBytes": 31719424,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792541911974,
+        "rssBytes": 31735808,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792541971977,
+        "rssBytes": 31735808,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792542031979,
+        "rssBytes": 31735808,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792542091986,
+        "rssBytes": 31735808,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792542151987,
+        "rssBytes": 31817728,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792542211990,
+        "rssBytes": 32784384,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792542271991,
+        "rssBytes": 31735808,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792542331993,
+        "rssBytes": 31735808,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792542391995,
+        "rssBytes": 31735808,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792542451997,
+        "rssBytes": 32735232,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792542511999,
+        "rssBytes": 31752192,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792542572000,
+        "rssBytes": 31752192,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792542632001,
+        "rssBytes": 31752192,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792542692004,
+        "rssBytes": 31719424,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792542752002,
+        "rssBytes": 31719424,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792542812005,
+        "rssBytes": 31719424,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792542872007,
+        "rssBytes": 31719424,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792542932008,
+        "rssBytes": 31719424,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792542992010,
+        "rssBytes": 31719424,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792543051996,
+        "rssBytes": 31719424,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792543111996,
+        "rssBytes": 31735808,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792543171996,
+        "rssBytes": 31719424,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792543231998,
+        "rssBytes": 31703040,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792543291999,
+        "rssBytes": 31735808,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792543352002,
+        "rssBytes": 31768576,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792543412004,
+        "rssBytes": 31801344,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792543472005,
+        "rssBytes": 31719424,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792543532004,
+        "rssBytes": 31703040,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792543592006,
+        "rssBytes": 31735808,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792543652008,
+        "rssBytes": 31784960,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792543712009,
+        "rssBytes": 31866880,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792543772012,
+        "rssBytes": 26263552,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792543832013,
+        "rssBytes": 40386560,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792543892013,
+        "rssBytes": 26247168,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792543952012,
+        "rssBytes": 51429376,
+        "fdCount": 19
+      },
+      {
+        "atMs": 1792544012004,
+        "rssBytes": 26312704,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792544072005,
+        "rssBytes": 26312704,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792544132006,
+        "rssBytes": 26296320,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792544192010,
+        "rssBytes": 26279936,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792544252011,
+        "rssBytes": 26296320,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792544312012,
+        "rssBytes": 26312704,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792544372012,
+        "rssBytes": 26689536,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792544432015,
+        "rssBytes": 27295744,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792544492017,
+        "rssBytes": 26312704,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792544552019,
+        "rssBytes": 26345472,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792544612020,
+        "rssBytes": 27492352,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792544672022,
+        "rssBytes": 26279936,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792544732024,
+        "rssBytes": 39731200,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792544792026,
+        "rssBytes": 40632320,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792544852027,
+        "rssBytes": 38289408,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792544912029,
+        "rssBytes": 40370176,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792544972039,
+        "rssBytes": 41402368,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792545032042,
+        "rssBytes": 27967488,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792545092044,
+        "rssBytes": 26656768,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792545152046,
+        "rssBytes": 26607616,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792545212048,
+        "rssBytes": 40714240,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792545272050,
+        "rssBytes": 26296320,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792545332052,
+        "rssBytes": 26361856,
+        "fdCount": 19
+      },
+      {
+        "atMs": 1792545392054,
+        "rssBytes": 26279936,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792545452057,
+        "rssBytes": 40845312,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792545512059,
+        "rssBytes": 26722304,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792545572061,
+        "rssBytes": 26312704,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792545632063,
+        "rssBytes": 26296320,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792545692063,
+        "rssBytes": 26312704,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792545752065,
+        "rssBytes": 26312704,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792545812067,
+        "rssBytes": 26296320,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792545872069,
+        "rssBytes": 26296320,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792545932076,
+        "rssBytes": 26509312,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792545992079,
+        "rssBytes": 26296320,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792546052082,
+        "rssBytes": 26345472,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792546112082,
+        "rssBytes": 26296320,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792546172082,
+        "rssBytes": 26607616,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792546232083,
+        "rssBytes": 26296320,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792546292085,
+        "rssBytes": 26279936,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792546352086,
+        "rssBytes": 26345472,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792546412086,
+        "rssBytes": 26279936,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792546472088,
+        "rssBytes": 27426816,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792546532087,
+        "rssBytes": 26279936,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792546592090,
+        "rssBytes": 26853376,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792546652092,
+        "rssBytes": 26558464,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792546712093,
+        "rssBytes": 26722304,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792546772094,
+        "rssBytes": 26443776,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792546832096,
+        "rssBytes": 26935296,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792546892108,
+        "rssBytes": 26296320,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792546952111,
+        "rssBytes": 26509312,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792547012112,
+        "rssBytes": 26312704,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792547072114,
+        "rssBytes": 26312704,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792547132115,
+        "rssBytes": 26705920,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792547192115,
+        "rssBytes": 26296320,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792547252118,
+        "rssBytes": 26394624,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792547312123,
+        "rssBytes": 26525696,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792547372125,
+        "rssBytes": 27000832,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792547432126,
+        "rssBytes": 26312704,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792547492129,
+        "rssBytes": 26296320,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792547552130,
+        "rssBytes": 52854784,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792547612131,
+        "rssBytes": 26394624,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792547672134,
+        "rssBytes": 27885568,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792547732135,
+        "rssBytes": 25968640,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792547792136,
+        "rssBytes": 25985024,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792547852127,
+        "rssBytes": 40730624,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792547912127,
+        "rssBytes": 26279936,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792547972128,
+        "rssBytes": 26394624,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792548032130,
+        "rssBytes": 40648704,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792548092132,
+        "rssBytes": 29769728,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792548152136,
+        "rssBytes": 26296320,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792548212137,
+        "rssBytes": 39747584,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792548272140,
+        "rssBytes": 33980416,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792548332143,
+        "rssBytes": 26279936,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792548392143,
+        "rssBytes": 26345472,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792548452146,
+        "rssBytes": 26312704,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792548512148,
+        "rssBytes": 26296320,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792548572151,
+        "rssBytes": 26247168,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792548632151,
+        "rssBytes": 26443776,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792548692153,
+        "rssBytes": 26296320,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792548752154,
+        "rssBytes": 39895040,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792548812147,
+        "rssBytes": 39944192,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792548872148,
+        "rssBytes": 44630016,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792548932149,
+        "rssBytes": 45842432,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792548992149,
+        "rssBytes": 49905664,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792549052149,
+        "rssBytes": 49758208,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792549112150,
+        "rssBytes": 50069504,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792549172152,
+        "rssBytes": 50905088,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792549232154,
+        "rssBytes": 51937280,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792549292156,
+        "rssBytes": 52461568,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792549352157,
+        "rssBytes": 52985856,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792549412158,
+        "rssBytes": 69533696,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792549472159,
+        "rssBytes": 72531968,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792549532161,
+        "rssBytes": 57180160,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792549592162,
+        "rssBytes": 59555840,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792549652165,
+        "rssBytes": 58654720,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792549712167,
+        "rssBytes": 60047360,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792549772183,
+        "rssBytes": 61030400,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792549832186,
+        "rssBytes": 61456384,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792549892187,
+        "rssBytes": 61882368,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792549952188,
+        "rssBytes": 62308352,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792550012190,
+        "rssBytes": 83116032,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792550072191,
+        "rssBytes": 72433664,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792550132193,
+        "rssBytes": 73285632,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792550192195,
+        "rssBytes": 74137600,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792550252197,
+        "rssBytes": 74563584,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792550312199,
+        "rssBytes": 75841536,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792550372201,
+        "rssBytes": 76693504,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792550432202,
+        "rssBytes": 77545472,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792550492204,
+        "rssBytes": 78397440,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792550552205,
+        "rssBytes": 79249408,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792550612207,
+        "rssBytes": 98582528,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792550672209,
+        "rssBytes": 93405184,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792550732198,
+        "rssBytes": 93503488,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792550792199,
+        "rssBytes": 93929472,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792550852200,
+        "rssBytes": 94781440,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792550912203,
+        "rssBytes": 95633408,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792550972205,
+        "rssBytes": 84279296,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792551032206,
+        "rssBytes": 85131264,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792551092208,
+        "rssBytes": 85983232,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792551152211,
+        "rssBytes": 86474752,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792551212211,
+        "rssBytes": 98418688,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792551272211,
+        "rssBytes": 91160576,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792551332213,
+        "rssBytes": 69402624,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792551392215,
+        "rssBytes": 71122944,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792551452217,
+        "rssBytes": 69189632,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792551512217,
+        "rssBytes": 71729152,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792551572218,
+        "rssBytes": 72663040,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792551632218,
+        "rssBytes": 72663040,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792551692218,
+        "rssBytes": 73777152,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792551752219,
+        "rssBytes": 74760192,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792551812221,
+        "rssBytes": 82067456,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792551872223,
+        "rssBytes": 83361792,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792551932225,
+        "rssBytes": 83099648,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792551992226,
+        "rssBytes": 83804160,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792552052228,
+        "rssBytes": 83820544,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792552112229,
+        "rssBytes": 84246528,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792552172230,
+        "rssBytes": 85262336,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792552232230,
+        "rssBytes": 85475328,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792552292232,
+        "rssBytes": 85688320,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792552352232,
+        "rssBytes": 86409216,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792552412234,
+        "rssBytes": 91357184,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792552472236,
+        "rssBytes": 86245376,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792552532238,
+        "rssBytes": 82132992,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792552592239,
+        "rssBytes": 70238208,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792552652228,
+        "rssBytes": 67878912,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792552712227,
+        "rssBytes": 69124096,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792552772228,
+        "rssBytes": 70713344,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792552832230,
+        "rssBytes": 71417856,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792552892230,
+        "rssBytes": 71417856,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792552952232,
+        "rssBytes": 72400896,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792553012232,
+        "rssBytes": 80166912,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792553072233,
+        "rssBytes": 87080960,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792553132234,
+        "rssBytes": 82919424,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792553192235,
+        "rssBytes": 81461248,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792553252236,
+        "rssBytes": 82132992,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792553312238,
+        "rssBytes": 82149376,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792553372239,
+        "rssBytes": 82575360,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792553432239,
+        "rssBytes": 83558400,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792553492241,
+        "rssBytes": 83771392,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792553552242,
+        "rssBytes": 84197376,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792553612243,
+        "rssBytes": 92880896,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792553672243,
+        "rssBytes": 93683712,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792553732244,
+        "rssBytes": 70172672,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792553792246,
+        "rssBytes": 71942144,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792553852248,
+        "rssBytes": 71024640,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792553912250,
+        "rssBytes": 71663616,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792553972251,
+        "rssBytes": 71958528,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792554032253,
+        "rssBytes": 73220096,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792554092255,
+        "rssBytes": 73940992,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792554152255,
+        "rssBytes": 73973760,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792554212256,
+        "rssBytes": 88686592,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792554272258,
+        "rssBytes": 94437376,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792554332260,
+        "rssBytes": 94879744,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792554392262,
+        "rssBytes": 95748096,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792554452264,
+        "rssBytes": 96632832,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792554512265,
+        "rssBytes": 97550336,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792554572274,
+        "rssBytes": 98025472,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792554632277,
+        "rssBytes": 85016576,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792554692279,
+        "rssBytes": 85934080,
+        "fdCount": 18
+      },
+      {
+        "atMs": 1792554752281,
+        "rssBytes": 86360064,
+        "fdCount": 18
+      }
+    ]
+  },
+  "rules": {
+    "finalWindowRss": {
+      "windowMs": 14400000,
+      "samples": 240,
+      "elapsedMs": 14340352,
+      "startRssBytes": 31981568,
+      "endRssBytes": 86360064,
+      "growthRatio": 1.7003073770491803,
+      "slopeBytesPerMs": 4.7683193395442816,
+      "impliedGrowthRatio": 2.1380870937119942,
+      "slopePctOfStartPerSecond_reportedNotGated": 0.014909585857529817,
+      "bound": 0.02,
+      "rule": "(endRSS - startRSS_of_window) / RSS_at_window_start <= 0.02, and the least-squares slope's implied growth across the window <= 0.02 — a total-growth bound (the final four hours at the default 8-hour duration), not the Story 2.4 per-second rate",
+      "pass": false
+    },
+    "fdStability": {
+      "baselineAfterMs": 3600000,
+      "baselineFd": 20,
+      "samplesAfterBaseline": 421,
+      "worstAbsDrift": 2,
+      "corridor": 5,
+      "rule": "every sample at or after duration/8 (one hour at the default 8) sits within +-5 of the hour-one baseline",
+      "pass": true
+    },
+    "zeroMessageLoss": {
+      "ackedCount": 22615,
+      "readableCount": 22615,
+      "duplicates": 0,
+      "lostOrPhantom": 0,
+      "unreadAcknowledged": 0,
+      "perRoom": {
+        "go-w6K76XgRosqqjP4Ge2g": 4523,
+        "VgmirJI4kSi2Ol6YjDMtpw": 4523,
+        "BtP-AW-j44F0OPA2Y9LgwQ": 4523,
+        "TPqvyurpryV2ABseRCRJaA": 4523,
+        "CSfJqXsP71DKCstVeWBCvw": 4523
+      },
+      "payloadFailures": [],
+      "pass": true,
+      "rule": "every acknowledged (room, seq, client_message_id) readable at the end; sequences contiguous from 1; readable set == acknowledged set; zero duplicates; payloads byte-exact"
+    }
+  },
+  "idleFootprint": {
+    "reported": true,
+    "gated": false,
+    "note": "REL-4 counter-metric: server RSS/FD/CPU with 0 Actors (start, each reconnect window, end) and the post-resume settled sample with the run's 4 Actors — reported, not optimized.",
+    "samples": [
+      {
+        "at": "2026-10-20T19:52:23.868Z",
+        "actors": 0,
+        "rssBytes": 65683456,
+        "fdCount": 18,
+        "cpuSeconds": 0.16
+      },
+      {
+        "at": "2026-10-20T20:52:31.387Z",
+        "actors": 0,
+        "rssBytes": 40648704,
+        "fdCount": 18,
+        "cpuSeconds": 9.62
+      },
+      {
+        "at": "2026-10-20T20:52:39.048Z",
+        "actors": 4,
+        "rssBytes": 55476224,
+        "fdCount": 18,
+        "cpuSeconds": 10.05
+      },
+      {
+        "at": "2026-10-20T21:52:31.380Z",
+        "actors": 0,
+        "rssBytes": 40189952,
+        "fdCount": 18,
+        "cpuSeconds": 16.55
+      },
+      {
+        "at": "2026-10-20T21:52:39.024Z",
+        "actors": 4,
+        "rssBytes": 61276160,
+        "fdCount": 18,
+        "cpuSeconds": 17
+      },
+      {
+        "at": "2026-10-20T22:52:31.381Z",
+        "actors": 0,
+        "rssBytes": 40058880,
+        "fdCount": 18,
+        "cpuSeconds": 24.07
+      },
+      {
+        "at": "2026-10-20T22:52:39.019Z",
+        "actors": 4,
+        "rssBytes": 44400640,
+        "fdCount": 18,
+        "cpuSeconds": 24.39
+      },
+      {
+        "at": "2026-10-20T23:52:31.399Z",
+        "actors": 0,
+        "rssBytes": 31637504,
+        "fdCount": 18,
+        "cpuSeconds": 32.62
+      },
+      {
+        "at": "2026-10-20T23:52:39.416Z",
+        "actors": 4,
+        "rssBytes": 31801344,
+        "fdCount": 18,
+        "cpuSeconds": 33.02
+      },
+      {
+        "at": "2026-10-21T00:52:31.378Z",
+        "actors": 0,
+        "rssBytes": 26247168,
+        "fdCount": 18,
+        "cpuSeconds": 41.95
+      },
+      {
+        "at": "2026-10-21T00:52:39.363Z",
+        "actors": 4,
+        "rssBytes": 39288832,
+        "fdCount": 18,
+        "cpuSeconds": 42.36
+      },
+      {
+        "at": "2026-10-21T01:52:31.383Z",
+        "actors": 0,
+        "rssBytes": 26247168,
+        "fdCount": 18,
+        "cpuSeconds": 50.71
+      },
+      {
+        "at": "2026-10-21T01:52:39.076Z",
+        "actors": 4,
+        "rssBytes": 26492928,
+        "fdCount": 18,
+        "cpuSeconds": 51.04
+      },
+      {
+        "at": "2026-10-21T02:52:31.373Z",
+        "actors": 0,
+        "rssBytes": 85393408,
+        "fdCount": 18,
+        "cpuSeconds": 61.08
+      },
+      {
+        "at": "2026-10-21T02:52:38.878Z",
+        "actors": 4,
+        "rssBytes": 87326720,
+        "fdCount": 18,
+        "cpuSeconds": 61.34
+      },
+      {
+        "at": "2026-10-21T03:53:53.832Z",
+        "actors": 0,
+        "rssBytes": 170164224,
+        "fdCount": 18,
+        "cpuSeconds": 73.25
+      }
+    ]
+  },
+  "failureReasons": [
+    "final-window RSS growth above the 2% total-growth bound"
+  ],
+  "world": {
+    "dir": "/Users/ngs/agent-skills/plugins/agent-room/.soak-world/agent-room-rel3-soak-WSjrfs",
+    "ackLog": "/Users/ngs/agent-skills/plugins/agent-room/.soak-world/agent-room-rel3-soak-WSjrfs/recorder/acked-sends.ndjson",
+    "database": "/Users/ngs/agent-skills/plugins/agent-room/.soak-world/agent-room-rel3-soak-WSjrfs/shared/agent-room.sqlite",
+    "kept": true
+  }
+}
