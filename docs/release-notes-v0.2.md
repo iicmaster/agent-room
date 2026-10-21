@@ -195,11 +195,20 @@ SM-C1 numbers above, and the binding statement for Stories 6.2 and 6.1.
 
 `CHANGELOG.md` is a packaging input: it ships inside both packages, so editing it after the
 candidate is frozen would change the artifact's bytes, void the candidate, and cost another
-eight-hour qualification run. The Story 6.4 continuity repair landed after the freeze, so it is
-NOT in the packaged CHANGELOG's v0.2.0 entry — **this release note is the changelog for v0.2.0**,
-and the packaged CHANGELOG will carry it in the next release. The rule behind that trade-off is
-recorded in the Epic 6 retrospective (finding F8) as an open product question, not as a silent
-omission.
+eight-hour qualification run. Two things follow from that, and both are stated here rather than
+left for a reader to discover:
+
+- **The Story 6.4 continuity repair is NOT in the packaged CHANGELOG.** It landed after the freeze.
+- **The packaged CHANGELOG's top section is still headed "Unreleased"**, because renaming it to
+  the released version is the same kind of packaged edit.
+
+**This release note is the changelog for v0.2.0.** The packaged CHANGELOG will carry both in the
+next release. The rule behind that trade-off is recorded in the Epic 6 retrospective (finding F8)
+as an open product question, not as a silent omission.
+
+What the PACKAGE does carry, and where a user meets the feature: the `agent-room help` text
+documents `agent-room session replace`, and the client's own `chat_id_taken` error names the
+command — so the recovery is discoverable at the moment it is needed, which is where it matters.
 
 ## Notes for the RC window
 
