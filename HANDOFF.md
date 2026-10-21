@@ -3,15 +3,23 @@
 ## 1. READ THIS FIRST
 
 - Branch `main`, **not pushed** (126+ commits ahead of `origin/main`).
-- **The candidate is `6d6b45f`** (`docs/release-evidence/v0.2.0-candidate.json`): version `0.2.0`,
-  portable package tree digest `ad08240b847d970233fff44e182cd3c8787ded45e66751796672082c03d4fceb`
+- **The candidate is `3929cc7`** (`docs/release-evidence/v0.2.0-candidate.json`): version `0.2.0`,
+  portable package tree digest `3d90129b434b3b7adb9b4b6d8c05ed28b5a8fbf7b07951726c322cc438cf3999`
   (46 files), Claude Code package tree digest
-  `fe4d2aaa2520e0031538c07a28b4b24e6439d6ecf92514ce8ea735e44f378d88` (46 files). All five Story 6.3 gate
+  `e481c9a46ea5e14865119503e6d327df3993b29a28b325eb9eee9421def2f47b` (46 files). All five Story 6.3 gate
   rows pass against it (deterministic materialization, the real `claude plugin validate --strict`
   (2.1.305, exit 0), the installed Claude Code smoke, the installed portable smoke, and SM-C1 — five
-  fresh installs, zero failures, 0.460 s raw mean / 0.265 s adjusted against v0.1's 0.352 s anchor).
-- **The formal 8-hour soak is the open gate.** It is running against `6d6b45f` on the QUIET host
-  ngs-staging (`ssh 43.229.78.155`), launched 2026-10-21T11:29:25Z, server pid 1017734, world under
+  fresh installs, zero failures, 0.460 s raw mean / 0.262 s adjusted against v0.1's 0.352 s anchor).
+- **THREE re-cuts, and the third was the advisors' doing.** The release-gate review found that the
+  SHIPPED source, the CLI help, the packaged CHANGELOG and the packaged README still carried the
+  overclaim the repo's record had already been corrected for. The codex lane recommended correcting the
+  shipped explanations and re-cutting rather than publish a package whose operator-facing text promises
+  more than the mechanism delivers; the agy lane was quota-exhausted for that round, so its earlier
+  verdict stands as recorded (approve the bytes, correct the record). The third re-cut was TEXT-ONLY and
+  it settled the process rule: **a story's changelog entry and README section land WITH the story,
+  before the candidate is frozen.**
+- **The formal 8-hour soak is the open gate.** It is running against `3929cc7` on the QUIET host
+  ngs-staging (`ssh 43.229.78.155`), launched 2026-10-21T13:16:41Z, server pid 1059106, world under
   `/root/rel1-soak4/.soak-world/`, with an external read-only host-telemetry sidecar writing
   `host-telemetry.log` beside it. The run's identity line reads `candidate-exact`.
   **Do not run `node --test`, another soak, or any heavy workload on ngs-staging while it is in
@@ -23,16 +31,21 @@
   CLI 0.17.0 on the Mac, the real Claude Code 2.1.306 on staging through that host's own model
   gateway), one self-hosted Room Server (Docker `node:24-alpine`, TLS with a demo CA) on ngs-2.
   DMs both ways inside the literal `<untrusted_message version="1">` envelope; the trust matrix HELD a
-  cross-machine message and then RELEASED it; broadcasts both ways; the viewer's freshness MEASURED
-  (0.107 s same-machine, 0.217 s cross-machine); zero DM content in the rendered DOM; a browser-session
-  recording, a screenshot, both vendor transcripts, and both machine preflights green.
-- **The lease defect REL-1 found is FIXED and shipped** (`6d6b45f`, Story 6.4): the explicit,
-  same-Actor, operator-authorized takeover with an atomic transfer and a fence; the MCP adapter's
-  orderly-exit release; `agent-room session replace`. Nineteen acceptance rows in
-  `tests/session-replacement.test.mjs`.
-- **Two advisor lanes reviewed the release gate** (`docs/implementation/reviews/epic-6-release-gate-{codex,agy}.md`)
-  and both REFUSED to sign a blanket "6.4 enforces every guarantee" claim. The record was corrected
-  everywhere (see §6) and five runtime items are OPEN work for the next release (§5).
+  cross-machine message (metadata only, body withheld) and then RELEASED it with its body; broadcasts
+  both ways; the viewer's freshness MEASURED (0.150 s same-machine, 0.276 s cross-machine, with the
+  observer attached BEFORE the first broadcast so all four arrivals are live); zero DM content in the
+  whole rendered DOM; a browser-session recording, a screenshot, both vendor transcripts, the operator
+  takeover receipts from both machines, and both machine preflights green.
+- **The lease defect REL-1 found is FIXED and shipped** (`6d6b45f` + the corrected text in `3929cc7`,
+  Story 6.4): the explicit, same-Actor, operator-authorized takeover with an atomic transfer and a
+  fence; the MCP adapter's orderly-exit release; `agent-room session replace`. Nineteen acceptance rows
+  in `tests/session-replacement.test.mjs`.
+- **Two advisor lanes reviewed the release gate, twice**
+  (`docs/implementation/reviews/epic-6-release-gate-{codex,agy}.md` and
+  `epic-6-comments-vs-recut-codex.md`). The first round REFUSED to sign a blanket "6.4 enforces every
+  guarantee" claim; the record was corrected everywhere (see §6) and five runtime items are OPEN work
+  for the next release (§5). The second round found the shipped text's overclaim and produced the third
+  re-cut.
 - Working tree: clean at the last commit; `git status` before committing.
 
 ## 2. HOW TO VERIFY
