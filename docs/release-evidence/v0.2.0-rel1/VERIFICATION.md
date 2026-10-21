@@ -59,17 +59,18 @@ its own provider seat, and the demo CA's private key never left the Mac.
    three installations, cursor "caught up through #8" (`viewer-state.json`).
 6. **The viewer's freshness is MEASURED, inside the 5-second bound.** Two canary broadcasts were timed
    against the sender's own acknowledgement instant with a DOM MutationObserver on the viewer's message
-   list: **0.107 s** for the same-machine sender (no clock term at all) and **0.00 s ± 0.45 s** for the
-   cross-machine sender — the corrected figure is **0.217 s** (the raw difference is 0.102 s and the
-   measured clock offset between the two machines adds 0.115 s; the offset between each machine and the
-   server was measured against the server's HTTP `Date`, not assumed). The first version of this record
-   subtracted that offset in the wrong direction; the release-gate review caught it and the corrected
-   arithmetic, the endpoints and the uncertainty are in `freshness.json`.
+   list: **0.107 s** for the same-machine sender (no clock term at all) and **0.217 s** for the
+   cross-machine sender (the raw difference is 0.102 s and the measured clock offset between the two
+   machines adds 0.115 s; the offset between each machine and the server was measured against the server's
+   HTTP `Date`, not assumed — and the uncertainty of that term is about ±0.9 s, since each offset is a
+   median over samples of a 1-second-resolution header). The first version of this record subtracted that
+   offset in the wrong direction; the release-gate review caught it, and the corrected arithmetic, the
+   endpoints and the uncertainty are in `freshness.json`.
    **What was measured, precisely:** the observer was attached to the viewer's message list at
    11:23:56.695Z, AFTER the conversation broadcasts (`seq 1`–`seq 6`, 11:03Z–11:19Z) had already been
    committed. Those six rows therefore entered the DOM as the page's initial catch-up page — the `arrivals`
    array in `viewer-state.json` shows them sharing one timestamp, the catch-up instant. The LIVE SSE
-   arrivals are `seq 7` (0.107 s) and `seq 8` (0.00 s ± 0.45 s), the two canaries sent after the observer
+   arrivals are `seq 7` (0.107 s) and `seq 8` (0.217 s), the two canaries sent after the observer
    was watching. `viewer-live.png` was captured at "caught up through #6", before the two canaries. The
    freshness claim rests on the two canaries and on nothing else.
 

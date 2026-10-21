@@ -20,9 +20,10 @@ Observations (the viewer's own rendered DOM, captured live):
   (`viewer-state.json`) is the page's own text, read from the DOM.
 - BROADCAST-FRESHNESS-CONFIRMED — a broadcast appears in the viewer's feed well inside the 5-second bound.
   Two canary broadcasts were measured with a DOM MutationObserver against the sender's own acknowledgement
-  instant: 0.107 s for the same-machine sender (no clock term at all) and 0.00 s ± 0.45 s for the
+  instant: 0.107 s for the same-machine sender (no clock term at all) and 0.217 s for the
   cross-machine sender (the raw difference is 0.102 s; the offset between the two machines' clocks was
-  measured, not assumed). Both numbers, their method, and their limits are in `freshness.json`.
+  measured, not assumed, and carries about +/-0.9 s of uncertainty). Both numbers, their method, and
+  their limits are in `freshness.json`.
 - DM-EXCLUSION-CONFIRMED — no DM content (`REL1-DM-…`) appears anywhere in the viewer. The check was run over
   the WHOLE rendered document, not only the visible message list: `dmLeakInWholeDom: false` in
   `viewer-state.json`. Direct Room ids are not learnable from anything the viewer serves.
