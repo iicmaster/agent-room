@@ -8,6 +8,7 @@ verdict, and an attempt that failed is never relabelled.
 |---|---|---|---|
 | 1 | `7dc980f` | **PASS** — 481.5 min, candidate-exact, zero loss over 22,625 messages, FD stable, final-window RSS pass | `docs/release-evidence/v0.2.0-soak-results.{json,md}` (the release candidate this attempt pinned) |
 | 2 | `89c8477` (the re-cut) | **FAIL** — 481.5 min tracked, candidate-exact, zero loss over 22,615 messages, FD stable, but the final-window RSS total-growth bound was exceeded | `attempt2-89c8477.{json,md}` |
+| 3 | `89c8477` (the re-cut) | **SUPERSEDED — stopped short of its 8 h** (191 min tracked) on a quiet host, because the lease-defect review placed a shipped-code fix inside v0.2.0's scope, which changes packaged bytes and voids the candidate. Its RSS trace is the evidence that the attempt-2 failure was host contention: on the quiet host the server sat at 90–117 MiB with **no sawtooth at all** (attempt 2 oscillated 25↔94 MiB) | `attempt3-quiet-host-telemetry.log` (the external host-telemetry sidecar: load, memory available, node process count, server RSS, `pgmajfault` every 60 s) |
 
 Attempt 2's own failure reason, verbatim from its record:
 
