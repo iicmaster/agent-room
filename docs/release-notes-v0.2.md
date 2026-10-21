@@ -198,7 +198,8 @@ candidate is frozen would change the artifact's bytes, void the candidate, and c
 eight-hour qualification run. Two things follow from that, and both are stated here rather than
 left for a reader to discover:
 
-- **The Story 6.4 continuity repair is NOT in the packaged CHANGELOG.** It landed after the freeze.
+- **The Story 6.4 continuity repair is NOT in the packaged CHANGELOG**, and it is not in the packaged
+  README either. Both landed after the freeze.
 - **The packaged CHANGELOG's top section is still headed "Unreleased"**, because renaming it to
   the released version is the same kind of packaged edit.
 
@@ -209,6 +210,10 @@ as an open product question, not as a silent omission.
 What the PACKAGE does carry, and where a user meets the feature: the `agent-room help` text
 documents `agent-room session replace`, and the client's own `chat_id_taken` error names the
 command — so the recovery is discoverable at the moment it is needed, which is where it matters.
+
+The process rule that follows from this is open work, not a footnote: every story's changelog entry
+and README section must land WITH the story, before the candidate is frozen, so that a release
+never ships a changelog that is missing its own headline fix.
 
 ## Notes for the RC window
 
