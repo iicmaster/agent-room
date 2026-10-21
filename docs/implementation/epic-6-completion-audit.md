@@ -1,7 +1,7 @@
 # Epic 6 Completion Audit — Prove It & Ship
 
-Date: 2026-10-21 · Commit range `3aec7ed` (post-Epic-5) → `02ea0b9` · Suite: **574 pass / 0 fail / 0 skipped** ·
-AC sweep: **clean** (4 stories, 8 criteria, 31 evidence pointers)
+Date: 2026-10-21 · Commit range `3aec7ed` (post-Epic-5) → `18ea145` · Suite: **574 pass / 0 fail / 0 skipped** ·
+AC sweep: **clean** (4 stories, 8 criteria, 22 evidence pointers)
 
 > **Status: written against the final candidate while the formal soak is still
 > running.** The soak's verdict is the one open gate; every other line here is
@@ -17,6 +17,21 @@ demonstration is captured and verified by its own verifier; and the one defect
 the demonstration found — a killed client that could not reclaim its own Chat
 ID — is repaired, proven by nineteen acceptance rows, and proven again in the
 physical deployment on both machines.
+
+**Three candidate re-cuts, and the third one was the advisors' doing.** The
+first two were forced by real changes to packaged runtime inputs (the viewer's
+boot read; the version stamp). The third was forced by the RELEASE-GATE
+REVIEW, which found that the shipped source, the CLI help, the packaged
+CHANGELOG and the packaged README all still carried the overclaim the repo's
+own record had already been corrected for. The codex lane's recommendation was
+to correct the shipped explanations and re-cut rather than publish a package
+whose operator-facing text promises more than the mechanism delivers ("the
+package supplies the assurance while excluding the document that qualifies
+it"); the agy lane was quota-exhausted for that round, so its earlier verdict
+stands as recorded — approve the bytes, correct the record. The third re-cut
+was TEXT-ONLY (no behaviour changed) and it settled the process rule: **every
+story's changelog entry and README section land WITH the story, before the
+candidate is frozen.**
 
 **Two real defects were found and fixed inside this epic**, and neither was
 visible to the suite:
@@ -42,14 +57,14 @@ visible to the suite:
 
 | Story | Commit | Proof |
 |---|---|---|
-| 6.1 REL-1 — the cross-everything demonstration | `33c7ec1` (the flight kit), `98a15f8` (the evidence) | `docs/release-evidence/v0.2.0-rel1/` — two physical machines (NSG-Mac-mini and ngs-staging), two vendor hosts (the real Zcode CLI 0.17.0 on the Mac, the real Claude Code 2.1.306 on staging through that host's own model gateway) plus a third installation as the negative control, against one self-hosted Room Server (Docker `node:24-alpine`, TLS with a private CA) on ngs-2. DMs both ways inside the literal `<untrusted_message version="1">` envelope; the trust matrix HELD a cross-machine message (`not_allowlisted`, body withheld) and then RELEASED it; broadcasts both ways; the viewer's freshness MEASURED (0.107 s same-machine, 0.217 s cross-machine with the measured clock offset); zero DM content in the rendered DOM; a browser-session recording, a screenshot, both vendor transcripts, and `scripts/rel1-verify-evidence.mjs` exiting 0 |
+| 6.1 REL-1 — the cross-everything demonstration | `33c7ec1` (the flight kit), `18ea145` (the evidence) | `docs/release-evidence/v0.2.0-rel1/` — two physical machines (NSG-Mac-mini and ngs-staging), two vendor hosts (the real Zcode CLI 0.17.0 on the Mac, the real Claude Code 2.1.306 on staging through that host's own model gateway) plus a third installation as the negative control, against one self-hosted Room Server (Docker `node:24-alpine`, TLS with a private CA) on ngs-2. DMs both ways inside the literal `<untrusted_message version="1">` envelope; the trust matrix HELD a cross-machine message (`not_allowlisted`, body withheld, 480 bytes) and then RELEASED it with its body; broadcasts both ways; the viewer's freshness MEASURED (0.150 s same-machine, 0.276 s cross-machine with the measured clock offset); zero DM content in the whole rendered DOM; a browser-session recording, a screenshot, both vendor transcripts, the operator takeover receipts from both machines, and `scripts/rel1-verify-evidence.mjs` exiting 0 |
 | 6.2 REL-3 — the formal soak | `33c7ec1` (harness) | `tests/soak/rel3-soak.mjs` (the long-runner) + `tests/soak/rel3-soak.test.mjs` (the compressed validation of the same runner). Attempt 1 PASSED against the now-superseded `7dc980f` (481.5 min, candidate-exact, zero loss over 22,625 messages, FD stable, final-window RSS pass). Attempt 2 FAILED the final-window RSS rule against `89c8477` — the advisor review's statistical refutation of my own "unlucky phase" explanation showed the real cause was host contention. Attempt 3 was stopped as void on a quiet host, and its flat RSS trace (90–117 MiB, no sawtooth) is the evidence for the contention diagnosis. **[PENDING]** the fresh 8-hour run against the final candidate |
-| 6.3 Release packaging & client smoke tests | `865d42e` (the re-cut) | `docs/release-evidence/v0.2.0-candidate.json` — commit `6d6b45f`, version `0.2.0`, both package tree digests (portable `ad08240b…`, claude_code `fe4d2aaa…`, 46 files each), Node/SQLite versions, the validator identity, and all five gate rows green on the re-cut artifacts: deterministic materialization, the real `claude plugin validate --strict` (2.1.305, exit 0), the installed Claude Code smoke, the installed portable smoke, and SM-C1 (five fresh installs, zero failures, 0.460 s raw mean, 0.265 s adjusted against v0.1's 0.352 s anchor) |
+| 6.3 Release packaging & client smoke tests | `dc61332` (the third re-cut) | `docs/release-evidence/v0.2.0-candidate.json` — commit `3929cc7`, version `0.2.0`, both package tree digests (portable `3d90129b…`, claude_code `e481c9a4…`, 46 files each), Node/SQLite versions, the validator identity, and all five gate rows green on the re-cut artifacts: deterministic materialization, the real `claude plugin validate --strict` (2.1.305, exit 0), the installed Claude Code smoke, the installed portable smoke, and SM-C1 (five fresh installs, zero failures, 0.460 s raw mean, 0.262 s adjusted against v0.1's 0.352 s anchor) |
 | 6.4 Reconnect recovery — the explicit session takeover | `6d6b45f` | `tests/session-replacement.test.mjs` (19 rows) — the squat and its repair, the same-Actor grant, the foreign-Actor refusal, the intent's grammar, the wrong verb, the registry's own incumbent re-check, the failed-write ordering at both the registry and the API level, the late requests, no ping-pong, the durable claim row and the client's cursor file surviving a takeover, the real client's recovery carrying no intent, the authorization stage's fence, a named row pinning the known fence-placement gap, the orderly exit at both the API and the MCP child, and the operator command's three refusals. Spec: `docs/implementation/spec-6-4-reconnect-recovery-takeover.md` |
 
 ## The three re-cuts, and why
 
-Three changes to **packaged runtime inputs** landed after the first candidate was
+Three changes to **packaged inputs** landed after the first candidate was
 frozen, and the candidate-immutability law then did exactly what it exists to
 do — void the candidate and restart the qualification:
 
@@ -61,6 +76,10 @@ do — void the candidate and restart the qualification:
    before it cost another night.
 3. **The Story 6.4 repair** (`server/`, `server/cli/`, `server/client/`) — the
    continuity defect the physical demonstration found.
+4. **The corrected shipped text** (`server/api/*.mjs`, `server/cli/*.mjs`,
+   `README.md`, `CHANGELOG.md`) — the release-gate review's finding that the
+   package's own explanations overstated what the package's code delivers.
+   TEXT-ONLY: no behaviour changed.
 
 The soak's identity proof refused each run with the drift named, rather than
 silently soaking a different artifact. All five Story 6.3 gate rows pass
@@ -145,6 +164,9 @@ certificate-ignore flag because the demo CA is not in the OS trust store):
   browser automation): the vendor HOSTS are real, with their own models and
   credentials; no person typed at a keyboard, and the recording is the browser
   session rather than an operator's desktop.
+- **The takeover's confirmation is a guardrail, not a proof of consent.** In the REL-1 run the Zcode agent
+  ran the takeover itself twice (under a pseudo-TTY, answering the prompt in its own words), while the Claude
+  Code agent refused to seize a name and waited for the operator. Both behaviours are in the transcripts.
 - **The packaged CHANGELOG cannot carry the 6.4 entry** without voiding the
   qualification — the release notes are the changelog for v0.2.0 (retro F8).
 - **Automatic unattended crash recovery is not built** and is not promised:
