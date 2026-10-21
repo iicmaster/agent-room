@@ -205,9 +205,9 @@ release's bytes were settled. The tag carries the publication date.)
 
 **The process rule that made that possible** is the thing worth keeping: every story's changelog entry and
 README section land WITH the story, before the candidate is frozen, so a release never ships a changelog
-that is missing its own headline fix. v0.2.0's first re-cut did not follow that rule — the Story 6.4
-entry and the heading would each have voided a qualification run — and the release-gate review found it
-(the Epic 6 retro, finding F8 and action A1).
+that is missing its own headline fix. The re-cut that carried the Story 6.4 repair did not follow that
+rule — its changelog entry and its heading would each have voided a qualification run — and the
+release-gate review found it (the Epic 6 retro, finding F8 and action A1). The third re-cut fixed it.
 
 ## Notes for the RC window
 
@@ -216,6 +216,6 @@ entry and the heading would each have voided a qualification run — and the rel
   moved with the release). The stamp is applied **before** the candidate is
   re-cut, so the frozen artifact and the shipped artifact are the same bytes —
   stamping after the soak would have voided the candidate a second time.
-- Package size grew from v0.1's 136 KiB / 13 files to 766 KiB / 46 files per
+- Package size grew from v0.1's 136 KiB / 13 files to 772 KiB / 46 files per
   package (remote mode, viewer assets, trust/held pipeline, migration, drills'
   runtime surface) — no external dependencies were added.
