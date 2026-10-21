@@ -70,17 +70,23 @@ start):
 | B DM opened | (B joined ~0.348) | 0.454 |
 | **B received A's message (end-to-end)** | **~0.351** | **0.458** |
 
-Per-run end-to-end across the three consecutive runs that fixed the frozen
-record (seconds):
+Per-run end-to-end across the three consecutive runs that fixed the first
+frozen record (seconds):
 
 - run 1: 0.459 / 0.477 / 0.466 / 0.461 / 0.464 (mean 0.465)
 - run 2: 0.462 / 0.463 / 0.461 / 0.454 / 0.456 (mean 0.459)
-- run 3 (frozen): 0.458 / 0.458 / 0.463 / 0.458 / 0.457 (mean 0.459, spread 0.005)
+- run 3 (frozen, the pre-6.4 tree): 0.458 / 0.458 / 0.463 / 0.458 / 0.457 (mean 0.459, spread 0.005)
 
-Three further five-install verification runs of the final gate recorded means
+Three further five-install verification runs of that gate recorded means
 0.497 / 0.500 / 0.489 s (adjusted 0.296 / 0.291 / 0.289 s) — the same verdict,
-slightly busier machine. Across all six verification runs: thirty fresh
-installs, zero failures, every run inside the rule.
+slightly busier machine. Across those six runs: thirty fresh installs, zero
+failures, every run inside the rule.
+
+**The frozen run of THIS candidate** (the tree that carries the reconnect
+recovery, commit `6d6b45f`) was measured again, on a quiet machine, before the
+REL-1 round: 0.454 / 0.463 / 0.472 / 0.458 / 0.455 s (mean **0.460 s**, median
+0.458), adjusted 0.257 / 0.268 / 0.279 / 0.261 / 0.259 s (mean **0.265 s**),
+zero failures across five fresh installs. The numbers below are that run's.
 
 **Verdict per SM-C1's rule: pass.**
 
@@ -89,12 +95,12 @@ installs, zero failures, every run inside the rule.
   command. v0.1's explicit `room_create` / `room_join` pair collapses into the
   two `room_direct_open` calls (DM addressing replaces manual room plumbing;
   room ids still come from tool results, never guessed). No other step exists.
-- Failures: 0 across the thirty fresh installs (five per run, six verification
-  runs of the final gate).
+- Failures: 0 across every fresh install of the final gate (thirty across the
+  first candidate's six runs, five more on this candidate's frozen run).
 - Time beyond the choice: the two added setup rows cost 0.181 s and 0.014 s
   (median) in the frozen run. Price them out and v0.2's ladder is
-  **0.264 s mean (adjusted per-run 0.260–0.266 s) — faster than v0.1's
-  0.352 s anchor**. The raw end-to-end mean (0.459 s) sits above the anchor
+  **0.265 s mean (adjusted per-run 0.257–0.279 s) — faster than v0.1's
+  0.352 s anchor**. The raw end-to-end mean (0.460 s) sits above the anchor
   only because the ladder now contains a step v0.1 never paid; everything
   v0.1's ladder paid, v0.2 pays faster. The one-time server cold start is
   still paid exactly once per install and remains invisible inside the Chat
@@ -127,11 +133,24 @@ v0.2.0 closes it with three things:
   the handoff. The server grants it only when the live holder is the SAME key
   (a different key's session is never displaced), moves the name atomically
   (the durable claim write first, the memory transfer second), and ends the
-  displaced session's authority WITH the handoff — its token stops
-  authenticating, and a request it had already sent cannot land afterwards. It
-  also cannot take the name back by reconnecting: an automatic re-authentication
-  never carries the takeover intent. The command asks for an interactive
-  confirmation and refuses a piped stdin — a takeover is a human decision.
+  displaced session's authority AT the handoff: its token stops authenticating
+  at once, and a request it had already sent is refused at the authorization
+  stage. It cannot take the name back by reconnecting either — an automatic
+  re-authentication never carries the takeover intent, so a plain re-bind is
+  refused with the ordinary collision error. The command asks for an interactive
+  confirmation and refuses a piped stdin.
+
+  Three honest limits, all recorded in the Epic 6 retrospective as open work:
+  the authorization-stage check happens BEFORE the request body is read, so a
+  request whose body was still streaming when the handoff happened can still
+  reach the handler (the takeover is for a DEAD session, which has no
+  in-flight request; the window matters only if an operator takes over a LIVE
+  one, which the command warns against); the takeover displaces whoever holds
+  the name AT THE MOMENT it runs, not an incumbent the operator observed
+  earlier, so a name that changed hands in between is displaced too; and the
+  `isTTY` gate stops an ACCIDENTAL non-interactive invocation — it is not proof
+  of human consent, because a shell-capable agent can allocate a pseudo-TTY and
+  answer the prompt itself (the REL-1 run recorded exactly that).
 - **The client says so.** A `chat_id_taken` collision now names the command
   that recovers the name, instead of leaving the operator to read a coded
   error.
@@ -164,7 +183,7 @@ the source tree at any time.
 ## The frozen candidate
 
 `docs/release-evidence/v0.2.0-candidate.json` records: the git commit the tree
-is built from, both package SHA-256 tree digests (45 files each — 3.5x the
+is built from, both package SHA-256 tree digests (46 files each — 3.5x the
 v0.1 package's 13 files), Node and SQLite versions, the validator identity, the
 SM-C1 numbers above, and the binding statement for Stories 6.2 and 6.1.
 
@@ -185,6 +204,6 @@ omission.
   moved with the release). The stamp is applied **before** the candidate is
   re-cut, so the frozen artifact and the shipped artifact are the same bytes —
   stamping after the soak would have voided the candidate a second time.
-- Package size grew from v0.1's 136 KiB / 13 files to 734 KiB / 45 files per
+- Package size grew from v0.1's 136 KiB / 13 files to 766 KiB / 46 files per
   package (remote mode, viewer assets, trust/held pipeline, migration, drills'
   runtime surface) — no external dependencies were added.

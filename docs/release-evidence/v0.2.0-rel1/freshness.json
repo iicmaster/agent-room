@@ -15,7 +15,8 @@
     "dom_arrival_epoch_ms": 1792581837055,
     "freshness_ms": 107,
     "freshness_seconds": 0.107,
-    "verdict": "pass \u2014 0.107 s against the 5 s bound"
+    "verdict": "pass \u2014 0.107 s against the 5 s bound",
+    "endpoints": "the measured interval runs from the sender's HTTP acknowledgement of the committed send to the instant the viewer's MutationObserver sees the message card inserted into the DOM. It does NOT run from send-start to the first painted pixel: the acknowledgement is after the commit, and the MutationObserver callback fires before the paint. This is an operational proxy for the viewer's freshness, not a general end-to-end latency SLA (release-gate review, Vex)."
   },
   "cross_machine_measurement": {
     "why": "the sender is the OTHER physical machine (ngs-staging), so the two clocks differ; the offset is measured, not assumed",
@@ -36,14 +37,17 @@
       "samples_per_client": 9
     },
     "offset_staging_minus_mac_ms": 115,
-    "corrected_freshness_ms": -13,
-    "corrected_freshness_seconds": -0.013,
-    "reported_as": "0.00 s +/- 0.45 s (the raw difference is 0.102 s; the offset correction is within its own quantization)",
-    "verdict": "pass \u2014 far inside the 5 s bound on any reading of the offset"
+    "corrected_freshness_ms": 217,
+    "corrected_freshness_seconds": 0.217,
+    "reported_as": "0.217 s (the corrected cross-machine freshness). The arithmetic: elapsed = (viewer_clock - mac_offset) - (sender_clock - staging_offset) = raw_difference + (staging_offset - mac_offset) = 102 + 115 = 217 ms. The first version of this file subtracted the offset in the wrong direction; the release-gate review (agy, Sally) caught it and this is the corrected value.",
+    "verdict": "pass - 0.217 s corrected (raw 0.102 s) against the 5 s bound, with a +/-0.9 s clock-offset uncertainty",
+    "uncertainty": "each clock offset is the median of 9 samples of (client midpoint - the server's HTTP Date); the Date header has 1-second resolution, so each median carries roughly +/-450 ms of quantization uncertainty, and the DIFFERENCE of the two medians inherits up to about +/-900 ms from that term alone, before any network asymmetry. The nine raw samples and the capture code were not retained, so this is not a calibrated total bound. The verdict does not depend on it: even at the worst case the measurement is about 1.1 s, far inside the 5 s bound.",
+    "endpoints": "the measured interval runs from the sender's HTTP acknowledgement of the committed send to the instant the viewer's MutationObserver sees the message card inserted into the DOM. It does NOT run from send-start to the first painted pixel: the acknowledgement is after the commit, and the MutationObserver callback fires before the paint. This is an operational proxy for the viewer's freshness, not a general end-to-end latency SLA (release-gate review, Vex)."
   },
   "honest_limits": [
-    "The measurement is the DOM arrival of the message card, not the network arrival of the SSE frame; the SSE frame itself lands slightly earlier (the server polls the store every 250 ms and writes the frame immediately).",
-    "The cross-machine number carries the clock-offset uncertainty stated above; the same-clock number carries none.",
-    "Two canary measurements were taken per path; the earlier pair (seq 2 and seq 3) gave 120 ms and 113 ms raw \u2014 the same order of magnitude, so the result is not a single lucky sample."
+    "The measured interval is sender-acknowledgement -> DOM card insertion, not send-start -> painted pixel. The acknowledgement is after the commit and the observer fires before the paint, so the interval is not the whole user-perceived latency.",
+    "The cross-machine number carries the clock-offset uncertainty stated above (each offset median has about +/-450 ms of quantization; their difference up to about +/-900 ms). The same-clock number carries no clock term at all.",
+    "Only seq 7 and seq 8 are live SSE arrivals; seq 1-6 entered the DOM as the page's initial catch-up page (the observer was attached after those messages were already committed), so their timestamps are the catch-up instant and NOT latencies.",
+    "Two canary measurements were taken per path; the earlier pair (seq 2 and seq 3) gave 120 ms and 113 ms raw - the same order of magnitude, so the result is not a single lucky sample."
   ]
 }

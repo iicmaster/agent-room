@@ -23,7 +23,7 @@ import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { generateKeyPairSync } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import http from 'node:http'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -32,10 +32,13 @@ import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
 import { loadOrCreateLocalToken } from '../server/api/local-token.mjs'
+import { DatabaseSync } from 'node:sqlite'
 import { createLiveSessionRegistry } from '../server/core/session-registry.mjs'
 import { createSessionRegistry, sessionKeyFromToken } from '../server/api/session.mjs'
 import { fingerprintFromPublicKey, loadOrCreateKeypair } from '../server/keys.mjs'
 import { startServer } from '../server/api/server.mjs'
+import { AuthzStage, AuthStage, runPipeline } from '../server/api/pipeline.mjs'
+import { createSessionVerifier } from '../server/api/session.mjs'
 import { createAgentRoomClient } from '../server/client/api-client.mjs'
 import { main } from '../server/cli/agent-room.mjs'
 import { atomicWriteJson } from '../server/runtime.mjs'
@@ -282,6 +285,315 @@ test('two competing takeovers: the last explicit intent wins, and the loser is f
   assert.equal((await sessionRequest(server.port, 'POST', first, { chat_id: 'Agent' })).status, 401)
   assert.equal((await sessionRequest(server.port, 'POST', second, { chat_id: 'Agent' })).status, 401)
   assert.equal(liveSessionRegistry.holderOf('Agent').sessionKey, sessionKeyFromToken(third))
+})
+
+test('the takeover intent is grammar-checked: a non-boolean is refused, an explicit null means false', async t => {
+  const { dataDir, server } = await makeServer(t)
+  const localToken = loadOrCreateLocalToken(dataDir)
+  const alice = installation()
+  const { token } = await bindSession(server.port, localToken, alice, 'Agent')
+
+  // A non-boolean is a request-shape refusal BEFORE any state changes.
+  for (const value of ['yes', 1, {}, []]) {
+    const refused = await sessionRequest(server.port, 'POST', token, {
+      chat_id: 'Agent-2',
+      client_type: 'mcp',
+      replace_existing: value,
+    })
+    assert.equal(refused.status, 400, `replace_existing=${JSON.stringify(value)} was not refused`)
+    assert.equal(refused.json.error.code, 'invalid_request')
+  }
+  // The refusal changed nothing: the session still holds its own name.
+  const stillHeld = await sessionRequest(server.port, 'POST', token, { chat_id: 'Agent' })
+  assert.equal(stillHeld.status, 200, stillHeld.text)
+
+  // An explicit null is the codebase's "not provided" convention (the same
+  // convention client_type uses): it means false, so the bind is an ordinary
+  // bind and a name held by ANOTHER session is refused the ordinary way.
+  const { token: squatter } = await bindSession(server.port, localToken, alice, 'Held')
+  const nullIntent = await sessionRequest(server.port, 'POST', token, {
+    chat_id: 'Held',
+    client_type: 'mcp',
+    replace_existing: null,
+  })
+  assert.equal(nullIntent.status, 409, nullIntent.text)
+  assert.equal(nullIntent.json.error.code, 'chat_id_taken')
+  // The squatter was NOT displaced: a null intent is not a takeover.
+  const squatterStill = await sessionRequest(server.port, 'POST', squatter, { chat_id: 'Held' })
+  assert.equal(squatterStill.status, 200, squatterStill.text)
+})
+
+test('the rename verb refuses the takeover intent', async t => {
+  const { dataDir, server } = await makeServer(t)
+  const localToken = loadOrCreateLocalToken(dataDir)
+  const alice = installation()
+  const { token } = await bindSession(server.port, localToken, alice, 'Agent')
+
+  // A rename is not a takeover: the intent field does not belong to the verb.
+  const refused = await sessionRequest(server.port, 'PATCH', token, {
+    chat_id: 'Agent-2',
+    client_type: 'mcp',
+    replace_existing: true,
+  })
+  assert.equal(refused.status, 400, refused.text)
+  assert.equal(refused.json.error.code, 'unknown_field')
+  // Nothing moved.
+  const stillHeld = await sessionRequest(server.port, 'POST', token, { chat_id: 'Agent' })
+  assert.equal(stillHeld.status, 200, stillHeld.text)
+})
+
+test('the registry re-checks the incumbent itself: a stale or foreign incumbent key is refused', async t => {
+  const { liveSessionRegistry } = await makeServer(t)
+  const alice = installation()
+  const bob = installation()
+  liveSessionRegistry.claim({ sessionKey: 'k-alice', chatId: 'Agent', actorFingerprint: alice.fingerprint })
+
+  // The named incumbent is not the holder (a stale observation).
+  assert.throws(() => liveSessionRegistry.transfer({
+    sessionKey: 'k-bob',
+    chatId: 'Agent',
+    actorFingerprint: bob.fingerprint,
+    incumbentSessionKey: 'k-not-the-holder',
+  }), error => error?.code === 'chat_id_taken')
+
+  // The holder is the named session, but it belongs to ANOTHER Actor.
+  assert.throws(() => liveSessionRegistry.transfer({
+    sessionKey: 'k-bob',
+    chatId: 'Agent',
+    actorFingerprint: bob.fingerprint,
+    incumbentSessionKey: 'k-alice',
+  }), error => error?.code === 'chat_id_taken')
+
+  // Alice's own transfer still works: the guard refuses only what it should.
+  const taken = liveSessionRegistry.transfer({
+    sessionKey: 'k-alice-2',
+    chatId: 'Agent',
+    actorFingerprint: alice.fingerprint,
+    incumbentSessionKey: 'k-alice',
+  })
+  assert.equal(taken.displacedSessionKey, 'k-alice')
+  assert.equal(liveSessionRegistry.holderOf('Agent').sessionKey, 'k-alice-2')
+})
+
+test('a failed takeover leaves the incumbent\'s authority intact', async t => {
+  // The API layer's own ordering (durable write first, memory transfer
+  // second, fence last) is what protects the incumbent when the write
+  // fails. This row drives it through the API with a registry whose transfer
+  // fails: the incumbent must still hold the name AND its token must still
+  // authenticate — a fenced-but-still-holding incumbent would be the worst
+  // of both worlds.
+  const dataDir = makeDataDir(t)
+  const sessionRegistry = createSessionRegistry()
+  const real = createLiveSessionRegistry()
+  const liveSessionRegistry = {
+    ...real,
+    claim: options => real.claim(options),
+    rename: options => real.rename(options),
+    transfer: () => { throw new Error('the durable write failed') },
+    release: key => real.release(key),
+    touch: (key, options) => real.touch(key, options),
+    lookup: key => real.lookup(key),
+    holderOf: id => real.holderOf(id),
+    presenceSnapshot: options => real.presenceSnapshot(options),
+    clear: () => real.clear(),
+  }
+  const server = await startServer({ dataDir, sessionRegistry, liveSessionRegistry })
+  t.after(() => server.close())
+  const localToken = loadOrCreateLocalToken(dataDir)
+  const alice = installation()
+
+  const { token: incumbentToken } = await bindSession(server.port, localToken, alice, 'Agent')
+  const takeoverToken = await exchange(server.port, alice, localToken)
+  const failed = await sessionRequest(server.port, 'POST', takeoverToken, {
+    chat_id: 'Agent',
+    client_type: 'mcp',
+    replace_existing: true,
+  })
+  assert.equal(failed.status, 500, failed.text)
+  // The incumbent still holds the name, and its token still authenticates.
+  assert.equal(real.holderOf('Agent').sessionKey, sessionKeyFromToken(incumbentToken))
+  const stillWorks = await sessionRequest(server.port, 'POST', incumbentToken, { chat_id: 'Agent' })
+  assert.equal(stillWorks.status, 200, stillWorks.text)
+})
+
+test('the real client\'s own recovery carries no takeover intent', async t => {
+  const { dataDir, server, liveSessionRegistry } = await makeServer(t)
+  const localToken = loadOrCreateLocalToken(dataDir)
+  const alice = installation()
+
+  // A dead session holds the name with a token that still authenticates —
+  // the squat the whole story is about.
+  const { token: squatter } = await bindSession(server.port, localToken, alice, 'Agent')
+  const squatterKey = sessionKeyFromToken(squatter)
+
+  // The REAL client (the package's own api-client) tries to use the name.
+  const pluginData = makePluginData(t, 'Agent')
+  const client = createAgentRoomClient({ dataDir, pluginDataDir: pluginData })
+  await assert.rejects(
+    () => client.presence(),
+    error => {
+      assert.equal(error.code, 'chat_id_taken')
+      assert.match(error.message, /agent-room session replace/)
+      return true
+    },
+  )
+  // The client's automatic path never seized the name: the squatter still
+  // holds it, and the squatter's own session is still alive.
+  assert.equal(liveSessionRegistry.holderOf('Agent').sessionKey, squatterKey)
+  const squatterAlive = await sessionRequest(server.port, 'POST', squatter, { chat_id: 'Agent' })
+  assert.equal(squatterAlive.status, 200, squatterAlive.text)
+})
+
+test('the takeover preserves the durable claim row and the client\'s cursor file', async t => {
+  const { dataDir, server } = await makeServer(t)
+  const localToken = loadOrCreateLocalToken(dataDir)
+  const alice = installation()
+
+  const { token } = await bindSession(server.port, localToken, alice, 'Agent')
+  const takeoverToken = await exchange(server.port, alice, localToken)
+  const takeover = await sessionRequest(server.port, 'POST', takeoverToken, {
+    chat_id: 'Agent',
+    client_type: 'mcp',
+    replace_existing: true,
+  })
+  assert.equal(takeover.status, 200, takeover.text)
+
+  // The durable (name, Actor) claim survives the takeover — the ambiguity
+  // data offline discovery resolves is still there.
+  const db = new DatabaseSync(join(dataDir, 'agent-room.sqlite'))
+  try {
+    const rows = db.prepare(`
+      SELECT chat_id_normalized, actor_fingerprint FROM chat_id_claims
+      WHERE chat_id_normalized = ?
+    `).all('agent')
+    assert.equal(rows.length, 1, 'the durable claim row for the name survives')
+    assert.equal(rows[0].actor_fingerprint, alice.fingerprint)
+  } finally {
+    db.close()
+  }
+
+  // The CLIENT's own cursor file is untouched: a takeover is a name
+  // operation, not a data operation.
+  const pluginData = makePluginData(t, 'Agent')
+  const cursorPath = join(pluginData, 'realms', 'realm-under-test', 'cursors.json')
+  mkdirSync(dirname(cursorPath), { recursive: true, mode: 0o700 })
+  const cursorBody = JSON.stringify({ 'room-1': { afterSeq: 42 } })
+  writeFileSync(cursorPath, cursorBody, { mode: 0o600 })
+  const before = readFileSync(cursorPath, 'utf8')
+  await sessionRequest(server.port, 'POST', takeoverToken, {
+    chat_id: 'Agent-2',
+    client_type: 'mcp',
+  })
+  assert.equal(readFileSync(cursorPath, 'utf8'), before, 'the client cursor file is untouched')
+  // And the takeover token still works (it is the live session now).
+  const alive = await sessionRequest(server.port, 'POST', takeoverToken, { chat_id: 'Agent-2' })
+  assert.equal(alive.status, 200, alive.text)
+})
+
+test('the fence itself refuses a displaced session at the authorization stage', async t => {
+  // The mechanism behind "admission alone is never authority": the
+  // authorization stage re-checks the fence immediately before the handler
+  // runs, so a request admitted BEFORE the handoff is refused rather than
+  // landing after it. This row drives the stage directly — the HTTP rows
+  // above prove the token is revoked, this one proves the in-flight request
+  // is refused.
+  const { sessionRegistry } = await makeServer(t)
+  const key = 'session-key-under-test'
+  const superseded = sessionRegistry.supersede(key)
+  assert.equal(superseded, false, 'nothing was registered under that key, so no live session was revoked')
+  assert.equal(sessionRegistry.isSuperseded(key), true, 'the fence still marks the displaced key')
+
+  const stage = new AuthzStage()
+  const refusal = stage.process({
+    route: { class: 'actor' },
+    session: { actorFingerprint: `sha256:${'a'.repeat(64)}`, sessionKey: key },
+    store: { isActorBanned: () => false },
+    sessionRegistry,
+  })
+  assert.ok(refusal, 'the authorization stage must refuse a superseded session')
+  assert.equal(refusal.ok, false)
+  assert.equal(refusal.code, 'unauthorized')
+
+  // A session that was never displaced is untouched by the same stage.
+  const untouched = stage.process({
+    route: { class: 'actor' },
+    session: { actorFingerprint: `sha256:${'a'.repeat(64)}`, sessionKey: 'another-key' },
+    store: { isActorBanned: () => false },
+    sessionRegistry,
+  })
+  assert.equal(untouched, undefined, 'an undisplaced session passes the fence')
+})
+
+test('KNOWN GAP (open for the next release): the fence is checked BEFORE the request body is read', async t => {
+  // The release-gate review executed this path and confirmed it: the
+  // authorization stage runs inside the stage sequence, and the request body
+  // is read AFTER the stages — so on a body-carrying route the fence is
+  // checked before the body arrives. A request that authenticated before the
+  // handoff and whose body was still streaming when the handoff happened
+  // therefore still reaches the handler.
+  //
+  // This row pins that gap VISIBLY, so it can never be mistaken for a
+  // covered guarantee: the expectation below is the CURRENT behaviour, and
+  // it FLIPS when the fence moves after the last awaited input step (the
+  // fix both advisors named). The takeover's intended use — taking over a
+  // DEAD session, which has no in-flight request — is not affected.
+  const auth = createSessionRegistry()
+  const live = createLiveSessionRegistry()
+  const actor = `sha256:${'a'.repeat(64)}`
+  const oldToken = auth.issue(actor)
+  const oldKey = sessionKeyFromToken(oldToken)
+  const newKey = sessionKeyFromToken(auth.issue(actor))
+  live.claim({ sessionKey: oldKey, chatId: 'Agent', actorFingerprint: actor })
+
+  let enter
+  let finish
+  const entered = new Promise(resolve => { enter = resolve })
+  const gate = new Promise(resolve => { finish = resolve })
+  const bodyStream = (async function* () {
+    enter()
+    await gate
+    yield Buffer.from(JSON.stringify({ chat_id: 'Ghost' }))
+  })()
+  const context = {
+    method: 'POST',
+    route: { class: 'actor', requestFields: ['chat_id'] },
+    headers: { authorization: `Bearer ${oldToken}` },
+    bodyStream,
+    sessionRegistry: auth,
+    liveSessionRegistry: live,
+  }
+  let handlerRan = false
+  const pending = runPipeline(
+    [new AuthStage({ sessionVerifier: createSessionVerifier({ registry: auth }) }), new AuthzStage()],
+    context,
+    ctx => {
+      handlerRan = true
+      return live.claim({
+        sessionKey: ctx.session.sessionKey,
+        chatId: ctx.body.chat_id,
+        actorFingerprint: ctx.session.actorFingerprint,
+      })
+    },
+  )
+  await entered
+  // The handoff happens while the request's body is still in flight.
+  live.transfer({
+    sessionKey: newKey,
+    chatId: 'Agent',
+    actorFingerprint: actor,
+    incumbentSessionKey: oldKey,
+  })
+  auth.supersede(oldKey)
+  assert.equal(auth.verify(oldToken).code, 'unauthorized', 'the displaced token no longer authenticates')
+  finish()
+  const outcome = await pending
+  assert.equal(handlerRan, true, 'the gap: the admitted request still reached the handler')
+  assert.equal(outcome.ok, true)
+  assert.equal(live.holderOf('Ghost').sessionKey, oldKey, 'and it could still claim a name')
+
+  // The part that DOES hold: every LATER request from the displaced session
+  // is refused at the auth stage, because its token no longer authenticates.
+  assert.equal(auth.verify(oldToken).code, 'unauthorized')
 })
 
 test('a failed durable write leaves the incumbent intact', async t => {
