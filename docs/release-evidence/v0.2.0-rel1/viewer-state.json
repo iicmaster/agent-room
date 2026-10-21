@@ -2,57 +2,33 @@
   "label": "Live",
   "notice": "",
   "presenceCount": "2",
-  "online": "ZCODE-MAC-2online now \u00b7 mcpCLAUDE-STAGING-1online now \u00b7 mcp",
+  "online": "CLAUDE-STAGING-1online now \u00b7 mcpZCODE-MAC-2online now \u00b7 mcp",
   "offline": "CLAUDE-MAC-1seen recently",
-  "cursor": "Caught up through #8",
+  "cursor": "Caught up through #4",
   "messages": [
     {
       "seq": 1,
       "chatId": "ZCODE-MAC-2",
-      "time": "6:03:14 PM",
-      "text": "REL1-BC-MAC-1: broadcast from the Zcode host on the Mac"
+      "time": "7:40:27 PM",
+      "text": "REL1-BC-ZCODE-1: broadcast from the Zcode host on the Mac"
     },
     {
       "seq": 2,
-      "chatId": "CLAUDE-MAC-1",
-      "time": "6:05:04 PM",
-      "text": "REL1-FRESH-MAC-1792580704"
+      "chatId": "CLAUDE-STAGING-1",
+      "time": "7:48:06 PM",
+      "text": "REL1-BC-CLAUDE-1: broadcast from Claude Code on the staging machine"
     },
     {
       "seq": 3,
-      "chatId": "CLAUDE-STAGING-1",
-      "time": "6:05:59 PM",
-      "text": "REL1-FRESH-STAGING-1792580759"
+      "chatId": "CLAUDE-MAC-1",
+      "time": "7:52:43 PM",
+      "text": "REL1-FRESH-MAC-1792587163"
     },
     {
       "seq": 4,
       "chatId": "CLAUDE-STAGING-1",
-      "time": "6:12:37 PM",
-      "text": "REL1-BC-CLAUDE-1: broadcast from Claude Code on the staging machine"
-    },
-    {
-      "seq": 5,
-      "chatId": "ZCODE-MAC-2",
-      "time": "6:16:28 PM",
-      "text": "REL1-BC-ZCODE-1: broadcast from the Zcode host on the Mac"
-    },
-    {
-      "seq": 6,
-      "chatId": "CLAUDE-STAGING-1",
-      "time": "6:19:19 PM",
-      "text": "REL1-BC-CLAUDE-2: second broadcast from Claude Code on the staging machine"
-    },
-    {
-      "seq": 7,
-      "chatId": "CLAUDE-MAC-1",
-      "time": "6:23:56 PM",
-      "text": "REL1-FRESH-MAC-1792581836"
-    },
-    {
-      "seq": 8,
-      "chatId": "CLAUDE-STAGING-1",
-      "time": "6:24:26 PM",
-      "text": "REL1-FRESH-STAGING-1792581865"
+      "time": "7:52:58 PM",
+      "text": "REL1-FRESH-STAGING-1792587177"
     }
   ],
   "dmLeak": null,
@@ -60,52 +36,28 @@
   "arrivals": [
     {
       "seq": 1,
-      "domAt": 1792581836695,
-      "iso": "2026-10-21T11:23:56.695Z",
-      "text": "REL1-BC-MAC-1: broadcast from the Zcode host on the Mac"
-    },
-    {
-      "seq": 2,
-      "domAt": 1792581836695,
-      "iso": "2026-10-21T11:23:56.695Z",
-      "text": "REL1-FRESH-MAC-1792580704"
-    },
-    {
-      "seq": 3,
-      "domAt": 1792581836695,
-      "iso": "2026-10-21T11:23:56.695Z",
-      "text": "REL1-FRESH-STAGING-1792580759"
-    },
-    {
-      "seq": 4,
-      "domAt": 1792581836695,
-      "iso": "2026-10-21T11:23:56.695Z",
-      "text": "REL1-BC-CLAUDE-1: broadcast from Claude Code on the staging machine"
-    },
-    {
-      "seq": 5,
-      "domAt": 1792581836695,
-      "iso": "2026-10-21T11:23:56.695Z",
+      "domAt": 1792586427975,
+      "iso": "2026-10-21T12:40:27.975Z",
       "text": "REL1-BC-ZCODE-1: broadcast from the Zcode host on the Mac"
     },
     {
-      "seq": 6,
-      "domAt": 1792581836695,
-      "iso": "2026-10-21T11:23:56.695Z",
-      "text": "REL1-BC-CLAUDE-2: second broadcast from Claude Code on the staging machine"
+      "seq": 2,
+      "domAt": 1792586886348,
+      "iso": "2026-10-21T12:48:06.348Z",
+      "text": "REL1-BC-CLAUDE-1: broadcast from Claude Code on the staging machine"
     },
     {
-      "seq": 7,
-      "domAt": 1792581837055,
-      "iso": "2026-10-21T11:23:57.055Z",
-      "text": "REL1-FRESH-MAC-1792581836"
+      "seq": 3,
+      "domAt": 1792587163470,
+      "iso": "2026-10-21T12:52:43.470Z",
+      "text": "REL1-FRESH-MAC-1792587163"
     },
     {
-      "seq": 8,
-      "domAt": 1792581866231,
-      "iso": "2026-10-21T11:24:26.231Z",
-      "text": "REL1-FRESH-STAGING-1792581865"
+      "seq": 4,
+      "domAt": 1792587178295,
+      "iso": "2026-10-21T12:52:58.295Z",
+      "text": "REL1-FRESH-STAGING-1792587177"
     }
   ],
-  "t": "2026-10-21T11:26:09.564Z"
+  "t": "2026-10-21T13:11:56.991Z"
 }

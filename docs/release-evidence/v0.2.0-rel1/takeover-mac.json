@@ -1,0 +1,2 @@
+Take over the Chat ID "ZCODE-MAC-2"? The session that currently holds it is displaced and can no longer use it — use this only when that session is gone. [y/N] y
+{"ok":true,"command":"session replace","chat_id":"ZCODE-MAC-2","mode":"remote","server_url":"https://43.229.78.103:18444","fingerprint":"sha256:9c7848ebcc8241e00ccd109dd09c790d4e5f6b9d8448f45a78e87b9f7c1c94e7","replaced":true,"released":true,"note":"the name is free until the live client binds it again; restart the client that uses this Chat ID"}

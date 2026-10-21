@@ -1,14 +1,22 @@
 # REL-1 two-machine demonstration — what was observed, and what was not
 
-**Date:** 2026-10-21 · **Candidate:** `6d6b45f` (the re-cut on the Story 6.4 tree) ·
-**Realm:** `d50364b3-61ab-4cbf-a8cf-f4d05ed32a0e` · **Broadcast Room:** `nblCruZASN1amIHyewDy2w` ·
-**Direct Room:** `8-tqanTN_jtsel8lOIkZgQ`
+**Date:** 2026-10-21 · **Candidate:** `3929cc7` (the third re-cut, on the corrected shipped text) ·
+**Realm:** `308fb41d-f0f8-4b22-b9b6-78bc0f3723ed` · **Broadcast Room:** `Fryr4-D5xCFHxJfL90nQ5g` ·
+**Direct Room:** `fhbozmHGAEufqbuoY5UuzA`
 
-This bundle replaces the partial REL-1 evidence of 2026-10-20 (which was pinned to the now-void candidate
-`89c8477` and left the viewer-freshness number unmeasured). Every artifact here was captured against the
-frozen candidate: the two machine preflights each verified that the INSTALLED package's tree digest equals the
-frozen record's digest (`ad08240b…` portable on the Mac, `fe4d2aaa…` Claude Code on staging), and the
-server's own tree digest is in `server.log`.
+This bundle replaces the earlier REL-1 evidence (pinned to candidates `89c8477` and then `6d6b45f`, both now
+void). Every artifact here was captured against the frozen candidate `3929cc7`: the two machine preflights each
+verified that the INSTALLED package's tree digest equals the frozen record's digest (`3d90129b…` portable on the
+Mac, `e481c9a4…` Claude Code on staging), and the server's own tree digest is in `server.log`.
+
+**What the transcripts are, stated plainly** (the verifier only greps them for substrings):
+`transcript-zcode.txt` is the concatenated stdout of the headless `zcode -p` runs on the Mac — the sends
+themselves (`{"status":"committed","seq":…}`) with the agent's narration of them; `transcript-claude.txt` is
+the stdout of the final `claude -p` run on staging, which RE-SENT the same `client_message_id`s and so
+received the server's idempotent replay answers (the original `seq`s, no new messages) alongside a full
+read-back of both rooms — it is a REPLAY VERIFICATION of the original sends, not their first transmission. The
+original staging → Mac transmission is proven by the server-committed rows the other artifacts show (the Mac's
+own transcript quotes that message first HELD and then DELIVERED, with its full envelope).
 
 ## Topology — two physical machines, two vendor hosts (three installations), one self-hosted server
 
@@ -34,11 +42,10 @@ its own provider seat, and the demo CA's private key never left the Mac.
 2. **Presence crosses machines** — the viewer's presence list showed `ZCODE-MAC-2` and `CLAUDE-STAGING-1`
    online at the SAME time, from the two machines, with the count badge at 2
    (`viewer-state.json`, `viewer-session.md`).
-3. **A DM crossed the wire in both directions** in the pair room `8-tqanTN_jtsel8lOIkZgQ` — Mac → staging
-   `seq 1` (`REL1-DM-MAC-2`), staging → Mac `seq 2` (`REL1-DM-CLAUDE-1`), Mac → staging `seq 3`
-   (`REL1-DM-ZCODE-1`), staging → Mac `seq 4` (`REL1-DM-CLAUDE-2`). Every foreign body arrived inside the
-   literal `<untrusted_message version="1">` envelope naming its sender; the transcripts quote them verbatim
-   (`transcript-zcode.txt`, `transcript-claude.txt`).
+3. **A DM crossed the wire in both directions** in the pair room `fhbozmHGAEufqbuoY5UuzA` — Mac → staging
+   `seq 1` (`REL1-DM-ZCODE-1`) and staging → Mac `seq 2` (`REL1-DM-CLAUDE-1`). Every foreign body arrived
+   inside the literal `<untrusted_message version="1">` envelope naming its sender; the transcripts quote them
+   verbatim (`transcript-zcode.txt`, `transcript-claude.txt`).
    **What the two transcripts actually are** (stated plainly because the verifier only greps them for
    substrings): `transcript-zcode.txt` is the concatenated stdout of four headless `zcode -p` runs, carrying
    the sends themselves (`{"status":"committed","seq":…}`) together with the agent's narration of them.
@@ -50,11 +57,11 @@ its own provider seat, and the demo CA's private key never left the Mac.
    envelopes), not by the replay transcript alone.
 
 4. **The trust matrix held a cross-machine message and then released it.** The staging → Mac DM (`seq 2`)
-   arrived **HELD** — metadata only, body withheld, `held_reason: not_allowlisted` — because the remote
-   transport is not the local-token lane. After `room_trust_set` added the sender's fingerprint (11:16:21Z),
-   the same message was **delivered with its body**, and the next message from that sender (`seq 4`) arrived
-   delivered outright. The negative control held throughout: `CLAUDE-MAC-1`'s messages stayed held on BOTH
-   sides (`not_allowlisted`), and the allowlist holds exactly one fingerprint with `accept_all: false`.
+   arrived **HELD** — metadata only, body withheld, `held_reason: not_allowlisted`, 480 bytes — because the
+   remote transport is not the local-token lane. After `room_trust_set` added the sender's fingerprint
+   (12:51:11.809Z), the same message was **delivered with its body** and the full envelope. The negative
+   control held throughout: `CLAUDE-MAC-1`'s messages stayed held on BOTH sides (`not_allowlisted`), and the
+   allowlist holds exactly one fingerprint with `accept_all: false`.
 5. **Broadcasts crossed the wire in both directions** and the viewer rendered them — eight messages from
    three installations, cursor "caught up through #8" (`viewer-state.json`).
 6. **The viewer's freshness is MEASURED, inside the 5-second bound.** Two canary broadcasts were timed
@@ -87,17 +94,20 @@ its own provider seat, and the demo CA's private key never left the Mac.
 8. **The Story 6.4 continuity repair works in the physical deployment, on both machines.** A client whose
    process was killed left its Chat ID reserved; the plain re-bind was refused with `chat_id_taken`; the
    sanctioned operator command `agent-room session replace` took the name back — `replaced: true,
-   released: true` — on the Mac (for `ZCODE-MAC-2`) and on staging (for `CLAUDE-STAGING-1`), and the live
-   client re-bound on its next call. The Claude Code vendor CLI refused to seize a name on its own ("the
-   tool says that takeover is never automatic") and waited for the operator.
+   released: true` — on the Mac (for `ZCODE-MAC-2`, `takeover-mac.json`) and on staging (for
+   `CLAUDE-STAGING-1`, `takeover-staging.txt`), and the live client re-bound on its next call. The Claude
+   Code vendor CLI refused to seize a name on its own ("it would knock that session off… if that session is
+   dead, an operator can run it") and waited for the operator.
    **Two facts about the Mac side that the transcript shows and that must not be read as successes:**
-   (a) The Zcode agent — not a human — ran the takeover itself. It diagnosed the squat correctly, then
-   wrapped the CLI in a pseudo-TTY (`script -q /dev/null`) and answered the `y/N` prompt on its own
+   (a) The Zcode agent — not a human — ran the takeover itself, TWICE: it diagnosed the squat correctly,
+   then wrapped the CLI in a pseudo-TTY (`script -q /dev/null`) and answered the `y/N` prompt on its own
    ("I answered y/N in the prompt myself because running autonomously I cannot ask a human"). The CLI's
    `isTTY` gate stops an accidental pipe; it does not stop a shell-capable agent from allocating a PTY.
    The takeover is an EXPLICIT decision, and this run shows an agent making it. That is a fact about the
    TTY guardrail, not a cryptographic boundary (a local process holding the installation's key can post the
-   takeover directly), and it is recorded rather than dressed up as operator consent.
+   takeover directly), and it is recorded rather than dressed up as operator consent. In a LATER run of the
+   same vendor CLI the agent REFUSED the takeover ("I didn't run it because it would knock that session
+   off") — the guardrail is a judgement, not a rule, and both outcomes are in the transcript.
    (b) The ORDERLY-EXIT release did NOT work under a one-shot vendor CLI: `ZCODE-MAC-2` stayed squatted
    after three `zcode -p` phases that each ended with `EXIT=0`, because the CLI tears its MCP child down
    while the child's fire-and-forget `DELETE /api/session` round trip is still crossing the internet. The
@@ -139,10 +149,12 @@ its own provider seat, and the demo CA's private key never left the Mac.
 | `viewer-session.md` | the observation record (the AC's three confirmation tokens) |
 | `viewer-live.png` | the browser's view, with both machines online |
 | `recording.webm` | the browser session recording |
+| `takeover-mac.json` / `takeover-staging.txt` | the operator takeover receipts from both machines |
 | `server.log` | the server host's own record: the container, its stderr (no fault line), live identity probes, and the installed tree digest it executed |
 
 ## Status
 
-REL-1 is **complete against the frozen candidate**: the physical two-machine, three-vendor, over-the-wire
-substance is recorded, the freshness number is measured, the recording exists, and the continuity defect that
-the previous run found is repaired and proven repaired in the same deployment.
+REL-1 is **complete against the frozen candidate `3929cc7`**: the physical two-machine, two-vendor,
+over-the-wire substance is recorded, the freshness number is measured, the recording exists, and the continuity
+defect the first run found is repaired and proven repaired in the same deployment — on both machines, with the
+operator receipts kept.

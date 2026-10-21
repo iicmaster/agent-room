@@ -1,7 +1,7 @@
 {
   "kit": "rel1-preflight",
   "schema_version": 1,
-  "timestamp": "2026-10-21T11:13:49.043Z",
+  "timestamp": "2026-10-21T13:12:16.575Z",
   "host": {
     "hostname": "ngs-staging",
     "platform": "linux",
@@ -17,8 +17,8 @@
     "kind": "claude_code",
     "manifestVersion": "0.2.0",
     "files": 46,
-    "bytes": 784116,
-    "sha256": "fe4d2aaa2520e0031538c07a28b4b24e6439d6ecf92514ce8ea735e44f378d88"
+    "bytes": 790931,
+    "sha256": "e481c9a46ea5e14865119503e6d327df3993b29a28b325eb9eee9421def2f47b"
   },
   "plugin_data": "/root/rel1-claude/client",
   "checks": [
@@ -62,7 +62,7 @@
       "title": "installed artifact is the frozen v0.2.0 candidate",
       "status": "pass",
       "gating": true,
-      "detail": "installed claude_code package at /root/rel1-claude/agent-room-claude-code matches the frozen candidate (46 files, 784116 bytes, sha256 fe4d2aaa2520e003…)"
+      "detail": "installed claude_code package at /root/rel1-claude/agent-room-claude-code matches the frozen candidate (46 files, 790931 bytes, sha256 e481c9a46ea5e148…)"
     }
   ],
   "all_pass": true

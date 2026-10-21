@@ -5,9 +5,9 @@
   "status": "frozen-pending-6-2-soak-and-6-1-rel1",
   "binding": "Stories 6.2 (REL-3 formal soak) and 6.1 (REL-1 physical two-machine demonstration) pin THIS candidate. Any change to server/ or the packaging inputs voids the candidate: cut a new one (re-materialize), rerun the Story 6.3 gates, and restart the soak (docs/implementation/reviews/epic-6-execution-agy.md, 'The Candidate Immutability Law').",
   "source": {
-    "git_commit": "6d6b45f6065c9c8103a0bb5b3f7489f7610920bc",
+    "git_commit": "3929cc74f30f1b0b1f5b989c6e9fbb9d4fed6eba",
     "git_branch": "main",
-    "working_tree_note": "This candidate was re-cut AGAIN on 2026-10-21 after Story 6.4 changed the packaged runtime inputs: the reconnect-recovery repair (the explicit same-Actor session takeover with an atomic transfer and a fence) touched server/api/session.mjs, server/api/server.mjs, server/api/pipeline.mjs, server/api/routes.mjs, server/core/session-registry.mjs, server/client/api-client.mjs, server/mcp-stdio.mjs, server/cli/* and server/constants.mjs. The repair was required: the physical two-machine demonstration found that a client whose process was killed left its Chat ID reserved by a dead session's lease, and the ordinary re-bind was refused with chat_id_taken - FR-12 continuity, inside v0.2.0's scope per the advisor review (docs/implementation/reviews/epic-6-lease-astra.md). The previous candidate 89c8477 and the soak attempts pinned to it remain in git history as that artifact's record; they do not qualify this one.",
+    "working_tree_note": "This candidate was re-cut AGAIN on 2026-10-21 (the third re-cut) after the release-gate review found that the SHIPPED TEXT overstated what the shipped CODE delivers: the API comments claimed the authorization stage re-checked the handoff fence 'immediately before the handler' (it runs before a body-carrying route's body is read), two vocabulary comments pointed at Story 4.8 instead of 6.4, the CLI's help text told the operator the displaced session 'can no longer act', and the packaged CHANGELOG/README omitted the continuity repair. The change was TEXT-ONLY - no behaviour changed - and it touched server/api/{pipeline,routes,server}.mjs, server/cli/{agent-room,session-commands}.mjs, README.md and CHANGELOG.md. The review that demanded it is archived at docs/implementation/reviews/epic-6-comments-vs-recut-codex.md. The two earlier candidates and the soak attempts pinned to them remain in git history as that artifact's record; they qualify nothing here.",
     "packager": "scripts/package-release.mjs",
     "packager_invocation": "node scripts/package-release.mjs --out <fresh-absolute-dir>"
   },
@@ -17,14 +17,14 @@
     "portable": {
       "package": "agent-room-agent-plugin",
       "files": 46,
-      "bytes": 784256,
-      "sha256": "ad08240b847d970233fff44e182cd3c8787ded45e66751796672082c03d4fceb"
+      "bytes": 791071,
+      "sha256": "3d90129b434b3b7adb9b4b6d8c05ed28b5a8fbf7b07951726c322cc438cf3999"
     },
     "claude_code": {
       "package": "agent-room-claude-code",
       "files": 46,
-      "bytes": 784116,
-      "sha256": "fe4d2aaa2520e0031538c07a28b4b24e6439d6ecf92514ce8ea735e44f378d88"
+      "bytes": 790931,
+      "sha256": "e481c9a46ea5e14865119503e6d327df3993b29a28b325eb9eee9421def2f47b"
     }
   },
   "environment": {
@@ -65,32 +65,32 @@
       "verdict": "pass",
       "frozen_run": {
         "per_run_s": [
+          0.46,
           0.454,
-          0.463,
-          0.472,
-          0.458,
-          0.455
+          0.46,
+          0.461,
+          0.464
         ],
         "mean_s": 0.46,
-        "median_s": 0.458,
+        "median_s": 0.46,
         "adjusted_per_run_s": [
           0.257,
-          0.268,
-          0.279,
-          0.261,
-          0.259
+          0.257,
+          0.265,
+          0.264,
+          0.265
         ],
-        "adjusted_mean_s": 0.265,
+        "adjusted_mean_s": 0.262,
         "milestone_medians_s": {
           "install": 0.009,
-          "A initialized": 0.12,
-          "A Chat ID chosen": 0.302,
-          "A DM opened": 0.439,
-          "A message sent": 0.441,
-          "B initialized": 0.411,
-          "B Chat ID chosen": 0.426,
-          "B DM opened": 0.454,
-          "B received A's message": 0.458
+          "A initialized": 0.118,
+          "A Chat ID chosen": 0.3,
+          "A DM opened": 0.442,
+          "A message sent": 0.444,
+          "B initialized": 0.412,
+          "B Chat ID chosen": 0.428,
+          "B DM opened": 0.456,
+          "B received A's message": 0.46
         },
         "milestone_order_note": "execution order: a DM addresses the peer's claimed Chat ID, so B's choice precedes A's open; medians are per-milestone, cumulative from install start"
       },
@@ -100,15 +100,17 @@
       "all_verification_run_means_s": [
         0.761,
         0.551,
+        0.46,
         0.46
       ],
       "all_verification_adjusted_means_s": [
         0.476,
         0.318,
-        0.265
+        0.265,
+        0.262
       ],
-      "verification_note": "three five-install runs of the final gate: fifteen fresh installs, zero failures, every run inside the rule. The first (raw mean 0.761 s) was measured while this workstation was under load from the cross-machine demonstration; the second (0.551 s) after that work was torn down; the third (0.460 s) is this re-cut's frozen run, measured on the quiet machine before the REL-1 round. All three are recorded; the third is frozen.",
-      "rule_reading": "the ladder delta is exactly the two Chat ID choices (v0.1's room_create/room_join collapse into the two room_direct_open calls); the ladder with those rows priced out is 0.265 s mean - below v0.1's 0.352 s anchor. 0 failures. No regression beyond the choice.",
+      "verification_note": "four five-install verification runs of the final gate: twenty fresh installs, zero failures, every run inside the rule. The first (raw mean 0.761 s) was measured while this workstation was under load from the cross-machine demonstration; the second (0.551 s) after that work was torn down; the third (0.460 s) was the pre-re-cut frozen run; the fourth (0.460 s) is THIS candidate's frozen run, measured on the quiet machine before the REL-1 round. All four are recorded; the fourth is frozen.",
+      "rule_reading": "the ladder delta is exactly the two Chat ID choices (v0.1's room_create/room_join collapse into the two room_direct_open calls); the ladder with those rows priced out is 0.262 s mean - below v0.1's 0.352 s anchor. 0 failures. No regression beyond the choice.",
       "noise_bounds": "declared in tests/release-smoke.test.mjs: adjusted-mean gate at 3x the anchor, raw-mean gate at 5x, both absorbing in-suite parallel-load noise (raw means reach ~1.26 s when the full suite runs concurrently); the recorded numbers above are the quiet-machine human-verdict comparison"
     }
   },
@@ -116,6 +118,8 @@
     "release_notes": "docs/release-notes-v0.2.md",
     "gate_tests": "tests/release-smoke.test.mjs",
     "spec": "docs/implementation/spec-6-3-release-packaging-client-smoke-tests.md",
-    "story_6_4": "docs/implementation/spec-6-4-reconnect-recovery-takeover.md"
+    "story_6_4": "docs/implementation/spec-6-4-reconnect-recovery-takeover.md",
+    "release_gate_review": "docs/implementation/reviews/epic-6-release-gate-{codex,agy}.md",
+    "recut_review": "docs/implementation/reviews/epic-6-comments-vs-recut-codex.md"
   }
 }

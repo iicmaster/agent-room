@@ -1,7 +1,7 @@
 {
   "kit": "rel1-preflight",
   "schema_version": 1,
-  "timestamp": "2026-10-21T11:13:54.919Z",
+  "timestamp": "2026-10-21T13:12:07.361Z",
   "host": {
     "hostname": "NSG-Mac-mini.local",
     "platform": "darwin",
@@ -17,8 +17,8 @@
     "kind": "portable",
     "manifestVersion": "0.2.0",
     "files": 46,
-    "bytes": 784256,
-    "sha256": "ad08240b847d970233fff44e182cd3c8787ded45e66751796672082c03d4fceb"
+    "bytes": 791071,
+    "sha256": "3d90129b434b3b7adb9b4b6d8c05ed28b5a8fbf7b07951726c322cc438cf3999"
   },
   "plugin_data": "/Users/ngs/agent-skills/plugins/agent-room/.vendor-lab/rel1-zcode",
   "checks": [
@@ -62,7 +62,7 @@
       "title": "installed artifact is the frozen v0.2.0 candidate",
       "status": "pass",
       "gating": true,
-      "detail": "installed portable package at /Users/ngs/agent-skills/plugins/agent-room/.candidate-packages/portable/agent-room-agent-plugin matches the frozen candidate (46 files, 784256 bytes, sha256 ad08240b847d9702…)"
+      "detail": "installed portable package at /Users/ngs/agent-skills/plugins/agent-room/.candidate-packages/portable/agent-room-agent-plugin matches the frozen candidate (46 files, 791071 bytes, sha256 3d90129b434b3b7a…)"
     }
   ],
   "all_pass": true

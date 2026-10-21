@@ -1,0 +1,2 @@
+Take over the Chat ID "CLAUDE-STAGING-1"? The session that currently holds it is displaced and can no longer use it — use this only when that session is gone. [y/N] y
+{"ok":true,"command":"session replace","chat_id":"CLAUDE-STAGING-1","mode":"remote","server_url":"https://43.229.78.103:18444","fingerprint":"sha256:d371a6d72ad949ccfd199069d860284c9a1cec346a9dff7fe7f43856ce1c259c","replaced":true,"released":true,"note":"the name is free until the live client binds it again; restart the client that uses this Chat ID"}
