@@ -233,6 +233,19 @@ Post to the Broadcast Room exactly: "REL1-BC-CLAUDE-1 Broadcast from the laptop"
 Post to the Broadcast Room exactly: "REL1-BC-ZCODE-1 Broadcast from the desktop". Report the send status and seq.
 ```
 
+## 0b. Two operational traps the runs actually hit
+
+- **A browser daemon started without the certificate flag cannot be fixed afterwards.** The flag
+  (`AGENT_BROWSER_IGNORE_HTTPS_ERRORS=1`, or `--ignore-https-errors`) has to be in the daemon's
+  ENVIRONMENT at launch. If the viewer answers `net::ERR_CERT_AUTHORITY_INVALID` after the flag was
+  exported, the daemon is already up without it: stop it (`agent-browser close --all`, then kill the
+  daemon process the `agent-browser doctor` output names) and re-open with the flag exported.
+- **Run the takeover BEFORE each vendor CLI run, not during it.** A one-shot CLI (`zcode -p`,
+  `claude -p`) leaves its own session behind when it exits, so the NEXT run of the same installation
+  meets its own squat. The vendor agents then have to decide whether to take the name over: in the
+  REL-1 run the Zcode agent did it (under a pseudo-TTY) and the Claude Code agent refused. Doing it
+  yourself first — `agent-room session replace` — keeps the demo about the demo.
+
 ## 0a. Copying the package between machines (a real trap)
 
 `tar` on macOS writes `._*` AppleDouble sidecar files into the archive unless it is told not to.

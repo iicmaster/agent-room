@@ -200,7 +200,8 @@ run. That is why the release notes are long and the packaged changelog is a summ
 **This release's packaged changelog is complete.** Its top section is the versioned
 `0.2.0 - 2026-10-21` heading, and it carries the Story 6.4 entry — the continuity repair, the takeover
 command, and the one limit the fence has. The packaged README carries the recovery section: what the
-command does, what it refuses, and the window.
+command does, what it refuses, and the window. (The date in that heading is the FREEZE date — the day the
+release's bytes were settled. The tag carries the publication date.)
 
 **The process rule that made that possible** is the thing worth keeping: every story's changelog entry and
 README section land WITH the story, before the candidate is frozen, so a release never ships a changelog
