@@ -168,6 +168,16 @@ is built from, both package SHA-256 tree digests (45 files each — 3.5x the
 v0.1 package's 13 files), Node and SQLite versions, the validator identity, the
 SM-C1 numbers above, and the binding statement for Stories 6.2 and 6.1.
 
+## Where the changelog is, and why
+
+`CHANGELOG.md` is a packaging input: it ships inside both packages, so editing it after the
+candidate is frozen would change the artifact's bytes, void the candidate, and cost another
+eight-hour qualification run. The Story 6.4 continuity repair landed after the freeze, so it is
+NOT in the packaged CHANGELOG's v0.2.0 entry — **this release note is the changelog for v0.2.0**,
+and the packaged CHANGELOG will carry it in the next release. The rule behind that trade-off is
+recorded in the Epic 6 retrospective (finding F8) as an open product question, not as a silent
+omission.
+
 ## Notes for the RC window
 
 - The plugin manifest version is `0.2.0` in `plugin.json` (the packager

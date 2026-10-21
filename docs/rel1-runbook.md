@@ -233,6 +233,23 @@ Post to the Broadcast Room exactly: "REL1-BC-CLAUDE-1 Broadcast from the laptop"
 Post to the Broadcast Room exactly: "REL1-BC-ZCODE-1 Broadcast from the desktop". Report the send status and seq.
 ```
 
+## 0a. Copying the package between machines (a real trap)
+
+`tar` on macOS writes `._*` AppleDouble sidecar files into the archive unless it is told not to.
+A package copied that way hashes to MORE files than the frozen candidate (100 instead of 46), and
+the preflight's candidate-identity check refuses it with a [FAIL] on the digest. The copy recipe
+that avoids it:
+
+```sh
+# on the SOURCE machine (macOS)
+COPYFILE_DISABLE=1 tar -C <packages-dir> -czf package.tgz agent-room-claude-code
+# on the DESTINATION machine
+tar -C <install-dir> -xzf package.tgz
+```
+
+If a copy already happened the wrong way, `find <package-dir> -name "._*" -delete` repairs it —
+but the preflight is the gate that should have caught it, and it does.
+
 ## 4a. If a client answers `chat_id_taken` — the recovery (2026-10-20, Story 6.4)
 
 A client whose process was killed leaves its Chat ID held by a live session row.
