@@ -415,12 +415,23 @@ export class AuthzStage {
 
   process(context) {
     if (context.route?.class !== 'actor') return undefined
-    // The handoff fence (v0.2.0 reconnect recovery). A session displaced by
-    // an explicit same-Actor replacement loses its authority WITH the
-    // handoff, not with its next request: the check sits here — after the
-    // auth stage, immediately before the handler — so a request admitted
-    // before the handoff is refused instead of landing after it. Admission
-    // alone is never authority.
+    // The handoff fence (Story 6.4, the v0.2.0 reconnect recovery). A
+    // session displaced by an explicit same-Actor replacement loses its
+    // authority WITH the handoff: its token stops authenticating, and this
+    // stage refuses a request that was admitted before the handoff.
+    // Admission alone is never authority.
+    //
+    // WHERE THIS CHECK SITS, exactly: this is the LAST stage of the
+    // sequence, and the request body is read AFTER the stages. On a route
+    // that carries a body, the body is therefore still arriving when this
+    // check runs — so a request admitted before the handoff whose body
+    // arrives after it can still reach the handler. On a bodyless route
+    // (GET, DELETE) this check IS immediately before the handler. The
+    // release-gate review executed the body-carrying case and confirmed the
+    // window (docs/implementation/reviews/epic-6-release-gate-codex.md);
+    // closing it — revalidating the authority after the last awaited input
+    // step — is the next release's first acceptance criterion
+    // (docs/implementation/epic-6-retro-2026-10-21.md, action A5).
     const sessionRegistry = context.sessionRegistry
     const sessionKey = context.session?.sessionKey
     if (sessionRegistry

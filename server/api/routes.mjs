@@ -159,7 +159,7 @@ export const REQUEST_FIELD_VOCABULARY = Object.freeze([
   'realm_id',
   'target_fingerprint',
   'client_type',
-  // Story 4.8 (v0.2.0 reconnect recovery): the takeover intent on
+  // Story 6.4 (v0.2.0 reconnect recovery): the takeover intent on
   // POST /api/session — a strict boolean, absent meaning false. It is the
   // ONLY way a live holder's name is taken away, and only from the same
   // Actor; PATCH does not accept it (a rename never takes a name) and no
@@ -196,7 +196,7 @@ export const RESPONSE_FIELD_VOCABULARY = Object.freeze([
   // ERROR_ENVELOPE_EXTRAS — a code carries only its declared extras).
   'original_seq',
   'retry_after_ms',
-  // Story 4.8 (v0.2.0 reconnect recovery): replaced — true only when
+  // Story 6.4 (v0.2.0 reconnect recovery): replaced — true only when
   // POST /api/session displaced a live holder of the same name in an
   // explicit same-Actor takeover, false on every ordinary bind. It is a
   // fact about the caller's own request, never information about another

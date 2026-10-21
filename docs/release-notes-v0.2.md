@@ -193,27 +193,20 @@ SM-C1 numbers above, and the binding statement for Stories 6.2 and 6.1.
 
 ## Where the changelog is, and why
 
-`CHANGELOG.md` is a packaging input: it ships inside both packages, so editing it after the
-candidate is frozen would change the artifact's bytes, void the candidate, and cost another
-eight-hour qualification run. Two things follow from that, and both are stated here rather than
-left for a reader to discover:
+`CHANGELOG.md` ships inside both packages, so it is part of the artifact's bytes: editing it after the
+candidate is frozen changes the digest, voids the candidate, and costs another eight-hour qualification
+run. That is why the release notes are long and the packaged changelog is a summary.
 
-- **The Story 6.4 continuity repair is NOT in the packaged CHANGELOG**, and it is not in the packaged
-  README either. Both landed after the freeze.
-- **The packaged CHANGELOG's top section is still headed "Unreleased"**, because renaming it to
-  the released version is the same kind of packaged edit.
+**This release's packaged changelog is complete.** Its top section is the versioned
+`0.2.0 - 2026-10-21` heading, and it carries the Story 6.4 entry — the continuity repair, the takeover
+command, and the one limit the fence has. The packaged README carries the recovery section: what the
+command does, what it refuses, and the window.
 
-**This release note is the changelog for v0.2.0.** The packaged CHANGELOG will carry both in the
-next release. The rule behind that trade-off is recorded in the Epic 6 retrospective (finding F8)
-as an open product question, not as a silent omission.
-
-What the PACKAGE does carry, and where a user meets the feature: the `agent-room help` text
-documents `agent-room session replace`, and the client's own `chat_id_taken` error names the
-command — so the recovery is discoverable at the moment it is needed, which is where it matters.
-
-The process rule that follows from this is open work, not a footnote: every story's changelog entry
-and README section must land WITH the story, before the candidate is frozen, so that a release
-never ships a changelog that is missing its own headline fix.
+**The process rule that made that possible** is the thing worth keeping: every story's changelog entry and
+README section land WITH the story, before the candidate is frozen, so a release never ships a changelog
+that is missing its own headline fix. v0.2.0's first re-cut did not follow that rule — the Story 6.4
+entry and the heading would each have voided a qualification run — and the release-gate review found it
+(the Epic 6 retro, finding F8 and action A1).
 
 ## Notes for the RC window
 

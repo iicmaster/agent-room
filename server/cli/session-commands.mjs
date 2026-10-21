@@ -17,11 +17,18 @@
 // server for the takeover with the additive `replace_existing` intent. The
 // server grants it only when the live holder is the SAME Actor, verifies the
 // incumbent against its own rows, writes the durable claim before the
-// memory commit, and fences the displaced session so it can neither land an
-// already-admitted request nor take the name back by re-authenticating. A
-// session of a DIFFERENT key is never displaced — the refusal is the
-// ordinary collision refusal, so the refused operator learns nothing about
-// who holds the name.
+// memory commit, and fences the displaced session: its token stops
+// authenticating (so it cannot take the name back by re-authenticating) and
+// a request admitted before the handoff is refused at the authorization
+// stage. ONE WINDOW, stated plainly: on a route that carries a body, the
+// authorization stage runs before the body is read, so a request whose body
+// was still arriving when the handoff happened can still reach the handler
+// (the release-gate review executed that path). The takeover's intended use —
+// taking over a DEAD session, which has no in-flight request — is not
+// affected; closing the window is the next release's work
+// (docs/implementation/epic-6-retro-2026-10-21.md, action A5). A session of a
+// DIFFERENT key is never displaced — the refusal is the ordinary collision
+// refusal, so the refused operator learns nothing about who holds the name.
 //
 // WHAT IT DOES WITH THE NAME. The command's own session holds the name only
 // for the duration of the takeover, then releases it again: the live client
@@ -35,8 +42,16 @@
 // one JSON object per line on stdout, one JSON object on stderr for a
 // refusal, exit 0 ok / 1 refusal / 2 usage. The takeover DISPLACES another
 // session, so it asks for an interactive y/N first and refuses a
-// non-interactive stdin outright: a command that needs a human answer can
-// never be driven programmatically into one.
+// non-interactive stdin outright.
+//
+// WHAT THE CONFIRMATION IS, exactly: a guardrail against an ACCIDENT — an
+// unattended pipe, a script, a harness cannot displace a session by accident.
+// It is NOT proof that a human answered, and NOT a security boundary: a
+// local process that can read this installation's key can post the takeover
+// directly, and a shell-capable agent can allocate a pseudo-TTY and answer
+// the prompt itself (the REL-1 run recorded exactly that). What the server
+// guarantees is absolute and is the part that matters: a session of a
+// DIFFERENT key is never displaced, whoever asks.
 
 import { createInterface } from 'node:readline'
 

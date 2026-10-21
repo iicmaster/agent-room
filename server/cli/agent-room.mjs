@@ -445,12 +445,17 @@ Commands:
       expires, even when that session's process is gone. The command
       authenticates as THIS installation and asks the server for the takeover
       explicitly; the server grants it only when the holder is this same key,
-      then fences the displaced session (it can no longer act, and it cannot
-      take the name back by reconnecting). A session of a DIFFERENT key is
-      never displaced. The takeover is never done automatically: the command
-      asks for an interactive y/N first and refuses a non-interactive stdin.
-      The name is released again right away, so restart the client that uses
-      it. The optional Chat ID defaults to the configured one.
+      then fences the displaced session: its token stops authenticating and a
+      request it had already sent is refused, so it cannot act on the name
+      afterwards and cannot take it back by reconnecting. (One window: a
+      request whose body was still arriving when the handoff happened can
+      still land.) A session of a DIFFERENT key is never displaced. The
+      takeover is never done automatically: the command asks for an
+      interactive y/N first and refuses a non-interactive stdin — that
+      confirmation guards against accidents, it is not proof that a human
+      answered. The name is released again right away, so the client that
+      uses it can bind it on its next call. The optional Chat ID defaults to
+      the configured one.
 
   agent-room help
       Show this help.

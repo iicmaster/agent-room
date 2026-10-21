@@ -482,16 +482,26 @@ function sessionPrincipalOf(context) {
 // send-time chat ids in the store. Both echo the accepted chat_id (display
 // form) alongside the session timestamps.
 //
-// POST alone accepts `replace_existing` (the v0.2.0 reconnect-recovery
-// takeover): the ONE way a live holder's name is taken away, and only from
-// the SAME Actor — the operator explicitly asks for the handoff, the server
-// verifies the incumbent against its own rows, the transfer is atomic (the
-// durable write first, then the memory commit), and the displaced session's
-// authority ends WITH the handoff (its token is revoked and its key fenced),
-// so it can neither act on an admitted request nor take the name back by
-// re-authenticating. PATCH keeps the plain collision protection, and no
-// automatic re-authentication ever carries the intent — a takeover is a
-// human decision, never a side effect of a reconnect.
+// POST alone accepts `replace_existing` (Story 6.4, the v0.2.0
+// reconnect-recovery takeover): the ONE way a live holder's name is taken
+// away, and only from the SAME Actor — the operator explicitly asks for the
+// handoff, the server verifies the incumbent against its own rows, and the
+// transfer is atomic (the durable write first, then the memory commit).
+//
+// The displaced session's authority ends WITH the handoff: its token stops
+// authenticating (so it cannot take the name back by re-authenticating) and
+// its key is fenced, so a request admitted BEFORE the handoff is refused at
+// the authorization stage. The one window: on a route that carries a body,
+// the authorization stage runs before the body is read, so a request whose
+// body was still arriving when the handoff happened can still reach the
+// handler (the release-gate review executed that path). The takeover's
+// intended use — taking over a DEAD session, which has no in-flight request
+// — is not affected; closing the window is the next release's work
+// (docs/implementation/epic-6-retro-2026-10-21.md, action A5).
+//
+// PATCH keeps the plain collision protection, and no automatic
+// re-authentication ever carries the intent — a takeover is an explicit
+// decision, never a side effect of a reconnect.
 function bindSession(context) {
   const principal = sessionPrincipalOf(context)
   if (principal.ok === false) return principal
@@ -583,9 +593,12 @@ function bindSession(context) {
   // its next request. Its token stops authenticating (so it cannot re-bind
   // the name by re-authenticating) and its key is marked superseded, so a
   // request that was admitted before the handoff is refused at the
-  // authorization stage instead of landing after it. A registry without the
-  // fence primitive still performs the transfer — the displaced session then
-  // simply loses its live row.
+  // authorization stage. (The authorization stage runs before a body-carrying
+  // route's body is read, so a request whose body was still arriving when
+  // the handoff happened can still reach the handler — the one window, and
+  // the next release's work.) A registry without the fence primitive still
+  // performs the transfer — the displaced session then simply loses its live
+  // row.
   const displaced = state.displacedSessionKey ?? null
   if (displaced !== null && typeof context.sessionRegistry?.supersede === 'function') {
     context.sessionRegistry.supersede(displaced)

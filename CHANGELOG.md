@@ -2,7 +2,7 @@
 
 All notable changes to Agent Room are documented in this file.
 
-## Unreleased
+## 0.2.0 - 2026-10-21
 
 ### Added
 
@@ -309,6 +309,30 @@ All notable changes to Agent Room are documented in this file.
 
 ### Fixed
 
+- A client that died could not reclaim its own Chat ID. The live session row
+  that holds a Chat ID outlives the process that created it, so a client that
+  was killed kept its name reserved until the 12-hour lease expired — and
+  because the holder's session token was still authenticating, the server
+  could not tell a dead process from a quiet one and refused the plain
+  re-bind with `chat_id_taken`. The restarted client was unrecoverable under
+  its own name, and the only workarounds were restarting the server or
+  changing the Chat ID. v0.2.0 adds an EXPLICIT takeover: the operator
+  command `agent-room session replace` authenticates as that installation and
+  asks the server for the handoff; the server grants it only when the live
+  holder is the SAME key (a different key's session is never displaced),
+  moves the name atomically (the durable claim write first, the memory
+  transfer second), and fences the displaced session so it cannot take the
+  name back by reconnecting. The MCP adapter also releases its session on an
+  orderly exit, so a client that ended normally does not squat its name. The
+  takeover's intent is carried by the additive `replace_existing` field on
+  `POST /api/session`, and no automatic re-authentication ever sends it.
+  ONE LIMIT, stated plainly: the authorization stage runs before a
+  body-carrying route's body is read, so a request admitted before the handoff
+  whose body was still arriving can still reach the handler. The takeover's
+  intended use — taking over a DEAD session, which has no in-flight request —
+  is not affected. `agent-room session replace` asks for an interactive
+  confirmation, which guards against accidents but is not proof that a human
+  answered.
 - The live web viewer could never connect. `web/app.js` read the boot
   descriptor's `broadcast_room_id` from the TOP LEVEL of the response, but the
   API answers in the standard `{ ok: true, result: { … } }` envelope — so every
