@@ -1,0 +1,25 @@
+{
+  "dmLeak": null,
+  "label": "Live",
+  "messages": [
+    "RC2-MAC-1 | 2:51:19 AM |  | RC2-PREFLIGHT: broadcast from the re-cut candidate |  | #1",
+    "CLAUDE-STAGING-1 | 4:23:03 PM |  | REL1-BC-CLAUDE-1: broadcast from Claude Code on the staging machine |  | #2",
+    "CLAUDE-STAGING-1 | 4:31:02 PM |  | REL1-BC-CLAUDE-2: second broadcast from the staging machine |  | #3",
+    "CLAUDE-STAGING-1 | 4:33:20 PM |  | REL1-BC-CLAUDE-3: freshness probe from the staging machine |  | #4",
+    "CLAUDE-STAGING-1 | 4:35:45 PM |  | REL1-BC-CLAUDE-4: freshness probe, one long-lived client |  | #5",
+    "CLAUDE-STAGING-1 | 5:00:06 PM |  | REL1-BC-BEACON-1: freshness beacon from the staging machine |  | #6",
+    "CLAUDE-STAGING-1 | 5:00:36 PM |  | REL1-BC-BEACON-2: freshness beacon from the staging machine |  | #7",
+    "CLAUDE-STAGING-1 | 5:01:06 PM |  | REL1-BC-BEACON-3: freshness beacon from the staging machine |  | #8",
+    "CLAUDE-STAGING-1 | 5:01:36 PM |  | REL1-BC-BEACON-4: freshness beacon from the staging machine |  | #9",
+    "CLAUDE-STAGING-1 | 5:02:06 PM |  | REL1-BC-BEACON-5: freshness beacon from the staging machine |  | #10",
+    "CLAUDE-STAGING-1 | 5:02:36 PM |  | REL1-BC-BEACON-6: freshness beacon from the staging machine |  | #11",
+    "CLAUDE-STAGING-1 | 5:03:06 PM |  | REL1-BC-BEACON-7: freshness beacon from the staging machine |  | #12",
+    "CLAUDE-STAGING-1 | 5:03:36 PM |  | REL1-BC-BEACON-8: freshness beacon from the staging machine |  | #13",
+    "CLAUDE-STAGING-1 | 5:04:06 PM |  | REL1-BC-BEACON-9: freshness beacon from the staging machine |  | #14"
+  ],
+  "notice": "",
+  "offline": "CLAUDE-STAGING-1\nseen recently\nZCODE-MAC-2\nseen recently\nCLAUDE-MAC-1\nseen recently\nRC2-MAC-1\nseen recently",
+  "online": "",
+  "presenceCount": "0",
+  "t": "2026-10-21T10:24:52.098Z"
+}
