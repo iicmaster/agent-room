@@ -120,7 +120,11 @@ function testInventory() {
   for (const name of [...testFiles, ...nested]) {
     const source = readFileSync(join(TESTS_DIR, name), 'utf8')
     for (const match of source.matchAll(/^test\(\s*\n?\s*(['"])((?:\\.|(?!\1).)*)\1/gm)) {
-      names.set(match[2], name)
+      // The captured text is the SOURCE spelling: a quote inside a name is
+      // written escaped ("the session\'s request"), and the evidence file
+      // spells it the way a human reads it. Unescape the quote characters
+      // only — the name a test prints is the name the evidence cites.
+      names.set(match[2].replace(/\\(['"])/g, '$1'), name)
     }
   }
   return names

@@ -34,7 +34,7 @@ export const ROUTE_TABLE = Object.freeze([
   // vocabulary — the connecting session may declare its client type from the
   // closed set in the constants module; an omitted declaration stays null
   // (the server never derives one).
-  Object.freeze({ method: 'POST', path: '/api/session', class: 'actor', implemented: true, requestFields: Object.freeze(['chat_id', 'client_type']) }),
+  Object.freeze({ method: 'POST', path: '/api/session', class: 'actor', implemented: true, requestFields: Object.freeze(['chat_id', 'client_type', 'replace_existing']) }),
   Object.freeze({ method: 'PATCH', path: '/api/session', class: 'actor', implemented: true, requestFields: Object.freeze(['chat_id', 'client_type']) }),
   Object.freeze({ method: 'DELETE', path: '/api/session', class: 'actor', implemented: true, requestFields: Object.freeze([]) }),
   // Story 1.6: the presence read is live — one row per live Session within
@@ -159,6 +159,12 @@ export const REQUEST_FIELD_VOCABULARY = Object.freeze([
   'realm_id',
   'target_fingerprint',
   'client_type',
+  // Story 4.8 (v0.2.0 reconnect recovery): the takeover intent on
+  // POST /api/session — a strict boolean, absent meaning false. It is the
+  // ONLY way a live holder's name is taken away, and only from the same
+  // Actor; PATCH does not accept it (a rename never takes a name) and no
+  // automatic re-authentication ever carries it.
+  'replace_existing',
 ])
 
 export const RESPONSE_FIELD_VOCABULARY = Object.freeze([
@@ -190,6 +196,12 @@ export const RESPONSE_FIELD_VOCABULARY = Object.freeze([
   // ERROR_ENVELOPE_EXTRAS — a code carries only its declared extras).
   'original_seq',
   'retry_after_ms',
+  // Story 4.8 (v0.2.0 reconnect recovery): replaced — true only when
+  // POST /api/session displaced a live holder of the same name in an
+  // explicit same-Actor takeover, false on every ordinary bind. It is a
+  // fact about the caller's own request, never information about another
+  // session.
+  'replaced',
 ])
 
 // Matching: specific patterns first, wildcard (`/viewer/` + static assets)

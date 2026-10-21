@@ -133,6 +133,7 @@ import { runRemoteFamilyCommand } from './remote-commands.mjs'
 import { runBanFamilyCommand } from './ban-commands.mjs'
 import { runCapacityFamilyCommand } from './capacity-commands.mjs'
 import { runViewerFamilyCommand } from './viewer-commands.mjs'
+import { runSessionFamilyCommand } from './session-commands.mjs'
 
 const OK_STATUS = 200
 // The collision status is owned by the constants table (chat_id_taken), never restated.
@@ -436,6 +437,21 @@ Commands:
       nothing and is retryable with the same token; a committed enrollment
       never needs another invite — reconnecting is automatic.
 
+  agent-room session replace [<chat-id>]
+      Take this installation's Chat ID back from the session that still holds
+      it. Use it when your client died, was killed, or lost its host and now
+      answers "chat id is already claimed by another connected session" for
+      its OWN name: the session that holds the name keeps it until its lease
+      expires, even when that session's process is gone. The command
+      authenticates as THIS installation and asks the server for the takeover
+      explicitly; the server grants it only when the holder is this same key,
+      then fences the displaced session (it can no longer act, and it cannot
+      take the name back by reconnecting). A session of a DIFFERENT key is
+      never displaced. The takeover is never done automatically: the command
+      asks for an interactive y/N first and refuses a non-interactive stdin.
+      The name is released again right away, so restart the client that uses
+      it. The optional Chat ID defaults to the configured one.
+
   agent-room help
       Show this help.
 
@@ -608,7 +624,7 @@ export async function main(argv = process.argv.slice(2), {
   // this printer. (Capacity's refuse state keeps its report on stdout and
   // exits 1 through the outcome's exitCode — the report IS the answer, and
   // the exit code is the severity a script keys on.)
-  if (command === 'invite' || command === 'remote' || command === 'ban' || command === 'unban' || command === 'capacity' || command === 'viewer') {
+  if (command === 'invite' || command === 'remote' || command === 'ban' || command === 'unban' || command === 'capacity' || command === 'viewer' || command === 'session') {
     const outcome = command === 'invite'
       ? await runInviteFamilyCommand(subcommand, argv.slice(2), deps)
       : command === 'remote'
@@ -617,7 +633,9 @@ export async function main(argv = process.argv.slice(2), {
           ? await runCapacityFamilyCommand(command, argv.slice(1), deps)
           : command === 'viewer'
             ? await runViewerFamilyCommand(subcommand, argv.slice(2), deps)
-            : await runBanFamilyCommand(command, argv.slice(1), deps)
+            : command === 'session'
+              ? await runSessionFamilyCommand(subcommand, argv.slice(2), deps)
+              : await runBanFamilyCommand(command, argv.slice(1), deps)
     if (outcome.status === 'ok') {
       for (const line of outcome.lines) output.write(`${line}\n`)
       if (outcome.exitCode === 1) process.exitCode = 1

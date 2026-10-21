@@ -1581,3 +1581,56 @@
         file: "tests/release-smoke.test.mjs"
       - test: "the one-time cursor reset is documented exactly once in production code"
         file: "tests/migration.test.mjs"
+
+  6.4:                       # Reconnect recovery — the explicit session takeover (3 criteria)
+    note: >-
+      Proves the CONNECTIVITY repair the physical REL-1 run uncovered, against
+      real servers, real keypairs and real session tokens (no wire mocks, no
+      server reset, no token flooding in any acceptance path). The defect row
+      reproduces the squat itself — a live row holding the Chat ID while the
+      holder's token still authenticates, which is exactly the state a killed
+      client leaves behind — and proves the plain re-bind is refused with the
+      coded chat_id_taken, that the refusal changes nothing, and that the
+      explicit same-Actor takeover recovers the name. The grant rows prove the
+      takeover reaches only the SAME Actor (a foreign key's session is never
+      displaced, and the refusal names no holder), the intent is a strict
+      boolean, and a malformed one is refused before any state changes. The
+      fence rows prove the displaced session's late bind, rename, send and
+      disconnect are all refused AND that its late disconnect cannot release
+      the successor, that a request admitted before the handoff cannot land
+      after it, and that an automatic re-authentication never takes the name
+      back (no ownership ping-pong). The stability rows prove a failed durable
+      write leaves the incumbent intact, two competing takeovers resolve
+      deterministically, and the same Actor's other Chat IDs, the rooms, the
+      history, the cursors and the peer's session are unchanged by a takeover.
+      The surfaces are real too: a real MCP child hands its name back when its
+      stdin closes, and the operator command refuses a non-interactive stdin,
+      refuses a declined answer, and after an explicit yes performs the
+      takeover and releases the name again for the live client. Does NOT
+      prove automatic unattended crash recovery — the successor process
+      cannot be identified from the Actor key alone, and the session-resume
+      design that would answer it is explicitly deferred in
+      docs/implementation/spec-6-4-reconnect-recovery-takeover.md.
+    evidence:
+      - test: "the defect: a client whose process died keeps the name, and the ordinary re-bind is refused; the explicit same-Actor takeover recovers it"
+        file: "tests/session-replacement.test.mjs"
+      - test: "a foreign key can never take the name, and the holder is untouched by the refused attempt"
+        file: "tests/session-replacement.test.mjs"
+      - test: "the displaced session's late requests cannot land, and its DELETE cannot release the successor"
+        file: "tests/session-replacement.test.mjs"
+      - test: "no ownership ping-pong: an automatic re-authentication never takes the name back"
+        file: "tests/session-replacement.test.mjs"
+      - test: "two competing takeovers: the last explicit intent wins, and the loser is fenced"
+        file: "tests/session-replacement.test.mjs"
+      - test: "a failed durable write leaves the incumbent intact"
+        file: "tests/session-replacement.test.mjs"
+      - test: "the takeover leaves the Actor's OTHER names, the peer, the room, and the history untouched"
+        file: "tests/session-replacement.test.mjs"
+      - test: "the client itself never takes a name: a squatted name is refused, not seized"
+        file: "tests/session-replacement.test.mjs"
+      - test: "the MCP adapter hands its name back when its stdin closes"
+        file: "tests/session-replacement.test.mjs"
+      - test: "the operator command refuses a non-interactive stdin and takes the name only after an explicit yes"
+        file: "tests/session-replacement.test.mjs"
+      - test: "the field vocabulary is the live spine AD-8 vocabulary, verbatim"
+        file: "tests/api-contract.test.mjs"

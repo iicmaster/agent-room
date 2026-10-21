@@ -588,6 +588,26 @@ So that endurance is proven once, completely.
 **Given** ≥3 concurrent sessions, the defined traffic profile (1 msg/10 s per room average + bursts, payloads to the 32 KiB cap, hourly reconnects), **When** the 8-hour run completes with pinned, recorded host/Node/SQLite versions, **Then** zero message loss, FDs stable after hour one, and RSS slope over the final four hours ≤2% of starting RSS (the single pass rule).
 **Given** the same run, **When** idle-footprint is sampled, **Then** the REL-4 counter-metric is recorded (0–5 Actors baseline) — reported, not optimized.
 
+### Story 6.4: Reconnect recovery — the explicit session takeover
+
+As the operator,
+I want my Chat ID back when my client's process died,
+So that a restart under my own name works again.
+
+*(Added 2026-10-20 by the REL-1 run: the physical two-machine demonstration
+uncovered a real continuity defect — a client whose process was killed left its
+live row holding the Chat ID, and the ordinary re-bind was refused with
+`chat_id_taken` because the server cannot tell a dead process from a quiet
+one. FR-12 puts reconnection in MVP scope, so the repair belongs to v0.2.0
+rather than to a later release. The advisor review is archived in
+`docs/implementation/reviews/epic-6-lease-astra.md`.)*
+
+**Acceptance Criteria:**
+
+**Given** a Chat ID still held by a live session row whose process is gone, **When** the client restarts and re-binds plainly, **Then** the bind is refused with the coded `chat_id_taken` (never a silent suffix, never an automatic takeover) and the operator is told the one command that recovers the name.
+**Given** that operator command and a holder that is the SAME Actor's key, **When** it runs, **Then** the name moves atomically (the durable claim write first, the memory transfer second), the displaced session is fenced — its token stops authenticating and an already-admitted request cannot land — the name is released again for the live client, and a session of a DIFFERENT key is never displaced.
+**Given** the same Actor's other Chat IDs, the rooms, the history, the cursors, and the peer's session, **When** the takeover happens, **Then** none of them change, and an orderly exit hands the name back without any takeover at all.
+
 ### Story 6.3: Release packaging & client smoke tests
 
 As the releasing builder,

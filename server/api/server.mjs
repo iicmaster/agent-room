@@ -481,6 +481,17 @@ function sessionPrincipalOf(context) {
 // collision. Neither verb ever rewrites history: messages keep their
 // send-time chat ids in the store. Both echo the accepted chat_id (display
 // form) alongside the session timestamps.
+//
+// POST alone accepts `replace_existing` (the v0.2.0 reconnect-recovery
+// takeover): the ONE way a live holder's name is taken away, and only from
+// the SAME Actor — the operator explicitly asks for the handoff, the server
+// verifies the incumbent against its own rows, the transfer is atomic (the
+// durable write first, then the memory commit), and the displaced session's
+// authority ends WITH the handoff (its token is revoked and its key fenced),
+// so it can neither act on an admitted request nor take the name back by
+// re-authenticating. PATCH keeps the plain collision protection, and no
+// automatic re-authentication ever carries the intent — a takeover is a
+// human decision, never a side effect of a reconnect.
 function bindSession(context) {
   const principal = sessionPrincipalOf(context)
   if (principal.ok === false) return principal
@@ -504,41 +515,90 @@ function bindSession(context) {
     && (typeof declaredType !== 'string' || !CLIENT_TYPES.includes(declaredType))) {
     return reject('invalid_request', `client_type must be one of: ${CLIENT_TYPES.join(', ')}`)
   }
+  // The takeover intent is a strict boolean: an absent field is false, a
+  // present one must say exactly true or false. A malformed value is a
+  // request-shape refusal BEFORE any state changes — never a truthy guess.
+  const replaceRaw = context.body?.replace_existing
+  let replaceExisting = false
+  if (replaceRaw !== undefined && replaceRaw !== null) {
+    if (typeof replaceRaw !== 'boolean') {
+      return reject('invalid_request', 'replace_existing must be true or false')
+    }
+    replaceExisting = replaceRaw
+  }
   const registry = context.liveSessionRegistry ?? LIVE_SESSION_REGISTRY
-  // Re-auth recovery (Story 1.7): a client whose session token was
-  // invalidated or expired re-authenticates and re-binds the SAME Chat ID.
-  // The dead session's row still holds the name until its lease, which would
-  // make the client permanently unrecoverable. When — and only when — the
-  // current holder is the SAME Actor and that holder's session token no longer
-  // authenticates, the row is released and the name re-claimed. A live session
-  // (even of the same Actor) is never displaced, and a different Actor never
-  // is.
-  if (typeof registry.holderOf === 'function') {
-    const holder = registry.holderOf(chatId)
-    if (holder !== null
-      && holder.sessionKey !== principal.sessionKey
-      && holder.actorFingerprint === principal.actorFingerprint
+  // The incumbent: whoever holds this name right now (the live registry's
+  // own answer, read before any change).
+  const holder = typeof registry.holderOf === 'function' ? registry.holderOf(chatId) : null
+  const heldByAnotherSession = holder !== null && holder.sessionKey !== principal.sessionKey
+  let incumbent = null
+  if (heldByAnotherSession) {
+    const sameActor = holder.actorFingerprint === principal.actorFingerprint
+    if (replaceExisting) {
+      // The takeover. A session of a DIFFERENT Actor is never displaced —
+      // and the refusal is the ordinary collision refusal, so the refused
+      // caller learns nothing about who holds the name.
+      if (!sameActor) return reject('chat_id_taken')
+      if (typeof registry.transfer !== 'function') return reject('chat_id_taken')
+      incumbent = holder.sessionKey
+    } else if (
+      sameActor
       && typeof context.sessionRegistry?.isLive === 'function'
-      && context.sessionRegistry.isLive(holder.sessionKey) === false) {
+      && context.sessionRegistry.isLive(holder.sessionKey) === false
+    ) {
+      // Re-auth recovery (Story 1.7): a client whose session token was
+      // invalidated or expired re-authenticates and re-binds the SAME Chat
+      // ID. The dead session's row still holds the name until its lease,
+      // which would make the client permanently unrecoverable. When — and
+      // only when — the current holder is the SAME Actor and that holder's
+      // session token no longer authenticates, the row is released and the
+      // name re-claimed. A live session (even of the same Actor) is never
+      // displaced, and a different Actor never is.
       registry.release(holder.sessionKey)
     }
   }
-  const state = registry.claim({
-    sessionKey: principal.sessionKey,
-    chatId,
-    actorFingerprint: principal.actorFingerprint,
-    clientType: declaredType,
-    // The durable claim write runs inside the registry's atomic claim step —
-    // after the collision check, before the memory commit — timestamped by
-    // the registry's own clock (one clock for live and durable recency), so
-    // a refused claim never touches the store and a failed write never
-    // leaves a phantom live row behind.
-    persist: claimPayload => context.store.upsertChatIdClaim(claimPayload),
-  })
+  // The durable claim write runs inside the registry's atomic bind step —
+  // after the collision check, before the memory commit — timestamped by
+  // the registry's own clock (one clock for live and durable recency), so
+  // a refused bind never touches the store and a failed write never
+  // leaves a phantom live row behind.
+  const persist = claimPayload => context.store.upsertChatIdClaim(claimPayload)
+  const state = incumbent === null
+    ? registry.claim({
+      sessionKey: principal.sessionKey,
+      chatId,
+      actorFingerprint: principal.actorFingerprint,
+      clientType: declaredType,
+      persist,
+    })
+    : registry.transfer({
+      sessionKey: principal.sessionKey,
+      chatId,
+      actorFingerprint: principal.actorFingerprint,
+      clientType: declaredType,
+      persist,
+      incumbentSessionKey: incumbent,
+    })
+  // The handoff fence: the displaced session's authority ends HERE, not with
+  // its next request. Its token stops authenticating (so it cannot re-bind
+  // the name by re-authenticating) and its key is marked superseded, so a
+  // request that was admitted before the handoff is refused at the
+  // authorization stage instead of landing after it. A registry without the
+  // fence primitive still performs the transfer — the displaced session then
+  // simply loses its live row.
+  const displaced = state.displacedSessionKey ?? null
+  if (displaced !== null && typeof context.sessionRegistry?.supersede === 'function') {
+    context.sessionRegistry.supersede(displaced)
+  }
   return {
     chat_id: state.chatId,
     connected_since: new Date(state.connectedSince).toISOString(),
     last_seen: new Date(state.lastSeen).toISOString(),
+    // True only when this bind displaced a live holder — the explicit
+    // same-Actor takeover. It is a fact about THIS caller's own request
+    // (the caller asked for the takeover and the server accepted it), never
+    // information about anyone else's session.
+    replaced: displaced !== null,
   }
 }
 

@@ -280,11 +280,13 @@ test('the implemented mark covers exactly the live frozen routes', () => {
   assert.deepEqual([...enroll.requestFields], ['invite_token', 'public_key', 'signature'])
   // The session surface: chat_id plus the 1.6 closed-set client_type
   // declaration on connect and rename, none on disconnect — actor identity
-  // always comes from the token, never the body.
+  // always comes from the token, never the body. Story 6.4 adds the explicit
+  // takeover intent to CONNECT only: a rename never takes a name, so the
+  // rename verb keeps the plain collision protection.
   const connect = ROUTE_TABLE.find(route => routeKey(route) === 'POST /api/session')
   const rename = ROUTE_TABLE.find(route => routeKey(route) === 'PATCH /api/session')
   const disconnect = ROUTE_TABLE.find(route => routeKey(route) === 'DELETE /api/session')
-  assert.deepEqual([...connect.requestFields], ['chat_id', 'client_type'])
+  assert.deepEqual([...connect.requestFields], ['chat_id', 'client_type', 'replace_existing'])
   assert.deepEqual([...rename.requestFields], ['chat_id', 'client_type'])
   assert.deepEqual([...disconnect.requestFields], [])
   // The Story 1.6 reads: the presence query allowlist is exactly the one

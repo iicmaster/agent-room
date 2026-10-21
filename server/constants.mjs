@@ -526,6 +526,14 @@ export const MCP_CLIENT_TYPE = 'mcp'
 export const CLIENT_REQUEST_TIMEOUT_MS = 10_000
 export const CLIENT_LONGPOLL_MARGIN_MS = 3_000
 
+// Story 6.4: the orderly-exit release bound. When the MCP adapter's stdin
+// closes, the adapter hands its Chat ID back (DELETE /api/session) instead of
+// squatting it until the lease expires. The release is best-effort and must
+// never hold the exiting process open: it gets this short bound, and a
+// release that does not answer in time is simply abandoned (the durable
+// claim row survives either way, so only a lease is lost).
+export const CLIENT_RELEASE_TIMEOUT_MS = 2_000
+
 // Server-side long-poll wake-up cadence (GET /api/rooms/:id/messages): the
 // handler re-polls the store at this interval inside the request — no open
 // read transaction is held while waiting.

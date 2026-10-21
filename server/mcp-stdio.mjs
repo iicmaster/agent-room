@@ -463,6 +463,26 @@ export function createMcpServer({
     return clientPromise
   }
 
+  // The orderly-exit release (Story 6.4). When the JSON-RPC channel closes,
+  // the adapter hands its Chat ID back (DELETE /api/session) instead of
+  // squatting it until the lease expires — the common case behind the
+  // reconnect defect (a client that ended normally could not re-bind its own
+  // name afterwards). It is best-effort and bounded: the client never
+  // bootstraps a session to close one, a failed release leaves only a lease
+  // to wait out, and the exiting process is never held open by it.
+  let releaseStarted = false
+  const releaseSession = async () => {
+    if (releaseStarted) return
+    releaseStarted = true
+    if (clientPromise === null) return
+    try {
+      const readyClient = await clientPromise
+      await readyClient.release()
+    } catch {
+      // Best-effort by design: the durable claim row survives either way.
+    }
+  }
+
   const realmIdOf = async () => {
     if (realmId !== null) return realmId
     const readyClient = await getClient()
@@ -741,9 +761,11 @@ export function createMcpServer({
   input.on('error', onStdinError)
   input.once('close', () => {
     // The JSON-RPC channel is gone: abort every in-flight call so the process
-    // never lingers on a held long-poll with no host attached.
+    // never lingers on a held long-poll with no host attached, and hand the
+    // Chat ID back so a clean exit does not squat the name (Story 6.4).
     for (const controller of pending.values()) controller.abort()
     pending.clear()
+    void releaseSession()
   })
 
   return {
@@ -752,6 +774,7 @@ export function createMcpServer({
       input.removeListener('error', onStdinError)
       for (const controller of pending.values()) controller.abort()
       pending.clear()
+      void releaseSession()
     },
     get protocolVersion() { return negotiatedProtocol },
     tools: TOOL_DESCRIPTORS,

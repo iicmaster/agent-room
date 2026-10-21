@@ -1,0 +1,1223 @@
+{
+  "story": "6.2",
+  "requirement": "REL-3 \u2014 the formal soak",
+  "rule_source": "docs/epics.md Story 6.2 (the total-growth reading per docs/implementation/reviews/epic-6-execution-agy.md)",
+  "status": "superseded",
+  "startedAt": "2026-10-21T07:14:51.648Z",
+  "endedAt": "2026-10-21T10:26:03.660Z",
+  "wallMinutes": 191.2,
+  "requestedDurationMs": 28800000,
+  "schedule": {
+    "durationMs": 28800000,
+    "sampleIntervalMs": 60000,
+    "burstEveryMs": 600000,
+    "burstMessagesPerRoom": 30,
+    "reconnectEveryMs": 3600000,
+    "fdBaselineAfterMs": 3600000,
+    "finalWindowMs": 14400000,
+    "readEveryMs": 30000,
+    "steadyRoomIntervalMs": 10000,
+    "payloadCapChars": 32768,
+    "sessionEvictionMints": 1008
+  },
+  "candidate": {
+    "record": "/root/rel1-soak/docs/release-evidence/v0.2.0-candidate.json",
+    "candidateCommit": "89c847787357be9e0ede135337eee4a1a29f48bf",
+    "launchHead": "9cf94d51faee917ea5d533cce2b0f0c366812013",
+    "launchBranch": "main",
+    "identityVerdict": "candidate-exact",
+    "frozenDigests": {
+      "portable": {
+        "package": "agent-room-agent-plugin",
+        "files": 45,
+        "bytes": 754644,
+        "sha256": "fa2ede8a8465a6f779bc85e51d5585794b357925505896f7922d7188e7181d51"
+      },
+      "claude_code": {
+        "package": "agent-room-claude-code",
+        "files": 45,
+        "bytes": 754504,
+        "sha256": "466874d18c7ae1b5753a210219a0b5e9ea540fd830b4d81413a28114fe386e7c"
+      }
+    },
+    "actualDigests": {
+      "portable": {
+        "files": 45,
+        "bytes": 754644,
+        "sha256": "fa2ede8a8465a6f779bc85e51d5585794b357925505896f7922d7188e7181d51"
+      },
+      "claude_code": {
+        "files": 45,
+        "bytes": 754504,
+        "sha256": "466874d18c7ae1b5753a210219a0b5e9ea540fd830b4d81413a28114fe386e7c"
+      }
+    },
+    "drift": [],
+    "note": "the fresh materialization reproduces the frozen candidate digests byte-for-byte"
+  },
+  "environment": {
+    "host": "ngs-staging",
+    "platform": "linux 5.14.0-642.el9.x86_64 x64",
+    "node": "v24.18.0",
+    "sqlite": "3.53.1",
+    "cpus": 4,
+    "totalMemoryBytes": 16497332224,
+    "serverEntry": "/root/rel1-soak/.soak-world/agent-room-rel3-soak-3rhkPI/release/agent-room-agent-plugin/server/api/server.mjs",
+    "mcpEntry": "/root/rel1-soak/.soak-world/agent-room-rel3-soak-3rhkPI/release/agent-room-agent-plugin/server/mcp-stdio.mjs",
+    "releaseDir": "/root/rel1-soak/.soak-world/agent-room-rel3-soak-3rhkPI/release",
+    "serverPid": 924048,
+    "serverPort": 39191,
+    "serverVersion": "0.2.0",
+    "serverStderrTail": ""
+  },
+  "clients": [
+    {
+      "chatId": "soak-1",
+      "fingerprint": "sha256:bfa9a820b38b894c0d43690a0429e8f544113ca94ece3567a268c0d2cbe44c36",
+      "stats": {
+        "sent": 1814,
+        "retried": 0,
+        "reads": 250,
+        "readErrors": 6,
+        "maxAttempts": 1
+      }
+    },
+    {
+      "chatId": "soak-2",
+      "fingerprint": "sha256:9034608e7de72421f18a449d01f84330aad6f0dcc5dcda4cf564c0fcf3f524ba",
+      "stats": {
+        "sent": 1814,
+        "retried": 0,
+        "reads": 250,
+        "readErrors": 6,
+        "maxAttempts": 1
+      }
+    },
+    {
+      "chatId": "soak-3",
+      "fingerprint": "sha256:d7889f55cbe2bf55f0d905059edbb17bcc9fb66f9474804c14037da839df7446",
+      "stats": {
+        "sent": 1791,
+        "retried": 0,
+        "reads": 250,
+        "readErrors": 6,
+        "maxAttempts": 1
+      }
+    },
+    {
+      "chatId": "soak-4",
+      "fingerprint": "sha256:bff9534236db0180559a649cb0248343bdfc30fb153bf0dad39e56819eb28cc8",
+      "stats": {
+        "sent": 1791,
+        "retried": 0,
+        "reads": 250,
+        "readErrors": 5,
+        "maxAttempts": 1
+      }
+    }
+  ],
+  "traffic": {
+    "acknowledged": 7210,
+    "perRoom": {
+      "uJkT6q-z1z5nSl8mRCThVw": 1442,
+      "e2HN8RqUcbMX7HnGQxW8_w": 1442,
+      "yNPkVOSHD2aUFBbrS5xaDg": 1442,
+      "BxO59fVRmNIRbNpNBKqk3A": 1442,
+      "naKt4iqKMJjUi3sWFBopyA": 1442
+    },
+    "bursts": 12,
+    "burstMessagesPerRoom": 30,
+    "reads": 1000,
+    "reconnects": [
+      {
+        "at": "2026-10-21T08:15:03.627Z",
+        "ms": 8252,
+        "clients": 4,
+        "evictionMints": 1008
+      },
+      {
+        "at": "2026-10-21T09:15:03.626Z",
+        "ms": 8284,
+        "clients": 4,
+        "evictionMints": 1008
+      },
+      {
+        "at": "2026-10-21T10:15:03.627Z",
+        "ms": 8248,
+        "clients": 4,
+        "evictionMints": 1008
+      }
+    ],
+    "loopErrors": [
+      "dm-soak-2-soak-3: soak-2: MCP request tools/call timed out after 30000 ms; stderr=",
+      "broadcast: soak-1: MCP request tools/call timed out after 30000 ms; stderr=",
+      "dm-soak-3-soak-4: soak-3: MCP request tools/call timed out after 30000 ms; stderr=",
+      "dm-soak-4-soak-1: soak-4: MCP request tools/call timed out after 30000 ms; stderr=",
+      "dm-soak-1-soak-2: soak-1: MCP request tools/call timed out after 30000 ms; stderr=",
+      "reads(soak-4): soak-4: 20 consecutive read errors; last: soak-4: MCP request tools/call timed out after 30000 ms; stderr=",
+      "bursts: soak-1: MCP request tools/call timed out after 30000 ms; stderr=",
+      "reads(soak-1): soak-1: 21 consecutive read errors; last: soak-1: MCP request tools/call timed out after 30000 ms; stderr=",
+      "reads(soak-3): soak-3: 22 consecutive read errors; last: soak-3: MCP request tools/call timed out after 30000 ms; stderr=",
+      "reads(soak-2): soak-2: 23 consecutive read errors; last: soak-2: MCP request tools/call timed out after 30000 ms; stderr="
+    ]
+  },
+  "samples": {
+    "intervalMs": 60000,
+    "count": 192,
+    "data": [
+      {
+        "atMs": 1792566903625,
+        "rssBytes": 108208128,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792566963625,
+        "rssBytes": 120397824,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792567023626,
+        "rssBytes": 117088256,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792567083626,
+        "rssBytes": 120397824,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792567143626,
+        "rssBytes": 112377856,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792567203626,
+        "rssBytes": 113242112,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792567263626,
+        "rssBytes": 118206464,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792567323626,
+        "rssBytes": 122245120,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792567383625,
+        "rssBytes": 115191808,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792567443625,
+        "rssBytes": 94973952,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792567503625,
+        "rssBytes": 95854592,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792567563625,
+        "rssBytes": 95641600,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792567623626,
+        "rssBytes": 95711232,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792567683626,
+        "rssBytes": 95739904,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792567743626,
+        "rssBytes": 95801344,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792567803626,
+        "rssBytes": 95928320,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792567863626,
+        "rssBytes": 96002048,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792567923626,
+        "rssBytes": 96071680,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792567983627,
+        "rssBytes": 96178176,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792568043628,
+        "rssBytes": 96243712,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792568103628,
+        "rssBytes": 96350208,
+        "fdCount": 23
+      },
+      {
+        "atMs": 1792568163629,
+        "rssBytes": 98074624,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792568223630,
+        "rssBytes": 98107392,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792568283630,
+        "rssBytes": 98119680,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792568343630,
+        "rssBytes": 98189312,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792568403631,
+        "rssBytes": 98258944,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792568463631,
+        "rssBytes": 98349056,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792568523631,
+        "rssBytes": 98377728,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792568583631,
+        "rssBytes": 98381824,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792568643631,
+        "rssBytes": 98418688,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792568703631,
+        "rssBytes": 98426880,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792568763630,
+        "rssBytes": 98533376,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792568823630,
+        "rssBytes": 98607104,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792568883631,
+        "rssBytes": 98693120,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792568943631,
+        "rssBytes": 98775040,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792569003632,
+        "rssBytes": 98856960,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792569063632,
+        "rssBytes": 98963456,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792569123633,
+        "rssBytes": 99053568,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792569183634,
+        "rssBytes": 99127296,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792569243633,
+        "rssBytes": 99205120,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792569303633,
+        "rssBytes": 99311616,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792569363632,
+        "rssBytes": 102146048,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792569423632,
+        "rssBytes": 101797888,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792569483632,
+        "rssBytes": 101892096,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792569543632,
+        "rssBytes": 101969920,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792569603633,
+        "rssBytes": 102060032,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792569663633,
+        "rssBytes": 102092800,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792569723634,
+        "rssBytes": 102092800,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792569783634,
+        "rssBytes": 102092800,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792569843634,
+        "rssBytes": 102092800,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792569903633,
+        "rssBytes": 102096896,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792569963632,
+        "rssBytes": 103739392,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792570023633,
+        "rssBytes": 102690816,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792570083632,
+        "rssBytes": 102690816,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792570143633,
+        "rssBytes": 102690816,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792570203633,
+        "rssBytes": 102690816,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792570263634,
+        "rssBytes": 104366080,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792570323635,
+        "rssBytes": 104366080,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792570383634,
+        "rssBytes": 104366080,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792570443634,
+        "rssBytes": 104366080,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792570503636,
+        "rssBytes": 104366080,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792570563637,
+        "rssBytes": 109756416,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792570623637,
+        "rssBytes": 108810240,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792570683637,
+        "rssBytes": 108810240,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792570743638,
+        "rssBytes": 108810240,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792570803637,
+        "rssBytes": 108810240,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792570863637,
+        "rssBytes": 108810240,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792570923637,
+        "rssBytes": 108810240,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792570983637,
+        "rssBytes": 108810240,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792571043637,
+        "rssBytes": 108810240,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792571103637,
+        "rssBytes": 108810240,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792571163638,
+        "rssBytes": 109539328,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792571223637,
+        "rssBytes": 110284800,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792571283637,
+        "rssBytes": 110284800,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792571343637,
+        "rssBytes": 110284800,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792571403638,
+        "rssBytes": 110284800,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792571463637,
+        "rssBytes": 110284800,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792571523637,
+        "rssBytes": 110284800,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792571583638,
+        "rssBytes": 110284800,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792571643639,
+        "rssBytes": 110284800,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792571703639,
+        "rssBytes": 110284800,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792571763640,
+        "rssBytes": 108548096,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792571823640,
+        "rssBytes": 109375488,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792571883641,
+        "rssBytes": 109375488,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792571943642,
+        "rssBytes": 109375488,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792572003643,
+        "rssBytes": 109375488,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792572063643,
+        "rssBytes": 109375488,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792572123643,
+        "rssBytes": 109375488,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792572183643,
+        "rssBytes": 109375488,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792572243643,
+        "rssBytes": 109375488,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792572303643,
+        "rssBytes": 109375488,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792572363643,
+        "rssBytes": 111161344,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792572423642,
+        "rssBytes": 111198208,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792572483642,
+        "rssBytes": 111198208,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792572543642,
+        "rssBytes": 111198208,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792572603642,
+        "rssBytes": 111198208,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792572663642,
+        "rssBytes": 111198208,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792572723643,
+        "rssBytes": 111198208,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792572783642,
+        "rssBytes": 111198208,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792572843643,
+        "rssBytes": 111202304,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792572903644,
+        "rssBytes": 108552192,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792572963645,
+        "rssBytes": 110039040,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792573023645,
+        "rssBytes": 111525888,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792573083645,
+        "rssBytes": 111529984,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792573143644,
+        "rssBytes": 111534080,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792573203644,
+        "rssBytes": 111534080,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792573263645,
+        "rssBytes": 111534080,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792573323644,
+        "rssBytes": 111538176,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792573383644,
+        "rssBytes": 111538176,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792573443643,
+        "rssBytes": 111538176,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792573503643,
+        "rssBytes": 111538176,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792573563643,
+        "rssBytes": 113020928,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792573623643,
+        "rssBytes": 111960064,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792573683644,
+        "rssBytes": 111960064,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792573743645,
+        "rssBytes": 111960064,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792573803644,
+        "rssBytes": 111960064,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792573863644,
+        "rssBytes": 111960064,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792573923644,
+        "rssBytes": 111960064,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792573983646,
+        "rssBytes": 111960064,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792574043646,
+        "rssBytes": 111960064,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792574103646,
+        "rssBytes": 111960064,
+        "fdCount": 23
+      },
+      {
+        "atMs": 1792574163646,
+        "rssBytes": 113881088,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792574223645,
+        "rssBytes": 110718976,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792574283646,
+        "rssBytes": 110718976,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792574343647,
+        "rssBytes": 110718976,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792574403646,
+        "rssBytes": 110723072,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792574463646,
+        "rssBytes": 110735360,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792574523646,
+        "rssBytes": 110735360,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792574583647,
+        "rssBytes": 110735360,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792574643647,
+        "rssBytes": 110735360,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792574703647,
+        "rssBytes": 110735360,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792574763647,
+        "rssBytes": 110735360,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792574823648,
+        "rssBytes": 110735360,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792574883648,
+        "rssBytes": 110735360,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792574943647,
+        "rssBytes": 110735360,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792575003646,
+        "rssBytes": 110735360,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792575063646,
+        "rssBytes": 110735360,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792575123647,
+        "rssBytes": 110735360,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792575183646,
+        "rssBytes": 110735360,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792575243646,
+        "rssBytes": 110735360,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792575303646,
+        "rssBytes": 110735360,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792575363646,
+        "rssBytes": 110735360,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792575423646,
+        "rssBytes": 110735360,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792575483646,
+        "rssBytes": 110735360,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792575543647,
+        "rssBytes": 110735360,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792575603648,
+        "rssBytes": 110735360,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792575663647,
+        "rssBytes": 110735360,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792575723648,
+        "rssBytes": 110735360,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792575783647,
+        "rssBytes": 110735360,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792575843647,
+        "rssBytes": 110735360,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792575903648,
+        "rssBytes": 110735360,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792575963648,
+        "rssBytes": 110735360,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792576023648,
+        "rssBytes": 110735360,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792576083648,
+        "rssBytes": 110735360,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792576143649,
+        "rssBytes": 110735360,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792576203649,
+        "rssBytes": 110735360,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792576263649,
+        "rssBytes": 110735360,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792576323649,
+        "rssBytes": 110735360,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792576383649,
+        "rssBytes": 110735360,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792576443650,
+        "rssBytes": 110735360,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792576503650,
+        "rssBytes": 110735360,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792576563651,
+        "rssBytes": 110735360,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792576623651,
+        "rssBytes": 110735360,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792576683650,
+        "rssBytes": 110735360,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792576743649,
+        "rssBytes": 110735360,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792576803648,
+        "rssBytes": 110993408,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792576863648,
+        "rssBytes": 110993408,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792576923648,
+        "rssBytes": 110993408,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792576983647,
+        "rssBytes": 110993408,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792577043647,
+        "rssBytes": 110993408,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792577103648,
+        "rssBytes": 110993408,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792577163649,
+        "rssBytes": 110993408,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792577223649,
+        "rssBytes": 110993408,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792577283650,
+        "rssBytes": 110993408,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792577343651,
+        "rssBytes": 110993408,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792577403652,
+        "rssBytes": 110993408,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792577463652,
+        "rssBytes": 110993408,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792577523652,
+        "rssBytes": 110993408,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792577583652,
+        "rssBytes": 110993408,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792577643652,
+        "rssBytes": 110993408,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792577703652,
+        "rssBytes": 111063040,
+        "fdCount": 23
+      },
+      {
+        "atMs": 1792577763653,
+        "rssBytes": 109334528,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792577823654,
+        "rssBytes": 109334528,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792577883655,
+        "rssBytes": 109334528,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792577943655,
+        "rssBytes": 109334528,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792578003656,
+        "rssBytes": 109334528,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792578063657,
+        "rssBytes": 109334528,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792578123658,
+        "rssBytes": 109334528,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792578183658,
+        "rssBytes": 109334528,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792578243659,
+        "rssBytes": 109334528,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792578303660,
+        "rssBytes": 109334528,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792578363660,
+        "rssBytes": 109334528,
+        "fdCount": 22
+      }
+    ]
+  },
+  "rules": {
+    "finalWindowRss": {
+      "windowMs": 14400000,
+      "samples": 192,
+      "elapsedMs": 11460035,
+      "startRssBytes": 108208128,
+      "endRssBytes": 109334528,
+      "growthRatio": 0.010409569233098645,
+      "slopeBytesPerMs": 0.9328741843884101,
+      "impliedGrowthRatio": 0.09879822339859382,
+      "slopePctOfStartPerSecond_reportedNotGated": 0.0008621110092472999,
+      "bound": 0.02,
+      "rule": "(endRSS - startRSS_of_window) / RSS_at_window_start <= 0.02, and the least-squares slope's implied growth across the window <= 0.02 \u2014 a total-growth bound (the final four hours at the default 8-hour duration), not the Story 2.4 per-second rate"
+    },
+    "fdStability": {
+      "baselineAfterMs": 3600000,
+      "baselineFd": 22,
+      "samplesAfterBaseline": 132,
+      "worstAbsDrift": 1,
+      "corridor": 5,
+      "rule": "every sample at or after duration/8 (one hour at the default 8) sits within +-5 of the hour-one baseline"
+    },
+    "zeroMessageLoss": {
+      "pending": true,
+      "note": "the run ended before the final drain"
+    }
+  },
+  "idleFootprint": {
+    "reported": true,
+    "gated": false,
+    "note": "REL-4 counter-metric: server RSS/FD/CPU with 0 Actors (start, each reconnect window, end) and the post-resume settled sample with the run's 4 Actors \u2014 reported, not optimized.",
+    "samples": [
+      {
+        "at": "2026-10-21T07:14:52.097Z",
+        "actors": 0,
+        "rssBytes": 68161536,
+        "fdCount": 22,
+        "cpuSeconds": 0.15
+      },
+      {
+        "at": "2026-10-21T08:15:03.640Z",
+        "actors": 0,
+        "rssBytes": 104366080,
+        "fdCount": 22,
+        "cpuSeconds": 12.12
+      },
+      {
+        "at": "2026-10-21T08:15:11.878Z",
+        "actors": 4,
+        "rssBytes": 108810240,
+        "fdCount": 22,
+        "cpuSeconds": 13.29
+      },
+      {
+        "at": "2026-10-21T09:15:03.634Z",
+        "actors": 0,
+        "rssBytes": 111960064,
+        "fdCount": 22,
+        "cpuSeconds": 20.25
+      },
+      {
+        "at": "2026-10-21T09:15:11.910Z",
+        "actors": 4,
+        "rssBytes": 108900352,
+        "fdCount": 22,
+        "cpuSeconds": 21.21
+      },
+      {
+        "at": "2026-10-21T10:15:03.627Z",
+        "actors": 0,
+        "rssBytes": 110993408,
+        "fdCount": 22,
+        "cpuSeconds": 22.08
+      },
+      {
+        "at": "2026-10-21T10:15:11.874Z",
+        "actors": 4,
+        "rssBytes": 109334528,
+        "fdCount": 22,
+        "cpuSeconds": 23.05
+      }
+    ]
+  },
+  "failureReasons": [],
+  "world": {
+    "dir": "/root/rel1-soak/.soak-world/agent-room-rel3-soak-3rhkPI",
+    "ackLog": "/root/rel1-soak/.soak-world/agent-room-rel3-soak-3rhkPI/recorder/acked-sends.ndjson",
+    "database": "/root/rel1-soak/.soak-world/agent-room-rel3-soak-3rhkPI/shared/agent-room.sqlite",
+    "kept": true
+  },
+  "stoppedAt": "2026-10-21T10:41:00Z",
+  "stopReason": "stopped short of its 8 h because the lease-defect repair (Story 6.4) changes the packaged server bytes, which voids candidate 89c8477 and every qualification run pinned to it; the host was released for the fresh soak against the final candidate",
+  "qualified": false
+}

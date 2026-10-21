@@ -39,7 +39,7 @@ per-session certificate-ignore flag because the demo CA is not in the OS trust s
    DM content anywhere, while the broadcast feed was populated.
 
 Evidence: `viewer-state.json` (the page's own state, read from the DOM),
-`viewer-live.png` (the browser's view), and the server's durable state in
+`viewer-live.png` (the browser's view), `rel1-viewer-raw.png` (the raw capture the run took, before the copy), and the server's durable state in
 `../v0.2.0-cross-machine/cross-machine-state.json`.
 
 ## What was NOT proven, and why

@@ -107,6 +107,40 @@ adjusted comparison and the raw mean carry declared noise factors
 reach ~1.26 s). They exist to catch structural regressions — never to replace
 the recorded numbers above, which are the human-verdict comparison.
 
+## Reconnect recovery: taking a Chat ID back (Story 6.4)
+
+A client's Chat ID is held by a live session row, and that row outlives the
+process that created it: a client that was killed, crashed, or lost its host
+keeps the name until the row's lease expires, while presence shows the holder
+offline. Before v0.2.0 shipped, the server could not tell a dead process from a
+quiet one, so the plain re-bind was refused with `chat_id_taken` and the
+restarted client was unrecoverable under its own name — the physical two-machine
+demonstration hit exactly this.
+
+v0.2.0 closes it with three things:
+
+- **An orderly exit hands the name back.** The MCP adapter releases its session
+  when its host closes its channel, so a client that ended normally never squats
+  its name at all.
+- **An explicit takeover recovers a name that IS squatted.** `agent-room
+  session replace` authenticates as that installation and asks the server for
+  the handoff. The server grants it only when the live holder is the SAME key
+  (a different key's session is never displaced), moves the name atomically
+  (the durable claim write first, the memory transfer second), and ends the
+  displaced session's authority WITH the handoff — its token stops
+  authenticating, and a request it had already sent cannot land afterwards. It
+  also cannot take the name back by reconnecting: an automatic re-authentication
+  never carries the takeover intent. The command asks for an interactive
+  confirmation and refuses a piped stdin — a takeover is a human decision.
+- **The client says so.** A `chat_id_taken` collision now names the command
+  that recovers the name, instead of leaving the operator to read a coded
+  error.
+
+Automatic, unattended crash recovery is NOT part of this: identifying the
+rightful successor process needs session-resume ownership evidence that the
+Actor key alone cannot provide. A killed client therefore recovers by an
+explicit operator action, and that is stated here rather than implied.
+
 ## Claimed clients: what each smoke proved
 
 Both smokes install the MATERIALIZED artifact (a fresh copy of the

@@ -415,6 +415,21 @@ export class AuthzStage {
 
   process(context) {
     if (context.route?.class !== 'actor') return undefined
+    // The handoff fence (v0.2.0 reconnect recovery). A session displaced by
+    // an explicit same-Actor replacement loses its authority WITH the
+    // handoff, not with its next request: the check sits here — after the
+    // auth stage, immediately before the handler — so a request admitted
+    // before the handoff is refused instead of landing after it. Admission
+    // alone is never authority.
+    const sessionRegistry = context.sessionRegistry
+    const sessionKey = context.session?.sessionKey
+    if (sessionRegistry
+      && typeof sessionRegistry.isSuperseded === 'function'
+      && typeof sessionKey === 'string'
+      && sessionKey.length > 0
+      && sessionRegistry.isSuperseded(sessionKey)) {
+      return reject('unauthorized')
+    }
     const store = context.store
     if (!store || typeof store.isActorBanned !== 'function') return undefined
     const actorFingerprint = context.session?.actorFingerprint

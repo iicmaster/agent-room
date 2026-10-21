@@ -57,6 +57,15 @@ export function createSessionRegistry({
   }
   // sha256(token) hex → { actorFingerprint, digest, expiresAt }.
   const sessions = new Map()
+  // The fenced set: session keys displaced by an EXPLICIT same-Actor
+  // replacement (the reconnect-recovery takeover). Displacing a session
+  // revokes its token — it stops authenticating at once — and leaves its key
+  // here so the pipeline's authorization stage can refuse a request that was
+  // ALREADY admitted when the handoff happened: admission alone is never
+  // authority. The set is bounded like the session map (the oldest fence is
+  // dropped at the bound — a fence that old can no longer describe a request
+  // still in flight), and it holds digests only, never a token.
+  const superseded = new Map()
 
   function issue(actorFingerprint) {
     if (typeof actorFingerprint !== 'string' || !FINGERPRINT_PATTERN.test(actorFingerprint)) {
@@ -120,6 +129,30 @@ export function createSessionRegistry({
     return sessions.delete(sessionKey)
   }
 
+  // The handoff fence. supersede() is the ONE operation that ends a live
+  // session's authority on the caller's explicit, operator-authorized
+  // replacement: the token stops authenticating (the registry entry goes)
+  // AND the key is remembered as superseded, so a request admitted before
+  // the handoff is refused at the authorization stage instead of landing
+  // after it. Returns whether a live session entry was actually removed.
+  function supersede(sessionKey) {
+    if (typeof sessionKey !== 'string' || sessionKey.length === 0) return false
+    const removed = sessions.delete(sessionKey)
+    superseded.set(sessionKey, now())
+    while (superseded.size > maxSessions) {
+      const oldest = superseded.keys().next().value
+      superseded.delete(oldest)
+    }
+    return removed
+  }
+
+  // Read-only: is this session key fenced? The pipeline's authorization stage
+  // asks this immediately before the handler runs.
+  function isSuperseded(sessionKey) {
+    if (typeof sessionKey !== 'string' || sessionKey.length === 0) return false
+    return superseded.has(sessionKey)
+  }
+
   function verify(token) {
     if (typeof token !== 'string' || token.length === 0 || token.length > SESSION_TOKEN_MAX_CHARS) {
       return reject('unauthorized')
@@ -137,7 +170,7 @@ export function createSessionRegistry({
     return { actorFingerprint: entry.actorFingerprint }
   }
 
-  return { issue, verify, isLive, revoke, sessionKeys }
+  return { issue, verify, isLive, revoke, supersede, isSuperseded, sessionKeys }
 }
 
 // Extract the Bearer credential from request headers. The scheme is

@@ -73,6 +73,7 @@ import { join } from 'node:path'
 import {
   CLIENT_CONFIG_MAX_BYTES,
   CLIENT_LONGPOLL_MARGIN_MS,
+  CLIENT_RELEASE_TIMEOUT_MS,
   CLIENT_REQUEST_TIMEOUT_MS,
   MCP_CLIENT_TYPE,
   PROTOCOL_HEADER,
@@ -451,6 +452,11 @@ export function createAgentRoomClient({
   // that was never bound. The raw path (not request()): authenticate runs
   // before/inside the ensure step, so routing through request() would await
   // the very ensure it is part of.
+  //
+  // The bind NEVER carries the takeover intent (replace_existing): a
+  // takeover is an operator's explicit decision, taken by hand through
+  // "agent-room session replace" — never something a reconnect decides for
+  // itself, and never something a second process may use to seize a name.
   async function bindWithToken(token) {
     try {
       const bind = await rawRequest('POST', '/api/session', {
@@ -461,7 +467,41 @@ export function createAgentRoomClient({
       return bind
     } catch (error) {
       sessionToken = null
-      throw error
+      throw explainBindFailure(error)
+    }
+  }
+
+  // A name collision is the one bind failure an operator can ACT on: this
+  // Chat ID is held by another connected session. The message names the one
+  // command that recovers it and says plainly that the takeover displaces the
+  // current holder — a human decision, never a silent retry.
+  function explainBindFailure(error) {
+    if (!(error instanceof AgentRoomRuntimeError) || error.code !== 'chat_id_taken') return error
+    return new AgentRoomRuntimeError(
+      'chat_id_taken',
+      `This Chat ID ("${config.chatId}") is held by another connected session. `
+      + 'If that session is gone (its process died), an operator can take the name over explicitly: '
+      + 'run "agent-room session replace" on this machine. That takeover displaces the current holder, '
+      + `so it is never done automatically; until it is, this installation cannot use "${config.chatId}".`,
+    )
+  }
+
+  // Release this session's live name on an orderly shutdown: an adapter that
+  // exits cleanly hands its Chat ID back instead of squatting it until the
+  // lease expires. It NEVER bootstraps a session to close one — with no
+  // token in hand there is nothing to release, and minting a credential to
+  // release a name would create the very session it claims to close.
+  // Best-effort and bounded: the durable claim row survives either way, so
+  // a failed release leaves only a lease to wait out.
+  async function release({ timeoutMs = CLIENT_RELEASE_TIMEOUT_MS } = {}) {
+    const token = sessionToken
+    if (token === null) return { released: false, reason: 'no_session' }
+    sessionToken = null
+    try {
+      await rawRequest('DELETE', '/api/session', { bearer: token, timeoutMs })
+      return { released: true }
+    } catch {
+      return { released: false, reason: 'release_failed' }
     }
   }
 
@@ -925,5 +965,12 @@ export function createAgentRoomClient({
     status({ signal } = {}) {
       return request('GET', '/api/status', { signal })
     },
+
+    // Release this session's live name (Story 6.4): the orderly-exit path.
+    // The MCP adapter calls it when its stdin closes, so a clean exit hands
+    // the Chat ID back instead of squatting it until the lease expires. It
+    // never bootstraps a session to close one, and it never carries the
+    // takeover intent — releasing is not taking.
+    release,
   }
 }

@@ -233,6 +233,38 @@ Post to the Broadcast Room exactly: "REL1-BC-CLAUDE-1 Broadcast from the laptop"
 Post to the Broadcast Room exactly: "REL1-BC-ZCODE-1 Broadcast from the desktop". Report the send status and seq.
 ```
 
+## 4a. If a client answers `chat_id_taken` — the recovery (2026-10-20, Story 6.4)
+
+A client whose process was killed leaves its Chat ID held by a live session row.
+The server cannot tell a dead process from a quiet one, so the plain re-bind is
+REFUSED with `chat_id_taken` — by design, never a silent suffix. The recovery is
+explicit and takes one command on the machine that owns the name:
+
+- [ ] On the machine whose Chat ID is stuck, run:
+
+```sh
+agent-room session replace
+```
+
+It authenticates as THAT installation, asks for the takeover, and — only if the
+holder is this installation's own key — moves the name to it, fences the stale
+session, and releases the name again so the live client can bind it. It asks for
+an interactive `y/N` first; a piped stdin is refused on purpose (a takeover must
+be a human decision). The receipt is one JSON line: `replaced` says whether a
+live holder was actually displaced, `released` says whether the name was handed
+back.
+
+- [ ] Restart the client that uses that Chat ID. It binds the name at once.
+
+- [ ] **Never** do this to recover from a transient failure of a LIVE client:
+  the takeover displaces a healthy session. If the other client is still running
+  and working, there is nothing to recover.
+
+- [ ] If the command answers `chat_id_taken`, the holder is a DIFFERENT key —
+  that session cannot be displaced by this installation, and nothing here will
+  change that. The name stays with its owner; pick another Chat ID for this
+  installation (`agent-room setup`).
+
 ## 5. The five verifications — while the demo is live
 
 - [ ] **1. Presence:** the viewer's presence list shows BOTH `CLAUDE-1` and

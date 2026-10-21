@@ -288,7 +288,7 @@ test('connect happy path: a session binds a chat id and the durable claim row la
   // the session connected and when it was last seen — frozen vocabulary
   // names only, no invented fields.
   const result = connect.json().result
-  assert.deepEqual(Object.keys(result).sort(), ['chat_id', 'connected_since', 'last_seen'])
+  assert.deepEqual(Object.keys(result).sort(), ['chat_id', 'connected_since', 'last_seen', 'replaced'])
   assert.equal(result.chat_id, 'Alice', 'the display form is echoed, never the lowercase key')
   assert.ok(!Number.isNaN(Date.parse(result.connected_since)), 'connected_since is a timestamp')
   assert.ok(!Number.isNaN(Date.parse(result.last_seen)), 'last_seen is a timestamp')
@@ -405,7 +405,7 @@ test('rename is immediate: the old name is freed in the same instant and the his
   const renamed = await sessionRequest(record.port, 'PATCH', aliceSession.sessionToken, { chat_id: 'Bob' })
   assert.equal(renamed.status, 200, renamed.text)
   const renameResult = renamed.json().result
-  assert.deepEqual(Object.keys(renameResult).sort(), ['chat_id', 'connected_since', 'last_seen'])
+  assert.deepEqual(Object.keys(renameResult).sort(), ['chat_id', 'connected_since', 'last_seen', 'replaced'])
   assert.equal(renameResult.chat_id, 'Bob', 'the rename echoes the accepted display form')
   assert.equal(renameResult.connected_since, connectedSince, 'the session lifetime did not reset')
 

@@ -41,7 +41,10 @@
 // the same lazy-sweep pattern the session registry uses on issue. The durable
 // chat_id_claims rows are deliberately untouched by the sweep: the (name,
 // actor) pair stays as ambiguity data. This claim-time sweep is the ONLY
-// name-freeing path. Presence liveness is a shorter window
+// name-freeing path, together with one EXPLICIT exception: transfer(), the
+// operator-authorized same-Actor takeover that ends the squat without waiting
+// a whole lease out (the reconnect-recovery handoff — see below). Presence
+// liveness is a shorter window
 // (presenceTtlMs, default PRESENCE_TTL_MS): presenceSnapshot FILTERS rows
 // silent strictly longer than the TTL out of the online group at read time —
 // a read never mutates this registry and never frees a name — and
@@ -193,7 +196,16 @@ export function createLiveSessionRegistry({ now = Date.now, leaseMs = SESSION_TT
   // an undeclaration) — and a fresh row stays null (never derived). The
   // persist callback receives { chatId, actorFingerprint, lastSeenAt } — the
   // exact durable-write payload, timestamped by this registry's clock.
-  function claim({ sessionKey, chatId, actorFingerprint, clientType, persist } = {}) {
+  //
+  // The `replace` option is the ONE way a live holder loses its name: an
+  // explicit, operator-authorized same-Actor takeover (the reconnect-recovery
+  // handoff). It is never reachable by an ordinary bind, a rename, or an
+  // automatic re-authentication — those never carry the intent. The caller
+  // states WHICH session it displaces, and this registry re-checks the
+  // statement against its own rows: the named session must still hold the
+  // name AND it must belong to the SAME Actor as the claimant. A foreign
+  // Actor's session is never displaced, whatever the caller claims.
+  function commit({ sessionKey, chatId, actorFingerprint, clientType, persist, replace } = {}) {
     const key = requireSessionKey(sessionKey)
     const forms = chatIdForms(chatId)
     if (forms === null) fail('invalid_chat_id', CHAT_ID_INVALID_MESSAGE)
@@ -206,12 +218,22 @@ export function createLiveSessionRegistry({ now = Date.now, leaseMs = SESSION_TT
     sweepExpired(timestamp)
 
     const holder = names.get(forms.normalized)
+    let displacedSessionKey = null
     if (holder !== undefined && holder !== key) {
-      // Explicit refusal, no suffixing, no state change. A same-Actor
-      // re-claim is a collision here TOO — the caller (the api layer) may
-      // release a DEAD holder's row via release() and claim again; the
-      // registry itself never decides a live session may lose its name.
-      fail('chat_id_taken', PUBLIC_ERRORS.chat_id_taken)
+      const incumbent = sessions.get(holder)
+      const authorized = replace !== undefined && replace !== null
+        && typeof replace === 'object'
+        && replace.sessionKey === holder
+        && incumbent !== undefined
+        && incumbent.actorFingerprint === fingerprint
+      if (!authorized) {
+        // Explicit refusal, no suffixing, no state change. A same-Actor
+        // re-claim is a collision here TOO — the caller (the api layer) may
+        // release a DEAD holder's row via release() and claim again; the
+        // registry itself never decides a live session may lose its name.
+        fail('chat_id_taken', PUBLIC_ERRORS.chat_id_taken)
+      }
+      displacedSessionKey = holder
     }
 
     const current = sessions.get(key)
@@ -224,11 +246,22 @@ export function createLiveSessionRegistry({ now = Date.now, leaseMs = SESSION_TT
       current.chatId = forms.display
       if (clientType !== undefined) current.clientType = type
       current.lastSeen = timestamp
-      return snapshot(current)
+      return { row: snapshot(current), displacedSessionKey: null }
     }
 
+    // The durable write runs BEFORE the memory side: a failed write leaves
+    // the incumbent's row and its name exactly where they were. The memory
+    // commit that follows is synchronous and holds no await, so no observer
+    // can see the name held by neither session or by both.
     if (persistStep !== undefined) {
       persistStep({ chatId: forms.display, actorFingerprint: fingerprint, lastSeenAt })
+    }
+    if (displacedSessionKey !== null) {
+      // The displaced session loses its live row here, in the same
+      // synchronous step that gives the name to the claimant. The durable
+      // claim row is deliberately untouched — the (name, actor) pair stays as
+      // ambiguity data, and it is this same Actor's row anyway.
+      sessions.delete(displacedSessionKey)
     }
     if (current !== undefined) names.delete(current.chatIdNormalized)
     const row = {
@@ -241,7 +274,34 @@ export function createLiveSessionRegistry({ now = Date.now, leaseMs = SESSION_TT
     }
     sessions.set(key, row)
     names.set(forms.normalized, key)
-    return snapshot(row)
+    return { row: snapshot(row), displacedSessionKey }
+  }
+
+  function claim(options = {}) {
+    return commit(options).row
+  }
+
+  // The explicit same-Actor takeover. The caller names the session it
+  // displaces; this registry verifies the name against its own rows (the
+  // named session must still hold the name and must belong to the caller's
+  // Actor) and performs the transfer atomically: the durable claim write
+  // first, then the memory commit that removes the incumbent's row and moves
+  // the name. The result reports WHICH session was displaced, so the api
+  // layer can fence it (the displaced session's authority ends with the
+  // handoff, not with its next request).
+  function transfer({ sessionKey, chatId, actorFingerprint, clientType, persist, incumbentSessionKey } = {}) {
+    if (typeof incumbentSessionKey !== 'string' || incumbentSessionKey.length === 0) {
+      fail('invalid_argument', 'incumbentSessionKey must be a non-empty string')
+    }
+    const { row, displacedSessionKey } = commit({
+      sessionKey,
+      chatId,
+      actorFingerprint,
+      clientType,
+      persist,
+      replace: { sessionKey: incumbentSessionKey },
+    })
+    return { ...row, displacedSessionKey }
   }
 
   // rename exposes the same atomic bind under its own name (the Code Map's
@@ -405,5 +465,5 @@ export function createLiveSessionRegistry({ now = Date.now, leaseMs = SESSION_TT
     names.clear()
   }
 
-  return Object.freeze({ claim, rename, release, touch, lookup, holderOf, presenceSnapshot, clear })
+  return Object.freeze({ claim, rename, transfer, release, touch, lookup, holderOf, presenceSnapshot, clear })
 }
