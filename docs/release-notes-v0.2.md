@@ -126,8 +126,12 @@ demonstration hit exactly this.
 v0.2.0 closes it with three things:
 
 - **An orderly exit hands the name back.** The MCP adapter releases its session
-  when its host closes its channel, so a client that ended normally never squats
-  its name at all.
+  when its host closes its channel, so a client that ended normally does not
+  squat its name — with one honest caveat the REL-1 run found: a vendor CLI
+  that tears its MCP child down kills it while that release is still crossing
+  the internet, so a one-shot CLI can still leave its name reserved. The
+  takeover below is the recovery for exactly that, and closing the race
+  properly is open work for the next release.
 - **An explicit takeover recovers a name that IS squatted.** `agent-room
   session replace` authenticates as that installation and asks the server for
   the handoff. The server grants it only when the live holder is the SAME key
