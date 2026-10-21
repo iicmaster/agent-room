@@ -2,73 +2,147 @@
 
 ## 1. READ THIS FIRST
 
-- Branch `main`, **not pushed** (42+ commits ahead of `origin/main`).
-- **The REL-3 8-hour soak PASSED** against candidate `7dc980f` (commit `3aec7ed`; 481.5 min; zero loss over 22625 messages; FD stable; final-window RSS pass). That PASS belongs to `7dc980f`.
-- **The candidate was RE-CUT** (`2c9cfe7`, record at `docs/release-evidence/v0.2.0-candidate.json`, commit `89c8477`, version `0.2.0`): a real cross-machine demo found that the shipped viewer could NEVER connect (it read the boot descriptor at the wrong level of the API envelope — fixed in `cc7eb6e`, regression test `tests/viewer-app.test.mjs`), and the v0.2.0 version stamp was applied BEFORE the re-cut so the shipped bytes and the frozen bytes are the same. All 5 Story 6.3 gate rows pass against the re-cut artifact; SM-C1 adjusted mean 0.318 s (below v0.1's 0.352 s anchor).
-- **Soak attempt 2 against the re-cut candidate FAILED** the final-window RSS rule (481.5 min, `candidate-exact`, zero loss over 22,615 messages, FDs stable, but `growthRatio` 1.7003 against the 0.02 bound). It is kept as its own attempt in `docs/release-evidence/v0.2.0-soak-attempts/` and is never relabelled. Two advisor round-tables (`epic-6-soak-rss-{astra,agy}.md`) agree the run was **contaminated** — the host was running the 555-test suite, a second compressed soak and a vendor-CLI demo during hour 1 — and agree the answer is a quiet-host repeat with the candidate and harness UNCHANGED, plus external host telemetry.
-- **Soak attempt 3 is RUNNING on the QUIET host ngs-staging** (`ssh 9router`), launched 2026-10-21T07:14:51Z, server pid 924048, `candidate-exact` at launch, 4 CPU, load ~1.0, world under `/root/rel1-soak/.soak-world/` (outside `/tmp`), with an external read-only host-telemetry sidecar writing `host-telemetry.log`. **Do not run `node --test`, another soak, or any heavy workload on ngs-staging or on this Mac while it is in flight** — that is exactly what broke attempt 2.
-- **The soak's temp world must NOT live in `/tmp`** — macOS temp cleanup ate its credential file. Re-locate the soak world to a repo-ignored dir (e.g. `.soak-world/`) before re-running.
-- Working tree: currently has Story 4.7's fix-loop output committed (`0eb3e94`+`562ea81`) plus 4.7/4.8 evidence entries — verify with `git status`.
-- The story-build workflow is **PARKED** (see DO NOT #1).
+- Branch `main`, **not pushed** (126+ commits ahead of `origin/main`).
+- **The candidate is `6d6b45f`** (`docs/release-evidence/v0.2.0-candidate.json`): version `0.2.0`,
+  portable package tree digest `ad08240b847d970233fff44e182cd3c8787ded45e66751796672082c03d4fceb`
+  (46 files), Claude Code package tree digest
+  `fe4d2aaa2520e0031538c07a28b4b24e6439d6ecf92514ce8ea735e44f378d88` (46 files). All five Story 6.3 gate
+  rows pass against it (deterministic materialization, the real `claude plugin validate --strict`
+  (2.1.305, exit 0), the installed Claude Code smoke, the installed portable smoke, and SM-C1 — five
+  fresh installs, zero failures, 0.460 s raw mean / 0.265 s adjusted against v0.1's 0.352 s anchor).
+- **The formal 8-hour soak is the open gate.** It is running against `6d6b45f` on the QUIET host
+  ngs-staging (`ssh 43.229.78.155`), launched 2026-10-21T11:29:25Z, server pid 1017734, world under
+  `/root/rel1-soak4/.soak-world/`, with an external read-only host-telemetry sidecar writing
+  `host-telemetry.log` beside it. The run's identity line reads `candidate-exact`.
+  **Do not run `node --test`, another soak, or any heavy workload on ngs-staging while it is in
+  flight** — that is exactly what broke soak attempt 2.
+- **The soak's temp world must NOT live in `/tmp`** — macOS temp cleanup ate a credential file
+  during an earlier run. The world is under `/root/rel1-soak4/`.
+- **REL-1 is DONE and verified** (`docs/release-evidence/v0.2.0-rel1/`, `scripts/rel1-verify-evidence.mjs`
+  exits 0): two physical machines (NSG-Mac-mini and ngs-staging), two vendor hosts (the real Zcode
+  CLI 0.17.0 on the Mac, the real Claude Code 2.1.306 on staging through that host's own model
+  gateway), one self-hosted Room Server (Docker `node:24-alpine`, TLS with a demo CA) on ngs-2.
+  DMs both ways inside the literal `<untrusted_message version="1">` envelope; the trust matrix HELD a
+  cross-machine message and then RELEASED it; broadcasts both ways; the viewer's freshness MEASURED
+  (0.107 s same-machine, 0.217 s cross-machine); zero DM content in the rendered DOM; a browser-session
+  recording, a screenshot, both vendor transcripts, and both machine preflights green.
+- **The lease defect REL-1 found is FIXED and shipped** (`6d6b45f`, Story 6.4): the explicit,
+  same-Actor, operator-authorized takeover with an atomic transfer and a fence; the MCP adapter's
+  orderly-exit release; `agent-room session replace`. Nineteen acceptance rows in
+  `tests/session-replacement.test.mjs`.
+- **Two advisor lanes reviewed the release gate** (`docs/implementation/reviews/epic-6-release-gate-{codex,agy}.md`)
+  and both REFUSED to sign a blanket "6.4 enforces every guarantee" claim. The record was corrected
+  everywhere (see §6) and five runtime items are OPEN work for the next release (§5).
+- Working tree: clean at the last commit; `git status` before committing.
 
 ## 2. HOW TO VERIFY
 
 ```bash
-node --test --test-timeout=600000        # expect ~554+ pass, 0 fail (some storage-gate tests need >1 GiB free — see DO NOT #4)
-node scripts/ac-sweep.mjs --epic N       # per epic 1..6; verdict must be `clean` (epic 6 currently `gaps` — 6.1/6.2 open by design)
+node --test --test-timeout=600000        # 574 pass / 0 fail / 0 skipped
+node scripts/ac-sweep.mjs --epic N       # per epic 1..6; all six verdicts are `clean`
+node scripts/rel1-verify-evidence.mjs --dir docs/release-evidence/v0.2.0-rel1   # exits 0
 claude plugin validate <materialized-pkg> --strict   # release gate; needs the `claude` CLI
 ```
-`--test-timeout` is required: several real-child integration tests exceed the 120 s default under load. Use **600000**, not 300000 — the REL-3 compressed-soak validation runs a 5-minute profile that takes ~327 s on its own, so a 300 s cap cancels it and reports a `not ok` that is a timeout, not a failure.
+`--test-timeout` is required: several real-child integration tests exceed the 120 s default under load. Use
+**600000**, not 300000 — the REL-3 compressed-soak validation runs a 5-minute profile that takes ~327 s on its
+own, so a 300 s cap cancels it and reports a `not ok` that is a timeout, not a failure.
 
 ## 3. STATE
 
-- **Epics 1–5: accepted**, each with audit + retro in `docs/implementation/epic-{1..5}-{completion-audit,retro}-*.md`. Per-story specs live in `docs/implementation/spec-*.md`, each ending with a Review Triage Log + Auto Run Result.
-- **Epic 6 (in progress)** — state record: `docs/implementation/epic-6-state-in-progress.md`.
-  - 6.3 **done**: RC frozen — `docs/release-evidence/v0.2.0-candidate.json` (commit `7dc980f`, tree digests, Node v24.18.1 / SQLite 3.53.4); SM-C1 PASS (0.459 s mean, 0.264 s adjusted vs v0.1's 0.352 s); release notes at `docs/release-notes-v0.2.md`.
-  - 6.2 **PASS**: runner `tests/soak/rel3-soak.mjs` (8h tracked, 481.5 min; candidate-exact `7dc980f`; zero loss 22625; FD stable; RSS pass; 47 bursts; 7 reconnects; 481 samples). Evidence: `docs/release-evidence/v0.2.0-soak-results.{json,md}` (commit `3aec7ed`).
-  - 6.1 **prepared, awaiting the human**: `scripts/rel1-preflight.mjs` + `docs/rel1-runbook.md` + `scripts/rel1-verify-evidence.mjs` (the Operator Flight Kit). The physical two-machine demo is the human's — it cannot be simulated (see DECIDED).
-- **Advisor verdicts on Epic 6 execution** (consensus: RC-first ordering, flight kit, human demo last): `docs/implementation/reviews/epic-6-execution-{luna,agy}.md`.
+- **Epics 1–5: accepted**, each with audit + retro in `docs/implementation/epic-{1..5}-{completion-audit,retro}-*.md`.
+- **Epic 6**: state record `docs/implementation/epic-6-state-in-progress.md`; audit
+  `docs/implementation/epic-6-completion-audit.md`; retro `docs/implementation/epic-6-retro-2026-10-21.md`.
+  - 6.1 **done** (evidence + verifier above).
+  - 6.2 **the open gate** (the 8-hour run above).
+  - 6.3 **done** (the candidate record above).
+  - 6.4 **done** (the repair above).
+- **Soak history** (every attempt kept under its own name, none relabelled):
+  `docs/release-evidence/v0.2.0-soak-results.{json,md}` — attempt 1's PASS against the superseded
+  `7dc980f`; `docs/release-evidence/v0.2.0-soak-attempts/` — attempt 2's FAIL against `89c8477`
+  (host contention: the advisor review's statistical refutation of my own "unlucky phase" explanation,
+  with the diagnostic beside it), attempt 3's 191 tracked minutes on the quiet host (stopped as void; its
+  flat RSS trace is the evidence for the contention diagnosis), and the fresh run's telemetry.
+- **Release notes**: `docs/release-notes-v0.2.md` (the one-time v1→v2 cursor reset, the SM-C1 numbers, the
+  claimed-clients table, the reconnect-recovery section, and the changelog position).
 
 ## 4. DO NOT
 
-- **Do not commit `server/` or `client/` code while a soak/run is in flight** — the candidate-immutability law: any product-code change after the soak started kills the RC and forces a full re-soak. Docs/tooling commits are fine. (Measured: `assertBaselineHead` correctly failed runs `dwfrun-{7a668b26,e3b56d2f}` for exactly this.)
-- **Do not run the story-build workflow on a dirty tree** — its clean-tree precondition refuses, correctly (`dwfrun-3455d41f` died there). Commit or stash first.
-- **Do not `git add -A` while a workflow run is in flight** — it sweeps the story's own uncommitted files into tooling commits and trips the baseline guard (`dwfrun-{9941dd61,d3e1f08c}` died this way). Commit only named paths.
-- **Do not put the soak world in `/tmp`** — macOS temp cleanup deleted the soak's `local-token` mid-run (the failed run's root cause, `docs/release-evidence/v0.2.0-soak-results.json` failureReasons[0]). Re-locate to a repo-ignored dir.
-- **Do not mark Epic 6 accepted before REL-1 passes** — both advisors ruled independently (luna: "interim only"; agy/Grumbal: "accepted-with-open-items is release debt"). `docs/implementation/reviews/epic-6-execution-{luna,agy}.md`.
-- **Do not simulate REL-1's substance** (localhost namespaces, mocked vendors) — every legitimate automated simulation already exists as Stories 1.8/4.8/5.3/6.3. Physical machines + real vendors are the proof.
-- **Do not hand-edit `sprint-status.yaml`** — it lagged the real work twice (Epic 1 retro F6, Epic 2 close). Use `scripts/ac-sweep.mjs` for verification and the `sprint_plan.py`/`sprint_status.py` scripts for writes.
-- **Do not retry a failing workflow dispatch more than twice** — after two provider failures, hand-loop the story (this is how 4.2–4.5 and 4.7 landed).
-- **Do not widen the soak's RSS gate to under-load windows** — under heavy traffic the RSS slope measures allocation rate (5–8%/s measured), not leaks; the 2% rule is asserted on the settled idle window only (Story 4.8's redesign, `c6cb589`).
+- **Do not commit `server/` or `client/` code while a soak is in flight** — the candidate-immutability
+  law: any product-code change after the soak started kills the RC and forces a full re-soak. Docs and
+  tooling commits are fine.
+- **Do not run heavy work on ngs-staging** while the soak runs, and do not run the full suite on a
+  machine that is hosting a soak.
+- **Do not put a soak world in `/tmp`** — macOS temp cleanup deleted the soak's `local-token` mid-run.
+- **Do not edit the packaged CHANGELOG** (`CHANGELOG.md` ships inside both packages) after the freeze:
+  it changes the artifact's bytes, voids the candidate and costs an eight-hour re-soak. The 6.4 entry
+  and the released heading are therefore carried by the release notes; the process question is open
+  (retro F8 / A1).
+- **Do not `git add -A` while a workflow run is in flight.**
+- **Do not hand-edit `sprint-status.yaml`** — use `python3 ~/.agents/skills/bmad-retrospective/scripts/sprint_status.py update …`.
+- **Do not mark Epic 6 accepted before the soak passes** — both advisors ruled independently that
+  "accepted-with-open-items" is release debt (`docs/implementation/reviews/epic-6-execution-{luna,agy}.md`).
+- **Do not simulate REL-1's substance** — physical machines + real vendors are the proof.
+- **Do not broaden the soak's RSS gate** — the memory rule is asserted on the settled idle window, not
+  under load (Story 4.8's redesign, `c6cb589`).
 
-## 5. DECIDED — DO NOT RELITIGATE
+## 5. DECIDED — DO NOT RELITELIGATE
 
-- **REL-1 cannot be simulated** — ruled by both advisors independently (luna: the named vendors/network/human observation ARE the proof; agy/Grumbal: "ABSOLUTELY NOT… safety theater"). User-endorsed via the standing advisor instruction.
-- **Epic 6 stays in-progress until REL-1 passes** — luna + agy consensus; the operator endorsed advisor-mediated decisions.
+- **REL-1 cannot be simulated** — ruled by both advisors independently; user-endorsed.
+- **Epic 6 stays in-progress until the soak passes.**
 - **1 session = 1 Chat ID; trust binds Actor fingerprints, never names** (D13, user decision).
-- **The `<untrusted_message>` v1 envelope is frozen** — additive labeling only (Story 1.7 freeze; 1.8 byte-pin; REL-2 byte-match).
-- **Ban ships WITHOUT session revocation** — the ban holds at the resource boundary; existing sessions stay alive by design (Story 4.5 Design Note; do not "fix" the apparent gap).
+- **The `<untrusted_message>` v1 envelope is frozen** — additive labeling only.
+- **Ban ships WITHOUT session revocation** — the ban holds at the resource boundary (Story 4.5).
 - **Local Mode is the default; Remote Mode is opt-in and https-only** (FR-1/AD-10).
-- **Candidate immutability law** — code change after a soak starts kills the RC; new RC = re-soak (agy consensus, Epic 6).
-- **The memory rule is asserted on the settled idle window, not under load** (Story 4.8 redesign, `c6cb589`).
+- **Candidate immutability law** — code change after a soak starts kills the RC; new RC = re-soak.
+- **The memory rule is asserted on the settled idle window, not under load** (Story 4.8).
+- **The v0.2.0 ownership semantics are what the code delivers, and the release owner accepted the
+  reduced intra-Actor semantics** (both advisor lanes: approve the candidate bytes for v0.2.0, log the
+  concurrency items for the next release). The next release's first acceptance criterion is the stronger
+  one: revalidate the session authority after the last awaited input step, directly before the mutation.
 
-## 6. UNPROVEN
+## 6. OPEN — the five runtime items the release-gate review found
 
-- **The 8-hour soak has never completed** — the only run died at 60 min (environmental). Zero-loss, FD stability, and the final-four-hour RSS rule are all unproven until a green re-run.
-- **REL-1 (physical two-machine, two-vendor)** — unproven by design; the Flight Kit (`scripts/rel1-preflight.mjs`, `docs/rel1-runbook.md`, `scripts/rel1-verify-evidence.mjs`) is built but never executed against real hardware.
-- **The declared-remote lane under real challenge traffic** — exercised by 4.8's drill over one machine's TLS; real cross-machine wire is REL-1.
-- **The reconnect loop's mutation coverage claims** rest on the 2.2 review pass's mutation runs (14 mutations, zero survivors) — the mutations themselves are not preserved as permanent tests beyond the five added tests.
-- **The 4.6 storage-gate findings from the mislabeled review run** (29 findings produced under a wrong story key before the run was fixed) — several were folded into the 4.6 hardening, but the full list was never formally triaged; it lives in the `dwfrun-7bb57776` run record's findings table.
+Each is recorded in the Epic 6 retro with the review's executed proof, and each is scheduled for the next
+release:
 
-## 7. WHERE THINGS LIVE
+| # | Item | Why it matters |
+|---|---|---|
+| A5 | Revalidate the session authority after the LAST awaited input step | the fence is checked before the request body is read, so a request admitted before a handoff whose body was still streaming can still reach the handler |
+| A6 | Bind the takeover intent to an OBSERVED incumbent (an opaque conflict ticket, never a bearer or a digest) | today the takeover displaces whoever holds the name at that moment, so a stale intent is not refused |
+| A7 | Make the fence's retention unexhaustible | the fence is bounded at 1,000 entries, so 1,001 supersessions can forget a still-admitted predecessor |
+| A8 | Signal-safe teardown in the MCP adapter (SIGTERM/SIGINT → release → exit) | `input.once('close')` covers a polite exit, not a host that kills the child: in the real run the name stayed squatted after three clean CLI exits |
+| A9 | The shutdown-during-initial-bind race | stdin can close while the first bind is pending; the release then sees no token |
+
+## 7. UNPROVEN
+
+- **Automatic unattended crash recovery** — not built and not promised: identifying the rightful
+  successor process needs session-resume ownership evidence the Actor key alone cannot provide.
+- **A human-facing screen recording** of the operator's desktop — the recording is the browser session.
+- **The evidence verifier is a structural check**, not an adjudicator: it greps transcripts for
+  substrings and checks that files exist; it does not recompute the freshness arithmetic or distinguish
+  a first transmission from an idempotent replay (A10).
+
+## 8. WHERE THINGS LIVE
 
 - Epics/ACs (source of truth): `docs/epics.md`
-- Story specs (done, with triage logs + Auto Run Results): `docs/implementation/spec-*.md`
-- Per-epic audits: `docs/implementation/epic-{1..5}-completion-audit.md`, `epic-{1..5}-retro-*.md`
+- Story specs: `docs/implementation/spec-*.md` (Story 6.4: `spec-6-4-reconnect-recovery-takeover.md`)
+- Per-epic audits/retros: `docs/implementation/epic-{1..6}-{completion-audit,retro}-*.md`
 - Epic 6 state record: `docs/implementation/epic-6-state-in-progress.md`
 - AC evidence: `docs/implementation/ac-evidence.yaml` · sweep: `node scripts/ac-sweep.mjs --epic N`
-- Workflow (parked): `docs/implementation/workflows/agent-room-story-build.ts` · batch orchestrator: `agent-room-epic-batch.ts`
-- v0.1 baseline / v0.2 candidate / soak results: `docs/v01-baseline.md`, `docs/release-evidence/v0.2.0-candidate.json`, `docs/release-evidence/v0.2.0-soak-results.{json,md}`
-- Release notes: `docs/release-notes-v0.2.md` · REL-1 kit: `scripts/rel1-preflight.mjs`, `docs/rel1-runbook.md`, `scripts/rel1-verify-evidence.mjs`
-- Advisor verdicts: `docs/implementation/reviews/*luna*.md`, `*agy*.md`; raw outboxes `.mailbox-out/`; lane state `.tmux-teams/`
-- Runtime gates: Node ≥ 24.15, SQLite ≥ 3.51.3 — asserted at every entrypoint (`server/runtime.mjs`); `package.json` engines pinned and test-tied
+- v0.1 baseline / v0.2 candidate / soak results: `docs/v01-baseline.md`,
+  `docs/release-evidence/v0.2.0-candidate.json`, `docs/release-evidence/v0.2.0-soak-results.{json,md}`
+- Release notes: `docs/release-notes-v0.2.md` · REL-1 kit: `scripts/rel1-preflight.mjs`,
+  `docs/rel1-runbook.md`, `scripts/rel1-verify-evidence.mjs`
+- Advisor verdicts: `docs/implementation/reviews/*`; raw outboxes `.mailbox-out/`
+- Runtime gates: Node ≥ 24.15, SQLite ≥ 3.51.3 — asserted at every entrypoint
+
+## 9. THE MACHINE-LEVEL EDITS THIS SESSION MADE (outside the repo — review or revert)
+
+- `~/.zcode/v2/provider_config.json` — the model order was changed so the free `minimax-m3.1-flash-free`
+  seat is picked first (the CLI's monthly quota was exhausted otherwise). Backup: `/tmp/provider_config.backup.json`.
+- `~/.zcode/cli/config.json` — the `agent-room` MCP server is registered for the Zcode CLI (the portable
+  package as the entrypoint, `PLUGIN_DATA` pointing at the demo installation). Backup: `/tmp/zcode-config-backup.json`.
+- `~/.local/bin/zcode` — a symlink to the desktop app's `zcode.cjs`, so the REL-1 preflight can find the
+  `zcode` binary on PATH. Remove it if the desktop app manages its own.
+- The demo hosts still carry state: the server container `agroom-rel1-64` on ngs-2 (port 18444, data dir
+  `/home/forge/rel1-64-data`) and the installed package + client under `/root/rel1-claude/` on ngs-staging.
