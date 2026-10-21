@@ -51,7 +51,7 @@
 ## 2. HOW TO VERIFY
 
 ```bash
-node --test --test-timeout=600000        # 574 pass / 0 fail / 0 skipped
+node --test --test-concurrency=1 --test-timeout=600000   # 574 pass / 0 fail / 0 skipped (the release run)
 node scripts/ac-sweep.mjs --epic N       # per epic 1..6; all six verdicts are `clean`
 node scripts/rel1-verify-evidence.mjs --dir docs/release-evidence/v0.2.0-rel1   # exits 0
 claude plugin validate <materialized-pkg> --strict   # release gate; needs the `claude` CLI
@@ -59,6 +59,12 @@ claude plugin validate <materialized-pkg> --strict   # release gate; needs the `
 `--test-timeout` is required: several real-child integration tests exceed the 120 s default under load. Use
 **600000**, not 300000 — the REL-3 compressed-soak validation runs a 5-minute profile that takes ~327 s on its
 own, so a 300 s cap cancels it and reports a `not ok` that is a timeout, not a failure.
+
+`--test-concurrency=1` is the RELEASE RUN's setting, and the reason is the same one as the soak's: the
+compressed profile's final-window RSS rule measures the allocator under whatever else the machine is
+doing. Under the full PARALLEL suite that row fails; ALONE it passes (366 s, exit 0) and SERIALLY it
+passes (the release run: 574 pass / 0 fail). It is a load artifact, not a regression — and it is the same
+effect that made soak attempt 2 look like a leak.
 
 ## 3. STATE
 
