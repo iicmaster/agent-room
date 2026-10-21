@@ -118,10 +118,10 @@ the recorded numbers above, which are the human-verdict comparison.
 A client's Chat ID is held by a live session row, and that row outlives the
 process that created it: a client that was killed, crashed, or lost its host
 keeps the name until the row's lease expires, while presence shows the holder
-offline. Before v0.2.0 shipped, the server could not tell a dead process from a
-quiet one, so the plain re-bind was refused with `chat_id_taken` and the
-restarted client was unrecoverable under its own name — the physical two-machine
-demonstration hit exactly this.
+offline. In v0.1 the server could not tell a dead process from a quiet one, so
+the plain re-bind was refused with `chat_id_taken` and the restarted client was
+unrecoverable under its own name — the physical two-machine demonstration hit
+exactly this.
 
 v0.2.0 closes it with three things:
 
