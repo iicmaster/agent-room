@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 09-21-2026 08:52
-last_updated: '10-06-2026 01:20'
+last_updated: '10-21-2026 21:30'
 project: agent-room
 project_key: NOKEY
 tracking_system: file-system
@@ -243,3 +243,85 @@ action_items:
     owner: "future surfaces"
     status: open
     ref: "docs/implementation/epic-5-retro-2026-09-29.md"
+  - id: "epic-6-retro-item-a5-revalidate-the-session-authority-after-the-last-awaited"
+    epic: 6
+    action: "Revalidate the session authority after the LAST awaited input step, directly
+      before the mutation: the handoff fence is checked at the authorization stage,
+      which runs BEFORE a body-carrying route body is read, so a request admitted
+      before a takeover whose body was still arriving can still reach the handler"
+    owner: "v0.3"
+    status: open
+    ref: "docs/implementation/epic-6-retro-2026-10-21.md"
+  - id: "epic-6-retro-item-a6-bind-the-takeover-intent-to-an-observed-incumbent"
+    epic: 6
+    action: "Bind the takeover intent to an OBSERVED incumbent (an opaque conflict
+      ticket tied to the Actor, the normalized Chat ID and the observed incumbent
+      - never a bearer or a token digest) so a stale intent is refused instead of
+      displacing whoever holds the name now"
+    owner: "v0.3"
+    status: open
+    ref: "docs/implementation/epic-6-retro-2026-10-21.md"
+  - id: "epic-6-retro-item-a7-make-the-fence-retention-unexhaustible"
+    epic: 6
+    action: "Make the handoff fence's retention unexhaustible: the fence is bounded
+      at 1000 entries, so 1001 supersessions can forget a still-admitted predecessor"
+    owner: "v0.3"
+    status: open
+    ref: "docs/implementation/epic-6-retro-2026-10-21.md"
+  - id: "epic-6-retro-item-a8-signal-safe-teardown-in-the-mcp-adapter"
+    epic: 6
+    action: "Signal-safe teardown in the MCP adapter: handle SIGTERM/SIGINT, complete
+      the session release, then exit - input.once(close) covers a polite exit, not
+      a host that kills the child, so a one-shot vendor CLI still leaves its Chat
+      ID reserved"
+    owner: "v0.3"
+    status: open
+    ref: "docs/implementation/epic-6-retro-2026-10-21.md"
+  - id: "epic-6-retro-item-a9-the-shutdown-during-initial-bind-race"
+    epic: 6
+    action: "Cover the shutdown-during-initial-bind race: stdin can close while the
+      first authentication/bind is still pending, so the release sees no token and
+      a later bind can assign one after the shutdown release already ran"
+    owner: "v0.3"
+    status: open
+    ref: "docs/implementation/epic-6-retro-2026-10-21.md"
+  - id: "epic-6-retro-item-a10-the-evidence-verifier-should-recompute-not-grep"
+    epic: 6
+    action: "The evidence verifier should recompute, not grep: it does not parse freshness.json,
+      does not read the recording, and cannot tell a first transmission from an idempotent
+      replay"
+    owner: "release"
+    status: open
+    ref: "docs/implementation/epic-6-retro-2026-10-21.md"
+  - id: "epic-6-retro-item-a1-the-packaged-docs-are-shipping-bytes"
+    epic: 6
+    action: "The packaged docs are shipping bytes, so every story changelog entry
+      and README section must land WITH the story, before the candidate is frozen
+      - the third re-cut of v0.2.0 existed only because this rule was not followed
+      the first time"
+    owner: "release"
+    status: open
+    ref: "docs/implementation/epic-6-retro-2026-10-21.md"
+  - id: "epic-6-retro-item-a2-automatic-unattended-crash-recovery-is-not-built"
+    epic: 6
+    action: "Automatic unattended crash recovery is not built: identifying the rightful
+      successor process needs session-resume ownership evidence the Actor key alone
+      cannot provide"
+    owner: "v0.3"
+    status: open
+    ref: "docs/implementation/epic-6-retro-2026-10-21.md"
+  - id: "epic-6-retro-item-a3-cookie-lifetime-question"
+    epic: 6
+    action: "Cookie lifetime question (session vs persistent) is a product question
+      for real viewer use"
+    owner: "post-launch"
+    status: open
+    ref: "docs/implementation/epic-6-retro-2026-10-21.md"
+  - id: "epic-6-retro-item-a4-the-viewer-freshness-probe-belongs-in-the-flight-kit"
+    epic: 6
+    action: "The viewer-freshness observer belongs in the Operator Flight Kit as a
+      script: it is the measurement the AC asks for and it should not need to be re-invented
+      per run"
+    owner: "release"
+    status: open
+    ref: "docs/implementation/epic-6-retro-2026-10-21.md"
