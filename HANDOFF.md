@@ -68,7 +68,7 @@
 ## 2. HOW TO VERIFY
 
 ```bash
-node --test --test-concurrency=1 --test-timeout=600000   # 574 pass / 0 fail / 0 skipped (the release run)
+node --test --test-concurrency=1 --test-timeout=600000   # 586 pass / 0 fail / 0 skipped (the release run)
 node scripts/ac-sweep.mjs --epic N       # per epic 1..6; all six verdicts are `clean`
 node scripts/rel1-verify-evidence.mjs --dir docs/release-evidence/v0.2.0-rel1   # exits 0
 claude plugin validate <materialized-pkg> --strict   # release gate; needs the `claude` CLI
