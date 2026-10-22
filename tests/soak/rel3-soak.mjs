@@ -134,6 +134,7 @@
 import assert from 'node:assert/strict'
 import { execFile, spawn } from 'node:child_process'
 import { createHash, createPublicKey } from 'node:crypto'
+import { createWriteStream } from 'node:fs'
 import http from 'node:http'
 import {
   chmodSync,
@@ -274,6 +275,9 @@ function execFilePromise(file, args, { timeoutMs = 30_000, cwd } = {}) {
 
 const clampMs = (value, min, max) => Math.min(Math.max(value, min), max)
 
+// FR-13's measured window is FOUR HOURS (prd.md:239). Named once here.
+const FOUR_HOURS_MS = 4 * 3_600_000
+
 // --- The derived schedule -----------------------------------------------------------
 //
 // Every period derives from the requested wall duration so the compressed
@@ -292,20 +296,33 @@ function deriveSchedule(durationMs) {
     burstMessagesPerRoom: durationMs >= 3_600_000 ? 30 : 10,
     reconnectEveryMs: Math.min(3_600_000, Math.round(durationMs / 8)),
     fdBaselineAfterMs: Math.round(durationMs / 8),
-    finalWindowMs: Math.round(durationMs / 2),
+    // FR-13's band is "the final FOUR HOURS" (prd.md:239). The window is
+    // therefore four hours and never grows with the run: the pre-amendment
+    // scaling (half the wall duration) is what put an 8-hour run's window
+    // exactly on the profile's equilibration knee — the hours in which the
+    // process first carries the cap load and is still growing into it. At
+    // the default 8-hour duration this is unchanged (four hours); a longer
+    // run keeps four hours, measured deep inside the cap-hold.
+    finalWindowMs: Math.min(FOUR_HOURS_MS, Math.round(durationMs / 2)),
+    // The payload ramp is bounded the same way, so the measured window is
+    // never the beginning of the cap-hold.
+    rampMs: Math.min(FOUR_HOURS_MS, Math.round(durationMs / 2)),
     readEveryMs: clampMs(Math.round(durationMs / 60), 5_000, 30_000),
     steadyRoomIntervalMs: STEADY_ROOM_INTERVAL_MS,
     payloadCapChars: null, // bound to the artifact's MESSAGE_TEXT_MAX at runtime
   }
 }
 
-// Payload ramp: linear from 256 characters to the cap across the first half
-// of the run, then AT the cap for the second half (snapped to 64-character
-// steps so the schedule is tidy and reproducible).
-function rampedPayloadChars(fractionElapsed, capChars) {
-  const fraction = Math.min(Math.max(fractionElapsed, 0), 1)
-  const raw = fraction < 0.5
-    ? PAYLOAD_RAMP_MIN_CHARS + (capChars - PAYLOAD_RAMP_MIN_CHARS) * (fraction / 0.5)
+// Payload ramp: linear from 256 characters to the cap across the ramp
+// (the first min(four hours, half the run)), then AT the cap for the rest
+// (snapped to 64-character steps so the schedule is tidy and reproducible).
+// The ramp's bound is what keeps the measured window out of the equilibration
+// knee: a longer run holds the cap for longer, so its final four hours sit
+// deep inside the hold instead of exactly on its start.
+function rampedPayloadChars(elapsedMs, capChars, rampMs) {
+  const fraction = Math.min(Math.max(rampMs <= 0 ? 1 : elapsedMs / rampMs, 0), 1)
+  const raw = fraction < 1
+    ? PAYLOAD_RAMP_MIN_CHARS + (capChars - PAYLOAD_RAMP_MIN_CHARS) * fraction
     : capChars
   return Math.min(capChars, Math.max(PAYLOAD_RAMP_MIN_CHARS, Math.floor(raw / 64) * 64))
 }
@@ -515,6 +532,7 @@ function buildWorld({ keepWorld }) {
     keepWorld,
     databasePath: join(sharedData, DATABASE_FILENAME),
     runtimePath: join(sharedData, RUNTIME_RECORD_FILENAME),
+    gcTracePath: join(sharedData, 'server-gc-trace.log'),
   }
 }
 
@@ -522,7 +540,13 @@ function buildWorld({ keepWorld }) {
 
 function startServerChild(world) {
   const entry = join(world.artifact.portableRoot, 'server', 'api', 'server.mjs')
-  const child = spawn(process.execPath, [entry], {
+  // --trace-gc makes V8 write one line per collection to stdout. That stream
+  // is the retained-state diagnostic's ONLY source (the used heap AFTER a
+  // confirmed natural major collection is the reachable set at that moment),
+  // so it is captured IN FULL to a file — the rolling tail below is for
+  // diagnostics only and cannot support a statistic. No forced GC is ever
+  // introduced: only natural collections are observed.
+  const child = spawn(process.execPath, ['--trace-gc', entry], {
     env: {
       PATH: process.env.PATH || '',
       LANG: process.env.LANG || 'C.UTF-8',
@@ -531,14 +555,17 @@ function startServerChild(world) {
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
-  const state = { child, exited: null, lifecycleError: null, stdout: '', stderr: '' }
+  const state = { child, exited: null, lifecycleError: null, stdout: '', stderr: '', gcTraceStream: null, startedAtMs: Date.now() }
   state.exited = new Promise(resolveExit => child.once('exit', (code, signal) => resolveExit({ code, signal })))
   child.on('error', error => {
     state.lifecycleError ??= new Error(`server child error: ${error.message}`)
   })
   child.stdout.setEncoding('utf8')
   child.stderr.setEncoding('utf8')
-  child.stdout.on('data', chunk => { state.stdout = rollingTail(state.stdout, chunk, STDERR_TAIL_BYTES) })
+  child.stdout.on('data', chunk => {
+    state.stdout = rollingTail(state.stdout, chunk, STDERR_TAIL_BYTES)
+    if (state.gcTraceStream !== null) state.gcTraceStream.write(chunk)
+  })
   child.stderr.on('data', chunk => { state.stderr = rollingTail(state.stderr, chunk, STDERR_TAIL_BYTES) })
   return state
 }
@@ -1000,10 +1027,99 @@ function evaluateFinalWindowRss(samples, schedule, final) {
     bound: FINAL_WINDOW_GROWTH_BOUND,
     rule:
       '(endRSS - startRSS_of_window) / RSS_at_window_start <= 0.02, and the least-squares slope\'s implied growth ' +
-      'across the window <= 0.02 — a total-growth bound (the final four hours at the default 8-hour duration), not the Story 2.4 per-second rate',
+      'across the window <= 0.02 — FR-13\'s single pass rule (the final four hours). The endpoint growth is reported, ' +
+      'never gated: FR-13 ratifies one band, and the endpoint term was never ratified. Not the Story 2.4 per-second rate.',
   }
-  if (final) evaluation.pass = growthRatio <= FINAL_WINDOW_GROWTH_BOUND && impliedGrowthRatio <= FINAL_WINDOW_GROWTH_BOUND
+  if (final) {
+    // FR-13's band is the SINGLE pass rule (prd.md:239: "RSS least-squares
+    // slope over the final four hours <=2% of starting RSS - this band is the
+    // single pass rule; no story may impose a stricter or looser memory
+    // criterion"). The endpoint growth is therefore REPORTED, not gated: it
+    // was the unratified second term, and its demonstrated run-to-run spread
+    // is an order of magnitude wider than the bound it was gating (the
+    // release-gate review of soak attempt 4). The ruling and the
+    // pre-registration:
+    // docs/implementation/spec-6-2-rel-3-the-formal-soak.md.amendment-2026-10-22.md
+    evaluation.pass = impliedGrowthRatio <= FINAL_WINDOW_GROWTH_BOUND
+    evaluation.gatedTerm = 'slope_implied_growth'
+    evaluation.reportedOnly = {
+      endpoint_growthRatio: growthRatio,
+      endpoint_bound: FINAL_WINDOW_GROWTH_BOUND,
+      endpoint_pass: growthRatio <= FINAL_WINDOW_GROWTH_BOUND,
+      note: 'the endpoint term is reported, never gated: FR-13 ratifies one band (the slope), and this term was never ratified',
+    }
+  }
   return evaluation
+}
+
+// --- The retained-state diagnostic ----------------------------------------------------
+//
+// The GC trace is the only observation this run collects that can tell "the
+// server retains state" from "the heap had not been collected yet": the used
+// heap AFTER a confirmed natural major collection is the reachable set at
+// that moment. It is REPORTED, never gated (the 2026-10-22 ruling and
+// pre-registration): a replacement criterion needs its own baseline, window,
+// denominator, coverage requirement and missing-data outcome, and none is
+// ratified yet. Coverage that cannot support a statement reads INCONCLUSIVE,
+// never PASS. No forced GC is ever introduced — only natural collections.
+const MAJOR_GC_MIN_EVENTS_IN_WINDOW = 4
+
+// The settle before the final idle sample: one minute, so the reading is a
+// footprint and not the instant the last client disconnected.
+const IDLE_SETTLE_MS = 60_000
+
+function readGcTrace(world, serverChild) {
+  try {
+    serverChild.gcTraceStream?.end()
+  } catch { /* the stream may already be closed */ }
+  try {
+    return parseMajorGcUsedHeapMiB(readFileSync(world.gcTracePath, 'utf8'))
+  } catch {
+    return []
+  }
+}
+
+function parseMajorGcUsedHeapMiB(text) {
+  const events = []
+  const pattern = /^\[\d+:0x[0-9a-f]+\]\s+(\d+) ms: (Mark-Compact|Mark-Sweep)\s+([\d.]+) \([\d.]+\)\s+->\s+([\d.]+) \([\d.]+\)/gm
+  for (const match of text.matchAll(pattern)) {
+    events.push({ childAtMs: Number(match[1]), usedHeapMiB: Number(match[4]) })
+  }
+  return events
+}
+
+function evaluateRetainedState(gcEvents, schedule, samples, serverStartedAtMs) {
+  if (!Array.isArray(samples) || samples.length < 3) {
+    return { status: 'inconclusive', gated: false, note: 'no samples to anchor the measured window' }
+  }
+  const windowEndMs = samples[samples.length - 1].atMs
+  const windowStartMs = windowEndMs - schedule.finalWindowMs
+  const inWindow = gcEvents
+    .map(event => ({ atMs: serverStartedAtMs + event.childAtMs, usedHeapMiB: event.usedHeapMiB }))
+    .filter(event => event.atMs >= windowStartMs && event.atMs <= windowEndMs)
+  if (inWindow.length < MAJOR_GC_MIN_EVENTS_IN_WINDOW) {
+    return {
+      status: 'inconclusive',
+      gated: false,
+      majorCollectionsInWindow: inWindow.length,
+      requiredMajorCollectionsInWindow: MAJOR_GC_MIN_EVENTS_IN_WINDOW,
+      note: 'too few confirmed natural major collections inside the measured window to state a trend; the RSS verdict stands either way',
+    }
+  }
+  const first = inWindow[0].usedHeapMiB
+  const last = inWindow[inWindow.length - 1].usedHeapMiB
+  return {
+    status: 'reported',
+    gated: false,
+    majorCollectionsInWindow: inWindow.length,
+    requiredMajorCollectionsInWindow: MAJOR_GC_MIN_EVENTS_IN_WINDOW,
+    windowStartMs,
+    windowEndMs,
+    usedHeapMiB_first: first,
+    usedHeapMiB_last: last,
+    growthRatio: first === 0 ? null : (last - first) / first,
+    note: 'the used heap after confirmed natural major collections inside the measured window — REPORTED, never gated',
+  }
 }
 
 function evaluateFdStability(samples, schedule, trackedStartAt, final) {
@@ -1069,6 +1185,11 @@ function assembleResults({
       serverStderrTail: server?.stderr ?? '',
     },
     clients,
+    retainedState: state.retainedState ?? {
+      status: 'inconclusive',
+      gated: false,
+      note: 'the GC trace was not collected in this run',
+    },
     traffic: {
       acknowledged: state.ackedTotal,
       perRoom: Object.fromEntries([...state.perRoomAcks.entries()]),
@@ -1140,6 +1261,12 @@ function renderSummaryMarkdown(document) {
 
 // --- The soak -----------------------------------------------------------------------------
 
+// The evaluator and the diagnostic are exported so the calibration suite can
+// drive the REAL rule (tests/soak/rel3-soak-calibration.test.mjs) instead of
+// a copy of it — a copy would drift from the shipped rule and the calibration
+// would then certify nothing.
+export { evaluateFinalWindowRss, evaluateRetainedState, parseMajorGcUsedHeapMiB, deriveSchedule, FOUR_HOURS_MS, MAJOR_GC_MIN_EVENTS_IN_WINDOW }
+
 export async function runSoak({
   durationHours,
   durationMinutes,
@@ -1201,7 +1328,7 @@ export async function runSoak({
         : { ...state.zeroLoss, rule: 'every acknowledged (room, seq, client_message_id) readable at the end; sequences contiguous from 1; readable set == acknowledged set; zero duplicates; payloads byte-exact' }
       rules = { finalWindowRss, fdStability, zeroMessageLoss }
       if (final) {
-        if (finalWindowRss.pass !== true) failureReasons.push('final-window RSS growth above the 2% total-growth bound')
+        if (finalWindowRss.pass !== true) failureReasons.push('final-window RSS slope growth above the 2% band (FR-13\'s single pass rule)')
         if (fdStability.pass !== true) failureReasons.push('FD drift outside the +-5 corridor after hour one')
         if (zeroMessageLoss.pass !== true) failureReasons.push('zero message loss failed')
       }
@@ -1300,6 +1427,10 @@ export async function runSoak({
     // S3 — the server child (the RC artifact's own entrypoint).
     const serverChild = startServerChild(world)
     world.serverChild = serverChild
+    // The GC trace is captured in full (the retained-state diagnostic's only
+    // source); it is written beside the server's own data, 0600, and is read
+    // back after the run.
+    serverChild.gcTraceStream = createWriteStream(world.gcTracePath, { flags: 'a', mode: 0o600 })
     const runtimeRecord = await waitServerReady(world, serverChild)
     world.serverRecord = { pid: serverChild.child.pid, port: runtimeRecord.port, version: runtimeRecord.version }
     log(`server ready: pid ${serverChild.child.pid}, port ${runtimeRecord.port}, version ${runtimeRecord.version}`)
@@ -1453,7 +1584,22 @@ export async function runSoak({
     for (const entry of state.clients.values()) {
       await entry.client.close()
     }
+    // The settle: the sample is taken a minute after the last client closed,
+    // so the number is a settled footprint rather than the instant-after-drain
+    // reading (the release-gate review of attempt 4: "201.2 MiB is immediate
+    // post-drain RSS ... worthless as a settled footprint"). The counter-metric
+    // gates nothing, so this changes no verdict.
+    await sleep(IDLE_SETTLE_MS)
     state.idleFootprint.push(await sampleIdleFootprint(serverPid, 0))
+
+    // The retained-state diagnostic: the used heap after confirmed natural
+    // major collections inside the measured window. REPORTED, never gated.
+    state.retainedState = evaluateRetainedState(
+      readGcTrace(world, serverChild),
+      schedule,
+      tracker.samples,
+      serverChild.startedAtMs,
+    )
 
     // S13 — the verdict: the three rules, evaluated once, then written.
     state.finalRules = {
@@ -1582,8 +1728,8 @@ export async function runSoak({
   function currentPayloadSize() {
     const startAt = state.trackedStartAt ?? Date.now()
     const endAt = state.endAt ?? startAt + schedule.durationMs
-    const fraction = (Date.now() - startAt) / Math.max(1, endAt - startAt)
-    return rampedPayloadChars(fraction, schedule.payloadCapChars)
+    const elapsedMs = Date.now() - startAt
+    return rampedPayloadChars(elapsedMs, schedule.payloadCapChars, schedule.rampMs)
   }
 
   async function steadyRoomLoop(room) {
