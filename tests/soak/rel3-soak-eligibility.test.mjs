@@ -485,7 +485,7 @@ test('the quiet-host scorer: a baseline that has moved since the registration is
       thresholds
     })
     assertVerdict(result, 'incomplete', 'a baseline that no longer matches the registered expectation')
-    assertReasoned(result, 'the host\'s baseline has moved since the registration', 'the moved baseline is named')
+    assertReasoned(result, "the host's baseline is BUSIER than the registration", 'the moved baseline is named')
     assert.ok(
       result.document.metrics.baselineExpectation.medianDrift > 0.15,
       `the drift is measured; drift=${result.document.metrics.baselineExpectation.medianDrift}`
@@ -1009,5 +1009,28 @@ test('the quiet-host scorer: a closing sample whose RUN cgroup was unreadable ca
     })
     assertVerdict(result, 'incomplete', 'a closing sample whose run cgroup was unreadable')
     assertReasoned(result, 'closes an interval that overlaps the measured window', 'the closing sample is named')
+  })
+})
+
+test('the quiet-host scorer: a host that is QUIETER than the registration is not a moved baseline', () => {
+  withWorkspace(directory => {
+    // The registered limits are UPPER BOUNDS, derived from the host's busiest
+    // measured state. A host that is merely quieter now still fits inside
+    // them, so a quieter host is not a changed host — and a night must not be
+    // voided because the machine had a quiet hour.
+    const thresholds = thresholdsVariant(directory, registered => {
+      registered.baselineExpectation.median = 0.9
+      registered.baselineExpectation.mean = 0.9
+    })
+    const result = score(directory, {
+      lines: buildLog({ baselineCores: 0.3 }),
+      args: ['--run-start', RUN_START, '--run-end', RUN_END],
+      thresholds
+    })
+    assertVerdict(result, 'eligible', 'a host that is quieter than the registration')
+    assert.ok(
+      !result.document.reasons.some(reason => reason.includes('BUSIER')),
+      'a quieter host is not reported as a moved baseline'
+    )
   })
 })

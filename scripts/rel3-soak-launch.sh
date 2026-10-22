@@ -200,7 +200,13 @@ median_tolerance = float(tolerance.get("median", 0.15))
 mean_tolerance = float(tolerance.get("mean", 0.25))
 median_drift = abs(median - float(expectation.get("median", median)))
 mean_drift = abs(mean - float(expectation.get("mean", mean)))
-verdict = "ok" if (median_drift <= median_tolerance and mean_drift <= mean_tolerance) else "moved"
+# One-sided, for the reason the scorer gives: the registered limits are upper
+# bounds derived from the host's BUSIEST measured state, so a host that is
+# merely quieter now still fits inside them. A host that is BUSIER than the
+# registration is not the host the limits were measured on.
+busier = (median > float(expectation.get("median", median)) + median_tolerance
+          or mean > float(expectation.get("mean", mean)) + mean_tolerance)
+verdict = "moved" if busier else "ok"
 print(f"{verdict} samples={len(measured)} median={median:.4f} mean={mean:.4f} median_drift={median_drift:.4f} mean_drift={mean_drift:.4f}")
 PYEOF
 )
@@ -212,7 +218,7 @@ case "$BASELINE_CHECK" in
   *)
     echo "baseline_check_failed — the host's baseline has moved since the registration, so the run is NOT started" >> "$RECORD"
     kill "$OBS_PID" 2>/dev/null
-    echo "rel3-soak-launch: the host's baseline has moved since the registration ($BASELINE_CHECK); the run is not started" >&2
+    echo "rel3-soak-launch: the host's baseline is busier than the registration ($BASELINE_CHECK); the run is not started" >&2
     exit 6
     ;;
 esac

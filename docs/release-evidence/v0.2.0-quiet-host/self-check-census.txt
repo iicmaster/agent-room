@@ -1,6 +1,6 @@
 # foreign-process census
 # boot_id 3bef85f2-56ae-4007-9a72-e5ef813b97d7
-# sampled_at 2026-10-22T11:32:43Z
+# sampled_at 2026-10-22T11:54:15Z
 # node_process_definition a process whose argv[0] basename is node, or node followed by digits
 # format pid own starttime argv0 argv1
 2259422 foreign 2516677619 node /root/.npm/_npx/15d63e9eb5a75d69/node_modules/.bin/zai-mcp-server

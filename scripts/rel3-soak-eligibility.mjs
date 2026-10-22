@@ -1242,15 +1242,24 @@ const main = argv => {
     if (baselineExpectation.median !== null && baselineExpectation.tolerance.median !== null) {
       baselineExpectationResult.medianDrift = baselineMedian === null ? null : Math.abs(baselineMedian - baselineExpectation.median)
       baselineExpectationResult.checked.push('median')
-      if (baselineExpectationResult.medianDrift !== null && baselineExpectationResult.medianDrift > baselineExpectation.tolerance.median) {
-        addData('baseline-moved', `the host's baseline has moved since the registration: the measured median is ${baselineMedian.toFixed(3)} cores against a registered ${baselineExpectation.median} (tolerance ${baselineExpectation.tolerance.median})`)
+      // The check is ONE-SIDED, and the side is not arbitrary. The
+      // registered limits are UPPER BOUNDS: they were derived from the
+      // busiest state this host was MEASURED in (the window that included
+      // its PHP-build burst), so a host that is merely QUIETER now still
+      // fits inside them — and a quieter host is not a changed host, it is
+      // the same host with less to do. A host that is BUSIER than the
+      // registration is a different host: its own normal behaviour may no
+      // longer fit inside the limits, and that is worth knowing before the
+      // night rather than after it.
+      if (baselineExpectationResult.medianDrift !== null && baselineMedian > baselineExpectation.median + baselineExpectation.tolerance.median) {
+        addData('baseline-moved', `the host's baseline is BUSIER than the registration: the measured median is ${baselineMedian.toFixed(3)} cores against a registered ${baselineExpectation.median} (tolerance ${baselineExpectation.tolerance.median}) — the registered limits were derived from the host's busiest measured state, so a busier host may no longer fit inside them`)
       }
     }
     if (baselineExpectation.mean !== null && baselineExpectation.tolerance.mean !== null) {
       baselineExpectationResult.meanDrift = baselineMean === null ? null : Math.abs(baselineMean - baselineExpectation.mean)
       baselineExpectationResult.checked.push('mean')
-      if (baselineExpectationResult.meanDrift !== null && baselineExpectationResult.meanDrift > baselineExpectation.tolerance.mean) {
-        addData('baseline-moved', `the host's baseline has moved since the registration: the measured mean is ${baselineMean.toFixed(3)} cores against a registered ${baselineExpectation.mean} (tolerance ${baselineExpectation.tolerance.mean})`)
+      if (baselineExpectationResult.meanDrift !== null && baselineMean > baselineExpectation.mean + baselineExpectation.tolerance.mean) {
+        addData('baseline-moved', `the host's baseline is BUSIER than the registration: the measured mean is ${baselineMean.toFixed(3)} cores against a registered ${baselineExpectation.mean} (tolerance ${baselineExpectation.tolerance.mean}) — the registered limits were derived from the host's busiest measured state, so a busier host may no longer fit inside them`)
       }
     }
   }
