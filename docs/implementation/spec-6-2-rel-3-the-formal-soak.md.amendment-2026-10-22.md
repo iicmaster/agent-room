@@ -77,7 +77,14 @@ the diagnostic reads INCONCLUSIVE — never PASS.
 - It does not rescue attempt 4. Under the amended rule attempt 4 still FAILS: its slope-implied growth over
   its window is **+3.988%** against the 2% band. The demotion of the endpoint term changes nothing for
   it (the endpoint was 2.239%, also failing).
-- It does not certify the server as leak-free. It makes the next run able to say so.
+- It does not certify the server as leak-free. FR-13's band is a finite noise band, not a universal
+  leak detector, and the calibration pins three of its limits as first-class rows: a persistent step at the
+  tail of the window PASSES it, a growth rate just under the band is read differently depending on where
+  the GC cycle sits in the window, and the retained-state diagnostic needs TEMPORAL coverage (a span), not
+  a count of collections. What the next run can say is exactly this: **it met the registered RSS band and
+  the other gates**, and the retained-state observation beside it is reported for what it is (the
+  reachable V8 heap at confirmed natural major collections — it does not cover native or external
+  allocations, and a flat used heap does not explain a rising RSS).
 - It does not change the zero-message-loss or FD-stability criteria, the candidate, the package, the
   REL-1 evidence, or the release notes' claims about what the product promises.
 - It does not introduce forced GC into qualification. Only NATURAL major collections are observed.
@@ -92,10 +99,10 @@ the diagnostic reads INCONCLUSIVE — never PASS.
 | The window | the final four hours of the run (`min(4 h, half the run)`) |
 | The run | 12 hours, ramp 0–4 h, cap-hold 4–12 h, window 8–12 h |
 | The demoted term | the endpoint growth — REPORTED in the results, never gated |
-| The retained-state diagnostic | the used-heap trend after confirmed natural major GCs in the window — REPORTED; missing coverage reads INCONCLUSIVE |
+| The retained-state diagnostic | the FITTED used-heap trend after confirmed natural major GCs in the window — REPORTED, never gated; the coverage requirement is temporal (the collections must span at least half the window and come from one load phase), not a count; inadequate coverage reads INCONCLUSIVE and never PASS; the observations (times and values) are retained with the verdict, and the raw GC trace is archived beside the results |
 | The other gates | unchanged: zero message loss, FD stability after hour one, artifact stability, zero loop errors |
-| The decision tree | PASS → the story's evidence is qualified and the epic may close. A FAIL with the slope-implied growth above 2% and a flat retained-state diagnostic → the amendment's premise is refuted, the hunt moves to heap snapshots, and the release stays held. A FAIL with a rising retained-state diagnostic → the server retains something; the release is blocked on that, not on this rule. A FAIL with an INCONCLUSIVE retained-state diagnostic → the observation is repeated, and the verdict on the slope band stands either way. |
-| The calibration set | synthetic traces with injected growth around the bound, and the archived runs replayed as DIAGNOSTICS — never attempt 4 as the fitting target |
+| The decision tree | **RSS PASS + every other gate PASS** → the story's evidence is qualified and the epic may close; the retained-state reading is reported beside it (flat = the reachable heap did not grow; rising = a finding to carry, NOT a leak-free claim; INCONCLUSIVE = no claim). **RSS PASS + any OTHER gate FAIL** (message loss, FD stability, artifact integrity, loop execution) → the run is a FAIL and the release is held on THAT gate; the retained-state reading does not rescue it. **RSS FAIL + the retained-state diagnostic RISING** → the server retains something reachable; the release is blocked on that, and the hunt uses heap snapshots. **RSS FAIL + the retained-state diagnostic FLAT** → the FAIL stands (a flat V8 heap does NOT refute a rising RSS: native allocations, allocator residency and continued equilibration are all still open); the hunt moves to native memory and allocator residency, not to the heap. **RSS FAIL + the retained-state diagnostic INCONCLUSIVE** → the FAIL stands and the observation is repeated. **Any INCONCLUSIVE observation** → no leak-free claim is made and no gate is turned into a PASS by it. **Interruption** (the run aborts) → the attempt is recorded under its own name as incomplete, exactly as attempt 3 was; it never qualifies and it is never re-scored. **A repeated INCONCLUSIVE observation** → it is a finding about the DIAGNOSTIC (its coverage requirement or the observation's collection), not about the server; the amendment is revisited once, not twice. |
+| The calibration set | synthetic traces with injected growth around the bound, the archived runs replayed as DIAGNOSTICS (never attempt 4 as the fitting target), and three KNOWN LIMITATIONS pinned as first-class rows (a persistent tail step passes the band; the band is phase-sensitive near the bound; the diagnostic needs temporal coverage) |
 
 ## The owners' gate
 

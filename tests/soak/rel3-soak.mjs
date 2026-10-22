@@ -138,6 +138,7 @@ import { createWriteStream } from 'node:fs'
 import http from 'node:http'
 import {
   chmodSync,
+  copyFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -1064,14 +1065,35 @@ function evaluateFinalWindowRss(samples, schedule, final) {
 // never PASS. No forced GC is ever introduced — only natural collections.
 const MAJOR_GC_MIN_EVENTS_IN_WINDOW = 4
 
+// The temporal coverage a four-hour trend needs: the confirmed collections
+// must span at least this fraction of the measured window. Four collections
+// inside a few milliseconds are four observations, not a four-hour trend.
+const MAJOR_GC_MIN_WINDOW_SPAN_FRACTION = 0.5
+
+// The classification tolerance: the fitted trend of the used heap, as a
+// percentage per hour of the window's first observation, at or below this
+// reads "flat" and above it reads "rising".
+const RETAINED_STATE_FLAT_PCT_PER_HOUR = 0.5
+
 // The settle before the final idle sample: one minute, so the reading is a
 // footprint and not the instant the last client disconnected.
 const IDLE_SETTLE_MS = 60_000
 
-function readGcTrace(world, serverChild) {
-  try {
-    serverChild.gcTraceStream?.end()
-  } catch { /* the stream may already be closed */ }
+// The collector: the stream's completion is ASYNCHRONOUS, so the file is
+// read only after the writer's 'finish' — reading it while the child can
+// still be writing is a source-level race.
+async function readGcTrace(world, serverChild) {
+  const stream = serverChild.gcTraceStream
+  if (stream !== null) {
+    await new Promise(resolve => {
+      let settled = false
+      const done = () => { if (!settled) { settled = true; resolve() } }
+      stream.end(done)
+      stream.on('finish', done)
+      stream.on('error', done)
+      setTimeout(done, 5_000)
+    })
+  }
   try {
     return parseMajorGcUsedHeapMiB(readFileSync(world.gcTracePath, 'utf8'))
   } catch {
@@ -1079,9 +1101,25 @@ function readGcTrace(world, serverChild) {
   }
 }
 
+// Custody: the trace is COPIED beside the results, so the evidence survives
+// the world's cleanup and can be read by whoever reads the verdict.
+function archiveGcTrace(world, outDir) {
+  try {
+    const target = join(outDir, 'server-gc-trace.log')
+    copyFileSync(world.gcTracePath, target)
+    return target
+  } catch {
+    return null
+  }
+}
+
 function parseMajorGcUsedHeapMiB(text) {
   const events = []
-  const pattern = /^\[\d+:0x[0-9a-f]+\]\s+(\d+) ms: (Mark-Compact|Mark-Sweep)\s+([\d.]+) \([\d.]+\)\s+->\s+([\d.]+) \([\d.]+\)/gm
+  // V8 writes the major collections under several collector names, and a
+  // "(reduce)" variant appears between the collector name and the heap sizes.
+  // A parser that silently omits a variant distorts the observed endpoints,
+  // so every documented spelling is accepted.
+  const pattern = /^\[\d+:0x[0-9a-f]+\]\s+(\d+) ms: (Mark-Compact|Mark-Sweep|Mark-Sweep-Compact|Scavenge \(reduce\))\s*(?:\(reduce\)\s*)?([\d.]+) \([\d.]+\)\s+->\s+([\d.]+) \([\d.]+\)/gm
   for (const match of text.matchAll(pattern)) {
     events.push({ childAtMs: Number(match[1]), usedHeapMiB: Number(match[4]) })
   }
@@ -1094,31 +1132,61 @@ function evaluateRetainedState(gcEvents, schedule, samples, serverStartedAtMs) {
   }
   const windowEndMs = samples[samples.length - 1].atMs
   const windowStartMs = windowEndMs - schedule.finalWindowMs
+  const windowMs = Math.max(1, windowEndMs - windowStartMs)
   const inWindow = gcEvents
     .map(event => ({ atMs: serverStartedAtMs + event.childAtMs, usedHeapMiB: event.usedHeapMiB }))
     .filter(event => event.atMs >= windowStartMs && event.atMs <= windowEndMs)
-  if (inWindow.length < MAJOR_GC_MIN_EVENTS_IN_WINDOW) {
+  // Workload comparability: every observation must come from the same load
+  // phase — the cap-load hold. A collection taken while the payload ramp was
+  // still moving is not comparable with one taken at the cap.
+  const comparableFromMs = serverStartedAtMs + (schedule.rampMs ?? 0)
+  const workloadComparable = inWindow.every(event => event.atMs >= comparableFromMs)
+  const spanMs = inWindow.length > 1 ? inWindow[inWindow.length - 1].atMs - inWindow[0].atMs : 0
+  const spanFraction = spanMs / windowMs
+  const coverage = {
+    majorCollectionsInWindow: inWindow.length,
+    requiredMajorCollectionsInWindow: MAJOR_GC_MIN_EVENTS_IN_WINDOW,
+    windowSpanMs: spanMs,
+    windowSpanFraction: Number(spanFraction.toFixed(4)),
+    requiredWindowSpanFraction: MAJOR_GC_MIN_WINDOW_SPAN_FRACTION,
+    workloadComparable,
+    capLoadFromMs: comparableFromMs,
+  }
+  if (
+    inWindow.length < MAJOR_GC_MIN_EVENTS_IN_WINDOW
+    || spanFraction < MAJOR_GC_MIN_WINDOW_SPAN_FRACTION
+    || !workloadComparable
+  ) {
     return {
       status: 'inconclusive',
       gated: false,
-      majorCollectionsInWindow: inWindow.length,
-      requiredMajorCollectionsInWindow: MAJOR_GC_MIN_EVENTS_IN_WINDOW,
-      note: 'too few confirmed natural major collections inside the measured window to state a trend; the RSS verdict stands either way',
+      ...coverage,
+      note: 'the confirmed natural major collections inside the measured window are too few, too close together, or not from one load phase to state a trend; the RSS verdict stands either way and no leak-free claim is made',
     }
   }
-  const first = inWindow[0].usedHeapMiB
-  const last = inWindow[inWindow.length - 1].usedHeapMiB
+  // The TREND, fitted over the observations — not the first-to-last change,
+  // which hides an excursion (40 -> 80 -> 90 -> 40 MiB reads as "no change").
+  const slopeBytesPerMs = leastSquaresSlopeBytesPerMs(
+    inWindow.map(event => ({ atMs: event.atMs, rssBytes: Math.round(event.usedHeapMiB * 1024 * 1024) })),
+  )
+  const firstUsedBytes = inWindow[0].usedHeapMiB * 1024 * 1024
+  const slopePctPerHour = firstUsedBytes === 0
+    ? null
+    : (slopeBytesPerMs * 3_600_000 / firstUsedBytes) * 100
+  const classification = slopePctPerHour === null
+    ? 'unknown'
+    : Math.abs(slopePctPerHour) <= RETAINED_STATE_FLAT_PCT_PER_HOUR ? 'flat' : 'rising'
   return {
     status: 'reported',
     gated: false,
-    majorCollectionsInWindow: inWindow.length,
-    requiredMajorCollectionsInWindow: MAJOR_GC_MIN_EVENTS_IN_WINDOW,
-    windowStartMs,
-    windowEndMs,
-    usedHeapMiB_first: first,
-    usedHeapMiB_last: last,
-    growthRatio: first === 0 ? null : (last - first) / first,
-    note: 'the used heap after confirmed natural major collections inside the measured window — REPORTED, never gated',
+    ...coverage,
+    classification,
+    flatTolerancePctPerHour: RETAINED_STATE_FLAT_PCT_PER_HOUR,
+    slopePctPerHour: slopePctPerHour === null ? null : Number(slopePctPerHour.toFixed(4)),
+    usedHeapMiB_first: inWindow[0].usedHeapMiB,
+    usedHeapMiB_last: inWindow[inWindow.length - 1].usedHeapMiB,
+    observations: inWindow.map(event => ({ atMs: event.atMs, usedHeapMiB: event.usedHeapMiB })),
+    note: 'the used heap after confirmed natural major collections inside the measured window — REPORTED, never gated. It observes the REACHABLE V8 heap at those collections; it does not cover native or external allocations, and a flat used heap does NOT explain a rising RSS.',
   }
 }
 
@@ -1190,6 +1258,7 @@ function assembleResults({
       gated: false,
       note: 'the GC trace was not collected in this run',
     },
+    gcTraceArchive: state.gcTraceArchive ?? null,
     traffic: {
       acknowledged: state.ackedTotal,
       perRoom: Object.fromEntries([...state.perRoomAcks.entries()]),
@@ -1595,11 +1664,12 @@ export async function runSoak({
     // The retained-state diagnostic: the used heap after confirmed natural
     // major collections inside the measured window. REPORTED, never gated.
     state.retainedState = evaluateRetainedState(
-      readGcTrace(world, serverChild),
+      await readGcTrace(world, serverChild),
       schedule,
       tracker.samples,
       serverChild.startedAtMs,
     )
+    state.gcTraceArchive = archiveGcTrace(world, outDir)
 
     // S13 — the verdict: the three rules, evaluated once, then written.
     state.finalRules = {

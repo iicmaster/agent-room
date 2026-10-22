@@ -128,6 +128,72 @@ test('the measured window is the final FOUR HOURS at any run length', () => {
   assert.equal(compressed.rampMs, 150_000, 'and its proportional ramp')
 })
 
+test('KNOWN LIMITATION: a persistent step at the tail passes the band', () => {
+  // The release-gate review of the amendment produced this counterexample
+  // itself, and it is PINNED here as a limitation of the ratified band
+  // rather than left undiscovered: a retained step that persists through the
+  // observed tail (100 MiB for 235 samples, then 110 MiB) is reported by
+  // the regression as about +1.2% — inside the 2% band — and therefore
+  // PASSES.
+  //
+  // The rule is FR-13's band, not a universal leak detector, and the
+  // amendment says so. This row exists so the limitation can never be
+  // rediscovered as a surprise, and so nobody can claim the band proves the
+  // absence of a late step.
+  const samples = sawtoothTrace({ phase: 0, amplitudeMiB: 0 })
+  const stepAt = samples.length - 5
+  for (let index = stepAt; index < samples.length; index += 1) {
+    samples[index] = { ...samples[index], rssBytes: Math.round(samples[index].rssBytes * 1.1) }
+  }
+  const verdict = evaluate(samples)
+  assert.equal(verdict.pass, true, 'the pinned limitation: a persistent tail step passes the band')
+  assert.ok(
+    verdict.impliedGrowthRatio > 0 && verdict.impliedGrowthRatio < BOUND,
+    `the step is reported as a positive but sub-bound growth: ${verdict.impliedGrowthRatio}`,
+  )
+})
+
+test('KNOWN LIMITATION: near the bound the band is still phase-sensitive', () => {
+  // The same review's second counterexample, pinned: a growth rate just
+  // under the band is read differently depending on where the GC cycle sits
+  // in the window — some phases pass, some fail. The band is a finite noise
+  // band, and this is what that means.
+  const outcomes = []
+  for (let phase = 0; phase < 25; phase += 1) {
+    const verdict = evaluate(sawtoothTrace({ phase, growthPerHour: 0.55 }))
+    outcomes.push(verdict.pass)
+  }
+  const passes = outcomes.filter(Boolean).length
+  assert.ok(passes > 0 && passes < outcomes.length,
+    `the pinned limitation: the band is phase-sensitive near the bound (${passes}/${outcomes.length} phases passed)`)
+})
+
+test('KNOWN LIMITATION: the retained-state diagnostic needs temporal coverage, not a count', () => {
+  // Four confirmed collections inside a few milliseconds are four
+  // observations, not a four-hour trend: the diagnostic must read
+  // INCONCLUSIVE, never PASS, and never a flat verdict.
+  const samples = sawtoothTrace({ samples: WINDOW_SAMPLES })
+  const schedule = { finalWindowMs: FOUR_HOURS_MS, rampMs: 0 }
+  const clustered = Array.from({ length: 8 }, (_, index) => ({ childAtMs: index, usedHeapMiB: 40 }))
+  const verdict = evaluateRetainedState(clustered, schedule, samples, 0)
+  assert.equal(verdict.status, 'inconclusive', 'a clustered set of collections is not a trend')
+  assert.equal(verdict.gated, false)
+  assert.ok(verdict.windowSpanFraction < 0.5, 'the coverage shortfall is reported, not hidden')
+
+  // And an excursion that hides between two equal endpoints must not read as
+  // "no change": the trend is FITTED over the observations.
+  const excursion = [
+    { childAtMs: 0, usedHeapMiB: 40 },
+    { childAtMs: 60 * 60_000, usedHeapMiB: 80 },
+    { childAtMs: 120 * 60_000, usedHeapMiB: 90 },
+    { childAtMs: 180 * 60_000, usedHeapMiB: 40 },
+  ]
+  const fitted = evaluateRetainedState(excursion, schedule, samples, 0)
+  assert.equal(fitted.status, 'reported')
+  assert.notEqual(fitted.classification, 'flat', 'the fitted trend sees the excursion')
+  assert.ok(fitted.observations.length >= 4, 'the observations are retained with the verdict')
+})
+
 test('the archived runs keep their own verdicts — the amendment rescues nothing', () => {
   const archived = [
     ['docs/release-evidence/v0.2.0-soak-results.json', 'attempt 1 (7dc980f)'],
@@ -159,25 +225,30 @@ test('the retained-state diagnostic reports a trend when the coverage is there a
   const samples = sawtoothTrace({ samples: WINDOW_SAMPLES }).map(sample => ({ atMs: sample.atMs, rssBytes: sample.rssBytes }))
   const schedule = { finalWindowMs: FOUR_HOURS_MS }
 
-  // A trace with confirmed natural major collections: the used heap after them
-  // is flat — REPORTED, never gated.
+  // A trace with confirmed natural major collections spread across the
+  // window: the used heap after them is flat — REPORTED, never gated. The
+  // collections must span at least half the window (the temporal coverage
+  // the trend needs) and come from one load phase.
   const flat = []
   for (let index = 0; index < 12; index += 1) {
-    flat.push({ childAtMs: index * 10 * 60_000, usedHeapMiB: 40 })
+    flat.push({ childAtMs: index * 20 * 60_000, usedHeapMiB: 40 })
   }
   const reported = evaluateRetainedState(flat, schedule, samples, 0)
   assert.equal(reported.status, 'reported')
   assert.equal(reported.gated, false, 'the diagnostic never gates')
-  assert.equal(reported.growthRatio, 0)
+  assert.equal(reported.classification, 'flat', 'a flat used heap reads flat')
+  assert.equal(reported.slopePctPerHour, 0)
 
   // The same diagnostic with a growing live set: the trend is visible.
   const growing = flat.map((event, index) => ({ ...event, usedHeapMiB: 40 + index * 0.5 }))
   const growingVerdict = evaluateRetainedState(growing, schedule, samples, 0)
-  assert.ok(growingVerdict.growthRatio > 0, 'a growing live set shows up in the diagnostic')
+  assert.equal(growingVerdict.classification, 'rising', 'a growing live set reads rising')
+  assert.ok(growingVerdict.slopePctPerHour > 0, 'and the fitted trend is positive')
 
   // Too few collections inside the window: INCONCLUSIVE, never PASS.
   const thin = evaluateRetainedState(flat.slice(0, MAJOR_GC_MIN_EVENTS_IN_WINDOW - 1), schedule, samples, 0)
   assert.equal(thin.status, 'inconclusive')
+  assert.equal(thin.gated, false, 'an inadequate coverage never becomes a diagnostic PASS')
 })
 
 test('the GC trace parser reads V8\'s major-collection lines', () => {
