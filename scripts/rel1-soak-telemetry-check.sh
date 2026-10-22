@@ -115,10 +115,34 @@ count_node_in_cgroup() {
       *) continue ;;
     esac
     path=$(cgroup_path_of "$dir/cgroup")
-    [ "$path" = "$target" ] || continue
+    case "$path" in
+      "$target"|"$target"/*) ;;
+      *) continue ;;
+    esac
     count=$(( count + 1 ))
   done
   echo "$count"
+}
+
+# The pids of the node processes in a cgroup, as a comma-separated list.
+own_pid_set() {
+  local target="$1" dir pid argv0 path list=""
+  for dir in /proc/[0-9]*; do
+    pid="${dir#/proc/}"
+    IFS= read -r -d '' argv0 < "$dir/cmdline" 2>/dev/null || true
+    [ -n "$argv0" ] || continue
+    case "${argv0##*/}" in
+      node|node[0-9]*) ;;
+      *) continue ;;
+    esac
+    path=$(cgroup_path_of "$dir/cgroup")
+    case "$path" in
+      "$target"|"$target"/*) ;;
+      *) continue ;;
+    esac
+    list="$list$pid,"
+  done
+  printf '%s' "${list%,}"
 }
 
 count_node_outside_cgroup() {
@@ -132,7 +156,9 @@ count_node_outside_cgroup() {
       *) continue ;;
     esac
     path=$(cgroup_path_of "$dir/cgroup")
-    [ "$path" = "$target" ] && continue
+    case "$path" in
+      "$target"|"$target"/*) continue ;;
+    esac
     count=$(( count + 1 ))
   done
   echo "$count"
@@ -236,8 +262,11 @@ wait_samples 3
 # reported ~4.000 foreign cores on an idle four-core host because it counted
 # idle time as consumption.
 if command -v python3 >/dev/null 2>&1; then
-  ARITH=$(python3 - "$OUT" <<'PYEOF'
+  # The jiffy size comes from the kernel's own answer, not from an
+  # assumption: the check's arithmetic must be the observer's arithmetic.
+  ARITH=$(python3 - "$OUT" "$US_PER_JIFFY" <<'PYEOF'
 import sys
+US_PER_JIFFY = int(sys.argv[2])
 rows = []
 for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
     f = dict(t.split("=", 1) for t in line.split() if "=" in t)
@@ -252,7 +281,7 @@ for prev, cur in zip(rows, rows[1:]):
     busy = int(cur["busyJiffies"]) - int(prev["busyJiffies"])
     run = int(cur["runCpuUs"]) - int(prev["runCpuUs"])
     obs = int(cur["obsCpuUs"]) - int(prev["obsCpuUs"])
-    expect_us = busy * 10000 - run - obs
+    expect_us = busy * US_PER_JIFFY - run - obs
     got_us = int(cur["foreignUs"])
     delta_us = abs(expect_us - got_us)
     gap = float(cur["gapSec"]) if float(cur["gapSec"]) > 0 else 1.0
@@ -432,6 +461,18 @@ if [ "${REPORTED_OWN:-0}" = "$ACTUAL_OWN" ] && [ "${REPORTED_FOREIGN:-0}" = "$AC
 else
   fail "5f the observer's counts match the cgroup's ACTUAL membership" "own $REPORTED_OWN vs $ACTUAL_OWN, foreign $REPORTED_FOREIGN vs $ACTUAL_FOREIGN"
 fi
+# The observer publishes the PID SET it counted as its own, and that set is
+# checked here against the cgroup's membership, pid by pid. A count can agree
+# by accident; a set cannot.
+REPORTED_SET=$(grep -o 'ownPids=[^ ]*' "$OUT" | tail -1 | cut -d= -f2)
+ACTUAL_SET=$(own_pid_set "$RUN_CG_PATH")
+SORTED_REPORTED=$(printf '%s\n' "$REPORTED_SET" | tr ',' '\n' | sort -n | tr '\n' ' ')
+SORTED_ACTUAL=$(printf '%s\n' "$ACTUAL_SET" | tr ',' '\n' | sort -n | tr '\n' ' ')
+if [ -n "$SORTED_REPORTED" ] && [ "$SORTED_REPORTED" = "$SORTED_ACTUAL" ]; then
+  pass "5g the observer's own PID SET matches the cgroup's membership, pid by pid (${SORTED_ACTUAL})"
+else
+  fail "5g the observer's own PID SET matches the cgroup's membership, pid by pid" "reported [$SORTED_REPORTED] against the cgroup's [$SORTED_ACTUAL]"
+fi
 # The count may FALL between the two readings (one of the run's own processes
 # exits); what must never happen is that it RISES, because the two fixtures
 # are foreign and must never be counted as the run's own.
@@ -441,6 +482,38 @@ else
   fail "5b the fixtures did not become the run's own" "ownProcs $OWN_BEFORE_FIXTURE -> $OWN_AFTER_FIXTURE"
 fi
 
+
+# --- 5h. a CHILD cgroup's process is the run's own, in both accountings -------------------------
+# The harness does not create child cgroups today, but the observer's rule
+# says the run's own set is its cgroup AND the cgroups under it: a
+# descendant's CPU charges the parent's cpu.stat, so leaving it out of the
+# own count would split the two accountings. This proves it.
+OWN_BEFORE_CHILD=$(field ownProcs)
+FOREIGN_BEFORE_CHILD=$(field foreignProcs)
+mkdir -p "$CGROOT/$RUN_CG/child"
+CHILD_PID=$(idle_node)
+echo "$CHILD_PID" > "$CGROOT/$RUN_CG/child/cgroup.procs" 2>/dev/null || true
+wait_samples 3
+OWN_AFTER_CHILD=$(field ownProcs)
+FOREIGN_AFTER_CHILD=$(field foreignProcs)
+CHILD_ROW=$(grep -o "ownPids=[^ ]*" "$OUT" | tail -1 | cut -d= -f2)
+if [ "${OWN_AFTER_CHILD:-0}" -eq "$(( ${OWN_BEFORE_CHILD:-0} + 1 ))" ] 2>/dev/null && [ "${FOREIGN_AFTER_CHILD:-0}" = "${FOREIGN_BEFORE_CHILD:-0}" ] 2>/dev/null; then
+  pass "5h a child cgroup's process is the RUN's own, in both counts (own $OWN_BEFORE_CHILD -> $OWN_AFTER_CHILD, foreign unchanged at $FOREIGN_AFTER_CHILD)"
+else
+  fail "5h a child cgroup's process is the RUN's own, in both counts" "own $OWN_BEFORE_CHILD -> $OWN_AFTER_CHILD, foreign $FOREIGN_BEFORE_CHILD -> $FOREIGN_AFTER_CHILD"
+fi
+case ",$CHILD_ROW," in
+  *",$CHILD_PID,"*)
+    pass "5i the published own PID SET includes the child cgroup's process (pid $CHILD_PID)" ;;
+  *)
+    fail "5i the published own PID SET includes the child cgroup's process" "pid $CHILD_PID is not in [$CHILD_ROW]" ;;
+esac
+kill "$CHILD_PID" 2>/dev/null
+rmdir "$CGROOT/$RUN_CG/child" 2>/dev/null
+
+# The fixtures are killed AFTER the child-cgroup scenario: killing the run's
+# own idle process first would change the own count underneath it, and the
+# scenario is about the child, not about the idle process's lifetime.
 kill "$FIXTURE_PID" "$SIBLING_PID" "$OWN_BUSY_PID2" "$OWN_PID" 2>/dev/null
 
 # --- 6. the census and the field hygiene ---------------------------------------------------------------
@@ -467,7 +540,22 @@ else
 fi
 # The observer's own accounting must have been sound in EVERY sample it took:
 # a sample whose observer cgroup or cgroup reads failed is not a measurement.
-BAD_SIGNALS=$(awk '{for(i=1;i<=NF;i++) if ($i ~ /^(obsCgroupOk|obsReadOk|deltaValid)=0$/) c++} END{printf "%d", c+0}' "$OUT")
+# An ABSENT signal counts as a failed one: a log that does not carry the
+# flag at all is not a log whose accounting was sound, it is a log that does
+# not say. runCgroupOk is included for the same reason.
+BAD_SIGNALS=$(awk '
+  {
+    for (i = 1; i <= NF; i++) {
+      if ($i ~ /^(obsCgroupOk|obsReadOk|deltaValid|runCgroupOk)=0$/) c++
+    }
+    seen = 0
+    for (i = 1; i <= NF; i++) {
+      if ($i ~ /^(obsCgroupOk|obsReadOk|deltaValid|runCgroupOk)=/) seen++
+    }
+    if (seen < 4) c += (4 - seen)
+  }
+  END { printf "%d", c + 0 }
+' "$OUT")
 if [ "${BAD_SIGNALS:-1}" = "0" ]; then
   pass "6d every sample the observer took had sound accounting"
 else

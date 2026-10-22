@@ -1,5 +1,5 @@
 {
-  "report": "the host's baseline distribution \u2014 the foreign state of ngs-staging with no run present",
+  "report": "the host's baseline distribution — the foreign state of ngs-staging with no run present",
   "measuredAt": "2026-10-22T07:12:40Z/2026-10-22T07:30:42Z",
   "thresholdsFile": "docs/implementation/rel3-quiet-host-thresholds.json",
   "thresholdsDigest": "sha256:ccb4bcaee02fd71ad45f211422c2bd2d26f9c95d7878c21f476573c08582b358",
@@ -19,5 +19,21 @@
     "meanMax": 1.576,
     "foreignProcessLimit": 7
   },
-  "note": "the limits are this baseline plus the registered allowances; a second window measured the same host the same day during a PHP-build burst (41 samples, mean 0.954, median 0.916, max 1.966) and stayed inside them, which is the calibration"
+  "note": "the limits are this baseline plus the registered allowances; a second window measured the same host the same day during a PHP-build burst (41 samples, mean 0.954, median 0.916, max 1.966) and stayed inside them, which is the calibration",
+  "secondWindow": {
+    "note": "The same host, the same day, measured while the host's PHP-build burst was running. Its RAW trace is archived beside this file, so the numbers are checkable rather than a summary. It was collected with the observer's EARLIER revision: that revision's CPU arithmetic was identical (user+nice+system+irq+softirq, idle and iowait excluded, the run's CPU from the cgroup), but it did not yet emit the validity signals, and its PROCESS COUNT was wrong whenever a run was present — and this window has no run, so its foreign node processes are the host's own services, as recorded. The first sample of the trace is the observer's synthetic one (gapSec=0) and is excluded from every statistic here, exactly as the scorer excludes it from a baseline.",
+    "log": "docs/release-evidence/v0.2.0-quiet-host/host-baseline-burst-window-2026-10-22.log",
+    "measuredAt": "2026-10-22T05:50:38Z/2026-10-22T06:29:42Z",
+    "samples": 40,
+    "syntheticSamplesExcluded": 1,
+    "foreignCores": {
+      "mean": 0.9779,
+      "median": 0.916,
+      "p95": 1.434,
+      "max": 1.966
+    },
+    "foreignProcessMax": 13,
+    "peakNote": "the host's own PHP-build burst, measured rather than assumed",
+    "foreignProcessMaxNote": "The foreign process count in that window is inflated to 13 by the observer's then-current defect: the run that was rehearsed inside the window had its own seven processes counted as foreign. The window's CPU figures are NOT affected — the run's CPU came from its cgroup — and the four foreign node processes it records outside the run are the host's own services. This is the defect the review found and the observer now fixes; it is recorded here rather than quietly trimmed."
+  }
 }

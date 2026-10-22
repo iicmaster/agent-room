@@ -44,6 +44,7 @@ RECORD="$PARENT/launch-record.txt"
 TELEMETRY="$REPO/scripts/rel1-soak-telemetry.sh"
 SCORER="$REPO/scripts/rel3-soak-eligibility.mjs"
 THRESHOLDS="$REPO/docs/implementation/rel3-quiet-host-thresholds.json"
+EXTRA_BASELINE="$REPO/docs/release-evidence/v0.2.0-quiet-host/host-baseline-2026-10-22.log"
 CGROOT=/sys/fs/cgroup
 # The baseline window's length, in minutes. The qualifying run uses the
 # default; the override exists so the launch path can be REHEARSED without
@@ -95,7 +96,14 @@ CENSUS="$PARENT/baseline-census.txt"
   echo "thresholds_digest sha256:$(digest "$THRESHOLDS")"
   echo "observer_digest sha256:$(digest "$TELEMETRY")"
   echo "scorer_digest sha256:$(digest "$SCORER")"
+  echo "selfcheck_digest sha256:$(digest "$REPO/scripts/rel1-soak-telemetry-check.sh")"
+  echo "adjudicator_digest sha256:$(digest "$REPO/scripts/rel3-soak-adjudicate.sh")"
   echo "launcher_digest sha256:$(digest "$0")"
+  # The extra baseline source — an EARLIER measurement of this host with the
+  # same observer — is bound by digest here, so that the file the scorer
+  # reads at adjudication time is the file this launch recorded.
+  echo "extra_baseline_file $EXTRA_BASELINE"
+  echo "extra_baseline_digest sha256:$(digest "$EXTRA_BASELINE" 2>/dev/null || echo none)"
 } >> "$RECORD"
 
 # --- 1. the observer, and its readiness -------------------------------------------
@@ -108,17 +116,33 @@ echo "observer_pid $OBS_PID" >> "$RECORD"
 echo "telemetry_log $TELEMETRY_LOG" >> "$RECORD"
 echo "census $CENSUS" >> "$RECORD"
 
+# A DIRTY REGISTRATION IS NOT A REGISTRATION. The rule's bytes are pinned by
+# digest, and the digests are taken from the tree the run is launched from —
+# so a tree with uncommitted changes is a tree whose bytes may change between
+# the launch and the scoring. The launcher refuses to start on one.
+CHANGED_PATHS=$(cd "$REPO" && git status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+if [ "${CHANGED_PATHS:-0}" != "0" ]; then
+  echo "repository_dirty $CHANGED_PATHS changed path(s) — the registration is not a registration while the tree is dirty" >> "$RECORD"
+  echo "rel3-soak-launch: the repository has ${CHANGED_PATHS} uncommitted change(s); commit them, or the night's bytes are not the night's bytes" >&2
+  exit 7
+fi
+echo "repository_clean yes" >> "$RECORD"
+
 # The observer must produce a sample whose own validity signals are good. An
 # observer that cannot account for its own CPU, or cannot read the run's
 # cgroup, would make every sample unscoreable — so the launch waits for a
 # good one and gives up rather than starting a night nobody could judge.
 READY=0
-for _ in $(seq 1 30); do
+# The observer's FIRST sample has no previous sample to difference against,
+# so it is not an interval; the second one arrives a full cadence later. The
+# readiness wait must outlast that, or it gives up at the exact moment the
+# first sound sample appears.
+for _ in $(seq 1 150); do
   sleep 2
   if [ -s "$TELEMETRY_LOG" ]; then
     LAST=$(tail -1 "$TELEMETRY_LOG")
     case "$LAST" in
-      *"obsCgroupOk=1"*"obsReadOk=1"*"deltaValid=1"*) READY=1 ;;
+      *"interval=1"*"obsCgroupOk=1"*"obsReadOk=1"*"deltaValid=1"*) READY=1 ;;
     esac
     [ "$READY" = 1 ] && break
   fi
@@ -230,25 +254,81 @@ echo "evidence_dir $WORLD/evidence" >> "$RECORD"
 sleep 150
 FIRST_OWN=$(grep -o 'ownProcs=[0-9]*' "$TELEMETRY_LOG" 2>/dev/null | tail -1 | cut -d= -f2)
 FIRST_FOREIGN=$(grep -o 'foreignProcs=[0-9]*' "$TELEMETRY_LOG" 2>/dev/null | tail -1 | cut -d= -f2)
+LAST_ROW=$(tail -1 "$TELEMETRY_LOG" 2>/dev/null)
 OWN_MIN=6
+# The cadence and the foreign limit are the REGISTERED ones, not numbers
+# invented here.
+CADENCE_SECONDS=$(python3 -c "
+import json
+print(json.load(open('$THRESHOLDS')).get('cadenceSeconds', 60))
+" 2>/dev/null || echo 60)
+CADENCE_TOLERANCE_SECONDS=$(python3 -c "
+import json
+print(json.load(open('$THRESHOLDS')).get('cadenceToleranceSeconds', 15))
+" 2>/dev/null || echo 15)
+# The foreign limit is the REGISTERED one, not a number invented here.
+FOREIGN_LIMIT=$(python3 -c "
+import json
+print(json.load(open('$THRESHOLDS')).get('foreignProcessLimit', 0))
+" 2>/dev/null || echo 0)
 {
   echo "minute_one_own_processes ${FIRST_OWN:-unknown}"
   echo "minute_one_foreign_processes ${FIRST_FOREIGN:-unknown}"
   echo "minute_one_expected_own_minimum $OWN_MIN"
+  echo "minute_one_foreign_limit $FOREIGN_LIMIT"
 } >> "$RECORD"
+# The whole partition, not just the own count: the run's own processes must
+# be present, the host's foreign processes must be within the registered
+# limit, the newest sample must be fresh, and its accounting signals must be
+# sound. A partition that is wrong in any of those ways is stopped HERE,
+# at minute one, rather than at hour twelve.
+PARTITION_OK=1
 if [ "${FIRST_OWN:-0}" -lt "$OWN_MIN" ] 2>/dev/null; then
+  PARTITION_OK=0
+  echo "minute_one_problem only ${FIRST_OWN:-0} own processes were seen (at least $OWN_MIN expected)" >> "$RECORD"
+fi
+if [ "${FIRST_FOREIGN:-0}" -gt "$FOREIGN_LIMIT" ] 2>/dev/null; then
+  PARTITION_OK=0
+  echo "minute_one_problem ${FIRST_FOREIGN:-0} foreign processes were seen (the registered limit is $FOREIGN_LIMIT)" >> "$RECORD"
+fi
+case "$LAST_ROW" in
+  *"interval=1"*"obsCgroupOk=1"*"obsReadOk=1"*"runCgroupOk=1"*"deltaValid=1"*) ;;
+  *)
+    PARTITION_OK=0
+    echo "minute_one_problem the newest sample's accounting signals are not all sound" >> "$RECORD"
+    ;;
+esac
+# FRESHNESS. A well-formed row from two days ago is not evidence about now,
+# and a partition read from a stale row cannot be the partition of a run
+# that is happening now. The newest sample must be within the registered
+# cadence (plus its tolerance) of this moment.
+LAST_TS=$(printf '%s' "$LAST_ROW" | awk '{print $1}')
+NOW=$(date -u +%s)
+SAMPLE_AT=$(date -u -d "$LAST_TS" +%s 2>/dev/null || echo 0)
+SAMPLE_AGE=$(( NOW - SAMPLE_AT ))
+MAX_AGE=$(( CADENCE_SECONDS + CADENCE_TOLERANCE_SECONDS ))
+{
+  echo "minute_one_sample_timestamp $LAST_TS"
+  echo "minute_one_sample_age_seconds $SAMPLE_AGE"
+  echo "minute_one_max_age_seconds $MAX_AGE"
+} >> "$RECORD"
+if [ "$SAMPLE_AGE" -gt "$MAX_AGE" ] 2>/dev/null; then
+  PARTITION_OK=0
+  echo "minute_one_problem the newest sample is ${SAMPLE_AGE}s old (the maximum is ${MAX_AGE}s) — a stale row is not evidence about a run that is happening now" >> "$RECORD"
+fi
+if [ "$PARTITION_OK" != 1 ]; then
   echo "minute_one_failed — the own/foreign partition is wrong, so the run is stopped" >> "$RECORD"
   kill "$SOAK_PID" 2>/dev/null
   kill "$OBS_PID" 2>/dev/null
-  echo "rel3-soak-launch: only ${FIRST_OWN:-0} own processes were seen (expected at least $OWN_MIN); the run is stopped" >&2
+  echo "rel3-soak-launch: the minute-one partition check failed (own=${FIRST_OWN:-0} foreign=${FIRST_FOREIGN:-0} limit=$FOREIGN_LIMIT); the run is stopped" >&2
   exit 5
 fi
 echo "minute_one_ok yes" >> "$RECORD"
 
 # --- 5. the adjudication command, recorded before the night --------------------------
 {
-  echo "adjudication_command node scripts/rel3-soak-eligibility.mjs --telemetry $TELEMETRY_LOG --baseline-extra $TELEMETRY_LOG --run-start <the run's start, from soak.log> --run-end <the run's end, from the results> --thresholds $THRESHOLDS --expect-thresholds-digest sha256:$(digest "$THRESHOLDS") --out <the attempt's eligibility.json>"
-  echo "adjudication_note the scorer reads the FROZEN limits from the thresholds file; the baseline is a CROSS-CHECK, not the source of the limits"
+  echo "adjudication_command bash scripts/rel3-soak-adjudicate.sh $REPO $PARENT <the attempt's name>"
+  echo "adjudication_note ONE authoritative procedure: the helper reads the run's own bounds from the run's record (the last tracker sample, the instant the memory gate anchors to), verifies the scorer's and the baseline's bytes against this record, runs the scorer with the FROZEN thresholds and their registered digest, and archives the attempt's evidence under its own name. It never overwrites an attempt's first verdict, and it never touches the release evidence."
 } >> "$RECORD"
 
 # The observer is stopped when the run ends, so the log ends with the run

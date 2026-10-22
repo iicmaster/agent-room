@@ -81,6 +81,44 @@ ELIGIBILITY="$ARCHIVE/$ATTEMPT-eligibility.json"
 # (the scorer refuses it, correctly).
 EXTRA_BASELINE="$REPO/docs/release-evidence/v0.2.0-quiet-host/host-baseline-2026-10-22.log"
 
+# The bytes that decided the night are checked against the bytes the launch
+# recorded. A thresholds file that did not change is no guarantee that the
+# ALGORITHM that reads it did not: an unchanged thresholds file and a changed
+# scorer would decide the night by different rules.
+RECORDED_SCORER=$(grep '^scorer_digest ' "$RECORD" | head -1 | cut -d' ' -f2)
+CURRENT_SCORER="sha256:$(digest "$SCORER")"
+if [ -z "$RECORDED_SCORER" ]; then
+  echo "rel3-soak-adjudicate: the launch record binds no scorer digest; a verdict without one is a verdict against whatever scorer happened to be on disk, so nothing is scored" >&2
+  exit 4
+fi
+if [ "$RECORDED_SCORER" != "$CURRENT_SCORER" ]; then
+  echo "rel3-soak-adjudicate: the scorer is not the one the launch recorded (recorded $RECORDED_SCORER, now $CURRENT_SCORER); nothing is scored" >&2
+  exit 4
+fi
+RECORDED_EXTRA=$(grep '^extra_baseline_digest ' "$RECORD" | head -1 | cut -d' ' -f2)
+if [ -z "$RECORDED_EXTRA" ] || [ "$RECORDED_EXTRA" = "none" ]; then
+  echo "rel3-soak-adjudicate: the launch record binds no extra baseline source; the baseline cross-check would be unbound, so nothing is scored" >&2
+  exit 5
+fi
+CURRENT_EXTRA="sha256:$(digest "$EXTRA_BASELINE" 2>/dev/null || echo none)"
+if [ "$RECORDED_EXTRA" != "$CURRENT_EXTRA" ]; then
+  echo "rel3-soak-adjudicate: the extra baseline source is not the one the launch recorded (recorded $RECORDED_EXTRA, now $CURRENT_EXTRA); nothing is scored" >&2
+  exit 5
+fi
+
+# An attempt's FIRST verdict is the attempt's verdict. A repeated
+# adjudication must not overwrite it: the record of what was decided, and
+# when, is part of the evidence. The check covers BOTH files the procedure
+# writes, so a partial attempt — an eligibility JSON with no final text, or
+# the other way round — cannot be silently overwritten either.
+for existing in "$ARCHIVE/$ATTEMPT-adjudication.txt" "$ARCHIVE/$ATTEMPT-eligibility.json"; do
+  if [ -e "$existing" ]; then
+    echo "rel3-soak-adjudicate: $ATTEMPT has already been adjudicated; its record stands and is not overwritten" >&2
+    echo "the existing record is $existing" >&2
+    exit 6
+  fi
+done
+
 node "$SCORER" \
   --telemetry "$TELEMETRY" \
   ${EXTRA_BASELINE:+--baseline-extra "$EXTRA_BASELINE"} \
@@ -123,4 +161,5 @@ except Exception:
 echo "verdict $VERDICT"
 echo "eligibility $ELIGIBILITY"
 echo "archived under $ARCHIVE/$ATTEMPT.*"
+echo "the adjudication command was: node scripts/rel3-soak-eligibility.mjs --telemetry $TELEMETRY --baseline-extra $EXTRA_BASELINE --run-start $RUN_START --run-end $WINDOW_END --thresholds $THRESHOLDS ${EXPECTED_DIGEST:+--expect-thresholds-digest $EXPECTED_DIGEST} --out $ELIGIBILITY"
 exit 0

@@ -155,6 +155,19 @@ cgroup_path_of() {
   printf '%s' "$path"
 }
 
+# A cgroup and every cgroup under it. A child cgroup's processes are the
+# run's own processes: their CPU charges the parent's cpu.stat, so leaving
+# them out of the own count would split the two accountings.
+cgroup_tree() {
+  local root="$1" path child
+  printf '%s\n' "$root"
+  for child in "$root"/*; do
+    [ -d "$child" ] || continue
+    [ -r "$child/cgroup.procs" ] || continue
+    cgroup_tree "$child"
+  done
+}
+
 # Is this argv[0] a node binary? The definition is exact and stated in the
 # census header, because a baseline measured by one counter cannot be compared
 # with a count taken by another.
@@ -198,28 +211,36 @@ while true; do
   SERVER_RSS=0
   RUN_US=0
   RUN_CG_OK=0
+  OWN_PID_LIST=""
   if [ -d "$RUN_CG" ]; then
     cg_usage_usec "$RUN_CG"
     RUN_US=$CG_US
     [ "$CG_US_OK" = 1 ] && RUN_CG_OK=1
-    while IFS= read -r pid; do
-      [ -n "$pid" ] || continue
-      d="/proc/$pid"
-      { IFS= read -r -d '' argv0 < "$d/cmdline"; } 2>/dev/null || true
-      if is_node_argv0 "$argv0"; then
-        OWN_PROCS=$(( OWN_PROCS + 1 ))
-      fi
-      # The server child is recognised by its entry point, INSIDE the run's own
-      # cgroup -- so this cannot match a neighbour.
-      read_cmdline "$d/cmdline"
-      case "$CMDLINE" in
-        *server/api/server.mjs*)
-          while read -r k v _rest; do
-            if [ "$k" = "VmRSS:" ]; then SERVER_RSS="$v"; break; fi
-          done < "$d/status" 2>/dev/null
-          ;;
-      esac
-    done < "$RUN_CG/cgroup.procs" 2>/dev/null
+    # The run's own processes are the run's cgroup AND any cgroup under it.
+    # A descendant's CPU still charges the parent's cpu.stat, so a descendant
+    # left out of the own count would be counted as foreign while its CPU was
+    # subtracted as the run's — the two accountings would disagree.
+    for cg_path in $(cgroup_tree "$RUN_CG"); do
+      while IFS= read -r pid; do
+        [ -n "$pid" ] || continue
+        d="/proc/$pid"
+        { IFS= read -r -d '' argv0 < "$d/cmdline"; } 2>/dev/null || true
+        if is_node_argv0 "$argv0"; then
+          OWN_PROCS=$(( OWN_PROCS + 1 ))
+          OWN_PID_LIST="$OWN_PID_LIST,$pid"
+        fi
+        # The server child is recognised by its entry point, INSIDE the run's
+        # own cgroup -- so this cannot match a neighbour.
+        read_cmdline "$d/cmdline"
+        case "$CMDLINE" in
+          *server/api/server.mjs*)
+            while read -r k v _rest; do
+              if [ "$k" = "VmRSS:" ]; then SERVER_RSS="$v"; break; fi
+            done < "$d/status" 2>/dev/null
+            ;;
+        esac
+      done < "$cg_path/cgroup.procs" 2>/dev/null
+    done
   fi
 
   # --- the host's node processes that are not the run's --------------------------------------
@@ -306,7 +327,7 @@ while true; do
   # The raw counters are logged as well as the derived ones, so that the
   # arithmetic can be recomputed from the log alone (the self-check does
   # exactly that) without trusting the observer's own arithmetic.
-  echo "$TS load=$LOAD memAvailable_kB=${FREE:-0} nodeProcs=$NODE_PROCS ownProcs=$OWN_PROCS foreignProcs=$FOREIGN_PROCS foreignCores=$FOREIGN_CORES stealCores=$STEAL_CORES serverRss_kB=$SERVER_RSS pgmajfault=${MAJ:-0} runCpuSec=$(awk -v u="$RUN_US" 'BEGIN{printf "%.1f", u/1000000}') gapSec=$GAP busyJiffies=$BUSY_JIFFIES runCpuUs=$RUN_US obsCpuUs=$OBS_US foreignUs=${FOREIGN_US:-0} interval=$IS_INTERVAL obsCgroupOk=$OBS_CG_OK obsReadOk=$OBS_CG_READ_OK runCgroupOk=$RUN_CG_OK deltaValid=$DELTA_VALID" >> "$OUT"
+  echo "$TS load=$LOAD memAvailable_kB=${FREE:-0} nodeProcs=$NODE_PROCS ownProcs=$OWN_PROCS foreignProcs=$FOREIGN_PROCS foreignCores=$FOREIGN_CORES stealCores=$STEAL_CORES serverRss_kB=$SERVER_RSS pgmajfault=${MAJ:-0} runCpuSec=$(awk -v u="$RUN_US" 'BEGIN{printf "%.1f", u/1000000}') gapSec=$GAP busyJiffies=$BUSY_JIFFIES runCpuUs=$RUN_US obsCpuUs=$OBS_US foreignUs=${FOREIGN_US:-0} interval=$IS_INTERVAL obsCgroupOk=$OBS_CG_OK obsReadOk=$OBS_CG_READ_OK runCgroupOk=$RUN_CG_OK deltaValid=$DELTA_VALID ownPids=${OWN_PID_LIST#,}" >> "$OUT"
 
   # --- the baseline census (once) ------------------------------------------------------------
   # The foreign processes are PINNED: identity, arguments and start time,

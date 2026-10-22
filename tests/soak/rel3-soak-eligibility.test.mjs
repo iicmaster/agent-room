@@ -40,6 +40,12 @@ const WINDOW_START_MS = Date.parse(RUN_END) - TAIL_HOURS * 3600 * 1000
 // One line of the observer's log, in the exact format
 // `scripts/rel1-soak-telemetry.sh` writes: the timestamp first and bare, then
 // the fields.
+//
+// The fixture's numbers are SELF-CONSISTENT, the way the observer's are: the
+// raw foreignUs is the microseconds behind the reported foreignCores over
+// the elapsed gap, and the process census adds up. The scorer checks the
+// raw accounting against itself — a fixture whose own numbers disagree
+// would be testing the check with a broken specimen.
 const sampleLine = ({
   at,
   ownProcs = 0,
@@ -55,12 +61,13 @@ const sampleLine = ({
   busyJiffies = 971547507,
   runCpuUs = 0,
   obsCpuUs = 87396,
-  foreignUs = 0,
+  foreignUs = null,
   stealCores = 0,
   nodeProcs = null
 }) => {
   const stamp = new Date(at).toISOString().replace(/\.\d{3}Z$/, 'Z')
-  return `${stamp} load=0.87 1.07 1.25 memAvailable_kB=${memAvailable} nodeProcs=${nodeProcs ?? ownProcs + foreignProcs} ownProcs=${ownProcs} foreignProcs=${foreignProcs} foreignCores=${foreignCores} stealCores=${stealCores} serverRss_kB=0 pgmajfault=1006176 runCpuSec=0.0 gapSec=${gapSec} busyJiffies=${busyJiffies} runCpuUs=${runCpuUs} obsCpuUs=${obsCpuUs} foreignUs=${foreignUs} interval=${interval} obsCgroupOk=${obsCgroupOk} obsReadOk=${obsReadOk} runCgroupOk=${runCgroupOk} deltaValid=${deltaValid}`
+  const microseconds = foreignUs === null ? Math.round(foreignCores * 1e6 * gapSec) : foreignUs
+  return `${stamp} load=0.87 1.07 1.25 memAvailable_kB=${memAvailable} nodeProcs=${nodeProcs ?? ownProcs + foreignProcs} ownProcs=${ownProcs} foreignProcs=${foreignProcs} foreignCores=${foreignCores} stealCores=${stealCores} serverRss_kB=0 pgmajfault=1006176 runCpuSec=0.0 gapSec=${gapSec} busyJiffies=${busyJiffies} runCpuUs=${runCpuUs} obsCpuUs=${obsCpuUs} foreignUs=${microseconds} interval=${interval} obsCgroupOk=${obsCgroupOk} obsReadOk=${obsReadOk} runCgroupOk=${runCgroupOk} deltaValid=${deltaValid}`
 }
 
 // A synthetic log: the baseline before the run, the run's own samples, and
@@ -208,11 +215,21 @@ const assertReasoned = (result, needle, context) => {
   )
 }
 
-// The standard invocation: the log, the run's bounds, and the repository's
-// frozen thresholds.
+// The standard invocation: the log, the run's bounds, the repository's
+// frozen thresholds, and the digest that binds them.
+//
+// The digest is not decoration: a scoring run without it is a usage error
+// (exit 2, nothing scored), because a verdict that is not bound to a
+// thresholds file is a verdict against whatever file was on disk. A test
+// that wants a DIFFERENT digest passes its own in `args`, which comes
+// after this one and therefore wins.
 const score = (directory, { lines, args = [], thresholds = THRESHOLDS, out = null } = {}) => {
   const telemetry = writeLog(directory, lines)
-  const argv = ['--telemetry', telemetry, '--thresholds', thresholds]
+  const argv = [
+    '--telemetry', telemetry,
+    '--thresholds', thresholds,
+    '--expect-thresholds-digest', digestOf(thresholds)
+  ]
   if (out !== null) argv.push('--out', out)
   return runScorer([...argv, ...args])
 }
@@ -517,7 +534,12 @@ test('the quiet-host scorer: a window whose available memory falls below the flo
 test('the quiet-host scorer: a window whose foreign process count exceeds the baseline + headroom is CONFOUNDED', () => {
   withWorkspace(directory => {
     const lines = buildLog()
-    lines[lines.length - 1] = lines[lines.length - 1].replace('foreignProcs=4', 'foreignProcs=9')
+    // The census still adds up: five of the run's own processes and nine
+    // foreign ones make fourteen node processes. A fixture whose own counts
+    // disagree would be measuring the accounting check, not the count.
+    lines[lines.length - 1] = lines[lines.length - 1]
+      .replace('foreignProcs=4', 'foreignProcs=9')
+      .replace('nodeProcs=9', 'nodeProcs=14')
     const result = score(directory, {
       lines,
       args: ['--run-start', RUN_START, '--run-end', RUN_END]
@@ -689,6 +711,10 @@ test('the quiet-host scorer: the foreign CPU mean is weighted by ELAPSED TIME, n
     })
     const metrics = result.document.metrics
     assert.equal(metrics.foreignCoresMean, 0.8125, 'the reported mean is the elapsed-time weighted mean')
+    // The fixture's hot intervals are the 39 long ones: 39 x 75 s = 2925 s,
+    // which is 48.75 minutes of hot window — not the 39 rows that carried it.
+    assert.equal(metrics.foreignCoresSamplesAboveOneCore, 39, 'the rows above one core are reported under their own name')
+    assert.equal(metrics.foreignCoresMinutesAboveOneCore, 48.75, 'the minutes above one core are MINUTES, computed from the intervals')
     assert.ok(metrics.foreignCoresRowMean < 0.75, `the row mean would have passed; rowMean=${metrics.foreignCoresRowMean}`)
     assert.ok(metrics.foreignCoresMean > metrics.foreignCoresRowMean, 'the elapsed-time mean is the larger, stricter number')
     assertVerdict(result, 'confounded', 'a window that only fails on the elapsed-time mean')
@@ -782,5 +808,206 @@ test('the quiet-host scorer: the baseline\'s statistics exclude the observer\'s 
       Math.abs(mean - 0.8) < 0.0001,
       `the baseline mean is the mean of the MEASURED samples (${mean}), not depressed by the synthetic zero`
     )
+  })
+})
+
+test('the quiet-host scorer: a measured window whose FIRST 48 minutes were never measured is INCOMPLETE, not quiet', () => {
+  withWorkspace(directory => {
+    // The trap: the coverage falls to exactly the registered 80% floor, so
+    // the coverage check alone passes — but the window's first forty-eight
+    // minutes were never measured at all, and an unmeasured prefix is not a
+    // quiet prefix. The head gap is judged by the intervals' RAW bounds.
+    const windowStart = Date.parse('2026-10-22T14:00:00Z')
+    const dropped = new Set()
+    for (let offset = 0; offset < 48 * 60; offset += 60) dropped.add(windowStart + offset * 1000)
+    const lines = buildLog().filter(line => {
+      const at = Date.parse(line.split(' ')[0])
+      return !dropped.has(at)
+    })
+    const result = score(directory, {
+      lines,
+      args: ['--run-start', RUN_START, '--run-end', RUN_END]
+    })
+    assertVerdict(result, 'incomplete', 'a window whose first forty-eight minutes were never measured')
+    assertReasoned(result, "the window's HEAD is not covered", 'the head gap is named')
+    assert.ok(
+      result.document.metrics.gaps.some(gap => gap.kind === 'head'),
+      'the head gap is reported as a gap'
+    )
+  })
+})
+
+test('the quiet-host scorer: a window whose end falls BETWEEN two samples is ELIGIBLE, not incomplete', () => {
+  withWorkspace(directory => {
+    // The observer's clock and the harness's tracker clock do not have to
+    // coincide. The samples arrive every 60 s through 18:01:00; the window's
+    // end is 18:00:30. The interval that spans the end covers it, so the
+    // window is covered at its tail — and the verdict must not claim that the
+    // registered cadence was exceeded when only thirty seconds elapsed.
+    const lines = buildLog({ windowSamplesEnd: '2026-10-22T18:01:00Z' })
+    const result = score(directory, {
+      lines,
+      args: ['--run-start', RUN_START, '--run-end', '2026-10-22T18:00:30Z']
+    })
+    assertVerdict(result, 'eligible', 'a complete window whose end falls between two samples')
+    assert.ok(
+      !result.document.reasons.some(reason => reason.includes('window-ends-early')),
+      'the window is not reported as ending early'
+    )
+    assert.ok(
+      !result.document.reasons.some(reason => reason.includes('cadence')),
+      'the cadence is not reported as exceeded'
+    )
+    assert.equal(result.document.metrics.gapCount, 0, 'there is no gap to report')
+  })
+})
+
+test('the quiet-host scorer: a scoring run WITHOUT the registered digest is a usage error, and nothing is scored', () => {
+  withWorkspace(directory => {
+    // The thresholds file is frozen and digested; a verdict that is not bound
+    // to that digest is a verdict against whatever file happened to be on
+    // disk. So the digest is REQUIRED for a scoring run.
+    const log = writeLog(directory, buildLog())
+    const result = runScorer(['--telemetry', log, '--run-start', RUN_START, '--run-end', RUN_END])
+    assert.equal(result.status, 2, 'a scoring run without the registered digest exits 2')
+    assert.match(result.stderr, /--expect-thresholds-digest is required/, 'the usage error names what is missing')
+    assert.equal(result.document, null, 'nothing is scored')
+  })
+})
+
+test('the quiet-host scorer: raw counters that go BACKWARDS are INCOMPLETE, whatever the flags say', () => {
+  withWorkspace(directory => {
+    const lines = buildLog()
+    const target = lines.length - 40
+    const fields = Object.fromEntries(lines[target].split(' ').filter(token => token.includes('=')).map(token => token.split('=')))
+    lines[target] = lines[target].replace(`busyJiffies=${fields.busyJiffies}`, `busyJiffies=${Number(fields.busyJiffies) - 6000}`)
+    const result = score(directory, { lines, args: ['--run-start', RUN_START, '--run-end', RUN_END] })
+    assertVerdict(result, 'incomplete', 'a counter that went backwards')
+    assertReasoned(result, 'BELOW the previous sample', 'the counter that went backwards is named')
+  })
+})
+
+test('the quiet-host scorer: interval=1 with gapSec=0 is INCOMPLETE, whatever the flags say', () => {
+  withWorkspace(directory => {
+    const lines = buildLog()
+    const target = lines.length - 30
+    lines[target] = lines[target].replace(/gapSec=\d+/, 'gapSec=0')
+    const result = score(directory, { lines, args: ['--run-start', RUN_START, '--run-end', RUN_END] })
+    assertVerdict(result, 'incomplete', 'an interval with no duration')
+    assertReasoned(result, 'interval=1 with gapSec=0', 'the contradiction is named')
+  })
+})
+
+test('the quiet-host scorer: process totals that do not add up are INCOMPLETE', () => {
+  withWorkspace(directory => {
+    const lines = buildLog()
+    const target = lines.length - 20
+    lines[target] = lines[target].replace(/nodeProcs=\d+/, 'nodeProcs=99')
+    const result = score(directory, { lines, args: ['--run-start', RUN_START, '--run-end', RUN_END] })
+    assertVerdict(result, 'incomplete', 'process counts that do not add up')
+    assertReasoned(result, 'the process counts do not add up', 'the disagreement is named')
+  })
+})
+
+test('the quiet-host scorer: a residual that disagrees with its own cores is INCOMPLETE', () => {
+  withWorkspace(directory => {
+    const lines = buildLog()
+    const target = lines.length - 10
+    lines[target] = lines[target].replace(/foreignUs=\d+/, 'foreignUs=99000000')
+    const result = score(directory, { lines, args: ['--run-start', RUN_START, '--run-end', RUN_END] })
+    assertVerdict(result, 'incomplete', 'a residual that disagrees with the cores')
+    assertReasoned(result, 'the residual and the cores disagree', 'the disagreement is named')
+  })
+})
+
+test('the quiet-host scorer: a thresholds file with NO registered cadence is INCOMPLETE, and the window\'s boundaries are still checked', () => {
+  withWorkspace(directory => {
+    // The boundary checks used to sit inside the block that runs only when a
+    // cadence is registered: a thresholds file without one silently switched
+    // them off, and a window whose first forty-eight minutes were never
+    // measured came back ELIGIBLE. A missing cadence is an invalid
+    // configuration, and the boundaries are checked either way.
+    const thresholds = thresholdsVariant(directory, registered => {
+      delete registered.cadenceSeconds
+      delete registered.cadenceToleranceSeconds
+    })
+    const windowStart = Date.parse('2026-10-22T14:00:00Z')
+    const dropped = new Set()
+    for (let offset = 0; offset < 48 * 60; offset += 60) dropped.add(windowStart + offset * 1000)
+    const lines = buildLog().filter(line => !dropped.has(Date.parse(line.split(' ')[0])))
+    const result = score(directory, {
+      lines,
+      args: ['--run-start', RUN_START, '--run-end', RUN_END],
+      thresholds
+    })
+    assertVerdict(result, 'incomplete', 'a thresholds file with no cadence')
+    assertReasoned(result, 'is missing cadenceSeconds', 'the missing cadence is named')
+    // The head gap cannot be judged without a registered cadence — which is
+    // precisely why a file without one is an invalid registration rather
+    // than a measurement. The boundary check itself is proven by the fixture
+    // above, which uses the registered cadence.
+  })
+})
+
+test('the quiet-host scorer: a malformed baseline expectation is INCOMPLETE, not a silently skipped check', () => {
+  withWorkspace(directory => {
+    const thresholds = thresholdsVariant(directory, registered => {
+      registered.baselineExpectation.tolerance.median = 'not a number'
+    })
+    const result = score(directory, {
+      lines: buildLog(),
+      args: ['--run-start', RUN_START, '--run-end', RUN_END],
+      thresholds
+    })
+    assertVerdict(result, 'incomplete', 'a malformed baseline expectation')
+    assertReasoned(result, 'baselineExpectation', 'the malformed field is named')
+  })
+})
+
+test('the quiet-host scorer: a thresholds file with an unrecognised breach disposition is not eligible', () => {
+  withWorkspace(directory => {
+    const thresholds = thresholdsVariant(directory, registered => {
+      registered.dispositions.breach = 'eligible'
+    })
+    const result = score(directory, {
+      lines: buildLog({ windowCores: 3.5 }),
+      args: ['--run-start', RUN_START, '--run-end', RUN_END],
+      thresholds
+    })
+    assert.ok(result.document.verdict !== 'eligible', `a breach must not come back eligible; verdict=${result.document.verdict}`)
+    assertReasoned(result, 'dispositions.breach', 'the unrecognised disposition is named')
+  })
+})
+
+test('the quiet-host scorer: a CLOSING sample whose accounting failed cannot certify the window\'s last seconds', () => {
+  withWorkspace(directory => {
+    // The intervals are built from the whole log, so the sample that closes
+    // the interval spanning the window's end CERTIFIES those seconds. If
+    // that sample's own accounting failed, it must not be able to certify
+    // them: the health check used to look only at the samples inside the
+    // window, and the closing sample sits outside it.
+    const lines = buildLog({ windowSamplesEnd: '2026-10-22T18:01:00Z' })
+    const closing = lines[lines.length - 1]
+    assert.match(closing, /18:01:00Z/, 'the fixture ends with the sample after the window')
+    lines[lines.length - 1] = closing.replace(/deltaValid=1/, 'deltaValid=0')
+    const result = score(directory, {
+      lines,
+      args: ['--run-start', RUN_START, '--run-end', '2026-10-22T18:00:30Z']
+    })
+    assertVerdict(result, 'incomplete', 'a closing sample whose accounting failed')
+    assertReasoned(result, 'closes an interval that overlaps the measured window', 'the closing sample is named')
+  })
+})
+
+test('the quiet-host scorer: a closing sample whose RUN cgroup was unreadable cannot certify the window either', () => {
+  withWorkspace(directory => {
+    const lines = buildLog({ windowSamplesEnd: '2026-10-22T18:01:00Z' })
+    lines[lines.length - 1] = lines[lines.length - 1].replace(/runCgroupOk=1/, 'runCgroupOk=0')
+    const result = score(directory, {
+      lines,
+      args: ['--run-start', RUN_START, '--run-end', '2026-10-22T18:00:30Z']
+    })
+    assertVerdict(result, 'incomplete', 'a closing sample whose run cgroup was unreadable')
+    assertReasoned(result, 'closes an interval that overlaps the measured window', 'the closing sample is named')
   })
 })

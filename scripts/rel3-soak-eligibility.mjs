@@ -36,10 +36,28 @@
 // parsed is never skipped: it makes the verdict INCOMPLETE, with the line and
 // the field named. A minute that was not measured is not a quiet minute.
 //
+// THE WINDOW IS A STRETCH OF TIME, NOT A SET OF ROWS. The observer's sample
+// grid and the harness's tracker boundary are DIFFERENT clocks — the
+// observer samples on the minute, the tracker anchors the final window to
+// its own last sample — so the two do not have to coincide. The window is
+// therefore judged by the INTERVALS THAT OVERLAP it, each clipped to the
+// window's bounds: a sample just after the window's end still closes an
+// interval that starts inside the window, and that interval's seconds are
+// the window's. An unmeasured PREFIX of the window is a data problem exactly
+// like an unmeasured tail. The window is never moved to fit the samples, and
+// its end is never chosen after seeing the night.
+//
+// EVERY LINE IS CHECKED AGAINST ITSELF. The observer's flags are its word
+// about itself, and a broken observer cannot be trusted to report that it is
+// broken. So the raw accounting — the monotonic counters, the elapsed time,
+// the process census, the foreign CPU against its own microseconds — is
+// verified independently, and a disagreement is a DATA problem naming the
+// sample and the field.
+//
 // USAGE:
 //   node scripts/rel3-soak-eligibility.mjs --telemetry <log> --run-start <ISO>
 //        [--run-end <ISO>] [--rss-window-end <ISO>] [--thresholds <json>]
-//        [--baseline-extra <log>]... [--expect-thresholds-digest <sha256:...>]
+//        [--baseline-extra <log>]... --expect-thresholds-digest <sha256:...>
 //        [--report-baseline] [--out <json>]
 //
 //   --telemetry               the observer's log (one line per sample)
@@ -54,13 +72,20 @@
 //                             same observer (repeatable); every line of it is
 //                             held to the same rules as the run's own log
 //   --expect-thresholds-digest  the digest the launch record registered; a
-//                             mismatch is INCOMPLETE
+//                             mismatch is INCOMPLETE. It is REQUIRED for a
+//                             scoring run: a verdict that is not bound to a
+//                             thresholds file is a verdict against whatever
+//                             file happened to be on disk, so without it the
+//                             scorer scores nothing and exits 2. The
+//                             baseline REPORT judges nothing and may go
+//                             without one — and says so in its output.
 //   --report-baseline         print the baseline's distribution and judge
 //                             nothing (exit 0 when the baseline is usable)
 //   --out                     where to write the verdict (default: stdout)
 //
 // Exit 0 = ELIGIBLE. Exit 1 = CONFOUNDED or INCOMPLETE (the verdict says
-// which, and why). A missing or unreadable input is INCOMPLETE, never
+// which, and why). Exit 2 = a USAGE error: the invocation was malformed, so
+// NOTHING was scored. A missing or unreadable input is INCOMPLETE, never
 // eligible.
 
 import { createHash } from 'node:crypto'
@@ -70,7 +95,7 @@ import { fileURLToPath } from 'node:url'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const DEFAULT_THRESHOLDS = join(ROOT, 'docs', 'implementation', 'rel3-quiet-host-thresholds.json')
-const USAGE = 'usage: node scripts/rel3-soak-eligibility.mjs --telemetry <log> --run-start <ISO> [--run-end <ISO>] [--rss-window-end <ISO>] [--thresholds <json>] [--baseline-extra <log>]... [--expect-thresholds-digest <sha256:...>] [--report-baseline] [--out <json>]'
+const USAGE = 'usage: node scripts/rel3-soak-eligibility.mjs --telemetry <log> --run-start <ISO> --expect-thresholds-digest <sha256:...> [--run-end <ISO>] [--rss-window-end <ISO>] [--thresholds <json>] [--baseline-extra <log>]... [--report-baseline] [--out <json>]'
 
 // The observer's timestamp is the first, BARE token of the line — not a
 // key=value pair. Anything else is not this observer's format.
@@ -273,6 +298,55 @@ const parseLine = (line, lineNumber, source) => {
   return { sample }
 }
 
+// The RAW ACCOUNTING of a source, checked against ITSELF and independently
+// of the observer's own flags.
+//
+// WHY. The flags are the observer's word about itself, and the word of
+// something that mis-read a counter is exactly what cannot be trusted: the
+// observer that read a counter wrong is the observer that reports
+// "deltaValid=1" while the counter went backwards. So the numbers in a
+// line are checked against each other, and a disagreement is a DATA
+// problem naming the sample and the field — never a silent pass.
+//
+// The checks are the ones the observer's own arithmetic rests on:
+//   * the raw counters are MONOTONIC. A cgroup's usage_usec and the host's
+//     busy jiffies only grow; a decrease is a failed read;
+//   * `interval=1` claims an interval, so it must have elapsed time, and
+//     `interval=0` claims the log's first sample, so it must have none;
+//   * the process census must ADD UP: nodeProcs is ownProcs + foreignProcs;
+//   * the derived foreignCores must be the raw foreignUs over the elapsed
+//     gap, to within the rounding the observer applies.
+const FOREIGN_CORES_TOLERANCE = 0.002
+
+const verifyAccounting = (samples, source) => {
+  const problems = []
+  const MONOTONIC = ['busyJiffies', 'runCpuUs', 'obsCpuUs']
+  samples.forEach((sample, index) => {
+    const previous = index === 0 ? null : samples[index - 1]
+    for (const field of MONOTONIC) {
+      if (previous !== null && sample[field] < previous[field]) {
+        problems.push(`${source}: line ${sample.line}: ${field} went backwards (${previous[field]} at line ${previous.line}, then ${sample[field]}) — a counter that decreases is a failed read, not a measurement`)
+      }
+    }
+    if (sample.interval === 1 && !(sample.gapSec > 0)) {
+      problems.push(`${source}: line ${sample.line}: interval=1 with gapSec=${sample.gapSec} — an interval with no elapsed time is not an interval`)
+    }
+    if (sample.interval === 0 && sample.gapSec !== 0) {
+      problems.push(`${source}: line ${sample.line}: interval=0 with gapSec=${sample.gapSec} — only the first sample of a log has no previous sample to difference against, and no elapsed time`)
+    }
+    if (sample.nodeProcs !== sample.ownProcs + sample.foreignProcs) {
+      problems.push(`${source}: line ${sample.line}: nodeProcs=${sample.nodeProcs} does not equal ownProcs+foreignProcs (${sample.ownProcs}+${sample.foreignProcs}) — the process census does not add up`)
+    }
+    if (sample.gapSec > 0) {
+      const rate = sample.foreignUs / 1e6 / sample.gapSec
+      if (Math.abs(rate - sample.foreignCores) > FOREIGN_CORES_TOLERANCE) {
+        problems.push(`${source}: line ${sample.line}: foreignUs=${sample.foreignUs} over gapSec=${sample.gapSec} is ${rate.toFixed(4)} cores, but foreignCores says ${sample.foreignCores} — the derived figure and the raw accounting disagree`)
+      }
+    }
+  })
+  return problems
+}
+
 // A whole source (the run's log, or an extra baseline source), parsed with
 // the same rules. A parse problem is NOT discarded: it is returned, and the
 // caller makes the verdict INCOMPLETE.
@@ -312,6 +386,9 @@ const parseSource = (text, source) => {
       problems.push(`${source}: line ${samples[index].line}: the sample's timestamp (${samples[index].ts}) is not after the previous sample's (${samples[index - 1].ts}) — the samples are not strictly increasing in time`)
     }
   }
+
+  // The raw accounting, checked against itself.
+  problems.push(...verifyAccounting(samples, source))
 
   return { samples, problems, comments }
 }
@@ -380,6 +457,14 @@ const rollingMeanMax = (intervals, rollingSeconds) => {
 
 const rounded = (value, digits = 4) => (value === null || value === undefined ? null : Number(value.toFixed(digits)))
 
+// The dispositions the thresholds file may register. A verdict is one of
+// three things — ELIGIBLE, CONFOUNDED or INCOMPLETE — and a disposition that
+// is not one of the two the contract knows would let a breached window be
+// recorded as something the contract never named ('eligible' being the
+// worst case). So an unrecognised disposition is a DATA problem, not a
+// disposition.
+const RECOGNISED_DISPOSITIONS = ['confounded', 'incomplete']
+
 const readConfiguration = (thresholds, addData) => {
   const config = {
     cadenceSeconds: null,
@@ -438,8 +523,19 @@ const readConfiguration = (thresholds, addData) => {
     const minimum = number(thresholds.baseline.minimumSamples, 'baseline.minimumSamples', { min: 1 })
     if (minimum !== null) config.baselineMinimumSamples = minimum
   }
-  if (thresholds.dispositions?.breach) config.dispositions.breach = thresholds.dispositions.breach
-  if (thresholds.dispositions?.missingOrInvalidTelemetry) config.dispositions.incomplete = thresholds.dispositions.missingOrInvalidTelemetry
+  // A disposition that this scorer does not know is not a disposition. It
+  // is a broken registration, and it is a broken registration that would
+  // otherwise decide the verdict — so it is a DATA problem.
+  const disposition = (value, label, fallback) => {
+    if (value === undefined || value === null) return fallback
+    if (!RECOGNISED_DISPOSITIONS.includes(value)) {
+      addData('configuration-invalid', `the thresholds file's dispositions.${label} is ${JSON.stringify(value)}, which is not a disposition this scorer knows (${RECOGNISED_DISPOSITIONS.join(', ')})`)
+      return fallback
+    }
+    return value
+  }
+  config.dispositions.breach = disposition(thresholds.dispositions?.breach, 'breach', config.dispositions.breach)
+  config.dispositions.incomplete = disposition(thresholds.dispositions?.missingOrInvalidTelemetry, 'missingOrInvalidTelemetry', config.dispositions.incomplete)
 
   return config
 }
@@ -519,21 +615,88 @@ const readCpuLimits = (thresholds, addData) => {
 // file carries one. Read defensively: the block may live at the top level or
 // inside `baseline`, and it may name the numbers under either a plain or a
 // "measured" key.
-const readBaselineExpectation = thresholds => {
-  const block = thresholds.baselineExpectation ?? thresholds.baseline?.baselineExpectation ?? null
-  if (!block || typeof block !== 'object') return null
-  const pick = (...keys) => {
-    for (const key of keys) {
-      if (block[key] !== undefined && block[key] !== null) return strictNumber(String(block[key]))
+//
+// FAIL-CLOSED. The block is the cross-check that this host has not MOVED
+// since the registration. A block that cannot be read — absent, not an
+// object, a non-numeric number, a negative tolerance, a missing tolerance —
+// must not quietly DISABLE that cross-check: a scorer that skips the check
+// it could not parse is a scorer judging under a rule nobody registered.
+// So a malformed block is a DATA problem, and the attempt is INCOMPLETE.
+// The observer's RAW accounting is verified, not taken on trust. The flags
+// say whether the observer believed its own numbers; these checks say whether
+// the numbers are consistent with each other. A log whose counters go
+// backwards, whose totals do not add up, or whose residual disagrees with
+// its own cores is not a measurement, whatever its flags say.
+const verifyRawAccounting = (samples, label, addData) => {
+  const counters = ['busyJiffies', 'runCpuUs', 'obsCpuUs']
+  let previous = null
+  for (const sample of samples) {
+    for (const counter of counters) {
+      if (previous !== null && sample[counter] < previous[counter]) {
+        addData('accounting-counter-went-backwards', `${label}: the sample at ${sample.ts} reports ${counter}=${sample[counter]}, which is BELOW the previous sample's ${previous[counter]} — a counter that goes backwards is a failed read, not a measurement`)
+      }
     }
+    if (sample.interval === 1 && !(sample.gapSec > 0)) {
+      addData('accounting-interval-without-duration', `${label}: the sample at ${sample.ts} says interval=1 with gapSec=${sample.gapSec} — an interval with no duration is not an interval`)
+    }
+    if (sample.interval === 0 && sample.gapSec !== 0) {
+      addData('accounting-synthetic-sample-with-duration', `${label}: the sample at ${sample.ts} says interval=0 with gapSec=${sample.gapSec} — the first sample of a log has no previous sample to difference against, so it can carry no duration`)
+    }
+    if (sample.nodeProcs !== sample.ownProcs + sample.foreignProcs) {
+      addData('accounting-totals-disagree', `${label}: the sample at ${sample.ts} reports nodeProcs=${sample.nodeProcs} but ownProcs=${sample.ownProcs} + foreignProcs=${sample.foreignProcs} = ${sample.ownProcs + sample.foreignProcs} — the process counts do not add up`)
+    }
+    if (sample.interval === 1 && sample.gapSec > 0) {
+      const implied = sample.foreignUs / 1_000_000 / sample.gapSec
+      if (Math.abs(implied - sample.foreignCores) > 0.002) {
+        addData('accounting-residual-disagrees-with-cores', `${label}: the sample at ${sample.ts} reports foreignCores=${sample.foreignCores} but foreignUs=${sample.foreignUs} over gapSec=${sample.gapSec} implies ${implied.toFixed(4)} — the residual and the cores disagree`)
+      }
+    }
+    previous = sample
+  }
+}
+
+const readBaselineExpectation = (thresholds, addData) => {
+  const block = thresholds.baselineExpectation ?? thresholds.baseline?.baselineExpectation ?? null
+  if (block === null || block === undefined) {
+    addData('configuration-invalid', 'the thresholds file registers no baseline expectation — the cross-check that this host has not moved since the registration cannot be skipped')
     return null
   }
+  if (typeof block !== 'object' || Array.isArray(block)) {
+    addData('configuration-invalid', `the thresholds file's baselineExpectation is not an object (${JSON.stringify(block)})`)
+    return null
+  }
+  const number = (value, label) => {
+    if (value === undefined || value === null) return null
+    const parsed = strictNumber(String(value))
+    if (parsed === null || parsed < 0) {
+      addData('configuration-invalid', `the thresholds file's baselineExpectation.${label} is not a finite, non-negative number (${JSON.stringify(value)})`)
+      return null
+    }
+    return parsed
+  }
+  const toleranceBlock = block.tolerance ?? {}
+  const median = number(block.median ?? block.medianCores ?? block.measuredMedian, 'median')
+  const mean = number(block.mean ?? block.meanCores ?? block.measuredMean, 'mean')
+  const toleranceMedian = number(block.toleranceMedian ?? toleranceBlock.median, 'tolerance.median')
+  const toleranceMean = number(block.toleranceMean ?? toleranceBlock.mean, 'tolerance.mean')
+  if (median === null && mean === null) {
+    addData('configuration-invalid', 'the thresholds file\'s baselineExpectation registers neither a median nor a mean — there is nothing to compare the measured baseline with')
+    return null
+  }
+  // A tolerance is not the scorer's to invent: it is registered with the
+  // number it forgives.
+  if (median !== null && toleranceMedian === null) {
+    addData('configuration-invalid', 'the thresholds file\'s baselineExpectation registers a median with no tolerance — the scorer does not invent one')
+  }
+  if (mean !== null && toleranceMean === null) {
+    addData('configuration-invalid', 'the thresholds file\'s baselineExpectation registers a mean with no tolerance — the scorer does not invent one')
+  }
   return {
-    median: pick('median', 'medianCores', 'measuredMedian'),
-    mean: pick('mean', 'meanCores', 'measuredMean'),
+    median,
+    mean,
     tolerance: {
-      median: pick('toleranceMedian') ?? (block.tolerance?.median !== undefined ? strictNumber(String(block.tolerance.median)) : null) ?? 0.15,
-      mean: pick('toleranceMean') ?? (block.tolerance?.mean !== undefined ? strictNumber(String(block.tolerance.mean)) : null) ?? 0.25
+      median: toleranceMedian,
+      mean: toleranceMean
     },
     source: thresholds.baselineExpectation ? 'baselineExpectation' : 'baseline.baselineExpectation'
   }
@@ -541,6 +704,25 @@ const readBaselineExpectation = thresholds => {
 
 const main = argv => {
   const { options, errors } = parseArgs(argv)
+
+  // The thresholds digest is REQUIRED for a scoring run.
+  //
+  // WHY. The scorer is the named adjudication step, and the verdict it
+  // writes is what the attempt's own record is built on. A verdict that is
+  // not bound to a thresholds file is a verdict against WHATEVER file was on
+  // disk when the scorer ran — and the whole point of freezing the
+  // thresholds in a digested file is that a file edited after the launch
+  // cannot re-define the contract a night is judged under. So a scoring
+  // invocation without the registered digest is a USAGE error: nothing is
+  // scored, nothing is written, and the exit code says so. The baseline
+  // REPORT judges nothing, so it may go without one — and says so in its
+  // output.
+  if (!options.reportBaseline && options.expectThresholdsDigest === null) {
+    const problems = ['--expect-thresholds-digest is required — the digest the launch record registered for the thresholds file', ...errors]
+    process.stderr.write(`rel3-soak-eligibility: ${problems.join('\n  ')}\n${USAGE}\n`)
+    return 2
+  }
+
   const findings = []
   const addData = (code, detail) => findings.push({ kind: 'data', code, detail })
   const addBreach = (code, detail) => findings.push({ kind: 'breach', code, detail })
@@ -565,13 +747,17 @@ const main = argv => {
       addData('thresholds-invalid', `the thresholds file is not valid JSON: ${thresholdsPath} (${error.message})`)
     }
   }
+  // The digest comparison is against the file ACTUALLY READ: the bytes the
+  // scorer opened, not a path it was told about and not a copy of the
+  // registered numbers. A file that changed between the launch and the
+  // scoring is a different rule, and the scorer refuses it.
   if (options.expectThresholdsDigest !== null && thresholdsDigest !== null && options.expectThresholdsDigest !== thresholdsDigest) {
     addData('thresholds-digest-mismatch', `the thresholds file's digest is ${thresholdsDigest}, but the launch record registered ${options.expectThresholdsDigest}`)
   }
 
   const config = readConfiguration(thresholds, addData)
   const limits = readCpuLimits(thresholds, addData)
-  const baselineExpectation = readBaselineExpectation(thresholds)
+  const baselineExpectation = readBaselineExpectation(thresholds, addData)
 
   // --- the run's own bounds -------------------------------------------------
   const runStart = options.runStart === null ? NaN : Date.parse(options.runStart)
@@ -611,6 +797,7 @@ const main = argv => {
       runLog.problems = parsed.problems
       runLog.comments = parsed.comments
       for (const problem of parsed.problems) addData('sample-invalid', problem)
+      verifyRawAccounting(runLog.samples, 'the telemetry log', addData)
     }
   }
 
@@ -635,6 +822,7 @@ const main = argv => {
     }
     const parsed = parseSource(text, `the extra baseline source ${extraPath}`)
     for (const problem of parsed.problems) addData('sample-invalid', problem)
+    verifyRawAccounting(parsed.samples, `the extra baseline source ${extraPath}`, addData)
     extraSources.push({ path: extraPath, samples: parsed.samples, problems: parsed.problems, comments: parsed.comments })
   }
 
@@ -742,59 +930,70 @@ const main = argv => {
     ? []
     : runLog.samples.filter(sample => sample.at >= windowStart && sample.at <= windowEnd)
 
-  const gaps = []
+  // The window's INTERVALS.
+  //
+  // The window is a stretch of TIME, not a set of rows. The observer's
+  // sample grid and the harness's tracker boundary are different clocks —
+  // the observer samples on the minute, the tracker anchors the final
+  // window to its own last sample — so the two do not have to coincide, and
+  // the contract does not ask them to. So the window is judged by the
+  // intervals that OVERLAP it, each clipped to the window's bounds: a
+  // sample just AFTER the window's end still closes an interval that
+  // starts inside the window, and that interval's seconds are the window's.
+  //
+  // The window's bounds come from the run's end and are never moved to fit
+  // the samples, and the end is never chosen after seeing the night.
   const intervals = []
-  let headSeconds = 0
-  let tailSeconds = 0
-  if (window.length > 0) {
+  if (windowStart !== null) {
     // A cadence that is not registered cannot be claimed: the configuration
     // is already invalid, and inventing a tolerance here would invent a
     // measurement too.
     const minInterval = config.cadenceSeconds === null ? null : config.cadenceSeconds - config.cadenceToleranceSeconds
     const maxInterval = config.cadenceSeconds === null ? null : config.cadenceSeconds + config.cadenceToleranceSeconds
-    for (let index = 1; index < window.length; index += 1) {
-      const previous = window[index - 1]
-      const current = window[index]
-      const seconds = (current.at - previous.at) / 1000
-      const inCadence = minInterval === null ? true : seconds >= minInterval && seconds <= maxInterval
-      if (!inCadence) {
-        gaps.push({
-          kind: 'interval',
-          from: previous.ts,
-          to: current.ts,
-          seconds,
-          expectedSeconds: config.cadenceSeconds,
-          toleranceSeconds: config.cadenceToleranceSeconds
-        })
-      }
-      if (seconds > 0) intervals.push({ value: current.foreignCores, seconds, inCadence })
-    }
-    // The window's HEAD: the run's samples before the window's first sample.
-    // The window's bounds come from the run's end, which is not on the
-    // observer's sample grid, so the head is measured and reported, and it is
-    // a gap only when it is longer than the tolerance.
-    headSeconds = Math.max(0, (window[0].at - windowStart) / 1000)
-    if (headSeconds > (config.cadenceToleranceSeconds ?? 0)) {
-      gaps.push({
-        kind: 'head',
-        from: new Date(windowStart).toISOString(),
-        to: window[0].ts,
-        seconds: headSeconds,
-        expectedSeconds: config.cadenceSeconds,
-        toleranceSeconds: config.cadenceToleranceSeconds
+    for (let index = 1; index < runLog.samples.length; index += 1) {
+      const previous = runLog.samples[index - 1]
+      const current = runLog.samples[index]
+      const duration = (current.at - previous.at) / 1000
+      if (!(duration > 0)) continue
+      const overlapStart = Math.max(previous.at, windowStart)
+      const overlapEnd = Math.min(current.at, windowEnd)
+      const overlap = Math.max(0, (overlapEnd - overlapStart) / 1000)
+      const inCadence = minInterval === null ? true : duration >= minInterval && duration <= maxInterval
+      intervals.push({
+        from: previous.ts,
+        to: current.ts,
+        fromMs: previous.at,
+        toMs: current.at,
+        fromTs: previous.ts,
+        toTs: current.ts,
+        previousSample: previous,
+        currentSample: current,
+        // The observer writes the residual for the interval that ENDED at a
+        // sample, so the value and the duration belong together.
+        value: current.foreignCores,
+        duration,
+        overlap,
+        overlapStart,
+        overlapEnd,
+        inCadence
       })
     }
-    // The window's TAIL: the observer's last sample before the run ended. A
-    // log that simply STOPS before the window does is not a window that
-    // happened to be quiet — it is a window that was never measured to its
-    // end. This is the case the coverage check exists to catch.
-    tailSeconds = Math.max(0, (windowEnd - window[window.length - 1].at) / 1000)
-    if (tailSeconds > (config.cadenceToleranceSeconds ?? 0)) {
+  }
+
+  // The intervals that overlap the window, and the ones among them that
+  // arrived at the registered cadence. An interval that overlaps the
+  // window by nothing is not part of the window at all.
+  const overlapping = intervals.filter(interval => interval.overlap > 0)
+  const validIntervals = overlapping.filter(interval => interval.inCadence)
+
+  const gaps = []
+  for (const interval of overlapping) {
+    if (!interval.inCadence) {
       gaps.push({
-        kind: 'tail',
-        from: window[window.length - 1].ts,
-        to: new Date(windowEnd).toISOString(),
-        seconds: tailSeconds,
+        kind: 'interval',
+        from: interval.from,
+        to: interval.to,
+        seconds: interval.duration,
         expectedSeconds: config.cadenceSeconds,
         toleranceSeconds: config.cadenceToleranceSeconds
       })
@@ -802,16 +1001,70 @@ const main = argv => {
   }
 
   // --- coverage, in ELAPSED TIME --------------------------------------------
-  // The covered seconds are the sum of the VALID intervals' durations: a gap
-  // is a gap, and an absent minute contributes no coverage at all. The
-  // coverage is therefore a statement about TIME, not about rows.
-  const validIntervals = intervals.filter(interval => interval.inCadence)
-  const coveredSeconds = validIntervals.reduce((sum, interval) => sum + interval.seconds, 0)
+  // The covered seconds are the sum of the VALID intervals' time INSIDE the
+  // window: a gap is a gap, and an absent minute contributes no coverage at
+  // all. The coverage is therefore a statement about TIME, not about rows.
+  const coveredSeconds = validIntervals.reduce((sum, interval) => sum + interval.overlap, 0)
   const tolerance = config.cadenceToleranceSeconds ?? 0
-  const coveredWithEdges = coveredSeconds
-    + (headSeconds <= tolerance ? headSeconds : 0)
-    + (tailSeconds <= tolerance ? tailSeconds : 0)
-  const coverage = windowSeconds > 0 ? coveredWithEdges / windowSeconds : 0
+  const coverage = windowSeconds > 0 ? coveredSeconds / windowSeconds : 0
+
+  // --- the window's HEAD and TAIL --------------------------------------------
+  // The window is covered at its head when the first interval that overlaps
+  // it reaches back to the window's start, and at its tail when the last
+  // interval that overlaps it reaches forward to the window's end.
+  //
+  // An UNMEASURED PREFIX is a data problem exactly like an unmeasured tail:
+  // a minute of the window that was not measured is not a quiet minute, and
+  // the head is where a log that starts late — or that skipped the first
+  // part of the window — hides. The window's bounds are not moved to fit the
+  // samples; the gap is reported and the attempt is INCOMPLETE.
+  const firstCovered = validIntervals.length > 0 ? validIntervals[0] : null
+  const lastCovered = validIntervals.length > 0 ? validIntervals[validIntervals.length - 1] : null
+  // The head and the tail are judged by the intervals' RAW bounds, not by
+  // their CLIPPED overlap with the window. The clipped overlap starts at the
+  // window's start whenever any interval reaches it, which hides exactly
+  // the case this check exists for: a window whose first forty-eight minutes
+  // were never measured. The raw bound says where the measurement actually
+  // began.
+  //
+  // And because the bounds are the raw ones, a window whose end falls
+  // BETWEEN two samples is not a failure: the interval that spans the end
+  // covers it, and the observer's clock and the harness's tracker clock do
+  // not have to coincide.
+  const headSeconds = firstCovered === null
+    ? windowSeconds
+    : Math.max(0, (firstCovered.fromMs - windowStart) / 1000)
+  const tailSeconds = lastCovered === null
+    ? windowSeconds
+    : Math.max(0, (windowEnd - lastCovered.toMs) / 1000)
+  if (headSeconds > tolerance) {
+    gaps.push({
+      kind: 'head',
+      from: new Date(windowStart).toISOString(),
+      to: firstCovered === null ? null : new Date(firstCovered.fromMs).toISOString(),
+      seconds: headSeconds,
+      expectedSeconds: config.cadenceSeconds,
+      toleranceSeconds: config.cadenceToleranceSeconds
+    })
+  }
+  // The window's TAIL: a log that simply STOPS before the window does is not
+  // a window that happened to be quiet — it is a window that was never
+  // measured to its end. This is the case the coverage check exists to
+  // catch.
+  if (tailSeconds > tolerance) {
+    gaps.push({
+      kind: 'tail',
+      from: lastCovered === null ? null : new Date(lastCovered.toMs).toISOString(),
+      to: new Date(windowEnd).toISOString(),
+      seconds: tailSeconds,
+      expectedSeconds: config.cadenceSeconds,
+      toleranceSeconds: config.cadenceToleranceSeconds
+    })
+  }
+
+  // The intervals the window's own statistics are computed over: the valid
+  // ones, with the seconds that fall inside the window.
+  const coveredIntervals = validIntervals.map(interval => ({ value: interval.value, seconds: interval.overlap }))
 
   if (window.length === 0) {
     addData('window-empty', 'the measured window holds no samples')
@@ -825,36 +1078,71 @@ const main = argv => {
       const first = outOfCadence[0]
       addData('window-cadence-violation', `${outOfCadence.length} interval(s) in the window are not at the registered ${config.cadenceSeconds}s cadence (the first: ${first.from} to ${first.to}, ${first.seconds}s) — a window whose samples did not arrive on the registered cadence is not the registered measurement`)
     }
-    if (tailSeconds > tolerance) {
-      addData('window-ends-early', `the window's last sample is ${Math.round(tailSeconds)}s before the run's end, more than the registered ${config.cadenceSeconds}s cadence allows — the log ends before the window does`)
+    if (validIntervals.length === 0) {
+      addData('window-not-covered', 'no interval of the measured window was measured at the registered cadence — the window was never covered')
     }
+  }
+  // The window's HEAD and TAIL are checked UNCONDITIONALLY. They used to sit
+  // inside the block above, which meant that a thresholds file without a
+  // registered cadence silently switched the boundary checks OFF: a window
+  // whose first forty-eight minutes were never measured then came back
+  // ELIGIBLE with its head gap visible in the metrics and no finding at all.
+  // A missing cadence is an invalid configuration (reported below), and a
+  // boundary that was not measured is a finding either way.
+  if (headSeconds > tolerance) {
+    addData('window-starts-late', `the window's HEAD is not covered: the first measured interval begins ${Math.round(headSeconds)}s after the window's start (${new Date(windowStart).toISOString()}), more than the registered ${config.cadenceToleranceSeconds ?? 0}s tolerance allows — an unmeasured prefix of the window is not a quiet prefix`)
+  }
+  if (tailSeconds > tolerance) {
+    addData('window-ends-early', `the window's last measured interval ends ${Math.round(tailSeconds)}s before the window's end (${new Date(windowEnd).toISOString()}), more than the registered ${config.cadenceToleranceSeconds ?? 0}s tolerance allows — the log ends before the window does`)
   }
   if (window.length > 0 && config.minimumSampleFraction !== null && coverage < config.minimumSampleFraction) {
     addData('coverage-too-low', `the window's elapsed-time coverage is ${(coverage * 100).toFixed(1)}%, below the registered minimum of ${(config.minimumSampleFraction * 100).toFixed(1)}%`)
   }
 
-  // --- the validity signals, inside the window -------------------------------
+  // --- the validity signals, of every measurement the window consumes -------
   // The run IS present in the window, so the run's cgroup must have been
   // readable; the observer's own cgroup must have held; and the interval's
   // counters must have been consistent. A sample whose accounting failed
   // cannot be scored, and it is named.
-  for (const sample of window) {
+  //
+  // The samples that are checked are every one an OVERLAPPING interval
+  // consumes — including the closing sample that falls AFTER the window's
+  // end. The intervals are built from the whole log, so an interval that
+  // spans the window's end is certified by the sample that closes it, and a
+  // failing closing sample must not be able to certify the last seconds of
+  // the window while its own flag says its accounting failed.
+  const consumedSamples = new Map()
+  for (const interval of overlapping) {
+    consumedSamples.set(interval.fromTs, interval.previousSample)
+    consumedSamples.set(interval.toTs, interval.currentSample)
+  }
+  const healthChecked = new Set()
+  for (const sample of [...window, ...consumedSamples.values()]) {
+    if (sample === undefined || healthChecked.has(sample)) continue
+    healthChecked.add(sample)
     for (const signal of ['deltaValid', 'obsCgroupOk', 'obsReadOk', 'runCgroupOk']) {
       if (sample[signal] !== 1) {
-        addData('window-signal-failed', `the sample at ${sample.ts} has ${signal}=${sample[signal]} — its accounting is not trustworthy`)
+        const inWindow = window.includes(sample)
+        addData('window-signal-failed', `the sample at ${sample.ts} has ${signal}=${sample[signal]} — its accounting is not trustworthy${inWindow ? '' : ' (it closes an interval that overlaps the measured window)'}`)
       }
     }
   }
 
   // --- the window's metrics --------------------------------------------------
   const windowCores = window.map(sample => sample.foreignCores)
-  const weighted = weightedMean(validIntervals)
+  const weighted = weightedMean(coveredIntervals)
   const rowMean = windowCores.length ? windowCores.reduce((sum, value) => sum + value, 0) / windowCores.length : null
   const windowMedian = nearestRank(windowCores, 0.5)
   const windowP95 = nearestRank(windowCores, 0.95)
   const windowMax = windowCores.length ? Math.max(...windowCores) : null
-  const rollingMax = rollingMeanMax(validIntervals, config.rollingMinutes * 60)
-  const minutesAboveOneCore = windowCores.filter(value => value > 1).length
+  const rollingMax = rollingMeanMax(coveredIntervals, config.rollingMinutes * 60)
+  // The SAMPLES above one core: a count of rows, and it says so.
+  const samplesAboveOneCore = windowCores.filter(value => value > 1).length
+  // The MINUTES above one core: the same measurement in the unit the name
+  // promises, computed from the intervals — each interval carries the value
+  // of the sample that closed it, and the seconds of it that fell inside the
+  // window. A row count is not minutes, and a minute is not a row.
+  const minutesAboveOneCore = coveredIntervals.reduce((sum, interval) => sum + (interval.value > 1 ? interval.seconds : 0), 0) / 60
   const memFloor = window.length > 0 ? Math.min(...window.map(sample => sample.memAvailable_kB * 1024)) : null
   const maxForeignProcs = window.length > 0 ? Math.max(...window.map(sample => sample.foreignProcs)) : null
 
@@ -951,14 +1239,14 @@ const main = argv => {
       meanDrift: null,
       checked: []
     }
-    if (baselineExpectation.median !== null) {
+    if (baselineExpectation.median !== null && baselineExpectation.tolerance.median !== null) {
       baselineExpectationResult.medianDrift = baselineMedian === null ? null : Math.abs(baselineMedian - baselineExpectation.median)
       baselineExpectationResult.checked.push('median')
       if (baselineExpectationResult.medianDrift !== null && baselineExpectationResult.medianDrift > baselineExpectation.tolerance.median) {
         addData('baseline-moved', `the host's baseline has moved since the registration: the measured median is ${baselineMedian.toFixed(3)} cores against a registered ${baselineExpectation.median} (tolerance ${baselineExpectation.tolerance.median})`)
       }
     }
-    if (baselineExpectation.mean !== null) {
+    if (baselineExpectation.mean !== null && baselineExpectation.tolerance.mean !== null) {
       baselineExpectationResult.meanDrift = baselineMean === null ? null : Math.abs(baselineMean - baselineExpectation.mean)
       baselineExpectationResult.checked.push('mean')
       if (baselineExpectationResult.meanDrift !== null && baselineExpectationResult.meanDrift > baselineExpectation.tolerance.mean) {
@@ -987,11 +1275,11 @@ const main = argv => {
     coverage: rounded(coverage),
     coverageDetail: {
       fraction: rounded(coverage),
-      coveredSeconds: Math.round(coveredWithEdges),
+      coveredSeconds: Math.round(coveredSeconds),
       windowSeconds,
       minimumSampleFraction: config.minimumSampleFraction,
       validIntervals: validIntervals.length,
-      intervalsInsideWindow: intervals.length,
+      intervalsInsideWindow: overlapping.length,
       headSeconds: Math.round(headSeconds),
       tailSeconds: Math.round(tailSeconds),
       outOfCadenceIntervals: gaps.filter(gap => gap.kind === 'interval').length
@@ -1047,7 +1335,8 @@ const main = argv => {
     foreignCoresP95: windowP95,
     foreignCoresMax: windowMax,
     foreignCoresRolling5mMax: rounded(rollingMax),
-    foreignCoresMinutesAboveOneCore: minutesAboveOneCore,
+    foreignCoresSamplesAboveOneCore: samplesAboveOneCore,
+    foreignCoresMinutesAboveOneCore: rounded(minutesAboveOneCore, 2),
     loadAverageMax: (() => {
       const values = window.flatMap(sample => (sample.load ?? []).filter(value => value !== null))
       return values.length ? Math.max(...values) : null
@@ -1087,6 +1376,14 @@ const main = argv => {
   if (options.reportBaseline) {
     const report = {
       report: 'baseline distribution — the host\'s foreign state before the run',
+      scored: false,
+      thresholdsDigestRegistered: options.expectThresholdsDigest !== null,
+      notes: [
+        'this report judges nothing: it prints the baseline distribution and scores no window',
+        options.expectThresholdsDigest === null
+          ? 'no thresholds digest was registered for this report — nothing here is bound to a contract, because nothing here is a verdict'
+          : `the thresholds digest was checked against the file that was read: ${thresholdsPath}`
+      ],
       verdict: dataProblems.length > 0 ? config.dispositions.incomplete : 'reported',
       scope: 'baseline distribution only — this judges nothing',
       thresholdsFile: thresholdsPath,
