@@ -296,7 +296,10 @@ function deriveSchedule(durationMs) {
     burstEveryMs: clampMs(Math.round(durationMs / 48), 15_000, 600_000),
     burstMessagesPerRoom: durationMs >= 3_600_000 ? 30 : 10,
     reconnectEveryMs: Math.min(3_600_000, Math.round(durationMs / 8)),
-    fdBaselineAfterMs: Math.round(durationMs / 8),
+    // The AC's "FDs stable after hour one" is an hour, whatever the run's
+    // length: the baseline is capped like the reconnect period, so a longer
+    // run does not quietly widen the criterion.
+    fdBaselineAfterMs: Math.min(3_600_000, Math.round(durationMs / 8)),
     // FR-13's band is "the final FOUR HOURS" (prd.md:239). The window is
     // therefore four hours and never grows with the run: the pre-amendment
     // scaling (half the wall duration) is what put an 8-hour run's window
@@ -1001,12 +1004,21 @@ async function verifyZeroMessageLoss(state, rooms, ackRecords) {
 
 function evaluateFinalWindowRss(samples, schedule, final) {
   const windowSamples = samples.filter(sample => sample.atMs >= samples[samples.length - 1].atMs - schedule.finalWindowMs)
-  if (windowSamples.length < 3) {
+  // The floor is NAMED, not "at least 3": a four-hour window that kept only
+  // a handful of samples through a tracker stall would otherwise still gate.
+  // Below the floor the run is INCOMPLETE — it is never scored, and it is
+  // recorded under its own name like an interruption.
+  const expectedSamples = Math.max(1, Math.round(schedule.finalWindowMs / 60_000))
+  const minimumSamples = Math.max(3, Math.floor(expectedSamples * 0.8))
+  if (windowSamples.length < minimumSamples) {
     return {
       windowMs: schedule.finalWindowMs,
       samples: windowSamples.length,
+      expectedSamples,
+      minimumSamples,
       pass: false,
-      note: `the final window holds ${windowSamples.length} samples; the rule needs at least 3`,
+      incomplete: true,
+      note: `the final window holds ${windowSamples.length} samples; the rule needs at least ${minimumSamples} of the expected ${expectedSamples} — the run is INCOMPLETE, never scored`,
     }
   }
   const startRssBytes = windowSamples[0].rssBytes
@@ -1119,7 +1131,7 @@ function parseMajorGcUsedHeapMiB(text) {
   // "(reduce)" variant appears between the collector name and the heap sizes.
   // A parser that silently omits a variant distorts the observed endpoints,
   // so every documented spelling is accepted.
-  const pattern = /^\[\d+:0x[0-9a-f]+\]\s+(\d+) ms: (Mark-Compact|Mark-Sweep|Mark-Sweep-Compact|Scavenge \(reduce\))\s*(?:\(reduce\)\s*)?([\d.]+) \([\d.]+\)\s+->\s+([\d.]+) \([\d.]+\)/gm
+  const pattern = /^\[\d+:0x[0-9a-f]+\]\s+(\d+) ms: (Mark-Compact|Mark-Sweep|Mark-Sweep-Compact)\s+([\d.]+) \([\d.]+\)\s+->\s+([\d.]+) \([\d.]+\)/gm
   for (const match of text.matchAll(pattern)) {
     events.push({ childAtMs: Number(match[1]), usedHeapMiB: Number(match[4]) })
   }
@@ -1397,7 +1409,11 @@ export async function runSoak({
         : { ...state.zeroLoss, rule: 'every acknowledged (room, seq, client_message_id) readable at the end; sequences contiguous from 1; readable set == acknowledged set; zero duplicates; payloads byte-exact' }
       rules = { finalWindowRss, fdStability, zeroMessageLoss }
       if (final) {
-        if (finalWindowRss.pass !== true) failureReasons.push('final-window RSS slope growth above the 2% band (FR-13\'s single pass rule)')
+        if (finalWindowRss.incomplete === true) {
+          failureReasons.push(finalWindowRss.note ?? 'the measured window is incomplete — the run is never scored')
+        } else if (finalWindowRss.pass !== true) {
+          failureReasons.push('final-window RSS slope growth above the 2% band (FR-13\'s single pass rule)')
+        }
         if (fdStability.pass !== true) failureReasons.push('FD drift outside the +-5 corridor after hour one')
         if (zeroMessageLoss.pass !== true) failureReasons.push('zero message loss failed')
       }
@@ -1680,6 +1696,7 @@ export async function runSoak({
       ...state.zeroLoss,
       rule: 'every acknowledged (room, seq, client_message_id) readable at the end; sequences contiguous from 1; readable set == acknowledged set; zero duplicates; payloads byte-exact',
     }
+    const incomplete = state.finalRules.finalWindowRss.incomplete === true
     const passed =
       state.finalRules.finalWindowRss.pass === true
       && state.finalRules.fdStability.pass === true
@@ -1687,7 +1704,9 @@ export async function runSoak({
       && artifactStable
       && state.fatal === null
       && state.loopErrors.length === 0
-    const status = passed ? 'pass' : 'fail'
+    // An incomplete measured window is recorded as incomplete: never scored,
+    // never a PASS, never a re-scoreable FAIL.
+    const status = passed ? 'pass' : incomplete ? 'incomplete' : 'fail'
     const document = writeResults(status, [
       ...(artifactStable ? [] : ['the artifact changed during the run (end-of-run digest mismatch)']),
     ])

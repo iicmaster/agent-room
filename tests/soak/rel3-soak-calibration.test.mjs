@@ -168,6 +168,23 @@ test('KNOWN LIMITATION: near the bound the band is still phase-sensitive', () =>
     `the pinned limitation: the band is phase-sensitive near the bound (${passes}/${outcomes.length} phases passed)`)
 })
 
+test('KNOWN LIMITATION: a DECELERATING leak looks like equilibration and passes', () => {
+  // The fourth limit, from the gate review: a leak whose rate decays
+  // (logarithmic, 1/t) has exactly the shape of a process approaching its
+  // asymptote, so at hours 8-12 the band cannot tell them apart. This is why
+  // the retained-state diagnostic exists - and why no four-hour band can make
+  // that distinction. It is pinned so it is never rediscovered as a surprise.
+  const base = 100 * 1024 * 1024
+  const samples = Array.from({ length: WINDOW_SAMPLES }, (_, index) => {
+    const fraction = (index + 1) / WINDOW_SAMPLES
+    // a 1/t decay: steep at first, then flat - the shape equilibration makes
+    const decay = 12 * 1024 * 1024 * (1 / fraction - 1) / (WINDOW_SAMPLES - 1)
+    return { atMs: index * SAMPLE_MS, rssBytes: Math.round(base + decay) }
+  })
+  const verdict = evaluate(samples)
+  assert.equal(verdict.pass, true, 'the pinned limitation: a decelerating leak passes the band')
+})
+
 test('KNOWN LIMITATION: the retained-state diagnostic needs temporal coverage, not a count', () => {
   // Four confirmed collections inside a few milliseconds are four
   // observations, not a four-hour trend: the diagnostic must read
@@ -192,6 +209,39 @@ test('KNOWN LIMITATION: the retained-state diagnostic needs temporal coverage, n
   assert.equal(fitted.status, 'reported')
   assert.notEqual(fitted.classification, 'flat', 'the fitted trend sees the excursion')
   assert.ok(fitted.observations.length >= 4, 'the observations are retained with the verdict')
+})
+
+test('the phase lottery is replayed on attempt 1\'s OWN residuals — the run that PASSED', () => {
+  // The gate review's second calibration gap: the synthetic sawtooth (7 MiB
+  // amplitude, a 25-minute cycle) is gentler than the real traces, so the
+  // phase-sensitivity row understates the real lottery. The fix is to replay
+  // the phase sweep on the residuals of attempt 1's window - the run that
+  // PASSED, so this cannot be fitting to the run under dispute.
+  const stored = JSON.parse(readFileSync(
+    join(ROOT, 'docs/release-evidence/v0.2.0-soak-results.json'),
+    'utf8',
+  ))
+  const windowSamples = stored.samples.data.filter(
+    sample => sample.atMs >= stored.samples.data[stored.samples.data.length - 1].atMs - stored.schedule.finalWindowMs,
+  )
+  assert.ok(windowSamples.length >= 100, `attempt 1's window holds ${windowSamples.length} samples`)
+  const outcomes = []
+  for (let phase = 0; phase < 25; phase += 1) {
+    const shifted = windowSamples.map((sample, index) => ({
+      ...sample,
+      rssBytes: sample.rssBytes + Math.round(6 * 1024 * 1024 * Math.sin(((index + phase) / 25) * 2 * Math.PI)),
+    }))
+    outcomes.push(evaluateFinalWindowRss(shifted, stored.schedule, true).pass)
+  }
+  const passes = outcomes.filter(Boolean).length
+  // The pinned property, on the run that PASSED (so this is not fitting to
+  // the run under dispute): the band is phase-ROBUST on a real trace that
+  // carries headroom - attempt 1's window declined, so every phase passes.
+  // Together with the near-bound row above, the band's character is precise:
+  // robust when there is headroom, phase-sensitive when the verdict sits
+  // near the bound.
+  assert.equal(passes, outcomes.length,
+    `the band must pass at every phase on attempt 1's own residuals (${passes}/${outcomes.length} phases passed)`)
 })
 
 test('the archived runs keep their own verdicts — the amendment rescues nothing', () => {
@@ -256,6 +306,11 @@ test('the GC trace parser reads V8\'s major-collection lines', () => {
     '[1234:0x7f9c2a1b3d40]     42 ms: Scavenge 10.2 (12.0) -> 9.8 (12.0) MB, 1.2 / 0.0 ms  (average mu = 1.000, current mu = 1.000) allocation failure',
     '[1234:0x7f9c2a1b3d40]   1104 ms: Mark-Compact 12.4 (14.0) -> 9.6 (13.2) MB, 3.1 / 0.0 ms  (average mu = 1.000, current mu = 1.000) allocation failure',
     '[1234:0x7f9c2a1b3d40]   2104 ms: Mark-Sweep 13.1 (14.0) -> 9.9 (13.4) MB, 2.4 / 0.0 ms  (average mu = 1.000, current mu = 1.000) allocation failure',
+    // A scavenge - including the "(reduce)" spelling - is a YOUNG-generation
+    // collection: the used heap after it still carries uncollected
+    // old-generation garbage, so it is NOT the reachable set. Counting it
+    // would inflate the coverage and contaminate the fitted trend.
+    '[1234:0x7f9c2a1b3d40]   2204 ms: Scavenge (reduce) 13.4 (14.0) -> 12.9 (14.2) MB, 0.6 / 0.0 ms  (average mu = 1.000, current mu = 1.000) allocation failure',
   ].join('\n')
   const events = parseMajorGcUsedHeapMiB(trace)
   assert.equal(events.length, 2, 'only the major collections are read')
