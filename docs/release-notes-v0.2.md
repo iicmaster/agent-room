@@ -3,7 +3,7 @@
 Status: **release candidate, frozen**. Every gate below ran against the materialized
 artifacts recorded in `docs/release-evidence/v0.2.0-candidate.json`. Per the Epic 6
 execution consensus (`docs/implementation/reviews/epic-6-execution-agy.md`,
-`-luna.md`), the formal 8-hour soak (Story 6.2 / REL-3) and the physical
+`-luna.md`), the formal endurance soak (Story 6.2 / REL-3 — a twelve-hour run, amended and pre-registered after the first attempts showed the eight-hour profile measured the process EQUILIBRATING rather than settled) and the physical
 two-machine demonstration (Story 6.1 / REL-1) pin THIS candidate: any code change
 voids it and restarts the gate chain. v0.2.0 is not tagged or shipped until REL-1
 passes.
@@ -194,7 +194,7 @@ SM-C1 numbers above, and the binding statement for Stories 6.2 and 6.1.
 ## Where the changelog is, and why
 
 `CHANGELOG.md` ships inside both packages, so it is part of the artifact's bytes: editing it after the
-candidate is frozen changes the digest, voids the candidate, and costs another eight-hour qualification
+candidate is frozen changes the digest, voids the candidate, and costs another full qualification
 run. That is why the release notes are long and the packaged changelog is a summary.
 
 **This release's packaged changelog is complete.** Its top section is the versioned
