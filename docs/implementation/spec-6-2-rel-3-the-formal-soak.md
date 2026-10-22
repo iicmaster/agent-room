@@ -23,6 +23,14 @@ deferred:
   - 'The 8-hour run''s PASS/FAIL verdict is not claimable until the detached run settles; this spec and the evidence entry are marked in-flight until then.'
 ---
 
+<!-- AMENDED 2026-10-22: the pass rule's measurement was amended by
+     docs/implementation/spec-6-2-rel-3-the-formal-soak.md.amendment-2026-10-22.md
+     (the requirements ruling and the pre-registration). Read that file before
+     running or judging a soak: it fixes the gate at FR-13's single band, the
+     measured window at the final FOUR hours, the run at 12 hours, and it
+     demotes the endpoint term to a reported diagnostic. The rule text below is
+     the pre-amendment text and is kept for the record. -->
+
 <intent-contract>
 
 ## Intent

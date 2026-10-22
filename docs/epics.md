@@ -585,7 +585,11 @@ So that endurance is proven once, completely.
 
 **Acceptance Criteria:**
 
-**Given** ≥3 concurrent sessions, the defined traffic profile (1 msg/10 s per room average + bursts, payloads to the 32 KiB cap, hourly reconnects), **When** the 8-hour run completes with pinned, recorded host/Node/SQLite versions, **Then** zero message loss, FDs stable after hour one, and RSS slope over the final four hours ≤2% of starting RSS (the single pass rule).
+**Given** ≥3 concurrent sessions, the defined traffic profile (1 msg/10 s per room average + bursts, payloads to the 32 KiB cap, hourly reconnects), **When** the endurance run completes with pinned, recorded host/Node/SQLite versions, **Then** zero message loss, FDs stable after hour one, and RSS slope over the final four hours ≤2% of starting RSS (the single pass rule).
+
+*(Amended 2026-10-22 by the release owner's requirements ruling, after the release-gate review of soak attempt 4: the run is now TWELVE hours — the payload ramp is the first four hours and the cap-hold the rest, so the measured window (the final four hours) sits four to eight hours into the hold instead of exactly on the equilibration knee it used to coincide with. The gate itself is unchanged and is FR-13's single band; the rule's second, unratified term (the endpoint growth) is demoted to a reported diagnostic. The full ruling, the pre-registration and the owners' gate are in
+`docs/implementation/spec-6-2-rel-3-the-formal-soak.md.amendment-2026-10-22.md`. Attempt 4 still fails under
+the amended rule and is never re-scored.)*
 **Given** the same run, **When** idle-footprint is sampled, **Then** the REL-4 counter-metric is recorded (0–5 Actors baseline) — reported, not optimized.
 
 ### Story 6.4: Reconnect recovery — the explicit session takeover
