@@ -18,6 +18,29 @@
   verdict stands as recorded (approve the bytes, correct the record). The third re-cut was TEXT-ONLY and
   it settled the process rule: **a story's changelog entry and README section land WITH the story,
   before the candidate is frozen.**
+- **The quiet-host contract has been through an advisor gate, and the INSTRUMENT it names was
+  rebuilt.** Both lanes (codex `gpt-6.1-sol[ultra]`, claude `claude-fable-5`; the agy seat was
+  quota-exhausted) agreed the CORRECTION was honest — the timing, the basis, the cost of a voided
+  night — and converged on the same two defects in the observer the contract names as its sole
+  source, both of which would have marked every window CONFOUNDED: the busy-CPU total counted
+  **idle and iowait** as consumption (an idle four-core host read 4.000 foreign cores), and the
+  run's own CPU was summed over the processes that happened to be alive (the harness replaces its
+  four clients every hour, so every replacement looked like a multi-core foreign spike). They also
+  found that the CONFOUNDED verdict had no scorer at all, that the baseline was hearsay, and that
+  the aggregation statistic lived only in the review brief. Their verdicts are archived at
+  `docs/implementation/reviews/epic-6-quiet-host-contract-{codex,claude}.md`.
+  What closed them: the run's identity and CPU are now its **cgroup's** (monotonic across process
+  exit; no substring matching); busy CPU excludes idle and iowait; `steal` is reported separately;
+  the observer excludes its own cost by sitting in its own cgroup; the per-minute sample is
+  fork-free; the baseline is MEASURED and the foreign processes are PINNED by identity; the
+  thresholds are frozen in `docs/implementation/rel3-quiet-host-thresholds.json`; and
+  `scripts/rel3-soak-eligibility.mjs` is the named scorer (ELIGIBLE / CONFOUNDED / INCOMPLETE —
+  never PASS, and missing telemetry is INCOMPLETE). The self-check
+  `scripts/rel1-soak-telemetry-check.sh` now PASSES every assertion and is archived under
+  `docs/release-evidence/v0.2.0-quiet-host/`. **One more finding came out of the repair: ngs-staging
+  is not a quiet host and cannot be one** (a staging auto-deploy compiles PHP every minute, so the
+  host's busy time moves between ~0.2 and ~4.0 cores) — so the CPU thresholds are relative to the
+  measured baseline, which is the same F18 lesson one clause further on.
 - **The formal soak is NOT in flight — the next twelve-hour run starts after the corrected
   quiet-host contract clears its advisor gate.** The first twelve-hour run (attempt 5: launched
   2026-10-22T02:41Z on the QUIET host ngs-staging, `ssh 43.229.78.155`, world under

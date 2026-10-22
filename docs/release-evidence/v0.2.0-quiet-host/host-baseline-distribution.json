@@ -1,0 +1,23 @@
+{
+  "report": "the host's baseline distribution \u2014 the foreign state of ngs-staging with no run present",
+  "measuredAt": "2026-10-22T07:12:40Z/2026-10-22T07:30:42Z",
+  "thresholdsFile": "docs/implementation/rel3-quiet-host-thresholds.json",
+  "thresholdsDigest": "sha256:ccb4bcaee02fd71ad45f211422c2bd2d26f9c95d7878c21f476573c08582b358",
+  "samples": 19,
+  "syntheticSamplesExcluded": 1,
+  "foreignProcessMax": 4,
+  "foreignCores": {
+    "mean": 0.8258,
+    "median": 0.845,
+    "p95": 1.025,
+    "max": 1.025,
+    "min": 0.575
+  },
+  "memAvailableFloorBytes": 7788199936,
+  "registeredLimits": {
+    "medianMax": 1.345,
+    "meanMax": 1.576,
+    "foreignProcessLimit": 7
+  },
+  "note": "the limits are this baseline plus the registered allowances; a second window measured the same host the same day during a PHP-build burst (41 samples, mean 0.954, median 0.916, max 1.966) and stayed inside them, which is the calibration"
+}

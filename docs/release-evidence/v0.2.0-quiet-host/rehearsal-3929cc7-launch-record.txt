@@ -1,0 +1,39 @@
+launched_at 2026-10-22T08:04:27Z
+repo /root/rel1-soak
+parent /root/rel3-rehearsal4
+duration_hours 0.08
+run_cgroup agent-room-soak-20261022T080427Z
+baseline_minutes 6
+node v24.18.0
+host Linux 5.14.0-642.el9.x86_64 x86_64
+cores 4
+boot_id 3bef85f2-56ae-4007-9a72-e5ef813b97d7
+repo_commit 01504a3036bea92433f4b927c3f78cf3d941a186
+repo_changed_paths 6
+thresholds_file /root/rel1-soak/docs/implementation/rel3-quiet-host-thresholds.json
+thresholds_digest sha256:ccb4bcaee02fd71ad45f211422c2bd2d26f9c95d7878c21f476573c08582b358
+observer_digest sha256:919541ff26e7f297f8215fbae1bd458e4fbc731cc0dbf570a8f403ae9d287228
+scorer_digest sha256:5edb89f739564ecf7c946a225f4b11116c37f4e8c9dc896ea0403d6198371027
+launcher_digest sha256:0ec2dd9cbcaf6c073a797c56b40977e39d573543e62adc4359fdc61aa5817e7a
+observer_pid 2058827
+telemetry_log /root/rel3-rehearsal4/telemetry.log
+census /root/rel3-rehearsal4/baseline-census.txt
+observer_ready yes
+baseline_samples 7
+baseline_foreign_processes 4
+baseline_log /root/rel3-rehearsal4/telemetry.log
+baseline_log_digest sha256:a7bac2d3977ec7c3c91edf075d003a1a6809d396ea593da78b14239c413a396c
+baseline_census_digest sha256:8f0bb29855fe574520a031586ca544b3e13ee1ebf48f6db9152c5c03d181619e
+baseline_check ok samples=6 median=0.8790 mean=0.8858 median_drift=0.0340 mean_drift=0.0600
+baseline_check_ok yes
+cgroup_placement verified
+soak_pid 2061112
+soak_log /root/rel3-rehearsal4/.soak-world/soak.log
+evidence_dir /root/rel3-rehearsal4/.soak-world/evidence
+minute_one_own_processes 7
+minute_one_foreign_processes 4
+minute_one_expected_own_minimum 6
+minute_one_ok yes
+adjudication_command node scripts/rel3-soak-eligibility.mjs --telemetry /root/rel3-rehearsal4/telemetry.log --baseline-extra /root/rel3-rehearsal4/telemetry.log --run-start <the run's start, from soak.log> --run-end <the run's end, from the results> --thresholds /root/rel1-soak/docs/implementation/rel3-quiet-host-thresholds.json --expect-thresholds-digest sha256:ccb4bcaee02fd71ad45f211422c2bd2d26f9c95d7878c21f476573c08582b358 --out <the attempt's eligibility.json>
+adjudication_note the scorer reads the FROZEN limits from the thresholds file; the baseline is a CROSS-CHECK, not the source of the limits
+observer_watcher_pid 2062632

@@ -1,0 +1,236 @@
+{
+  "verdict": "incomplete",
+  "scope": "quiet-host eligibility only — this does not judge the soak, and it does not confer a PASS",
+  "thresholdsFile": "/root/rel1-soak/docs/implementation/rel3-quiet-host-thresholds.json",
+  "thresholdsDigest": "sha256:ccb4bcaee02fd71ad45f211422c2bd2d26f9c95d7878c21f476573c08582b358",
+  "expectedThresholdsDigest": "sha256:ccb4bcaee02fd71ad45f211422c2bd2d26f9c95d7878c21f476573c08582b358",
+  "runStart": "2026-10-22T08:10:30.385Z",
+  "runEnd": "2026-10-22T08:15:38.356Z",
+  "runEndSource": "run-end",
+  "metrics": {
+    "windowStart": "2026-10-22T04:15:38.356Z",
+    "windowEnd": "2026-10-22T08:15:38.356Z",
+    "windowSeconds": 14400,
+    "windowEndSource": "run-end",
+    "windowSamples": 12,
+    "expectedSamples": 240,
+    "coverage": 0.0466,
+    "coverageDetail": {
+      "fraction": 0.0466,
+      "coveredSeconds": 670,
+      "windowSeconds": 14400,
+      "minimumSampleFraction": 0.8,
+      "validIntervals": 11,
+      "intervalsInsideWindow": 11,
+      "headSeconds": 13730,
+      "tailSeconds": 9,
+      "outOfCadenceIntervals": 0
+    },
+    "gaps": [
+      {
+        "kind": "head",
+        "from": "2026-10-22T04:15:38.356Z",
+        "to": "2026-10-22T08:04:28Z",
+        "seconds": 13729.644,
+        "expectedSeconds": 60,
+        "toleranceSeconds": 15
+      }
+    ],
+    "gapCount": 1,
+    "baselineSamples": 14,
+    "baselineMeasuredSamples": 12,
+    "baselineSyntheticSamples": 2,
+    "telemetryCommentLines": 0,
+    "baselineSources": [
+      {
+        "path": "/root/rel3-rehearsal4/telemetry.log",
+        "samples": 13,
+        "usable": 7,
+        "commentLines": 0
+      }
+    ],
+    "baselineForeignProcessMax": 4,
+    "baselineForeignCoresMean": 0.8858,
+    "baselineForeignCores": {
+      "median": 0.879,
+      "mean": 0.8858,
+      "p95": 0.967,
+      "max": 0.967,
+      "rolling5mMax": 0.9048
+    },
+    "baselineExpectation": {
+      "source": "baselineExpectation",
+      "expectedMedian": 0.845,
+      "expectedMean": 0.8258,
+      "tolerance": {
+        "median": 0.15,
+        "mean": 0.25
+      },
+      "medianDrift": 0.03400000000000003,
+      "meanDrift": 0.06003333333333338,
+      "checked": [
+        "median",
+        "mean"
+      ]
+    },
+    "limits": {
+      "source": "absolute",
+      "medianMax": 1.345,
+      "meanMax": 1.576,
+      "computed": {
+        "medianMax": 1.379,
+        "meanMax": 1.6358,
+        "baselineMedian": 0.879,
+        "baselineMean": 0.8858333333333334,
+        "medianAllowanceCores": 0.5,
+        "meanAllowanceCores": 0.75
+      },
+      "advertised": {
+        "medianMax": 1.345,
+        "meanMax": 1.576
+      }
+    },
+    "memAvailableFloorBytes": 7569084416,
+    "maxForeignProcesses": 4,
+    "foreignProcessAllowance": 7,
+    "foreignCoresMean": 0.9499,
+    "foreignCoresRowMean": 0.8708,
+    "foreignCoresMedian": 0.949,
+    "foreignCoresP95": 1.142,
+    "foreignCoresMax": 1.142,
+    "foreignCoresRolling5mMax": 1.0265,
+    "foreignCoresMinutesAboveOneCore": 2,
+    "loadAverageMax": 1.33,
+    "stealCoresMax": 0
+  },
+  "reasons": [
+    "the run's span is 308 s, which is shorter than the registered 4 h window",
+    "/root/rel3-rehearsal4/telemetry.log: the baseline sample at 2026-10-22T08:11:28Z is not before the run's start (2026-10-22T08:10:30.385Z)",
+    "/root/rel3-rehearsal4/telemetry.log: the baseline sample at 2026-10-22T08:12:28Z is not before the run's start (2026-10-22T08:10:30.385Z)",
+    "/root/rel3-rehearsal4/telemetry.log: the baseline sample at 2026-10-22T08:13:29Z is not before the run's start (2026-10-22T08:10:30.385Z)",
+    "/root/rel3-rehearsal4/telemetry.log: the baseline sample at 2026-10-22T08:14:29Z is not before the run's start (2026-10-22T08:10:30.385Z)",
+    "/root/rel3-rehearsal4/telemetry.log: the baseline sample at 2026-10-22T08:15:29Z is not before the run's start (2026-10-22T08:10:30.385Z)",
+    "/root/rel3-rehearsal4/telemetry.log: the baseline sample at 2026-10-22T08:16:29Z is not before the run's start (2026-10-22T08:10:30.385Z)",
+    "the window's first sample (2026-10-22T08:04:28Z) is not an interval — only the first sample of a log has no previous sample to difference against",
+    "the window's elapsed-time coverage is 4.7%, below the registered minimum of 80.0%",
+    "the registered limits and the measured baseline disagree (the registered median limit is 1.345 against a computed 1.379, the registered mean limit is 1.576 against a computed 1.6358)",
+    "the sample at 2026-10-22T08:04:28Z shows none of the run's own processes inside the measured window — the window is not a window of a run",
+    "the sample at 2026-10-22T08:05:28Z shows none of the run's own processes inside the measured window — the window is not a window of a run",
+    "the sample at 2026-10-22T08:06:28Z shows none of the run's own processes inside the measured window — the window is not a window of a run",
+    "the sample at 2026-10-22T08:07:28Z shows none of the run's own processes inside the measured window — the window is not a window of a run",
+    "the sample at 2026-10-22T08:08:28Z shows none of the run's own processes inside the measured window — the window is not a window of a run",
+    "the sample at 2026-10-22T08:09:28Z shows none of the run's own processes inside the measured window — the window is not a window of a run",
+    "the sample at 2026-10-22T08:10:28Z shows none of the run's own processes inside the measured window — the window is not a window of a run"
+  ],
+  "dataProblems": [
+    "the run's span is 308 s, which is shorter than the registered 4 h window",
+    "/root/rel3-rehearsal4/telemetry.log: the baseline sample at 2026-10-22T08:11:28Z is not before the run's start (2026-10-22T08:10:30.385Z)",
+    "/root/rel3-rehearsal4/telemetry.log: the baseline sample at 2026-10-22T08:12:28Z is not before the run's start (2026-10-22T08:10:30.385Z)",
+    "/root/rel3-rehearsal4/telemetry.log: the baseline sample at 2026-10-22T08:13:29Z is not before the run's start (2026-10-22T08:10:30.385Z)",
+    "/root/rel3-rehearsal4/telemetry.log: the baseline sample at 2026-10-22T08:14:29Z is not before the run's start (2026-10-22T08:10:30.385Z)",
+    "/root/rel3-rehearsal4/telemetry.log: the baseline sample at 2026-10-22T08:15:29Z is not before the run's start (2026-10-22T08:10:30.385Z)",
+    "/root/rel3-rehearsal4/telemetry.log: the baseline sample at 2026-10-22T08:16:29Z is not before the run's start (2026-10-22T08:10:30.385Z)",
+    "the window's first sample (2026-10-22T08:04:28Z) is not an interval — only the first sample of a log has no previous sample to difference against",
+    "the window's elapsed-time coverage is 4.7%, below the registered minimum of 80.0%",
+    "the registered limits and the measured baseline disagree (the registered median limit is 1.345 against a computed 1.379, the registered mean limit is 1.576 against a computed 1.6358)",
+    "the sample at 2026-10-22T08:04:28Z shows none of the run's own processes inside the measured window — the window is not a window of a run",
+    "the sample at 2026-10-22T08:05:28Z shows none of the run's own processes inside the measured window — the window is not a window of a run",
+    "the sample at 2026-10-22T08:06:28Z shows none of the run's own processes inside the measured window — the window is not a window of a run",
+    "the sample at 2026-10-22T08:07:28Z shows none of the run's own processes inside the measured window — the window is not a window of a run",
+    "the sample at 2026-10-22T08:08:28Z shows none of the run's own processes inside the measured window — the window is not a window of a run",
+    "the sample at 2026-10-22T08:09:28Z shows none of the run's own processes inside the measured window — the window is not a window of a run",
+    "the sample at 2026-10-22T08:10:28Z shows none of the run's own processes inside the measured window — the window is not a window of a run"
+  ],
+  "thresholdBreaches": [],
+  "findings": [
+    {
+      "kind": "data",
+      "code": "run-span-too-short",
+      "detail": "the run's span is 308 s, which is shorter than the registered 4 h window"
+    },
+    {
+      "kind": "data",
+      "code": "baseline-after-run-start",
+      "detail": "/root/rel3-rehearsal4/telemetry.log: the baseline sample at 2026-10-22T08:11:28Z is not before the run's start (2026-10-22T08:10:30.385Z)"
+    },
+    {
+      "kind": "data",
+      "code": "baseline-after-run-start",
+      "detail": "/root/rel3-rehearsal4/telemetry.log: the baseline sample at 2026-10-22T08:12:28Z is not before the run's start (2026-10-22T08:10:30.385Z)"
+    },
+    {
+      "kind": "data",
+      "code": "baseline-after-run-start",
+      "detail": "/root/rel3-rehearsal4/telemetry.log: the baseline sample at 2026-10-22T08:13:29Z is not before the run's start (2026-10-22T08:10:30.385Z)"
+    },
+    {
+      "kind": "data",
+      "code": "baseline-after-run-start",
+      "detail": "/root/rel3-rehearsal4/telemetry.log: the baseline sample at 2026-10-22T08:14:29Z is not before the run's start (2026-10-22T08:10:30.385Z)"
+    },
+    {
+      "kind": "data",
+      "code": "baseline-after-run-start",
+      "detail": "/root/rel3-rehearsal4/telemetry.log: the baseline sample at 2026-10-22T08:15:29Z is not before the run's start (2026-10-22T08:10:30.385Z)"
+    },
+    {
+      "kind": "data",
+      "code": "baseline-after-run-start",
+      "detail": "/root/rel3-rehearsal4/telemetry.log: the baseline sample at 2026-10-22T08:16:29Z is not before the run's start (2026-10-22T08:10:30.385Z)"
+    },
+    {
+      "kind": "data",
+      "code": "window-first-sample-not-an-interval",
+      "detail": "the window's first sample (2026-10-22T08:04:28Z) is not an interval — only the first sample of a log has no previous sample to difference against"
+    },
+    {
+      "kind": "data",
+      "code": "coverage-too-low",
+      "detail": "the window's elapsed-time coverage is 4.7%, below the registered minimum of 80.0%"
+    },
+    {
+      "kind": "data",
+      "code": "limits-disagree-with-baseline",
+      "detail": "the registered limits and the measured baseline disagree (the registered median limit is 1.345 against a computed 1.379, the registered mean limit is 1.576 against a computed 1.6358)"
+    },
+    {
+      "kind": "data",
+      "code": "window-has-no-own-processes",
+      "detail": "the sample at 2026-10-22T08:04:28Z shows none of the run's own processes inside the measured window — the window is not a window of a run"
+    },
+    {
+      "kind": "data",
+      "code": "window-has-no-own-processes",
+      "detail": "the sample at 2026-10-22T08:05:28Z shows none of the run's own processes inside the measured window — the window is not a window of a run"
+    },
+    {
+      "kind": "data",
+      "code": "window-has-no-own-processes",
+      "detail": "the sample at 2026-10-22T08:06:28Z shows none of the run's own processes inside the measured window — the window is not a window of a run"
+    },
+    {
+      "kind": "data",
+      "code": "window-has-no-own-processes",
+      "detail": "the sample at 2026-10-22T08:07:28Z shows none of the run's own processes inside the measured window — the window is not a window of a run"
+    },
+    {
+      "kind": "data",
+      "code": "window-has-no-own-processes",
+      "detail": "the sample at 2026-10-22T08:08:28Z shows none of the run's own processes inside the measured window — the window is not a window of a run"
+    },
+    {
+      "kind": "data",
+      "code": "window-has-no-own-processes",
+      "detail": "the sample at 2026-10-22T08:09:28Z shows none of the run's own processes inside the measured window — the window is not a window of a run"
+    },
+    {
+      "kind": "data",
+      "code": "window-has-no-own-processes",
+      "detail": "the sample at 2026-10-22T08:10:28Z shows none of the run's own processes inside the measured window — the window is not a window of a run"
+    }
+  ],
+  "dispositions": {
+    "breach": "confounded",
+    "missingOrInvalidTelemetry": "incomplete"
+  }
+}

@@ -72,9 +72,12 @@ fail() { echo "FAIL  $1 — $2"; FAILURES=$(( FAILURES + 1 )); }
 # --- the independent measurement ------------------------------------------------------------------
 # The host's busy time in microseconds: user + nice + system + irq + softirq.
 # Idle and iowait are excluded, deliberately (see the observer's header).
+# The microseconds per jiffy is read from the kernel's own answer, not
+# assumed: the check's arithmetic must be the observer's arithmetic.
+US_PER_JIFFY=$(( 1000000 / $(getconf CLK_TCK 2>/dev/null || echo 100) ))
 host_busy_us() {
   read -r _label U N S IDLE IOW IRQ SIRQ STEAL _rest < /proc/stat
-  echo $(( (U + N + S + IRQ + SIRQ) * 10000 ))
+  echo $(( (U + N + S + IRQ + SIRQ) * US_PER_JIFFY ))
 }
 cg_us() {
   local k v
@@ -83,12 +86,68 @@ cg_us() {
   done < "$1/cpu.stat" 2>/dev/null
   echo 0
 }
+# The observer's own cgroup is found by ITS PID, not by a wildcard: a stale
+# group left by a killed observer would otherwise be picked up and would
+# poison the independent measurement.
 observer_cg() {
-  local candidate
-  for candidate in "$CGROOT"/agent-room-observer-*; do
-    [ -d "$candidate" ] && { echo "$candidate"; return 0; }
-  done
+  local record path
+  [ -n "${OBS_PID:-}" ] || { echo ""; return 0; }
+  record=$(IFS= read -r record < "/proc/$OBS_PID/cgroup" 2>/dev/null; echo "$record")
+  case "$record" in
+    *::*) path="${record#*::}" ;;
+    *) path="" ;;
+  esac
+  [ -n "$path" ] && [ -d "$CGROOT$path" ] && { echo "$CGROOT$path"; return 0; }
   echo ""
+}
+
+# The node processes in a cgroup, by the observer's definition (argv[0]'s
+# basename is node), and the node processes outside it. These are the counts
+# the observer's own numbers must agree with.
+count_node_in_cgroup() {
+  local target="$1" dir pid argv0 path count=0
+  for dir in /proc/[0-9]*; do
+    pid="${dir#/proc/}"
+    IFS= read -r -d '' argv0 < "$dir/cmdline" 2>/dev/null || true
+    [ -n "$argv0" ] || continue
+    case "${argv0##*/}" in
+      node|node[0-9]*) ;;
+      *) continue ;;
+    esac
+    path=$(cgroup_path_of "$dir/cgroup")
+    [ "$path" = "$target" ] || continue
+    count=$(( count + 1 ))
+  done
+  echo "$count"
+}
+
+count_node_outside_cgroup() {
+  local target="$1" dir pid argv0 path count=0
+  for dir in /proc/[0-9]*; do
+    pid="${dir#/proc/}"
+    IFS= read -r -d '' argv0 < "$dir/cmdline" 2>/dev/null || true
+    [ -n "$argv0" ] || continue
+    case "${argv0##*/}" in
+      node|node[0-9]*) ;;
+      *) continue ;;
+    esac
+    path=$(cgroup_path_of "$dir/cgroup")
+    [ "$path" = "$target" ] && continue
+    count=$(( count + 1 ))
+  done
+  echo "$count"
+}
+
+# The cgroup path of a process, from its cgroup v2 record.
+cgroup_path_of() {
+  local record path
+  IFS= read -r record < "$1" 2>/dev/null || true
+  [ -n "$record" ] || return 0
+  case "$record" in
+    *::*) path="${record#*::}" ;;
+    *) path="$record" ;;
+  esac
+  printf '%s' "$path"
 }
 
 # The observer's mean foreign CPU over the last N samples.
@@ -122,6 +181,9 @@ measure_window() {
   obs1=$([ -n "$obs_cg" ] && cg_us "$obs_cg" || echo 0)
   EXPECTED=$(awk -v b="$(( busy1 - busy0 ))" -v o="$(( own1 - own0 ))" -v s="$(( obs1 - obs0 ))" -v t="$(( t1 - t0 ))" \
     'BEGIN{printf "%.3f", (b-o-s)/1000000/t}')
+  # The measured window's span, for the record.
+  MEASURED_FROM=$t0
+  MEASURED_TO=$t1
   OBSERVED=$(observer_mean_foreign 4)
   DELTA=$(awk -v e="$EXPECTED" -v o="$OBSERVED" 'BEGIN{d=e-o; if(d<0)d=-d; printf "%.3f", d}')
 }
@@ -129,8 +191,16 @@ measure_window() {
 # --- the observer ------------------------------------------------------------------------------
 TELEMETRY_INTERVAL_SECONDS=$INTERVAL "$OBSERVER" "$OUT" "$RUN_CG" "$CENSUS" > "$WORK/observer.out" 2>&1 &
 OBS_PID=$!
+# The check's own processes are killed and its cgroups removed on the way out,
+# WHETHER IT PASSED OR FAILED. A check that dies half way through (a bug in
+# the check, an interrupted run) used to leave its node processes behind on the
+# host, where they counted as foreign work and inflated the very number the
+# next measurement would read.
 cleanup() {
   kill $OBS_PID 2>/dev/null
+  for pid in ${OWN_PID:-} ${OWN_BUSY_PID:-} ${OWN_BUSY_PID2:-} ${FIXTURE_PID:-} ${SIBLING_PID:-} ${FOREIGN_PID:-}; do
+    [ -n "$pid" ] && kill "$pid" 2>/dev/null
+  done
   rmdir "$CGROOT/$RUN_CG" "$CGROOT/$SIBLING_CG" 2>/dev/null
   return 0
 }
@@ -223,13 +293,19 @@ else
 fi
 
 # --- 2. a foreign load is counted ----------------------------------------------------------------
+EXPECTED_BEFORE_FOREIGN=$EXPECTED
 FOREIGN_PID=$(busy_node 40)
 wait_samples 2
 measure_window
-if awk -v e="$EXPECTED" 'BEGIN{exit !(e >= 0.30)}'; then
-  pass "2 a foreign load is counted (independent measurement $EXPECTED cores, observed $OBSERVED)"
+# The fixture's CONTRIBUTION is what is asserted: a busy process outside the
+# run's cgroup must ADD about a core to the residual. Asserting only that the
+# residual is above 0.30 would pass on this host's own baseline, which sits
+# near 0.85 with no fixture at all.
+CONTRIBUTION=$(awk -v a="$EXPECTED" -v b="$EXPECTED_BEFORE_FOREIGN" 'BEGIN{printf "%.3f", a-b}')
+if awk -v c="$CONTRIBUTION" 'BEGIN{exit !(c >= 0.50)}'; then
+  pass "2 a foreign load is counted (it added $CONTRIBUTION cores to the residual: $EXPECTED_BEFORE_FOREIGN -> $EXPECTED)"
 else
-  fail "2 a foreign load is counted" "independent measurement $EXPECTED cores, observed $OBSERVED"
+  fail "2 a foreign load is counted" "the fixture added only $CONTRIBUTION cores ($EXPECTED_BEFORE_FOREIGN -> $EXPECTED)"
 fi
 if awk -v d="$DELTA" "BEGIN{exit !(d <= $TOLERANCE)}"; then
   pass "2b the foreign load is accounted correctly (delta $DELTA)"
@@ -257,16 +333,40 @@ else
   fail "3b the run's own CPU is counted as the run's" "runCpuSec did not grow ($RUN_CPU_BEFORE -> $RUN_CPU_AFTER)"
 fi
 
-# --- 4. a process exit produces no spike ------------------------------------------------------------
+# --- 3c. the run's own replacement does not inflate the foreign count --------------------------------
+# The harness replaces its four clients every hour. A process that exits
+# during a sample must not be counted as FOREIGN: the rehearsal showed that
+# race adding seven phantom processes to a single sample, which would have
+# voided a qualifying night on the process-count gate alone.
+FOREIGN_BEFORE_REPLACE=$(field foreignProcs)
 kill "$OWN_BUSY_PID" 2>/dev/null
 OWN_BUSY_PID2=$(busy_node 40)
 echo "$OWN_BUSY_PID2" > "$CGROOT/$RUN_CG/cgroup.procs" 2>/dev/null || true
 wait_samples 3
+FOREIGN_AFTER_REPLACE=$(field foreignProcs)
+if [ "${FOREIGN_AFTER_REPLACE:-0}" -le "$(( ${FOREIGN_BEFORE_REPLACE:-0} + 3 ))" ] 2>/dev/null; then
+  pass "3c the run's own replacement does not inflate the foreign count (foreignProcs $FOREIGN_BEFORE_REPLACE -> $FOREIGN_AFTER_REPLACE)"
+else
+  fail "3c the run's own replacement does not inflate the foreign count" "foreignProcs $FOREIGN_BEFORE_REPLACE -> $FOREIGN_AFTER_REPLACE"
+fi
+
+# --- 4. a process exit produces no spike ------------------------------------------------------------
+EXIT_MARK=$(wc -l < "$OUT" | tr -d ' ')
+wait_samples 2
 measure_window
 if awk -v d="$DELTA" "BEGIN{exit !(d <= $TOLERANCE)}"; then
   pass "4 a process exit produces no spike (expected $EXPECTED cores, observed $OBSERVED, delta $DELTA)"
 else
   fail "4 a process exit produces no spike" "expected $EXPECTED cores, observed $OBSERVED, delta $DELTA"
+fi
+# The AVERAGE of the last four samples can hide a ONE-SAMPLE spike, and a
+# spike is exactly what an exit would produce if the accounting still summed
+# lifetime counters. The WORST sample since the exit is asserted as well.
+WORST_SINCE_EXIT=$(tail -n +"$EXIT_MARK" "$OUT" | awk '{for(i=1;i<=NF;i++) if ($i ~ /^foreignCores=/) {sub("foreignCores=","",$i); if ($i+0 > m) m=$i+0}} END{printf "%.3f", m+0}')
+if awk -v w="$WORST_SINCE_EXIT" "BEGIN{exit !(w <= $TOLERANCE + 1.2)}"; then
+  pass "4b no single sample spiked at the exit (the worst sample since the exit was $WORST_SINCE_EXIT cores)"
+else
+  fail "4b no single sample spiked at the exit" "the worst sample since the exit was $WORST_SINCE_EXIT cores"
 fi
 
 # --- 5. the identity is exact -----------------------------------------------------------------------
@@ -287,9 +387,50 @@ wait_samples 3
 FOREIGN_AFTER_FIXTURE=$(field foreignProcs)
 OWN_AFTER_FIXTURE=$(field ownProcs)
 if [ "${FOREIGN_AFTER_FIXTURE:-0}" -gt "${FOREIGN_BEFORE_FIXTURE:-0}" ] 2>/dev/null; then
-  pass "5a a process merely MENTIONING the soak's script is foreign (foreignProcs $FOREIGN_BEFORE_FIXTURE -> $FOREIGN_AFTER_FIXTURE)"
+  pass "5a the fixtures raised the foreign count (foreignProcs $FOREIGN_BEFORE_FIXTURE -> $FOREIGN_AFTER_FIXTURE)"
 else
-  fail "5a a process merely MENTIONING the soak's script is foreign" "foreignProcs $FOREIGN_BEFORE_FIXTURE -> $FOREIGN_AFTER_FIXTURE"
+  fail "5a the fixtures raised the foreign count" "foreignProcs $FOREIGN_BEFORE_FIXTURE -> $FOREIGN_AFTER_FIXTURE"
+fi
+# Each fixture is checked BY ITS OWN PID in the census: an aggregate count
+# going up does not prove WHICH processes went up, and the defect this check
+# exists to catch (the run's own processes counted as foreign) moves the
+# aggregate too.
+# Each fixture is checked by its OWN cgroup, and the observer's counts are
+# checked against the cgroup's ACTUAL membership. The census cannot carry
+# this: it is a snapshot of the first sample, taken before the fixtures
+# existed. Comparing the counts is also the stronger property — it is exactly
+# the defect that a single newline in a cgroup record would cause, and an
+# aggregate count going up does not prove which processes went up.
+# The cgroup's path in the v2 hierarchy. RUN_CG is the group's NAME; the
+# path is that name under the root, and the observer's membership test
+# compares exactly that string.
+RUN_CG_PATH="/$RUN_CG"
+FIXTURE_PATH=$(cgroup_path_of "/proc/$FIXTURE_PID/cgroup")
+SIBLING_PATH=$(cgroup_path_of "/proc/$SIBLING_PID/cgroup")
+OWN_PATH=$(cgroup_path_of "/proc/$OWN_PID/cgroup")
+if [ "$FIXTURE_PATH" != "$RUN_CG_PATH" ] && [ -n "$FIXTURE_PATH" ]; then
+  pass "5c the process that MENTIONS the soak's script is NOT in the run's cgroup (pid $FIXTURE_PID, cgroup $FIXTURE_PATH)"
+else
+  fail "5c the process that MENTIONS the soak's script is NOT in the run's cgroup" "pid $FIXTURE_PID is in '$FIXTURE_PATH'"
+fi
+if [ "$SIBLING_PATH" != "$RUN_CG_PATH" ] && [ -n "$SIBLING_PATH" ]; then
+  pass "5d the process in the SIBLING cgroup is NOT in the run's cgroup (pid $SIBLING_PID, cgroup $SIBLING_PATH)"
+else
+  fail "5d the process in the SIBLING cgroup is NOT in the run's cgroup" "pid $SIBLING_PID is in '$SIBLING_PATH'"
+fi
+if [ "$OWN_PATH" = "$RUN_CG_PATH" ]; then
+  pass "5e the run's own process IS in the run's cgroup (pid $OWN_PID)"
+else
+  fail "5e the run's own process IS in the run's cgroup" "pid $OWN_PID is in '$OWN_PATH'"
+fi
+ACTUAL_OWN=$(count_node_in_cgroup "$RUN_CG_PATH")
+ACTUAL_FOREIGN=$(count_node_outside_cgroup "$RUN_CG_PATH")
+REPORTED_OWN=$(field ownProcs)
+REPORTED_FOREIGN=$(field foreignProcs)
+if [ "${REPORTED_OWN:-0}" = "$ACTUAL_OWN" ] && [ "${REPORTED_FOREIGN:-0}" = "$ACTUAL_FOREIGN" ]; then
+  pass "5f the observer's counts match the cgroup's ACTUAL membership (own $REPORTED_OWN vs $ACTUAL_OWN, foreign $REPORTED_FOREIGN vs $ACTUAL_FOREIGN)"
+else
+  fail "5f the observer's counts match the cgroup's ACTUAL membership" "own $REPORTED_OWN vs $ACTUAL_OWN, foreign $REPORTED_FOREIGN vs $ACTUAL_FOREIGN"
 fi
 # The count may FALL between the two readings (one of the run's own processes
 # exits); what must never happen is that it RISES, because the two fixtures
@@ -311,8 +452,9 @@ fi
 # NB: `grep -c` prints the count AND exits 1 when the count is zero, so a
 # `|| echo 0` here would make the value "0\n0" and the comparison below would
 # fail on a clean log.
-EMPTY_RSS=$(grep -c 'serverRss_kB=$' "$OUT" 2>/dev/null)
-EMPTY_RSS=${EMPTY_RSS:-0}
+# The RSS field is followed by other fields, so the check must look at the
+# field's own position, not at the end of the line.
+EMPTY_RSS=$(awk '{for(i=1;i<=NF;i++) if ($i ~ /^serverRss_kB=$/) c++} END{printf "%d", c+0}' "$OUT")
 if [ "${EMPTY_RSS:-1}" = "0" ]; then
   pass "6b the server RSS field is never empty"
 else
@@ -322,6 +464,14 @@ if [ -s "$WORK/observer.out" ]; then
   fail "6c the observer is quiet" "$(head -3 "$WORK/observer.out")"
 else
   pass "6c the observer is quiet (no stray output)"
+fi
+# The observer's own accounting must have been sound in EVERY sample it took:
+# a sample whose observer cgroup or cgroup reads failed is not a measurement.
+BAD_SIGNALS=$(awk '{for(i=1;i<=NF;i++) if ($i ~ /^(obsCgroupOk|obsReadOk|deltaValid)=0$/) c++} END{printf "%d", c+0}' "$OUT")
+if [ "${BAD_SIGNALS:-1}" = "0" ]; then
+  pass "6d every sample the observer took had sound accounting"
+else
+  fail "6d every sample the observer took had sound accounting" "$BAD_SIGNALS sample(s) carry a failed validity signal"
 fi
 
 echo

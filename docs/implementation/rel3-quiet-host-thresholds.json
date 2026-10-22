@@ -1,29 +1,78 @@
 {
-  "registeredAt": "2026-10-22T06:05:00Z",
-  "note": "The frozen quiet-host thresholds for the REL-3 qualifying soak. Registered BEFORE the qualifying run was launched and never adjusted afterwards. scripts/rel3-soak-eligibility.mjs reads this file; it does not carry its own copy of these numbers, so the contract and the scorer cannot drift apart. The file's SHA-256 is recorded in the attempt's launch record.",
+  "registeredAt": "2026-10-22T07:35:00Z",
+  "note": "The frozen quiet-host thresholds for the REL-3 qualifying soak. Registered BEFORE the qualifying run was launched and never adjusted afterwards. scripts/rel3-soak-eligibility.mjs reads this file; it does not carry its own copy of these numbers, so the contract and the scorer cannot drift apart. The file's SHA-256 is recorded in the attempt's launch record, and the scorer refuses a thresholds file whose digest is not the one the launch recorded: frozen means committed and digested, not a working tree.",
   "cadenceSeconds": 60,
   "cadenceToleranceSeconds": 15,
   "window": {
     "tailHours": 4,
-    "note": "The measured window is the final four hours of the run, matching the harness's final-window RSS rule (FR-13's four hours)."
+    "note": "The measured window is the final four hours of the run, matching the harness's final-window RSS rule (FR-13's four hours) — the host window and the memory window are the same four hours."
   },
   "memAvailableFloorBytes": 4294967296,
+  "foreignProcessLimit": 7,
   "foreignProcessHeadroom": 3,
   "foreignCores": {
-    "windowMeanMax": 0.25,
-    "p95Max": 0.5,
-    "percentileMethod": "nearest-rank",
+    "medianMax": 1.345,
+    "meanMax": 1.576,
+    "medianAllowanceCores": 0.5,
+    "meanAllowanceCores": 0.75,
     "rollingMinutes": 5,
-    "rollingMeanMax": 0.5,
-    "note": "Three gates on the foreign CPU, each catching a different shape of interference: the window mean bounds the TOTAL interference, the nearest-rank p95 catches a recurring workload that occupies a minority of the samples, and the rolling five-minute mean catches a sustained neighbour that a whole-window mean would hide. A one-minute spike survives all three (it contributes 0.20 to a five-minute mean); a twelve-minute one-core neighbour fails the rolling gate; a forty-percent-duty neighbour fails the p95."
+    "percentileMethod": "nearest-rank",
+    "reportedOnly": [
+      "p95",
+      "max",
+      "rolling5mMax",
+      "minutesAboveOneCore"
+    ],
+    "note": "The limits are ABSOLUTE numbers, derived ONCE from a measurement of this host and frozen here. They are never recomputed from whatever files an operator hands the scorer: the baseline is a CROSS-CHECK against the registration, not the source of the limits. An absolute threshold on this host would be unsatisfiable — ngs-staging runs a staging auto-deploy that compiles PHP, and its busy time moves between roughly 0.2 and 2 cores on its own — so the limits are the host's measured baseline plus a stated allowance. The MEDIAN is the sustained-interference detector: a neighbour that keeps the box busy moves it, the host's own episodic bursts do not. The MEAN is weighted by each interval's ELAPSED TIME and bounds the total interference, with an allowance that absorbs the host's own bursts. The p95, the maximum, the worst rolling five-minute mean and the count of minutes above one core are REPORTED and never gated: this host's bursts reach ~2 cores, so gating a tail statistic against a baseline that may not contain a burst would void a clean night for the host's own behaviour."
+  },
+  "knownLimits": {
+    "detectionBoundary": "The gates are aimed at interference that is SUSTAINED across most of the measured window — the attempt-2 class, +2 to +3 cores throughout. The honest arithmetic: the mean allowance of 0.75 cores over a four-hour window is 180 core-minutes, so a ONE-core neighbour can be present for up to about 180 minutes and still pass the mean gate; and the nearest-rank median over 240 samples selects rank 120, so it does not move until MORE THAN HALF the window's samples are affected — an intrusion present for up to about 119 of the 240 minutes passes both gates. Anything shorter is visible in the reported p95, the reported maximum and the reported rolling five-minute mean, and in the archived raw telemetry, but it is not GATED.",
+    "unresolved": "Whether the retained-state diagnostic and the memory gate need the same treatment is a separate question, and one this contract does not answer."
   },
   "coverage": {
     "minimumSampleFraction": 0.8,
-    "note": "The window must hold at least this fraction of the expected samples at the registered cadence. The window's samples are the ones inside the final four hours of the run."
+    "note": "The window must hold at least this fraction of the expected samples at the registered cadence, measured by ELAPSED TIME rather than by rows, and a window whose tail is simply absent is INCOMPLETE rather than quiet."
+  },
+  "baseline": {
+    "minimumSamples": 12,
+    "note": "The baseline is the host's foreign state before the run: the run log's own pre-run samples plus any earlier measurement of the same host with the same observer, named in the launch record. The foreign processes are PINNED by identity — argv[0], argv[1], start time, boot id — in the baseline census. The observer's FIRST sample of any log has no previous sample to difference against, so it is a synthetic zero rather than a measurement and is EXCLUDED from every statistic."
+  },
+  "baselineExpectation": {
+    "median": 0.845,
+    "mean": 0.8258,
+    "foreignProcessMax": 4,
+    "tolerance": {
+      "median": 0.15,
+      "mean": 0.25
+    },
+    "note": "The baseline measured on ngs-staging with THIS observer, before the registration: 19 measured samples (the observer's synthetic first sample excluded), 2026-10-22T07:12:40Z-07:21:40Z — mean 0.8258 cores, median 0.8450, p95 1.0250, max 1.0250, four foreign node processes, MemAvailable floor 7.25 GiB. A SECOND window measured the same host the same day while the host's PHP-build burst was running: 41 samples, mean 0.954, median 0.916, max 1.966 — so the registered limits tolerate the host's own bursts (the burst moves the MEAN to 0.954 and leaves the MEDIAN at 0.916, both inside the limits) while still refusing the attempt-2 class. At scoring time the scorer recomputes the baseline and compares it with these numbers: a drift beyond the tolerance means the host's baseline has MOVED since the registration, and the attempt is INCOMPLETE rather than judged against stale limits. The launcher performs the same comparison BEFORE the run starts, so a moved baseline is caught before the night and not after it."
   },
   "dispositions": {
     "breach": "confounded",
     "missingOrInvalidTelemetry": "incomplete",
     "note": "A breach makes the attempt CONFOUNDED: recorded under its own name as incomplete, never scored, never re-scored. Missing or invalid telemetry has the same disposition — it is never read as a quiet host. A valid host window permits the unchanged memory and other gates to be scored; it does not itself confer a PASS."
+  },
+  "calibration": {
+    "hostBaselineWindows": [
+      {
+        "window": "2026-10-22T07:12:40Z/07:21:40Z",
+        "samples": 19,
+        "mean": 0.8258,
+        "median": 0.845,
+        "p95": 1.025,
+        "max": 1.025,
+        "note": "the host at its steady state"
+      },
+      {
+        "window": "2026-10-22T05:49:38Z/06:29:42Z",
+        "samples": 41,
+        "mean": 0.954,
+        "median": 0.916,
+        "p95": 1.434,
+        "max": 1.966,
+        "note": "the same host while its PHP-build burst was running — the burst moves the mean to 0.954 and the median to 0.916, and both stay inside the registered limits, which is the point of measuring them against this host rather than inventing them"
+      }
+    ],
+    "note": "The two windows are the calibration the advisor gate asked for: the host's own behaviour on both sides of a burst, measured with the same instrument that will judge the night."
   }
 }
