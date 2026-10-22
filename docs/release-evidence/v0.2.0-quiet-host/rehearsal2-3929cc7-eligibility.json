@@ -1,0 +1,215 @@
+{
+  "verdict": "incomplete",
+  "scope": "quiet-host eligibility only — this does not judge the soak, and it does not confer a PASS",
+  "thresholdsFile": "/root/rel1-soak/docs/implementation/rel3-quiet-host-thresholds.json",
+  "thresholdsDigest": "sha256:253ef29657c47e40f5e60d39ec82b4cdd02560c2639f5bd0f27e1603f15e5576",
+  "expectedThresholdsDigest": "sha256:253ef29657c47e40f5e60d39ec82b4cdd02560c2639f5bd0f27e1603f15e5576",
+  "runStart": "2026-10-22T12:12:48.958Z",
+  "runEnd": "2026-10-22T12:17:18.837Z",
+  "runEndSource": "run-end",
+  "metrics": {
+    "windowStart": "2026-10-22T08:17:18.837Z",
+    "windowEnd": "2026-10-22T12:17:18.837Z",
+    "windowSeconds": 14400,
+    "windowEndSource": "run-end",
+    "windowSamples": 11,
+    "expectedSamples": 240,
+    "coverage": 0.0417,
+    "coverageDetail": {
+      "fraction": 0.0417,
+      "coveredSeconds": 601,
+      "windowSeconds": 14400,
+      "minimumSampleFraction": 0.8,
+      "validIntervals": 10,
+      "intervalsInsideWindow": 10,
+      "headSeconds": 13767,
+      "tailSeconds": 32,
+      "outOfCadenceIntervals": 0
+    },
+    "gaps": [
+      {
+        "kind": "head",
+        "from": "2026-10-22T08:17:18.837Z",
+        "to": "2026-10-22T12:06:46.000Z",
+        "seconds": 13767.163,
+        "expectedSeconds": 60,
+        "toleranceSeconds": 15
+      },
+      {
+        "kind": "tail",
+        "from": "2026-10-22T12:16:47.000Z",
+        "to": "2026-10-22T12:17:18.837Z",
+        "seconds": 31.837,
+        "expectedSeconds": 60,
+        "toleranceSeconds": 15
+      }
+    ],
+    "gapCount": 2,
+    "baselineSamples": 27,
+    "baselineMeasuredSamples": 25,
+    "baselineSyntheticSamples": 2,
+    "telemetryCommentLines": 0,
+    "baselineSources": [
+      {
+        "path": "/root/rel1-soak/docs/release-evidence/v0.2.0-quiet-host/host-baseline-2026-10-22.log",
+        "samples": 20,
+        "usable": 20,
+        "commentLines": 0
+      }
+    ],
+    "baselineForeignProcessMax": 4,
+    "baselineForeignCoresMean": 0.7067,
+    "baselineForeignCores": {
+      "median": 0.798,
+      "mean": 0.7067,
+      "p95": 1.011,
+      "max": 1.025,
+      "rolling5mMax": 0.9146
+    },
+    "baselineExpectation": {
+      "source": "baselineExpectation",
+      "expectedMedian": 0.845,
+      "expectedMean": 0.8258,
+      "tolerance": {
+        "median": 0.15,
+        "mean": 0.25
+      },
+      "medianDrift": 0.04699999999999993,
+      "meanDrift": 0.11911999999999989,
+      "checked": [
+        "median",
+        "mean"
+      ]
+    },
+    "limits": {
+      "source": "absolute",
+      "medianMax": 1.345,
+      "meanMax": 1.576,
+      "computed": {
+        "medianMax": 1.298,
+        "meanMax": 1.4567,
+        "baselineMedian": 0.798,
+        "baselineMean": 0.7066800000000001,
+        "medianAllowanceCores": 0.5,
+        "meanAllowanceCores": 0.75
+      },
+      "advertised": {
+        "medianMax": 1.345,
+        "meanMax": 1.576
+      },
+      "advertisedVsComputed": {
+        "medianDrift": 0.047,
+        "meanDrift": 0.1193,
+        "note": "the registered limits are the ones that gate; the relative computation is a diagnostic of this host now"
+      }
+    },
+    "memAvailableFloorBytes": 8295059456,
+    "maxForeignProcesses": 4,
+    "foreignProcessAllowance": 7,
+    "foreignCoresMean": 0.3283,
+    "foreignCoresRowMean": 0.2985,
+    "foreignCoresMedian": 0.328,
+    "foreignCoresP95": 0.34,
+    "foreignCoresMax": 0.34,
+    "foreignCoresRolling5mMax": 0.3298,
+    "foreignCoresSamplesAboveOneCore": 0,
+    "foreignCoresMinutesAboveOneCore": 0,
+    "loadAverageMax": 1.36,
+    "stealCoresMax": 0
+  },
+  "reasons": [
+    "the run's span is 270 s, which is shorter than the registered 4 h window",
+    "the window's first sample (2026-10-22T12:06:46Z) is not an interval — only the first sample of a log has no previous sample to difference against",
+    "the window's HEAD is not covered: the first measured interval begins 13767s after the window's start (2026-10-22T08:17:18.837Z), more than the registered 15s tolerance allows — an unmeasured prefix of the window is not a quiet prefix",
+    "the window's last measured interval ends 32s before the window's end (2026-10-22T12:17:18.837Z), more than the registered 15s tolerance allows — the log ends before the window does",
+    "the window's elapsed-time coverage is 4.2%, below the registered minimum of 80.0%",
+    "the sample at 2026-10-22T12:06:46Z shows none of the run's own processes inside the measured window — the window is not a window of a run",
+    "the sample at 2026-10-22T12:07:46Z shows none of the run's own processes inside the measured window — the window is not a window of a run",
+    "the sample at 2026-10-22T12:08:46Z shows none of the run's own processes inside the measured window — the window is not a window of a run",
+    "the sample at 2026-10-22T12:09:46Z shows none of the run's own processes inside the measured window — the window is not a window of a run",
+    "the sample at 2026-10-22T12:10:46Z shows none of the run's own processes inside the measured window — the window is not a window of a run",
+    "the sample at 2026-10-22T12:11:47Z shows none of the run's own processes inside the measured window — the window is not a window of a run",
+    "the sample at 2026-10-22T12:12:47Z shows none of the run's own processes inside the measured window — the window is not a window of a run"
+  ],
+  "dataProblems": [
+    "the run's span is 270 s, which is shorter than the registered 4 h window",
+    "the window's first sample (2026-10-22T12:06:46Z) is not an interval — only the first sample of a log has no previous sample to difference against",
+    "the window's HEAD is not covered: the first measured interval begins 13767s after the window's start (2026-10-22T08:17:18.837Z), more than the registered 15s tolerance allows — an unmeasured prefix of the window is not a quiet prefix",
+    "the window's last measured interval ends 32s before the window's end (2026-10-22T12:17:18.837Z), more than the registered 15s tolerance allows — the log ends before the window does",
+    "the window's elapsed-time coverage is 4.2%, below the registered minimum of 80.0%",
+    "the sample at 2026-10-22T12:06:46Z shows none of the run's own processes inside the measured window — the window is not a window of a run",
+    "the sample at 2026-10-22T12:07:46Z shows none of the run's own processes inside the measured window — the window is not a window of a run",
+    "the sample at 2026-10-22T12:08:46Z shows none of the run's own processes inside the measured window — the window is not a window of a run",
+    "the sample at 2026-10-22T12:09:46Z shows none of the run's own processes inside the measured window — the window is not a window of a run",
+    "the sample at 2026-10-22T12:10:46Z shows none of the run's own processes inside the measured window — the window is not a window of a run",
+    "the sample at 2026-10-22T12:11:47Z shows none of the run's own processes inside the measured window — the window is not a window of a run",
+    "the sample at 2026-10-22T12:12:47Z shows none of the run's own processes inside the measured window — the window is not a window of a run"
+  ],
+  "thresholdBreaches": [],
+  "findings": [
+    {
+      "kind": "data",
+      "code": "run-span-too-short",
+      "detail": "the run's span is 270 s, which is shorter than the registered 4 h window"
+    },
+    {
+      "kind": "data",
+      "code": "window-first-sample-not-an-interval",
+      "detail": "the window's first sample (2026-10-22T12:06:46Z) is not an interval — only the first sample of a log has no previous sample to difference against"
+    },
+    {
+      "kind": "data",
+      "code": "window-starts-late",
+      "detail": "the window's HEAD is not covered: the first measured interval begins 13767s after the window's start (2026-10-22T08:17:18.837Z), more than the registered 15s tolerance allows — an unmeasured prefix of the window is not a quiet prefix"
+    },
+    {
+      "kind": "data",
+      "code": "window-ends-early",
+      "detail": "the window's last measured interval ends 32s before the window's end (2026-10-22T12:17:18.837Z), more than the registered 15s tolerance allows — the log ends before the window does"
+    },
+    {
+      "kind": "data",
+      "code": "coverage-too-low",
+      "detail": "the window's elapsed-time coverage is 4.2%, below the registered minimum of 80.0%"
+    },
+    {
+      "kind": "data",
+      "code": "window-has-no-own-processes",
+      "detail": "the sample at 2026-10-22T12:06:46Z shows none of the run's own processes inside the measured window — the window is not a window of a run"
+    },
+    {
+      "kind": "data",
+      "code": "window-has-no-own-processes",
+      "detail": "the sample at 2026-10-22T12:07:46Z shows none of the run's own processes inside the measured window — the window is not a window of a run"
+    },
+    {
+      "kind": "data",
+      "code": "window-has-no-own-processes",
+      "detail": "the sample at 2026-10-22T12:08:46Z shows none of the run's own processes inside the measured window — the window is not a window of a run"
+    },
+    {
+      "kind": "data",
+      "code": "window-has-no-own-processes",
+      "detail": "the sample at 2026-10-22T12:09:46Z shows none of the run's own processes inside the measured window — the window is not a window of a run"
+    },
+    {
+      "kind": "data",
+      "code": "window-has-no-own-processes",
+      "detail": "the sample at 2026-10-22T12:10:46Z shows none of the run's own processes inside the measured window — the window is not a window of a run"
+    },
+    {
+      "kind": "data",
+      "code": "window-has-no-own-processes",
+      "detail": "the sample at 2026-10-22T12:11:47Z shows none of the run's own processes inside the measured window — the window is not a window of a run"
+    },
+    {
+      "kind": "data",
+      "code": "window-has-no-own-processes",
+      "detail": "the sample at 2026-10-22T12:12:47Z shows none of the run's own processes inside the measured window — the window is not a window of a run"
+    }
+  ],
+  "dispositions": {
+    "breach": "confounded",
+    "missingOrInvalidTelemetry": "incomplete"
+  }
+}

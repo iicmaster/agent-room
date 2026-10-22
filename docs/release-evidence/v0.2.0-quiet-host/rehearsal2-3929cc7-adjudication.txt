@@ -1,0 +1,11 @@
+# rehearsal2-3929cc7
+adjudicated_at 2026-10-22T12:17:24Z
+run_start 2026-10-22T12:12:48.958Z
+run_end 
+window_end 2026-10-22T12:17:18.837000Z
+window_note the window's end is the LAST TRACKER SAMPLE, the instant the harness's final-window RSS rule anchors to; the run's endedAt is later, by the final drain
+thresholds_digest_at_launch sha256:253ef29657c47e40f5e60d39ec82b4cdd02560c2639f5bd0f27e1603f15e5576
+thresholds_digest_at_scoring sha256:253ef29657c47e40f5e60d39ec82b4cdd02560c2639f5bd0f27e1603f15e5576
+scorer_exit 1
+eligibility_verdict incomplete
+note the release evidence (docs/release-evidence/v0.2.0-soak-results.{json,md}) is NOT touched by this step; it is a separate, deliberate step taken after the verdict is read

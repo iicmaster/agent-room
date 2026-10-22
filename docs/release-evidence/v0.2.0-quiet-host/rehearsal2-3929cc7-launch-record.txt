@@ -1,0 +1,48 @@
+launched_at 2026-10-22T12:06:46Z
+repo /root/rel1-soak
+parent /root/rel3-rehearsal6
+duration_hours 0.08
+run_cgroup agent-room-soak-20261022T120646Z
+baseline_minutes 5
+node v24.18.0
+host Linux 5.14.0-642.el9.x86_64 x86_64
+cores 4
+boot_id 3bef85f2-56ae-4007-9a72-e5ef813b97d7
+repo_commit 12e3634af19a9268f837fa42f9e509187633464b
+repo_changed_paths 0
+thresholds_file /root/rel1-soak/docs/implementation/rel3-quiet-host-thresholds.json
+thresholds_digest sha256:253ef29657c47e40f5e60d39ec82b4cdd02560c2639f5bd0f27e1603f15e5576
+observer_digest sha256:d5316a38afdc22593ff63b11cabc593caff19dfdf07e2710d5c1a71ebd2dd2b9
+scorer_digest sha256:a1981cc873a367f2f4c5b7e42ca79bb6c5087667776e3651f2fe6836f52e1ea1
+selfcheck_digest sha256:5fec971cd08fc4397de1f7ab634d8af9e96eb5abdecbbf7c6ee727437358faa3
+adjudicator_digest sha256:e2a9bdabdd8b13977ad2afb2af0bc520b1c62e6bb1763f9eed1a643716c36a8f
+launcher_digest sha256:193c3a83c3e908252f366fbc60764ce6349f9428b94eeb9f00c0edc0e27d7434
+extra_baseline_file /root/rel1-soak/docs/release-evidence/v0.2.0-quiet-host/host-baseline-2026-10-22.log
+extra_baseline_digest sha256:1163ee3f6a2001ce106efcc3bc2c795126c113edcb4af2a70fda96c5eb193d2d
+observer_pid 2445469
+telemetry_log /root/rel3-rehearsal6/telemetry.log
+census /root/rel3-rehearsal6/baseline-census.txt
+repository_clean yes
+observer_ready yes
+baseline_samples 7
+baseline_foreign_processes 4
+baseline_log /root/rel3-rehearsal6/telemetry.log
+baseline_log_digest sha256:cc873c339ce5f8ca044ffb1c1ccd5ccd7618d3a68e9170a6b3b55a9bce3b92f0
+baseline_census_digest sha256:a38bd51ccc23200e08194bce9badfd6193f7afee2f825cea02e987215fc96b9f
+baseline_check ok samples=6 median=0.3280 mean=0.3295 median_drift=0.5170 mean_drift=0.4963
+baseline_check_ok yes
+cgroup_placement verified
+soak_pid 2447561
+soak_log /root/rel3-rehearsal6/.soak-world/soak.log
+evidence_dir /root/rel3-rehearsal6/.soak-world/evidence
+minute_one_own_processes 7
+minute_one_foreign_processes 4
+minute_one_expected_own_minimum 6
+minute_one_foreign_limit 7
+minute_one_sample_timestamp 2026-10-22T12:14:47Z
+minute_one_sample_age_seconds 36
+minute_one_max_age_seconds 75
+minute_one_ok yes
+adjudication_command bash scripts/rel3-soak-adjudicate.sh /root/rel1-soak /root/rel3-rehearsal6 <the attempt's name>
+adjudication_note ONE authoritative procedure: the helper reads the run's own bounds from the run's record (the last tracker sample, the instant the memory gate anchors to), verifies the scorer's and the baseline's bytes against this record, runs the scorer with the FROZEN thresholds and their registered digest, and archives the attempt's evidence under its own name. It never overwrites an attempt's first verdict, and it never touches the release evidence.
+observer_watcher_pid 2448851
