@@ -174,6 +174,18 @@ effect that made soak attempt 2 look like a leak.
 - **Release notes**: `docs/release-notes-v0.2.md` (the one-time v1→v2 cursor reset, the SM-C1 numbers, the
   claimed-clients table, the reconnect-recovery section, and the changelog position).
 
+## 3a. THE CLOSEOUT, STEP BY STEP (after the run's drain finishes)
+
+The run's evidence lands in `/root/rel1-soak6/.soak-world/evidence/`. The steps, in order, and what each
+one decides:
+
+1. **Adjudicate the host window** — `ssh 9router 'cd /root/rel1-soak && bash scripts/rel3-soak-adjudicate.sh /root/rel1-soak /root/rel1-soak6 attempt6-3929cc7'`. It verifies the scorer's and the baseline's bytes against the launch record, scores the window against the FROZEN thresholds, and archives the attempt's evidence under its own name. **ELIGIBLE** means the host window was admissible; it does NOT mean the soak passed.
+2. **Read the harness's own verdict** in `docs/release-evidence/v0.2.0-soak-attempts/attempt6-3929cc7.md` (the copied results). The release qualifies only if BOTH the harness says `pass` (with `wallMinutes ≥ 480`, `rules.finalWindowRss.pass`, `rules.fdStability.pass`, `rules.zeroMessageLoss.pass`, the identity `candidate-exact`, and no `failureReasons`) AND the eligibility verdict is `eligible`.
+3. **Only then** copy `attempt6-3929cc7.json`/`.md` over `docs/release-evidence/v0.2.0-soak-results.{json,md}` — the release evidence. If either verdict fails, the release evidence is NOT overwritten and the release stays HELD.
+4. **Update the record**: the AC evidence entry for 6.2 (`docs/implementation/ac-evidence.yaml`), the completion audit's verdict, the retro's acceptance verdict, the state record, and this file. Run `node scripts/ac-sweep.mjs --epic 6` and `node scripts/rel1-verify-evidence.mjs --dir docs/release-evidence/v0.2.0-rel1`.
+5. **The sprint status**: `python3 ~/.agents/skills/bmad-retrospective/scripts/sprint_status.py update --file docs/implementation/sprint-status.yaml --epic 6 --set-retro-done --add-action '<the remaining open actions>' --verdict <the verdict>`, and then the story keys (`6-1-…`, `6-2-…`, `6-4-…`, `epic-6`) — the script owns the retro flag and the action items; the story keys are the orchestrator's.
+6. **Tag** `v0.2.0` and commit everything with `git add` on NAMED paths (never `git add -A`).
+
 ## 4. DO NOT
 
 - **Do not commit `server/` or `client/` code while a soak is in flight** — the candidate-immutability
