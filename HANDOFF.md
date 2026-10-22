@@ -18,21 +18,29 @@
   verdict stands as recorded (approve the bytes, correct the record). The third re-cut was TEXT-ONLY and
   it settled the process rule: **a story's changelog entry and README section land WITH the story,
   before the candidate is frozen.**
-- **The formal 8-hour soak is HELD, on a recorded FAIL.** Attempt 4 ran against `3929cc7` on the QUIET
-  host ngs-staging (`ssh 43.229.78.155`), launched 2026-10-21T13:16:41Z, world under
-  `/root/rel1-soak4/.soak-world/`, with an external read-only host-telemetry sidecar beside it; it ended
-  2026-10-21T21:19Z after 482.66 min. Its identity line reads `candidate-exact`, and everything but one
-  rule is green: **zero message loss** (23,080 acknowledged == 23,080 readable, 0 duplicates, 0 lost), FD
-  stability (worst drift 1 in a ±5 corridor), 47 bursts, 7 reconnect cycles. The one failure, verbatim:
-  `final-window RSS growth above the 2% total-growth bound` — the window went 113.9 MiB → 116.5 MiB
-  (`growthRatio` 0.02239 against the 0.02 bound; the slope's implied growth 0.03988). The host was quiet
-  throughout (the sidecar: max 1-minute load 1.04, min memAvailable 8.97 GiB) — contention is excluded
-  this time. **v0.2.0 is HELD**; both advisor lanes (codex `gpt-6.1-sol[ultra]`, claude
-  `claude-fable-5`; the agy seat was quota-exhausted) say the FAIL stands on the record and that the
-  path out is an owner-ratified, pre-registered, calibrated measurement change plus a fresh longer run —
-  which does NOT void the candidate (`tests/` is not a packaging input).
-  **Do not run `node --test`, another soak, or any heavy workload on ngs-staging while a run is in
-  flight** — that is exactly what broke soak attempt 2.
+- **The formal soak is IN FLIGHT — a twelve-hour qualifying run under the amended, pre-registered
+  protocol.** It started 2026-10-22T02:41Z on the QUIET host ngs-staging (`ssh 43.229.78.155`),
+  world under `/root/rel1-soak5/.soak-world/`, server pid 1325282, `candidate-exact`, with the external
+  read-only host-telemetry sidecar beside it; it ends ~14:41Z plus the final drain. **v0.2.0 is HELD
+  until it returns a verdict.** **Do not run `node --test`, another soak, or any heavy workload on
+  ngs-staging while it is in flight** — that is exactly what broke soak attempt 2, and the run's
+  quiet-host contract is pre-registered: a window whose telemetry breaches it is CONFOUNDED, and the
+  attempt is then recorded as INCOMPLETE, never scored.
+
+  **How it got here.** Attempt 4 ran against `3929cc7` on the quiet host and FAILED one rule — the
+  final-window RSS total-growth bound (113.9 → 116.5 MiB; `growthRatio` 0.02239 against 0.02; the
+  slope's implied growth 0.03988) — with everything else green (zero loss over 23,080 messages, FD
+  stable, 47 bursts, 7 reconnect cycles). Two advisor lanes found that the rule, as placed, measured
+  EQUILIBRATION rather than retention: the profile's ramp IS the first half of the run and the measured
+  window IS the cap-hold, so the rule asked whether the process had stopped growing during the hours it
+  first carried its heaviest sustained load. The rule was therefore amended prospectively (the gate is
+  FR-13's single band, the endpoint term is demoted to a report, the window is FR-13's four hours, the
+  run is twelve hours with the ramp bounded to four, the retained-state diagnostic is collected and
+  reported, the quiet-host contract is pre-registered), calibrated (twelve rows, four of them KNOWN
+  LIMITATIONS), owner-ratified, and put through a second advisor gate whose findings are all closed.
+  The ruling and the pre-registration:
+  `docs/implementation/spec-6-2-rel-3-the-formal-soak.md.amendment-2026-10-22.md`. Attempt 4 is never
+  re-scored, and the release evidence is NOT overwritten.
 - **The soak's temp world must NOT live in `/tmp`** — macOS temp cleanup ate a credential file
   during an earlier run. The world is under `/root/rel1-soak4/`.
 - **REL-1 is DONE and verified** (`docs/release-evidence/v0.2.0-rel1/`, `scripts/rel1-verify-evidence.mjs`
