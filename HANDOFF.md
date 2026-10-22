@@ -68,6 +68,18 @@
   that the observer's counts match the cgroup's ACTUAL membership; and an end-to-end rehearsal whose
   own row reads `ownProcs=7 foreignProcs=4`, whose placement was verified, and whose adjudication
   returned INCOMPLETE with its reasons named.
+- **THE TWELVE-HOUR QUALIFYING RUN IS IN FLIGHT.** It was launched 2026-10-22T12:17:57Z on the quiet
+  host ngs-staging (`ssh 43.229.78.155`), world under `/root/rel1-soak6/.soak-world/`, launcher
+  `scripts/rel3-soak-launch.sh` with a fifteen-minute pre-run baseline. Its tracked window ends about
+  **2026-10-23T00:33Z**, and the final drain after that; the observer stops with the run, and
+  `scripts/rel3-soak-adjudicate.sh /root/rel1-soak /root/rel1-soak6 attempt6-3929cc7` produces the
+  eligibility verdict and archives the attempt's own evidence. **v0.2.0 is HELD until that verdict and
+  the harness's own verdict are both read.** **Do not run `node --test`, another soak, or any heavy
+  workload on ngs-staging or on this Mac while it is in flight** — the run's quiet-host contract is
+  pre-registered, and a window whose telemetry breaches it is CONFOUNDED: the attempt is recorded under
+  its own name as incomplete, never scored, never re-scored. The launch record at
+  `/root/rel1-soak6/launch-record.txt` pins the commit, the five rule digests, the extra baseline's
+  digest, the measured baseline and the placement and partition checks.
 - **The formal soak is NOT in flight — the next twelve-hour run starts after the corrected
   quiet-host contract clears its advisor gate.** The first twelve-hour run (attempt 5: launched
   2026-10-22T02:41Z on the QUIET host ngs-staging, `ssh 43.229.78.155`, world under
