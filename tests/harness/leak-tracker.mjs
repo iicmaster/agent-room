@@ -162,6 +162,32 @@ export async function sampleFdCount(pid) {
 // Timestamps are centered internally so absolute epoch values cannot lose
 // precision. Throws on fewer than MIN_SAMPLES_FOR_REGRESSION samples or a
 // degenerate window (every sample at the same timestamp).
+// The same regression over ANY measured series: the soak's retained-state
+// diagnostic fits the trend of the used heap (in MiB, as V8 reports it) with
+// this helper, so the arithmetic exists once.
+export function leastSquaresSlopeUnitsPerMs(samples, field) {
+  if (!Array.isArray(samples) || samples.length < MIN_SAMPLES_FOR_REGRESSION) {
+    throw new Error(
+      `the regression needs at least ${MIN_SAMPLES_FOR_REGRESSION} samples, received ${Array.isArray(samples) ? samples.length : String(samples)}`,
+    )
+  }
+  const x0 = samples[0].atMs
+  const xs = samples.map(sample => sample.atMs - x0)
+  const ys = samples.map(sample => sample[field])
+  const xMean = xs.reduce((sum, value) => sum + value, 0) / xs.length
+  const yMean = ys.reduce((sum, value) => sum + value, 0) / ys.length
+  let covariance = 0
+  let variance = 0
+  for (let index = 0; index < xs.length; index += 1) {
+    covariance += (xs[index] - xMean) * (ys[index] - yMean)
+    variance += (xs[index] - xMean) ** 2
+  }
+  if (variance === 0) {
+    throw new Error('degenerate sampling window: every sample carries the same timestamp')
+  }
+  return covariance / variance
+}
+
 export function leastSquaresSlopeBytesPerMs(samples) {
   if (!Array.isArray(samples) || samples.length < MIN_SAMPLES_FOR_REGRESSION) {
     throw new Error(

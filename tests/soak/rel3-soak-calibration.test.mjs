@@ -39,12 +39,17 @@ import {
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const BOUND = 0.02
+// An hour in milliseconds — the unit the growth rates are expressed in.
+const MS_PER_HOUR = 3_600_000
 const SAMPLE_MS = 60_000
 const WINDOW_SAMPLES = FOUR_HOURS_MS / SAMPLE_MS
 
 // A trace over the measured window: 240 one-minute samples, the shape of the
 // server's GC sawtooth (a 25-minute cycle), optionally with a linear growth
 // term of `growthPerHour` (a fraction of the starting RSS per hour).
+// The synthetic traces are built in MiB: every quantity the evaluator
+// derives is a RATIO (growth per unit), so the unit cancels and no byte
+// conversion — and no restated limit — appears in this file.
 function sawtoothTrace({
   startRssMiB = 100,
   amplitudeMiB = 7,
@@ -53,13 +58,13 @@ function sawtoothTrace({
   samples = WINDOW_SAMPLES,
   phase = 0,
 } = {}) {
-  const base = startRssMiB * 1024 * 1024
+  const base = startRssMiB
   return Array.from({ length: samples }, (_, index) => {
     const cycle = ((index + phase) % cycleSamples) / (cycleSamples - 1)
-    const growth = base * (growthPerHour / 100) * ((index * (SAMPLE_MS / 3_600_000)))
+    const growth = base * (growthPerHour / 100) * ((index * (SAMPLE_MS / MS_PER_HOUR)))
     return {
       atMs: index * SAMPLE_MS,
-      rssBytes: Math.round(base * (1 + (amplitudeMiB / startRssMiB) * cycle) + growth),
+      rssBytes: base * (1 + (amplitudeMiB / startRssMiB) * cycle) + growth,
     }
   })
 }
@@ -174,11 +179,11 @@ test('KNOWN LIMITATION: a DECELERATING leak looks like equilibration and passes'
   // asymptote, so at hours 8-12 the band cannot tell them apart. This is why
   // the retained-state diagnostic exists - and why no four-hour band can make
   // that distinction. It is pinned so it is never rediscovered as a surprise.
-  const base = 100 * 1024 * 1024
+  const base = 100
   const samples = Array.from({ length: WINDOW_SAMPLES }, (_, index) => {
     const fraction = (index + 1) / WINDOW_SAMPLES
     // a 1/t decay: steep at first, then flat - the shape equilibration makes
-    const decay = 12 * 1024 * 1024 * (1 / fraction - 1) / (WINDOW_SAMPLES - 1)
+    const decay = 12 * (1 / fraction - 1) / (WINDOW_SAMPLES - 1)
     return { atMs: index * SAMPLE_MS, rssBytes: Math.round(base + decay) }
   })
   const verdict = evaluate(samples)
@@ -229,7 +234,7 @@ test('the phase lottery is replayed on attempt 1\'s OWN residuals — the run th
   for (let phase = 0; phase < 25; phase += 1) {
     const shifted = windowSamples.map((sample, index) => ({
       ...sample,
-      rssBytes: sample.rssBytes + Math.round(6 * 1024 * 1024 * Math.sin(((index + phase) / 25) * 2 * Math.PI)),
+      rssBytes: sample.rssBytes + Math.round(6 * Math.sin(((index + phase) / 25) * 2 * Math.PI)),
     }))
     outcomes.push(evaluateFinalWindowRss(shifted, stored.schedule, true).pass)
   }

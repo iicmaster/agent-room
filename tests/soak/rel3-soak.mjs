@@ -155,7 +155,13 @@ import os, { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
-import { createLeakTracker, leastSquaresSlopeBytesPerMs, sampleFdCount, sampleRssBytes } from '../harness/leak-tracker.mjs'
+import {
+  createLeakTracker,
+  leastSquaresSlopeBytesPerMs,
+  leastSquaresSlopeUnitsPerMs,
+  sampleFdCount,
+  sampleRssBytes,
+} from '../harness/leak-tracker.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const PACKAGER_ENTRY = join(ROOT, 'scripts', 'package-release.mjs')
@@ -1091,6 +1097,10 @@ const RETAINED_STATE_FLAT_PCT_PER_HOUR = 0.5
 // footprint and not the instant the last client disconnected.
 const IDLE_SETTLE_MS = 60_000
 
+// An hour in milliseconds — the unit the retained-state trend is reported
+// in (% per hour).
+const MS_PER_HOUR = 3_600_000
+
 // The collector: the stream's completion is ASYNCHRONOUS, so the file is
 // read only after the writer's 'finish' — reading it while the child can
 // still be writing is a source-level race.
@@ -1178,13 +1188,13 @@ function evaluateRetainedState(gcEvents, schedule, samples, serverStartedAtMs) {
   }
   // The TREND, fitted over the observations — not the first-to-last change,
   // which hides an excursion (40 -> 80 -> 90 -> 40 MiB reads as "no change").
-  const slopeBytesPerMs = leastSquaresSlopeBytesPerMs(
-    inWindow.map(event => ({ atMs: event.atMs, rssBytes: Math.round(event.usedHeapMiB * 1024 * 1024) })),
-  )
-  const firstUsedBytes = inWindow[0].usedHeapMiB * 1024 * 1024
-  const slopePctPerHour = firstUsedBytes === 0
+  // The trend is fitted over the USED HEAP IN MiB - the unit V8's trace
+  // reports - so no byte conversion (and no restated limit) appears here.
+  const slopeMibPerMs = leastSquaresSlopeUnitsPerMs(inWindow, 'usedHeapMiB')
+  const firstUsedMiB = inWindow[0].usedHeapMiB
+  const slopePctPerHour = firstUsedMiB === 0
     ? null
-    : (slopeBytesPerMs * 3_600_000 / firstUsedBytes) * 100
+    : (slopeMibPerMs * MS_PER_HOUR / firstUsedMiB) * 100
   const classification = slopePctPerHour === null
     ? 'unknown'
     : Math.abs(slopePctPerHour) <= RETAINED_STATE_FLAT_PCT_PER_HOUR ? 'flat' : 'rising'
@@ -1481,6 +1491,8 @@ export async function runSoak({
     const constantsUrl = pathToFileURL(join(world.artifact.portableRoot, 'server', 'constants.mjs'))
     const { MESSAGE_TEXT_MAX, SESSIONS_MAX } = await import(constantsUrl.href)
     schedule.payloadCapChars = MESSAGE_TEXT_MAX
+    // The MiB/byte factor comes from the ARTIFACT's own constants module, like
+    // the payload cap does - never from a literal here (AD-9).
     schedule.sessionEvictionMints = SESSIONS_MAX + 2 * CLIENT_COUNT
     const keysUrl = pathToFileURL(join(world.artifact.portableRoot, 'server', 'keys.mjs'))
     const { KEYPAIR_FILENAME } = await import(keysUrl.href)
