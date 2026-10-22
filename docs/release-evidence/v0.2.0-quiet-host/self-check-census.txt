@@ -1,0 +1,9 @@
+# foreign-process census
+# boot_id 3bef85f2-56ae-4007-9a72-e5ef813b97d7
+# sampled_at 2026-10-22T05:45:22Z
+# node_process_definition a process whose argv[0] basename is node, or node followed by digits
+# format pid own starttime argv0 argv1
+2259422 foreign 2516677619 node /root/.npm/_npx/15d63e9eb5a75d69/node_modules/.bin/zai-mcp-server
+2259471 foreign 2516677792 node /root/.npm/_npx/9833c18b2d85bc59/node_modules/.bin/playwright-mcp
+2999296 foreign 2778133722 node /usr/local/bin/9router
+511659 foreign 2178426780 node /run/user/0/fnm_multishells/511629_1786148059170/bin/codex

@@ -1,0 +1,29 @@
+{
+  "registeredAt": "2026-10-22T06:05:00Z",
+  "note": "The frozen quiet-host thresholds for the REL-3 qualifying soak. Registered BEFORE the qualifying run was launched and never adjusted afterwards. scripts/rel3-soak-eligibility.mjs reads this file; it does not carry its own copy of these numbers, so the contract and the scorer cannot drift apart. The file's SHA-256 is recorded in the attempt's launch record.",
+  "cadenceSeconds": 60,
+  "cadenceToleranceSeconds": 15,
+  "window": {
+    "tailHours": 4,
+    "note": "The measured window is the final four hours of the run, matching the harness's final-window RSS rule (FR-13's four hours)."
+  },
+  "memAvailableFloorBytes": 4294967296,
+  "foreignProcessHeadroom": 3,
+  "foreignCores": {
+    "windowMeanMax": 0.25,
+    "p95Max": 0.5,
+    "percentileMethod": "nearest-rank",
+    "rollingMinutes": 5,
+    "rollingMeanMax": 0.5,
+    "note": "Three gates on the foreign CPU, each catching a different shape of interference: the window mean bounds the TOTAL interference, the nearest-rank p95 catches a recurring workload that occupies a minority of the samples, and the rolling five-minute mean catches a sustained neighbour that a whole-window mean would hide. A one-minute spike survives all three (it contributes 0.20 to a five-minute mean); a twelve-minute one-core neighbour fails the rolling gate; a forty-percent-duty neighbour fails the p95."
+  },
+  "coverage": {
+    "minimumSampleFraction": 0.8,
+    "note": "The window must hold at least this fraction of the expected samples at the registered cadence. The window's samples are the ones inside the final four hours of the run."
+  },
+  "dispositions": {
+    "breach": "confounded",
+    "missingOrInvalidTelemetry": "incomplete",
+    "note": "A breach makes the attempt CONFOUNDED: recorded under its own name as incomplete, never scored, never re-scored. Missing or invalid telemetry has the same disposition — it is never read as a quiet host. A valid host window permits the unchanged memory and other gates to be scored; it does not itself confer a PASS."
+  }
+}

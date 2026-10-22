@@ -1,0 +1,47 @@
+PASS  1 the arithmetic is right, recomputed from the log (samples=4 max_residual_delta_us=0.0 max_cores_delta=0.0000)
+PASS  1c the accounting agrees with an independent measurement (expected 0.706 cores, observed 0.711, delta 0.005)
+PASS  1b the run's own process is counted as own (ownProcs=1)
+PASS  2 a foreign load is counted (independent measurement 1.832 cores, observed 1.678)
+PASS  2b the foreign load is accounted correctly (delta 0.154)
+PASS  3 an equivalent run-owned load is excluded (independent measurement 0.965 cores, observed 0.898, delta 0.067)
+PASS  3b the run's own CPU is counted as the run's (runCpuSec 0.0 -> 29.4)
+PASS  4 a process exit produces no spike (expected 0.850 cores, observed 0.762, delta 0.088)
+PASS  5a a process merely MENTIONING the soak's script is foreign (foreignProcs 6 -> 7)
+PASS  5b the fixtures did not become the run's own (ownProcs 2 -> 1)
+PASS  6a the baseline census was written (/root/rel1-soak-telemetry-check/census.txt, 4 node processes)
+PASS  6b the server RSS field is never empty
+PASS  6c the observer is quiet (no stray output)
+
+--- the observer's samples ---
+2026-10-22T05:45:22Z load=2.81 4.50 5.99 memAvailable_kB=8598420 nodeProcs=4 ownProcs=0 foreignProcs=4 foreignCores=0.000 stealCores=0.000 serverRss_kB=0 pgmajfault=1000949 runCpuSec=0.0 gapSec=0 busyJiffies=971278193 runCpuUs=0 obsCpuUs=75851 foreignUs=0
+2026-10-22T05:45:27Z load=2.74 4.46 5.97 memAvailable_kB=8642980 nodeProcs=6 ownProcs=1 foreignProcs=5 foreignCores=0.722 stealCores=0.000 serverRss_kB=0 pgmajfault=1000949 runCpuSec=0.0 gapSec=5 busyJiffies=971278575 runCpuUs=26706 obsCpuUs=260276 foreignUs=3608869
+2026-10-22T05:45:32Z load=2.52 4.39 5.93 memAvailable_kB=8650976 nodeProcs=6 ownProcs=1 foreignProcs=5 foreignCores=1.041 stealCores=0.000 serverRss_kB=0 pgmajfault=1000949 runCpuSec=0.0 gapSec=5 busyJiffies=971279105 runCpuUs=27723 obsCpuUs=352258 foreignUs=5207001
+2026-10-22T05:45:37Z load=2.32 4.32 5.90 memAvailable_kB=8617236 nodeProcs=6 ownProcs=1 foreignProcs=5 foreignCores=1.059 stealCores=0.000 serverRss_kB=0 pgmajfault=1000959 runCpuSec=0.0 gapSec=5 busyJiffies=971279644 runCpuUs=28621 obsCpuUs=447070 foreignUs=5294290
+2026-10-22T05:45:42Z load=2.21 4.26 5.88 memAvailable_kB=8614196 nodeProcs=6 ownProcs=1 foreignProcs=5 foreignCores=0.808 stealCores=0.000 serverRss_kB=0 pgmajfault=1000959 runCpuSec=0.0 gapSec=5 busyJiffies=971280057 runCpuUs=29088 obsCpuUs=537884 foreignUs=4038719
+2026-10-22T05:45:47Z load=2.04 4.19 5.84 memAvailable_kB=8562740 nodeProcs=6 ownProcs=1 foreignProcs=5 foreignCores=0.580 stealCores=0.000 serverRss_kB=0 pgmajfault=1000959 runCpuSec=0.0 gapSec=5 busyJiffies=971280356 runCpuUs=29504 obsCpuUs=628550 foreignUs=2898918
+2026-10-22T05:45:52Z load=2.03 4.15 5.82 memAvailable_kB=8460344 nodeProcs=6 ownProcs=1 foreignProcs=5 foreignCores=0.933 stealCores=0.000 serverRss_kB=0 pgmajfault=1003648 runCpuSec=0.0 gapSec=5 busyJiffies=971280832 runCpuUs=29947 obsCpuUs=721839 foreignUs=4666268
+2026-10-22T05:45:57Z load=1.87 4.08 5.79 memAvailable_kB=8434552 nodeProcs=6 ownProcs=1 foreignProcs=5 foreignCores=0.524 stealCores=0.000 serverRss_kB=0 pgmajfault=1003648 runCpuSec=0.0 gapSec=5 busyJiffies=971281103 runCpuUs=30391 obsCpuUs=813547 foreignUs=2617848
+2026-10-22T05:46:02Z load=2.60 4.20 5.82 memAvailable_kB=8062300 nodeProcs=7 ownProcs=1 foreignProcs=6 foreignCores=2.887 stealCores=0.000 serverRss_kB=0 pgmajfault=1003648 runCpuSec=0.0 gapSec=5 busyJiffies=971282556 runCpuUs=30761 obsCpuUs=910262 foreignUs=14432915
+2026-10-22T05:46:08Z load=2.47 4.15 5.79 memAvailable_kB=8068784 nodeProcs=7 ownProcs=1 foreignProcs=6 foreignCores=1.059 stealCores=0.000 serverRss_kB=0 pgmajfault=1003648 runCpuSec=0.0 gapSec=6 busyJiffies=971283201 runCpuUs=31203 obsCpuUs=1005140 foreignUs=6354680
+2026-10-22T05:46:13Z load=2.35 4.09 5.77 memAvailable_kB=8042896 nodeProcs=7 ownProcs=1 foreignProcs=6 foreignCores=2.243 stealCores=0.000 serverRss_kB=0 pgmajfault=1003649 runCpuSec=0.0 gapSec=5 busyJiffies=971284332 runCpuUs=31589 obsCpuUs=1101873 foreignUs=11212881
+2026-10-22T05:46:18Z load=2.33 4.06 5.75 memAvailable_kB=8115612 nodeProcs=7 ownProcs=1 foreignProcs=6 foreignCores=1.822 stealCores=0.000 serverRss_kB=0 pgmajfault=1003649 runCpuSec=0.0 gapSec=5 busyJiffies=971285252 runCpuUs=32082 obsCpuUs=1191034 foreignUs=9110346
+2026-10-22T05:46:23Z load=2.30 4.02 5.73 memAvailable_kB=8103840 nodeProcs=7 ownProcs=1 foreignProcs=6 foreignCores=1.590 stealCores=0.000 serverRss_kB=0 pgmajfault=1003649 runCpuSec=0.0 gapSec=5 busyJiffies=971286056 runCpuUs=32504 obsCpuUs=1279826 foreignUs=7950786
+2026-10-22T05:46:28Z load=2.28 3.99 5.71 memAvailable_kB=8616896 nodeProcs=6 ownProcs=1 foreignProcs=5 foreignCores=1.739 stealCores=0.000 serverRss_kB=0 pgmajfault=1003649 runCpuSec=0.0 gapSec=5 busyJiffies=971286935 runCpuUs=32971 obsCpuUs=1374700 foreignUs=8694659
+2026-10-22T05:46:33Z load=2.17 3.94 5.68 memAvailable_kB=8580728 nodeProcs=6 ownProcs=1 foreignProcs=5 foreignCores=0.989 stealCores=0.000 serverRss_kB=0 pgmajfault=1003649 runCpuSec=0.0 gapSec=5 busyJiffies=971287439 runCpuUs=33458 obsCpuUs=1466980 foreignUs=4947233
+2026-10-22T05:46:38Z load=2.08 3.89 5.66 memAvailable_kB=8586928 nodeProcs=8 ownProcs=2 foreignProcs=6 foreignCores=0.608 stealCores=0.000 serverRss_kB=0 pgmajfault=1003651 runCpuSec=4.2 gapSec=5 busyJiffies=971288172 runCpuUs=4227700 obsCpuUs=1564355 foreignUs=3038383
+2026-10-22T05:46:43Z load=1.99 3.84 5.63 memAvailable_kB=8834148 nodeProcs=8 ownProcs=2 foreignProcs=6 foreignCores=0.901 stealCores=0.000 serverRss_kB=0 pgmajfault=1003651 runCpuSec=9.3 gapSec=5 busyJiffies=971289137 runCpuUs=9281780 obsCpuUs=1653652 foreignUs=4506623
+2026-10-22T05:46:48Z load=1.99 3.81 5.61 memAvailable_kB=8835284 nodeProcs=8 ownProcs=2 foreignProcs=6 foreignCores=0.601 stealCores=0.000 serverRss_kB=0 pgmajfault=1003651 runCpuSec=14.3 gapSec=5 busyJiffies=971289952 runCpuUs=14332085 obsCpuUs=1746843 foreignUs=3006504
+2026-10-22T05:46:53Z load=1.99 3.78 5.59 memAvailable_kB=8795900 nodeProcs=8 ownProcs=2 foreignProcs=6 foreignCores=0.587 stealCores=0.000 serverRss_kB=0 pgmajfault=1003651 runCpuSec=19.4 gapSec=5 busyJiffies=971290760 runCpuUs=19380043 obsCpuUs=1842002 foreignUs=2936883
+2026-10-22T05:46:59Z load=1.99 3.75 5.57 memAvailable_kB=8790100 nodeProcs=8 ownProcs=2 foreignProcs=6 foreignCores=0.482 stealCores=0.000 serverRss_kB=0 pgmajfault=1003651 runCpuSec=24.4 gapSec=6 busyJiffies=971291564 runCpuUs=24431040 obsCpuUs=1937712 foreignUs=2893293
+2026-10-22T05:47:04Z load=2.48 3.82 5.58 memAvailable_kB=8146352 nodeProcs=8 ownProcs=2 foreignProcs=6 foreignCores=1.924 stealCores=0.000 serverRss_kB=0 pgmajfault=1003651 runCpuSec=29.4 gapSec=5 busyJiffies=971293037 runCpuUs=29448990 obsCpuUs=2030087 foreignUs=9619675
+2026-10-22T05:47:09Z load=2.44 3.79 5.56 memAvailable_kB=8153580 nodeProcs=8 ownProcs=2 foreignProcs=6 foreignCores=0.907 stealCores=0.000 serverRss_kB=0 pgmajfault=1003651 runCpuSec=34.5 gapSec=5 busyJiffies=971294004 runCpuUs=34492498 obsCpuUs=2123091 foreignUs=4533488
+2026-10-22T05:47:14Z load=2.48 3.78 5.55 memAvailable_kB=8128232 nodeProcs=8 ownProcs=2 foreignProcs=6 foreignCores=1.043 stealCores=0.000 serverRss_kB=0 pgmajfault=1005354 runCpuSec=39.5 gapSec=5 busyJiffies=971295039 runCpuUs=39525454 obsCpuUs=2223829 foreignUs=5216306
+2026-10-22T05:47:19Z load=2.36 3.73 5.53 memAvailable_kB=8119656 nodeProcs=8 ownProcs=2 foreignProcs=6 foreignCores=0.698 stealCores=0.000 serverRss_kB=0 pgmajfault=1005354 runCpuSec=44.6 gapSec=5 busyJiffies=971295903 runCpuUs=44582544 obsCpuUs=2316368 foreignUs=3490371
+2026-10-22T05:47:24Z load=2.25 3.69 5.50 memAvailable_kB=8110140 nodeProcs=8 ownProcs=2 foreignProcs=6 foreignCores=0.788 stealCores=0.000 serverRss_kB=0 pgmajfault=1005354 runCpuSec=49.6 gapSec=5 busyJiffies=971296811 runCpuUs=49632058 obsCpuUs=2406726 foreignUs=3940128
+2026-10-22T05:47:29Z load=2.23 3.66 5.48 memAvailable_kB=8136136 nodeProcs=8 ownProcs=2 foreignProcs=6 foreignCores=0.671 stealCores=0.000 serverRss_kB=0 pgmajfault=1005354 runCpuSec=54.7 gapSec=5 busyJiffies=971297659 runCpuUs=54667473 obsCpuUs=2495974 foreignUs=3355337
+2026-10-22T05:47:34Z load=2.13 3.62 5.46 memAvailable_kB=8094316 nodeProcs=8 ownProcs=2 foreignProcs=6 foreignCores=0.889 stealCores=0.000 serverRss_kB=0 pgmajfault=1005354 runCpuSec=59.7 gapSec=5 busyJiffies=971298617 runCpuUs=59711569 obsCpuUs=2588146 foreignUs=4443732
+2026-10-22T05:47:39Z load=2.12 3.59 5.44 memAvailable_kB=8158808 nodeProcs=10 ownProcs=2 foreignProcs=8 foreignCores=1.105 stealCores=0.000 serverRss_kB=0 pgmajfault=1005354 runCpuSec=64.8 gapSec=5 busyJiffies=971299683 runCpuUs=64752376 obsCpuUs=2682362 foreignUs=5524977
+2026-10-22T05:47:44Z load=2.03 3.54 5.41 memAvailable_kB=8612744 nodeProcs=8 ownProcs=1 foreignProcs=7 foreignCores=0.646 stealCores=0.000 serverRss_kB=0 pgmajfault=1005355 runCpuSec=69.4 gapSec=5 busyJiffies=971300483 runCpuUs=69428170 obsCpuUs=2774109 foreignUs=3232459
+2026-10-22T05:47:49Z load=1.95 3.50 5.39 memAvailable_kB=8602496 nodeProcs=8 ownProcs=1 foreignProcs=7 foreignCores=0.991 stealCores=0.000 serverRss_kB=0 pgmajfault=1005355 runCpuSec=69.4 gapSec=5 busyJiffies=971300988 runCpuUs=69428582 obsCpuUs=2866321 foreignUs=4957376
+
+SELF-CHECK PASSED — every assertion held
