@@ -41,6 +41,33 @@
   is not a quiet host and cannot be one** (a staging auto-deploy compiles PHP every minute, so the
   host's busy time moves between ~0.2 and ~4.0 cores) — so the CPU thresholds are relative to the
   measured baseline, which is the same F18 lesson one clause further on.
+- **The quiet-host rule is FROZEN, DIGESTED and PROVEN on the host — the round-3 gate is running.**
+  The round-2 gate (both lanes) held the launch and found nine defects; all nine are closed, and two
+  more were found by the rehearsal and are closed too. The two that would have voided every night: the
+  observer read `/proc/<pid>/cgroup` with a NUL delimiter, so the trailing newline stayed in the value,
+  the run's own processes never matched, and SEVEN of them were counted as FOREIGN in every sample
+  (the rehearsal's `foreignProcs=11` was `4 + 7`); and the observer's per-sample flag and its cadence
+  variable shared a name, so it had been sampling every SECOND instead of every minute. The rest: a
+  failed measurement could not be told from a good one (the observer now reports its validity signals
+  and the scorer requires them); the window defaulted to the log's last sample and coverage counted
+  ROWS (now: the run's bounds are required, the window is aligned to the last tracker sample, and
+  coverage is measured in ELAPSED TIME); the limits were recomputed at adjudication time from
+  operator-supplied files (now: ABSOLUTE limits registered in the thresholds file, with the baseline
+  as a cross-check and the relative form a reported diagnostic); the launcher swallowed a failed
+  cgroup placement and printed advice instead of enforcing it (now it verifies the placement, waits
+  for a sound observer sample, stops the run if the host's baseline has moved since the registration,
+  and stops the run if the minute-one partition is wrong); the amendment and the thresholds file gated
+  DIFFERENT statistics (now the same two — the median and the elapsed-time-weighted mean); and the
+  registered known limit understated the blind spot by about five times (now stated with its
+  arithmetic: a one-core neighbour can be present for up to about 180 of the window's 240 minutes and
+  still pass). The judge has **thirty fixtures** (`tests/soak/rel3-soak-eligibility.test.mjs`) driving
+  the real scorer over synthetic logs, and the suite is green at **616 pass / 0 fail / 0 skipped**.
+  The evidence is under `docs/release-evidence/v0.2.0-quiet-host/`: the host's baseline measured with
+  the final observer (19 samples, mean 0.826, median 0.845) and a bursty window (41 samples, mean
+  0.954, median 0.916, max 1.966) — the calibration; the self-check, every assertion green, including
+  that the observer's counts match the cgroup's ACTUAL membership; and an end-to-end rehearsal whose
+  own row reads `ownProcs=7 foreignProcs=4`, whose placement was verified, and whose adjudication
+  returned INCOMPLETE with its reasons named.
 - **The formal soak is NOT in flight — the next twelve-hour run starts after the corrected
   quiet-host contract clears its advisor gate.** The first twelve-hour run (attempt 5: launched
   2026-10-22T02:41Z on the QUIET host ngs-staging, `ssh 43.229.78.155`, world under
