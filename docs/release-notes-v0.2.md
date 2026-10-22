@@ -5,8 +5,8 @@ artifacts recorded in `docs/release-evidence/v0.2.0-candidate.json`. Per the Epi
 execution consensus (`docs/implementation/reviews/epic-6-execution-agy.md`,
 `-luna.md`), the formal endurance soak (Story 6.2 / REL-3 — a twelve-hour run, amended and pre-registered after the first attempts showed the eight-hour profile measured the process EQUILIBRATING rather than settled) and the physical
 two-machine demonstration (Story 6.1 / REL-1) pin THIS candidate: any code change
-voids it and restarts the gate chain. v0.2.0 is not tagged or shipped until REL-1
-passes.
+voids it and restarts the gate chain. v0.2.0 is not tagged or shipped until both
+of those gates return a verdict.
 
 ## What v0.2 is
 
