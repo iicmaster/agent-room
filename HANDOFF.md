@@ -18,11 +18,20 @@
   verdict stands as recorded (approve the bytes, correct the record). The third re-cut was TEXT-ONLY and
   it settled the process rule: **a story's changelog entry and README section land WITH the story,
   before the candidate is frozen.**
-- **The formal 8-hour soak is the open gate.** It is running against `3929cc7` on the QUIET host
-  ngs-staging (`ssh 43.229.78.155`), launched 2026-10-21T13:16:41Z, server pid 1059106, world under
-  `/root/rel1-soak4/.soak-world/`, with an external read-only host-telemetry sidecar writing
-  `host-telemetry.log` beside it. The run's identity line reads `candidate-exact`.
-  **Do not run `node --test`, another soak, or any heavy workload on ngs-staging while it is in
+- **The formal 8-hour soak is HELD, on a recorded FAIL.** Attempt 4 ran against `3929cc7` on the QUIET
+  host ngs-staging (`ssh 43.229.78.155`), launched 2026-10-21T13:16:41Z, world under
+  `/root/rel1-soak4/.soak-world/`, with an external read-only host-telemetry sidecar beside it; it ended
+  2026-10-21T21:19Z after 482.66 min. Its identity line reads `candidate-exact`, and everything but one
+  rule is green: **zero message loss** (23,080 acknowledged == 23,080 readable, 0 duplicates, 0 lost), FD
+  stability (worst drift 1 in a ±5 corridor), 47 bursts, 7 reconnect cycles. The one failure, verbatim:
+  `final-window RSS growth above the 2% total-growth bound` — the window went 113.9 MiB → 116.5 MiB
+  (`growthRatio` 0.02239 against the 0.02 bound; the slope's implied growth 0.03988). The host was quiet
+  throughout (the sidecar: max 1-minute load 1.04, min memAvailable 8.97 GiB) — contention is excluded
+  this time. **v0.2.0 is HELD**; both advisor lanes (codex `gpt-6.1-sol[ultra]`, claude
+  `claude-fable-5`; the agy seat was quota-exhausted) say the FAIL stands on the record and that the
+  path out is an owner-ratified, pre-registered, calibrated measurement change plus a fresh longer run —
+  which does NOT void the candidate (`tests/` is not a packaging input).
+  **Do not run `node --test`, another soak, or any heavy workload on ngs-staging while a run is in
   flight** — that is exactly what broke soak attempt 2.
 - **The soak's temp world must NOT live in `/tmp`** — macOS temp cleanup ate a credential file
   during an earlier run. The world is under `/root/rel1-soak4/`.
