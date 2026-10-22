@@ -18,13 +18,23 @@
   verdict stands as recorded (approve the bytes, correct the record). The third re-cut was TEXT-ONLY and
   it settled the process rule: **a story's changelog entry and README section land WITH the story,
   before the candidate is frozen.**
-- **The formal soak is IN FLIGHT — a twelve-hour qualifying run under the amended, pre-registered
-  protocol.** It started 2026-10-22T02:41Z on the QUIET host ngs-staging (`ssh 43.229.78.155`),
-  world under `/root/rel1-soak5/.soak-world/`, server pid 1325282, `candidate-exact`, with the external
-  read-only host-telemetry sidecar beside it; it ends ~14:41Z plus the final drain. **v0.2.0 is HELD
-  until it returns a verdict.** **Do not run `node --test`, another soak, or any heavy workload on
-  ngs-staging while it is in flight** — that is exactly what broke soak attempt 2, and the run's
-  quiet-host contract is pre-registered: a window whose telemetry breaches it is CONFOUNDED, and the
+- **The formal soak is NOT in flight — the next twelve-hour run starts after the corrected
+  quiet-host contract clears its advisor gate.** The first twelve-hour run (attempt 5: launched
+  2026-10-22T02:41Z on the QUIET host ngs-staging, `ssh 43.229.78.155`, world under
+  `/root/rel1-soak5/.soak-world/`, server pid 1325282, `candidate-exact`) was **ABORTED at 130.37 min**
+  (2026-10-22T04:47:40Z) — not for anything the server did: the pre-registered quiet-host contract
+  turned out to be UNSATISFIABLE on the host it was written for. It forbade any node process but the
+  run's own, while ngs-staging carries seven foreign node processes of its own (a model gateway, two
+  MCP servers with their npm wrappers, a `next-server`, the codex app-server) that were present during
+  every attempt including attempt 4; and it gated the 1-minute load average, which on this host is
+  dominated by the run's OWN fsync waits (the CPU sat over 90% idle while the load read 1.2–3.2). A
+  criterion that can never be satisfied disqualifies every attempt equally — it measures the HOST, not
+  the run. The contract is now a baseline-comparison form (available-memory floor; foreign node count
+  against the host's own baseline; foreign CPU in cores; the load average REPORTED, not gated), its
+  source is the repository's own read-only sidecar `scripts/rel1-soak-telemetry.sh`, and the MEMORY
+  GATE ITSELF IS UNTOUCHED. Attempt 5 is never scored and the release evidence is not overwritten.
+  **While the next run is in flight: do not run `node --test`, another soak, or any heavy workload on
+  ngs-staging or on this Mac** — a window whose telemetry breaches the contract is CONFOUNDED, and the
   attempt is then recorded as INCOMPLETE, never scored.
 
   **How it got here.** Attempt 4 ran against `3929cc7` on the quiet host and FAILED one rule — the
@@ -42,7 +52,8 @@
   `docs/implementation/spec-6-2-rel-3-the-formal-soak.md.amendment-2026-10-22.md`. Attempt 4 is never
   re-scored, and the release evidence is NOT overwritten.
 - **The soak's temp world must NOT live in `/tmp`** — macOS temp cleanup ate a credential file
-  during an earlier run. The world is under `/root/rel1-soak4/`.
+  during an earlier run. The worlds are under `/root/rel1-soak4/` (attempt 4) and `/root/rel1-soak5/`
+  (attempt 5, aborted); each new run gets its own directory.
 - **REL-1 is DONE and verified** (`docs/release-evidence/v0.2.0-rel1/`, `scripts/rel1-verify-evidence.mjs`
   exits 0): two physical machines (NSG-Mac-mini and ngs-staging), two vendor hosts (the real Zcode
   CLI 0.17.0 on the Mac, the real Claude Code 2.1.306 on staging through that host's own model
@@ -89,7 +100,7 @@ effect that made soak attempt 2 look like a leak.
 - **Epic 6**: state record `docs/implementation/epic-6-state-in-progress.md`; audit
   `docs/implementation/epic-6-completion-audit.md`; retro `docs/implementation/epic-6-retro-2026-10-21.md`.
   - 6.1 **done** (evidence + verifier above).
-  - 6.2 **the open gate** (the 8-hour run above).
+  - 6.2 **the open gate** (the twelve-hour run, above).
   - 6.3 **done** (the candidate record above).
   - 6.4 **done** (the repair above).
 - **Soak history** (every attempt kept under its own name, none relabelled):

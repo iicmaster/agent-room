@@ -1,0 +1,22 @@
+2026-10-22T02:41:02.215Z REL-3 soak: requested duration 720 min; schedule {"sampleIntervalMs":60000,"burstEveryMs":600000,"burstMessagesPerRoom":30,"reconnectEveryMs":3600000,"fdBaselineAfterMs":3600000,"finalWindowMs":14400000}
+2026-10-22T02:41:02.460Z identity: candidate-exact — the fresh materialization reproduces the frozen candidate digests byte-for-byte
+2026-10-22T02:41:02.465Z payload cap bound to the artifact: MESSAGE_TEXT_MAX = 32768 characters; session capacity 1000 (eviction mints per reconnect: 1008)
+2026-10-22T02:41:02.465Z environment: node v24.18.0, sqlite 3.53.1, host ngs-staging, linux 5.14.0-642.el9.x86_64 x64, 4 cpus
+2026-10-22T02:41:02.722Z server ready: pid 1325282, port 33393, version 0.2.0
+2026-10-22T02:41:03.337Z warmup: driving the allocator to steady state before the tracked window opens
+2026-10-22T02:41:14.202Z warmup done: 1650 messages in 11 rounds, stabilized=true, 11 s
+2026-10-22T02:42:14.204Z progress: acked 1680, bursts 0, reconnects 0, samples 1, rss 104.3 MiB, fd 22
+2026-10-22T02:51:14.587Z burst 1: 150 messages at 1600 chars in 382 ms; acked total 2100
+2026-10-22T03:12:14.213Z progress: acked 3025, bursts 3, reconnects 0, samples 31, rss 95.8 MiB, fd 22
+2026-10-22T03:41:14.205Z reconnect cycle at 2026-10-22T03:41:14.205Z
+2026-10-22T03:41:22.481Z reconnect cycle done in 8276 ms; traffic resumed (acked so far: 4350)
+2026-10-22T03:42:14.228Z progress: acked 4375, bursts 6, reconnects 1, samples 61, rss 101.2 MiB, fd 23
+2026-10-22T04:12:14.235Z progress: acked 5725, bursts 9, reconnects 1, samples 91, rss 106.5 MiB, fd 22
+2026-10-22T04:31:23.909Z burst 11: 150 messages at 15168 chars in 389 ms; acked total 6600
+2026-10-22T04:41:14.204Z reconnect cycle at 2026-10-22T04:41:14.204Z
+2026-10-22T04:41:22.532Z reconnect cycle done in 8328 ms; traffic resumed (acked so far: 6900)
+2026-10-22T04:42:14.240Z progress: acked 7075, bursts 12, reconnects 2, samples 121, rss 107.4 MiB, fd 23
+2026-10-22T04:47:40.017Z abort signal received — tearing the soak down and recording what it measured
+2026-10-22T04:48:40.104Z soak failed: traffic loops did not settle within 60000 ms
+2026-10-22T04:51:24.345Z world kept for autopsy: /root/rel1-soak5/.soak-world/agent-room-rel3-soak-3KGWiO
+2026-10-22T04:51:24.345Z REL-3 soak finished with status aborted; results in /root/rel1-soak5/.soak-world/evidence

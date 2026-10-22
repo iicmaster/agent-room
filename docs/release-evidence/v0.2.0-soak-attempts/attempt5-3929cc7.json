@@ -1,0 +1,874 @@
+{
+  "story": "6.2",
+  "requirement": "REL-3 — the formal soak",
+  "rule_source": "docs/epics.md Story 6.2 (the total-growth reading per docs/implementation/reviews/epic-6-execution-agy.md)",
+  "status": "aborted",
+  "startedAt": "2026-10-22T02:41:02.213Z",
+  "endedAt": "2026-10-22T04:51:24.327Z",
+  "wallMinutes": 130.37,
+  "requestedDurationMs": 43200000,
+  "schedule": {
+    "durationMs": 43200000,
+    "sampleIntervalMs": 60000,
+    "burstEveryMs": 600000,
+    "burstMessagesPerRoom": 30,
+    "reconnectEveryMs": 3600000,
+    "fdBaselineAfterMs": 3600000,
+    "finalWindowMs": 14400000,
+    "rampMs": 14400000,
+    "readEveryMs": 30000,
+    "steadyRoomIntervalMs": 10000,
+    "payloadCapChars": 32768,
+    "sessionEvictionMints": 1008
+  },
+  "candidate": {
+    "record": "/root/rel1-soak/docs/release-evidence/v0.2.0-candidate.json",
+    "candidateCommit": "3929cc74f30f1b0b1f5b989c6e9fbb9d4fed6eba",
+    "launchHead": "01504a3036bea92433f4b927c3f78cf3d941a186",
+    "launchBranch": "main",
+    "identityVerdict": "candidate-exact",
+    "frozenDigests": {
+      "portable": {
+        "package": "agent-room-agent-plugin",
+        "files": 46,
+        "bytes": 791071,
+        "sha256": "3d90129b434b3b7adb9b4b6d8c05ed28b5a8fbf7b07951726c322cc438cf3999"
+      },
+      "claude_code": {
+        "package": "agent-room-claude-code",
+        "files": 46,
+        "bytes": 790931,
+        "sha256": "e481c9a46ea5e14865119503e6d327df3993b29a28b325eb9eee9421def2f47b"
+      }
+    },
+    "actualDigests": {
+      "portable": {
+        "files": 46,
+        "bytes": 791071,
+        "sha256": "3d90129b434b3b7adb9b4b6d8c05ed28b5a8fbf7b07951726c322cc438cf3999"
+      },
+      "claude_code": {
+        "files": 46,
+        "bytes": 790931,
+        "sha256": "e481c9a46ea5e14865119503e6d327df3993b29a28b325eb9eee9421def2f47b"
+      }
+    },
+    "drift": [],
+    "note": "the fresh materialization reproduces the frozen candidate digests byte-for-byte"
+  },
+  "environment": {
+    "host": "ngs-staging",
+    "platform": "linux 5.14.0-642.el9.x86_64 x64",
+    "node": "v24.18.0",
+    "sqlite": "3.53.1",
+    "cpus": 4,
+    "totalMemoryBytes": 16497332224,
+    "serverEntry": "/root/rel1-soak5/.soak-world/agent-room-rel3-soak-3KGWiO/release/agent-room-agent-plugin/server/api/server.mjs",
+    "mcpEntry": "/root/rel1-soak5/.soak-world/agent-room-rel3-soak-3KGWiO/release/agent-room-agent-plugin/server/mcp-stdio.mjs",
+    "releaseDir": "/root/rel1-soak5/.soak-world/agent-room-rel3-soak-3KGWiO/release",
+    "serverPid": 1325282,
+    "serverPort": 33393,
+    "serverVersion": "0.2.0",
+    "serverStderrTail": ""
+  },
+  "clients": [
+    {
+      "chatId": "soak-1",
+      "fingerprint": "sha256:41ee31ba8ee8afb299b3570873f84d1b8e0ad71b22c23125fa00e0a3fd4721b8",
+      "stats": {
+        "sent": 1821,
+        "retried": 0,
+        "reads": 252,
+        "readErrors": 0,
+        "maxAttempts": 1
+      }
+    },
+    {
+      "chatId": "soak-2",
+      "fingerprint": "sha256:e170182d8bfb62318e6c111dbfb5eef4fa38493adf61725af0460e883cad1423",
+      "stats": {
+        "sent": 1820,
+        "retried": 0,
+        "reads": 252,
+        "readErrors": 0,
+        "maxAttempts": 1
+      }
+    },
+    {
+      "chatId": "soak-3",
+      "fingerprint": "sha256:5f157c02ff56c8064c0552be21478ab7d59f61e79955cf9fa43394b8a4512016",
+      "stats": {
+        "sent": 1797,
+        "retried": 0,
+        "reads": 252,
+        "readErrors": 0,
+        "maxAttempts": 1
+      }
+    },
+    {
+      "chatId": "soak-4",
+      "fingerprint": "sha256:c5a5ef9ebfaf2e49af7ca5c2978b9bb0ab31ff018635782654b29fdba31dd5e0",
+      "stats": {
+        "sent": 1797,
+        "retried": 0,
+        "reads": 252,
+        "readErrors": 0,
+        "maxAttempts": 1
+      }
+    }
+  ],
+  "retainedState": {
+    "status": "inconclusive",
+    "gated": false,
+    "note": "the GC trace was not collected in this run"
+  },
+  "gcTraceArchive": null,
+  "traffic": {
+    "acknowledged": 7235,
+    "perRoom": {
+      "JL8gfIU_RC_BQbFKJfxbPw": 1447,
+      "sGZSM8qg9-jA-rTn7f4tqg": 1447,
+      "998IsigD3DGZw8vP6JpqjQ": 1447,
+      "rEH7ziLCDO3F24QitP6Mnw": 1447,
+      "gA1P1eW4KbITkUjy8B_22g": 1447
+    },
+    "bursts": 12,
+    "burstMessagesPerRoom": 30,
+    "reads": 1008,
+    "reconnects": [
+      {
+        "at": "2026-10-22T03:41:14.205Z",
+        "ms": 8276,
+        "clients": 4,
+        "evictionMints": 1008
+      },
+      {
+        "at": "2026-10-22T04:41:14.204Z",
+        "ms": 8328,
+        "clients": 4,
+        "evictionMints": 1008
+      }
+    ],
+    "loopErrors": []
+  },
+  "samples": {
+    "intervalMs": 60000,
+    "count": 128,
+    "data": [
+      {
+        "atMs": 1792636874203,
+        "rssBytes": 109342720,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792636934206,
+        "rssBytes": 121774080,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792636994205,
+        "rssBytes": 116830208,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792637054206,
+        "rssBytes": 128684032,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792637114206,
+        "rssBytes": 120668160,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792637174207,
+        "rssBytes": 122789888,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792637234206,
+        "rssBytes": 127332352,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792637294206,
+        "rssBytes": 126279680,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792637354207,
+        "rssBytes": 96817152,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792637414208,
+        "rssBytes": 97697792,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792637474208,
+        "rssBytes": 96407552,
+        "fdCount": 24
+      },
+      {
+        "atMs": 1792637534209,
+        "rssBytes": 97718272,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792637594209,
+        "rssBytes": 98643968,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792637654209,
+        "rssBytes": 98717696,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792637714210,
+        "rssBytes": 98795520,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792637774210,
+        "rssBytes": 98820096,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792637834211,
+        "rssBytes": 98820096,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792637894211,
+        "rssBytes": 98820096,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792637954211,
+        "rssBytes": 98820096,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792638014212,
+        "rssBytes": 98836480,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792638074212,
+        "rssBytes": 98836480,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792638134213,
+        "rssBytes": 99991552,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792638194213,
+        "rssBytes": 100052992,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792638254214,
+        "rssBytes": 100155392,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792638314213,
+        "rssBytes": 100159488,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792638374212,
+        "rssBytes": 100163584,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792638434213,
+        "rssBytes": 100245504,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792638494212,
+        "rssBytes": 100290560,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792638554213,
+        "rssBytes": 100290560,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792638614214,
+        "rssBytes": 100417536,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792638674215,
+        "rssBytes": 100425728,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792638734216,
+        "rssBytes": 102060032,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792638794216,
+        "rssBytes": 102141952,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792638854215,
+        "rssBytes": 102236160,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792638914215,
+        "rssBytes": 102322176,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792638974215,
+        "rssBytes": 102404096,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792639034216,
+        "rssBytes": 102449152,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792639094217,
+        "rssBytes": 102453248,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792639154217,
+        "rssBytes": 102457344,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792639214218,
+        "rssBytes": 102457344,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792639274217,
+        "rssBytes": 102461440,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792639334217,
+        "rssBytes": 104230912,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792639394218,
+        "rssBytes": 105582592,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792639454219,
+        "rssBytes": 105582592,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792639514219,
+        "rssBytes": 105582592,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792639574219,
+        "rssBytes": 105615360,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792639634219,
+        "rssBytes": 105635840,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792639694219,
+        "rssBytes": 105664512,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792639754220,
+        "rssBytes": 105279488,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792639814219,
+        "rssBytes": 105279488,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792639874220,
+        "rssBytes": 105279488,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792639934220,
+        "rssBytes": 107130880,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792639994221,
+        "rssBytes": 106082304,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792640054221,
+        "rssBytes": 106082304,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792640114222,
+        "rssBytes": 106082304,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792640174222,
+        "rssBytes": 106082304,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792640234222,
+        "rssBytes": 106082304,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792640294222,
+        "rssBytes": 106082304,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792640354223,
+        "rssBytes": 106082304,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792640414222,
+        "rssBytes": 106082304,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792640474229,
+        "rssBytes": 106082304,
+        "fdCount": 23
+      },
+      {
+        "atMs": 1792640534229,
+        "rssBytes": 112291840,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792640594230,
+        "rssBytes": 110399488,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792640654230,
+        "rssBytes": 110399488,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792640714231,
+        "rssBytes": 110399488,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792640774231,
+        "rssBytes": 110399488,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792640834232,
+        "rssBytes": 110399488,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792640894232,
+        "rssBytes": 110399488,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792640954233,
+        "rssBytes": 110399488,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792641014234,
+        "rssBytes": 110399488,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792641074233,
+        "rssBytes": 110399488,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792641134232,
+        "rssBytes": 111857664,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792641194232,
+        "rssBytes": 112238592,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792641254232,
+        "rssBytes": 112238592,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792641314233,
+        "rssBytes": 112238592,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792641374234,
+        "rssBytes": 112238592,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792641434235,
+        "rssBytes": 112242688,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792641494235,
+        "rssBytes": 112242688,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792641554234,
+        "rssBytes": 112242688,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792641614234,
+        "rssBytes": 112242688,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792641674234,
+        "rssBytes": 112242688,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792641734234,
+        "rssBytes": 110817280,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792641794234,
+        "rssBytes": 111644672,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792641854235,
+        "rssBytes": 111644672,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792641914235,
+        "rssBytes": 111644672,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792641974235,
+        "rssBytes": 111644672,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792642034236,
+        "rssBytes": 111644672,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792642094237,
+        "rssBytes": 111644672,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792642154236,
+        "rssBytes": 111644672,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792642214236,
+        "rssBytes": 111644672,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792642274236,
+        "rssBytes": 111644672,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792642334236,
+        "rssBytes": 113876992,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792642394236,
+        "rssBytes": 114180096,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792642454237,
+        "rssBytes": 114180096,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792642514237,
+        "rssBytes": 114180096,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792642574238,
+        "rssBytes": 114180096,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792642634239,
+        "rssBytes": 114180096,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792642694239,
+        "rssBytes": 114180096,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792642754240,
+        "rssBytes": 114180096,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792642814240,
+        "rssBytes": 114180096,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792642874240,
+        "rssBytes": 110686208,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792642934240,
+        "rssBytes": 111935488,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792642994241,
+        "rssBytes": 112951296,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792643054241,
+        "rssBytes": 112951296,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792643114240,
+        "rssBytes": 112951296,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792643174239,
+        "rssBytes": 112951296,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792643234240,
+        "rssBytes": 112951296,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792643294241,
+        "rssBytes": 112955392,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792643354242,
+        "rssBytes": 112955392,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792643414243,
+        "rssBytes": 112955392,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792643474244,
+        "rssBytes": 112959488,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792643534244,
+        "rssBytes": 112648192,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792643594244,
+        "rssBytes": 112611328,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792643654245,
+        "rssBytes": 112611328,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792643714246,
+        "rssBytes": 112611328,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792643774246,
+        "rssBytes": 112611328,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792643834246,
+        "rssBytes": 112611328,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792643894247,
+        "rssBytes": 112611328,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792643954247,
+        "rssBytes": 112611328,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792644014248,
+        "rssBytes": 112611328,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792644074248,
+        "rssBytes": 112611328,
+        "fdCount": 23
+      },
+      {
+        "atMs": 1792644134247,
+        "rssBytes": 116150272,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792644194246,
+        "rssBytes": 111169536,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792644254245,
+        "rssBytes": 111169536,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792644314245,
+        "rssBytes": 111169536,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792644374246,
+        "rssBytes": 111173632,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792644434245,
+        "rssBytes": 111185920,
+        "fdCount": 22
+      },
+      {
+        "atMs": 1792644494244,
+        "rssBytes": 111190016,
+        "fdCount": 22
+      }
+    ]
+  },
+  "rules": {
+    "finalWindowRss": {
+      "windowMs": 14400000,
+      "samples": 128,
+      "expectedSamples": 240,
+      "minimumSamples": 192,
+      "pass": false,
+      "incomplete": true,
+      "note": "the final window holds 128 samples; the rule needs at least 192 of the expected 240 — the run is INCOMPLETE, never scored"
+    },
+    "fdStability": {
+      "baselineAfterMs": 3600000,
+      "baselineFd": 23,
+      "samplesAfterBaseline": 68,
+      "worstAbsDrift": 1,
+      "corridor": 5,
+      "rule": "every sample at or after duration/8 (one hour at the default 8) sits within +-5 of the hour-one baseline"
+    },
+    "zeroMessageLoss": {
+      "pending": true,
+      "note": "the run ended before the final drain"
+    }
+  },
+  "idleFootprint": {
+    "reported": true,
+    "gated": false,
+    "note": "REL-4 counter-metric: server RSS/FD/CPU with 0 Actors (start, each reconnect window, end) and the post-resume settled sample with the run's 4 Actors — reported, not optimized.",
+    "samples": [
+      {
+        "at": "2026-10-22T02:41:02.723Z",
+        "actors": 0,
+        "rssBytes": 67358720,
+        "fdCount": 22,
+        "cpuSeconds": 0.2
+      },
+      {
+        "at": "2026-10-22T03:41:14.215Z",
+        "actors": 0,
+        "rssBytes": 106082304,
+        "fdCount": 22,
+        "cpuSeconds": 11.84
+      },
+      {
+        "at": "2026-10-22T03:41:22.481Z",
+        "actors": 4,
+        "rssBytes": 110399488,
+        "fdCount": 22,
+        "cpuSeconds": 13.02
+      },
+      {
+        "at": "2026-10-22T04:41:14.212Z",
+        "actors": 0,
+        "rssBytes": 112611328,
+        "fdCount": 22,
+        "cpuSeconds": 20
+      },
+      {
+        "at": "2026-10-22T04:41:22.532Z",
+        "actors": 4,
+        "rssBytes": 111169536,
+        "fdCount": 22,
+        "cpuSeconds": 20.96
+      }
+    ]
+  },
+  "failureReasons": [
+    "traffic loops did not settle within 60000 ms"
+  ],
+  "world": {
+    "dir": "/root/rel1-soak5/.soak-world/agent-room-rel3-soak-3KGWiO",
+    "ackLog": "/root/rel1-soak5/.soak-world/agent-room-rel3-soak-3KGWiO/recorder/acked-sends.ndjson",
+    "database": "/root/rel1-soak5/.soak-world/agent-room-rel3-soak-3KGWiO/shared/agent-room.sqlite",
+    "kept": true
+  }
+}
