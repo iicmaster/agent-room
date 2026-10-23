@@ -1483,13 +1483,11 @@
       - test: "the viewer still accepts a bare (un-enveloped) boot descriptor"
         file: "tests/viewer-app.test.mjs"
 
-  6.2:                       # REL-3 — the formal soak (IN FLIGHT: the 8-hour run
-                             # is launched detached; its results land in
-                             # docs/release-evidence/v0.2.0-soak-results.{json,md}
-                             # when it settles, and this entry's note is finalized
-                             # then — do not mark the story done before reading them)
+  6.2:                       # REL-3 — the formal soak (CLOSED 2026-10-23: attempt 6 PASSED
+                             # and the host window was adjudicated eligible; the release
+                             # evidence is attempt 6's results)
     note: >-
-      IN FLIGHT. Proves the soak HARNESS end to end at compressed scale while
+      CLOSED. The formal qualifying run (attempt 6) PASSED. Proves the soak HARNESS end to end at compressed scale while
       the formal 8-hour run executes (the harness and its rule evaluations
       are what a red suite can and should prove now; the endurance verdict
       itself can only come from the settled 8-hour run): the standalone
@@ -1533,6 +1531,27 @@
       deliberately never restarts the server), or the rate gates' refusal
       behavior (4.4's suite; the soak raises the operator floors by the REL-2
       precedent so the profile's own point is what is exercised).
+      THE VERDICT (2026-10-23): attempt 6 — the twelve-hour qualifying run
+      against the final candidate 3929cc7, candidate-exact, launched under
+      the amended protocol and the corrected quiet-host contract with the
+      rule's five digests pinned in its launch record — finished after 724.61
+      wall minutes with status pass: the final-window RSS rule PASS (the
+      window's RSS fell −1.86%; the slope's implied growth 0.0056 against
+      the 0.02 bound), FD stability PASS (worst drift 1 of a ±5 corridor),
+      and zero message loss (33,725 acknowledged == 33,725 readable, 0
+      duplicates, 0 lost). The host window was adjudicated ELIGIBLE by the
+      named scorer against the frozen thresholds (coverage 1.0, median 0.449
+      / mean 0.446 cores against the frozen 1.345 / 1.576, the foreign
+      process count never above 4 against 7, MemAvailable never below 6.54
+      GiB, zero gaps, the thresholds digest matching at the launch and at the
+      scoring). The retained-state diagnostic reads RISING (0.65%/hour) —
+      reported, never gated, carried as a finding rather than a leak-free
+      claim. The run's own artifacts are the evidence of record (not suite
+      tests, so they are cited here rather than as evidence pointers):
+      docs/release-evidence/v0.2.0-soak-attempts/attempt6-3929cc7.{json,md},
+      its eligibility verdict attempt6-3929cc7-eligibility.json, its launch
+      record, its telemetry and census, and its full --trace-gc capture; the
+      release evidence is docs/release-evidence/v0.2.0-soak-results.{json,md}.
     evidence:
       - test: "REL-3 compressed validation: the soak harness runs the candidate artifact green on a 5-minute compressed profile"
         file: "tests/soak/rel3-soak.test.mjs"

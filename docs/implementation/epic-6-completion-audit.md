@@ -1,17 +1,33 @@
 # Epic 6 Completion Audit — Prove It & Ship
 
-Date: 2026-10-21 · Commit range `3aec7ed` (post-Epic-5) → `18ea145` · Suite: **574 pass / 0 fail / 0 skipped** ·
+Date: 2026-10-21 (verdict closed 2026-10-23) · Commit range `3aec7ed` (post-Epic-5) → `18ea145` · Suite: **628 pass / 0 fail / 0 skipped** ·
 AC sweep: **clean** (4 stories, 8 criteria, 22 evidence pointers)
 
-> **Status: written against the final candidate while the formal soak is still
-> running.** The soak's verdict is the one open gate; every other line here is
-> settled by evidence that exists today. The sections marked **[PENDING]** wait
-> for that result — and this document will not pre-record a verdict for a run
-> that has not finished.
+> **Status: CLOSED 2026-10-23 — every gate returned.** The formal twelve-hour
+> qualifying run finished at 2026-10-23T00:38:33Z with `status: pass`, and the
+> host's quiet-window adjudication returned `eligible` the same day. The
+> [PENDING] sections below were written before those verdicts and are closed
+> by the verdict paragraph that follows them.
 
 ## Verdict
 
-**Epic 6 is one gate short: the formal twelve-hour soak has not yet returned a verdict.** The release
+**Epic 6 is COMPLETE: every gate returned a verdict, and the verdicts are clean.** The formal
+twelve-hour qualifying run (attempt 6, against the final candidate `3929cc7`, `candidate-exact`) finished
+at 2026-10-23T00:38:33Z after 724.61 wall minutes with **`status: pass`**: the final-window RSS rule PASSED
+(the measured window's RSS actually FELL — growthRatio −0.0186 against the 0.02 bound, and the
+least-squares slope's implied growth 0.0056 against the same bound), FD stability PASSED (worst drift 1 of
+a ±5 corridor over 661 post-baseline samples), and zero message loss PASSED (33,725 acknowledged ==
+33,725 readable, 0 duplicates, 0 lost). The host's quiet-window adjudication returned **`eligible`**
+coverage 1.0, 239 of 240 expected samples, median foreign CPU 0.449 cores against the frozen 1.345 limit,
+elapsed-time mean 0.446 against 1.576, the foreign process count never above 4 against the frozen 7, the
+available memory never below 6.54 GiB, zero gaps. The thresholds digest matched at the launch and at the
+scoring. One honest finding rides beside the PASS and does not qualify it away: the retained-state
+diagnostic (the used V8 heap after confirmed natural major collections inside the window) reads **RISING**
+at 0.65%/hour against the 0.5%/hour flat tolerance — REPORTED, never gated, and per the pre-registered
+decision tree a rising reading is *a finding to carry, NOT a leak-free claim*. The OS-level RSS — the
+thing FR-13's ratified band gates — went DOWN across the window. The record therefore says: the release
+is qualified on the ratified gate, and the reachable-heap observation is carried as v0.3 work. The
+release
 candidate is frozen, validated and reproducible; the physical two-machine
 demonstration is captured and verified by its own verifier; and the one defect
 the demonstration found — a killed client that could not reclaim its own Chat
@@ -58,7 +74,7 @@ visible to the suite:
 | Story | Commit | Proof |
 |---|---|---|
 | 6.1 REL-1 — the cross-everything demonstration | `33c7ec1` (the flight kit), `18ea145` (the evidence) | `docs/release-evidence/v0.2.0-rel1/` — two physical machines (NSG-Mac-mini and ngs-staging), two vendor hosts (the real Zcode CLI 0.17.0 on the Mac, the real Claude Code 2.1.306 on staging through that host's own model gateway) plus a third installation as the negative control, against one self-hosted Room Server (Docker `node:24-alpine`, TLS with a private CA) on ngs-2. DMs both ways inside the literal `<untrusted_message version="1">` envelope; the trust matrix HELD a cross-machine message (`not_allowlisted`, body withheld, 480 bytes) and then RELEASED it with its body; broadcasts both ways; the viewer's freshness MEASURED (0.150 s same-machine, 0.276 s cross-machine with the measured clock offset); zero DM content in the whole rendered DOM; a browser-session recording, a screenshot, both vendor transcripts, the operator takeover receipts from both machines, and `scripts/rel1-verify-evidence.mjs` exiting 0 |
-| 6.2 REL-3 — the formal soak | `33c7ec1` (harness), `01504a3` (the amended rule) | `tests/soak/rel3-soak.mjs` (the long-runner) + `tests/soak/rel3-soak.test.mjs` (the compressed validation) + `tests/soak/rel3-soak-calibration.test.mjs` (twelve rows driving the REAL exported evaluator over synthetic traces and the archived runs). Attempt 1 PASSED against the now-superseded `7dc980f`. Attempt 2 FAILED the final-window RSS rule against `89c8477`. Attempt 3 was stopped short of its 8 hours when the candidate was voided by the Story 6.4 repair. Attempt 4 FAILED the same rule against the FINAL candidate `3929cc7` on a quiet host (482.66 min, zero loss over 23,080 messages, FD stable, `candidate-exact`; the window 113.9 → 116.5 MiB, `growthRatio` 0.02239 against 0.02, the slope's implied growth 0.03988) — and the release is HELD on it. Two advisor lanes found that the rule, as placed, measured EQUILIBRATION rather than retention (the profile's ramp IS the first half of the run and the measured window IS the cap-hold), so the rule was amended prospectively: the gate is FR-13's single band (the endpoint term, never ratified, is demoted to a report), the window is FR-13's four hours, the run is twelve hours with the ramp bounded to four, the retained-state diagnostic is collected from a full `--trace-gc` capture and reported (never gated), and the quiet-host contract is pre-registered. The ruling and the pre-registration: `docs/implementation/spec-6-2-rel-3-the-formal-soak.md.amendment-2026-10-22.md`. Attempt 5 — the first twelve-hour run under the amended protocol — was ABORTED at 130.37 min (2026-10-22T04:47:40Z) and is never scored: the pre-registered quiet-host contract turned out to be UNSATISFIABLE on the host it was written for (it forbade any node process but the run's own, while the host carries seven foreign ones of its own; and it gated the load average, which on this host is dominated by the run's OWN fsync waits — the CPU sat over 90% idle while the load read 1.2–3.2). The contract was rewritten into a baseline-comparison form measured by the repository's own observer (`scripts/rel1-soak-telemetry.sh`), the MEMORY GATE ITSELF was not touched, and the corrected contract is at its own advisor gate before the next run starts. **[PENDING]** the twelve-hour qualifying run |
+| 6.2 REL-3 — the formal soak | `33c7ec1` (harness), `01504a3` (the amended rule) | `tests/soak/rel3-soak.mjs` (the long-runner) + `tests/soak/rel3-soak.test.mjs` (the compressed validation) + `tests/soak/rel3-soak-calibration.test.mjs` (twelve rows driving the REAL exported evaluator over synthetic traces and the archived runs). Attempt 1 PASSED against the now-superseded `7dc980f`. Attempt 2 FAILED the final-window RSS rule against `89c8477`. Attempt 3 was stopped short of its 8 hours when the candidate was voided by the Story 6.4 repair. Attempt 4 FAILED the same rule against the FINAL candidate `3929cc7` on a quiet host (482.66 min, zero loss over 23,080 messages, FD stable, `candidate-exact`; the window 113.9 → 116.5 MiB, `growthRatio` 0.02239 against 0.02, the slope's implied growth 0.03988) — and the release is HELD on it. Two advisor lanes found that the rule, as placed, measured EQUILIBRATION rather than retention (the profile's ramp IS the first half of the run and the measured window IS the cap-hold), so the rule was amended prospectively: the gate is FR-13's single band (the endpoint term, never ratified, is demoted to a report), the window is FR-13's four hours, the run is twelve hours with the ramp bounded to four, the retained-state diagnostic is collected from a full `--trace-gc` capture and reported (never gated), and the quiet-host contract is pre-registered. The ruling and the pre-registration: `docs/implementation/spec-6-2-rel-3-the-formal-soak.md.amendment-2026-10-22.md`. Attempt 5 — the first twelve-hour run under the amended protocol — was ABORTED at 130.37 min (2026-10-22T04:47:40Z) and is never scored: the pre-registered quiet-host contract turned out to be UNSATISFIABLE on the host it was written for (it forbade any node process but the run's own, while the host carries seven foreign ones of its own; and it gated the load average, which on this host is dominated by the run's OWN fsync waits — the CPU sat over 90% idle while the load read 1.2–3.2). The contract was rewritten into a baseline-comparison form measured by the repository's own observer (`scripts/rel1-soak-telemetry.sh`), the MEMORY GATE ITSELF was not touched, and the corrected contract is at its own advisor gate before the next run starts. Attempt 6 — the qualifying run under the amended protocol AND the corrected contract — PASSED (724.61 min, `candidate-exact`, 33,725 acknowledged == readable with 0 duplicates and 0 lost, FD stable, the final-window RSS rule PASS with the window's RSS falling −1.86%, the slope's implied growth 0.0056 against 0.02) and the host window was adjudicated **`eligible`** under the frozen, digested contract (coverage 1.0, median 0.449 / mean 0.446 cores against the frozen 1.345 / 1.576, foreign processes ≤ 4 against 7, MemAvailable ≥ 6.54 GiB, zero gaps, the thresholds digest matching at the launch and at the scoring). The retained-state diagnostic reads RISING (0.65%/hour) — reported, never gated, and carried as a finding rather than read as a leak-free claim. **[CLOSED]** |
 | 6.3 Release packaging & client smoke tests | `dc61332` (the third re-cut) | `docs/release-evidence/v0.2.0-candidate.json` — commit `3929cc7`, version `0.2.0`, both package tree digests (portable `3d90129b…`, claude_code `e481c9a4…`, 46 files each), Node/SQLite versions, the validator identity, and all five gate rows green on the re-cut artifacts: deterministic materialization, the real `claude plugin validate --strict` (2.1.305, exit 0), the installed Claude Code smoke, the installed portable smoke, and SM-C1 (five fresh installs, zero failures, 0.460 s raw mean, 0.262 s adjusted against v0.1's 0.352 s anchor) |
 | 6.4 Reconnect recovery — the explicit session takeover | `6d6b45f` | `tests/session-replacement.test.mjs` (19 rows) — the squat and its repair, the same-Actor grant, the foreign-Actor refusal, the intent's grammar, the wrong verb, the registry's own incumbent re-check, the failed-write ordering at both the registry and the API level, the late requests, no ping-pong, the durable claim row and the client's cursor file surviving a takeover, the real client's recovery carrying no intent, the authorization stage's fence, a named row pinning the known fence-placement gap, the orderly exit at both the API and the MCP child, and the operator command's three refusals. Spec: `docs/implementation/spec-6-4-reconnect-recovery-takeover.md` |
 
@@ -149,8 +165,11 @@ certificate-ignore flag because the demo CA is not in the OS trust store):
 - **[PENDING] The endurance verdict for the final candidate.** The first run's
   PASS belongs to `7dc980f`; attempt 4 against the final candidate FAILED the
   memory rule on a quiet host, and the release is held until the amended,
-  pre-registered twelve-hour run returns its verdict — the first one was aborted because the
-  quiet-host contract it ran under could not be satisfied on this host (see the story ledger).
+  pre-registered twelve-hour run RETURNED ITS VERDICT on 2026-10-23: `pass`, with the host window
+  adjudicated `eligible` under the frozen contract. The first two attempts at the corrected protocol
+  were stopped rather than scored — attempt 5 because the contract it ran under could not be satisfied
+  on this host (see the story ledger), and the instrument was rebuilt and re-gated four times before
+  the qualifying run was allowed to start.
 - **The takeover's fence is checked before the request body is read** (retro
   A5), **its intent binds to whoever holds the name now rather than to an
   incumbent the operator observed** (A6), **its retention is bounded by a

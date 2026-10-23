@@ -68,18 +68,23 @@
   that the observer's counts match the cgroup's ACTUAL membership; and an end-to-end rehearsal whose
   own row reads `ownProcs=7 foreignProcs=4`, whose placement was verified, and whose adjudication
   returned INCOMPLETE with its reasons named.
-- **THE TWELVE-HOUR QUALIFYING RUN IS IN FLIGHT.** It was launched 2026-10-22T12:17:57Z on the quiet
-  host ngs-staging (`ssh 43.229.78.155`), world under `/root/rel1-soak6/.soak-world/`, launcher
-  `scripts/rel3-soak-launch.sh` with a fifteen-minute pre-run baseline. Its tracked window ends about
-  **2026-10-23T00:33Z**, and the final drain after that; the observer stops with the run, and
-  `scripts/rel3-soak-adjudicate.sh /root/rel1-soak /root/rel1-soak6 attempt6-3929cc7` produces the
-  eligibility verdict and archives the attempt's own evidence. **v0.2.0 is HELD until that verdict and
-  the harness's own verdict are both read.** **Do not run `node --test`, another soak, or any heavy
-  workload on ngs-staging or on this Mac while it is in flight** — the run's quiet-host contract is
-  pre-registered, and a window whose telemetry breaches it is CONFOUNDED: the attempt is recorded under
-  its own name as incomplete, never scored, never re-scored. The launch record at
-  `/root/rel1-soak6/launch-record.txt` pins the commit, the five rule digests, the extra baseline's
-  digest, the measured baseline and the placement and partition checks.
+- **THE TWELVE-HOUR QUALIFYING RUN PASSED — the release gate is CLOSED.** Attempt 6 (against the final
+  candidate `3929cc7`, launched 2026-10-22T12:17:57Z on ngs-staging with the rule's five digests pinned
+  in its launch record) finished 2026-10-23T00:38:33Z after 724.61 wall minutes with **`status: pass`**:
+  the final-window RSS rule PASSED (the window's RSS FELL −1.86%, growthRatio −0.0186 against 0.02; the
+  slope's implied growth 0.0056 against the same bound), FD stability PASSED (worst drift 1 of a ±5
+  corridor), zero message loss (33,725 acknowledged == readable, 0 duplicates, 0 lost), `candidate-exact`.
+  The host window was adjudicated **`eligible`** by the named scorer against the frozen thresholds
+  (coverage 1.0, zero gaps, median 0.449 / mean 0.446 cores against the frozen 1.345 / 1.576, foreign
+  processes ≤ 4 against 7, MemAvailable ≥ 6.54 GiB, the thresholds digest matching at the launch and at
+  the scoring). **One finding rides beside the PASS:** the retained-state diagnostic (the used V8 heap
+  after confirmed natural major collections in the window) reads **RISING** at 0.65%/hour — reported,
+  never gated, and per the pre-registered decision tree that is a finding to carry, NOT a leak-free
+  claim. The ratified gate passed; the reachable-heap observation is v0.3 work. The release evidence is
+  attempt 6's results (`docs/release-evidence/v0.2.0-soak-results.{json,md}`); the attempt's own files,
+  telemetry, census, launch record, adjudication and GC trace are under
+  `docs/release-evidence/v0.2.0-soak-attempts/attempt6-3929cc7.*`. The heavy-workload restriction on
+  ngs-staging is LIFTED with the run's end.
 - **The formal soak is NOT in flight — the next twelve-hour run starts after the corrected
   quiet-host contract clears its advisor gate.** The first twelve-hour run (attempt 5: launched
   2026-10-22T02:41Z on the QUIET host ngs-staging, `ssh 43.229.78.155`, world under

@@ -1,0 +1,111 @@
+{
+  "verdict": "eligible",
+  "scope": "quiet-host eligibility only — this does not judge the soak, and it does not confer a PASS",
+  "thresholdsFile": "/root/rel1-soak/docs/implementation/rel3-quiet-host-thresholds.json",
+  "thresholdsDigest": "sha256:253ef29657c47e40f5e60d39ec82b4cdd02560c2639f5bd0f27e1603f15e5576",
+  "expectedThresholdsDigest": "sha256:253ef29657c47e40f5e60d39ec82b4cdd02560c2639f5bd0f27e1603f15e5576",
+  "runStart": "2026-10-22T12:33:56.840Z",
+  "runEnd": "2026-10-23T00:34:07.991Z",
+  "runEndSource": "run-end",
+  "metrics": {
+    "windowStart": "2026-10-22T20:34:07.991Z",
+    "windowEnd": "2026-10-23T00:34:07.991Z",
+    "windowSeconds": 14400,
+    "windowEndSource": "run-end",
+    "windowSamples": 239,
+    "expectedSamples": 240,
+    "coverage": 1,
+    "coverageDetail": {
+      "fraction": 1,
+      "coveredSeconds": 14400,
+      "windowSeconds": 14400,
+      "minimumSampleFraction": 0.8,
+      "validIntervals": 240,
+      "intervalsInsideWindow": 240,
+      "headSeconds": 0,
+      "tailSeconds": 0,
+      "outOfCadenceIntervals": 0
+    },
+    "gaps": [],
+    "gapCount": 0,
+    "baselineSamples": 37,
+    "baselineMeasuredSamples": 35,
+    "baselineSyntheticSamples": 2,
+    "telemetryCommentLines": 0,
+    "baselineSources": [
+      {
+        "path": "/root/rel1-soak/docs/release-evidence/v0.2.0-quiet-host/host-baseline-2026-10-22.log",
+        "samples": 20,
+        "usable": 20,
+        "commentLines": 0
+      }
+    ],
+    "baselineForeignProcessMax": 6,
+    "baselineForeignCoresMean": 0.61,
+    "baselineForeignCores": {
+      "median": 0.663,
+      "mean": 0.61,
+      "p95": 1.011,
+      "max": 1.025,
+      "rolling5mMax": 0.9146
+    },
+    "baselineExpectation": {
+      "source": "baselineExpectation",
+      "expectedMedian": 0.845,
+      "expectedMean": 0.8258,
+      "tolerance": {
+        "median": 0.15,
+        "mean": 0.25
+      },
+      "medianDrift": 0.18199999999999994,
+      "meanDrift": 0.2158285714285716,
+      "checked": [
+        "median",
+        "mean"
+      ]
+    },
+    "limits": {
+      "source": "absolute",
+      "medianMax": 1.345,
+      "meanMax": 1.576,
+      "computed": {
+        "medianMax": 1.163,
+        "meanMax": 1.36,
+        "baselineMedian": 0.663,
+        "baselineMean": 0.6099714285714284,
+        "medianAllowanceCores": 0.5,
+        "meanAllowanceCores": 0.75
+      },
+      "advertised": {
+        "medianMax": 1.345,
+        "meanMax": 1.576
+      },
+      "advertisedVsComputed": {
+        "medianDrift": 0.182,
+        "meanDrift": 0.216,
+        "note": "the registered limits are the ones that gate; the relative computation is a diagnostic of this host now"
+      }
+    },
+    "memAvailableFloorBytes": 7023443968,
+    "maxForeignProcesses": 4,
+    "foreignProcessAllowance": 7,
+    "foreignCoresMean": 0.4457,
+    "foreignCoresRowMean": 0.446,
+    "foreignCoresMedian": 0.449,
+    "foreignCoresP95": 0.666,
+    "foreignCoresMax": 0.802,
+    "foreignCoresRolling5mMax": 0.704,
+    "foreignCoresSamplesAboveOneCore": 0,
+    "foreignCoresMinutesAboveOneCore": 0,
+    "loadAverageMax": 1.32,
+    "stealCoresMax": 0
+  },
+  "reasons": [],
+  "dataProblems": [],
+  "thresholdBreaches": [],
+  "findings": [],
+  "dispositions": {
+    "breach": "confounded",
+    "missingOrInvalidTelemetry": "incomplete"
+  }
+}

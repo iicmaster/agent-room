@@ -1,0 +1,65 @@
+2026-10-22T12:33:56.842Z REL-3 soak: requested duration 720 min; schedule {"sampleIntervalMs":60000,"burstEveryMs":600000,"burstMessagesPerRoom":30,"reconnectEveryMs":3600000,"fdBaselineAfterMs":3600000,"finalWindowMs":14400000}
+2026-10-22T12:33:57.147Z identity: candidate-exact — the fresh materialization reproduces the frozen candidate digests byte-for-byte
+2026-10-22T12:33:57.152Z payload cap bound to the artifact: MESSAGE_TEXT_MAX = 32768 characters; session capacity 1000 (eviction mints per reconnect: 1008)
+2026-10-22T12:33:57.153Z environment: node v24.18.0, sqlite 3.53.1, host ngs-staging, linux 5.14.0-642.el9.x86_64 x64, 4 cpus
+2026-10-22T12:33:57.410Z server ready: pid 2456290, port 45059, version 0.2.0
+2026-10-22T12:33:58.005Z warmup: driving the allocator to steady state before the tracked window opens
+2026-10-22T12:34:07.882Z warmup done: 1500 messages in 10 rounds, stabilized=true, 10 s
+2026-10-22T12:35:07.883Z progress: acked 1530, bursts 0, reconnects 0, samples 2, rss 113.6 MiB, fd 22
+2026-10-22T12:44:08.235Z burst 1: 150 messages at 1600 chars in 352 ms; acked total 1950
+2026-10-22T13:05:07.898Z progress: acked 2875, bursts 3, reconnects 0, samples 32, rss 95.2 MiB, fd 22
+2026-10-22T13:34:07.885Z reconnect cycle at 2026-10-22T13:34:07.885Z
+2026-10-22T13:34:16.489Z reconnect cycle done in 8604 ms; traffic resumed (acked so far: 4200)
+2026-10-22T13:35:07.910Z progress: acked 4225, bursts 6, reconnects 1, samples 62, rss 103.5 MiB, fd 22
+2026-10-22T14:05:07.918Z progress: acked 5575, bursts 9, reconnects 1, samples 92, rss 106.4 MiB, fd 22
+2026-10-22T14:24:16.792Z burst 11: 150 messages at 15168 chars in 371 ms; acked total 6450
+2026-10-22T14:34:07.884Z reconnect cycle at 2026-10-22T14:34:07.884Z
+2026-10-22T14:34:16.161Z reconnect cycle done in 8277 ms; traffic resumed (acked so far: 6750)
+2026-10-22T14:35:07.922Z progress: acked 6925, bursts 12, reconnects 2, samples 122, rss 107.0 MiB, fd 22
+2026-10-22T15:05:07.930Z progress: acked 8275, bursts 15, reconnects 2, samples 152, rss 109.5 MiB, fd 22
+2026-10-22T15:34:07.884Z reconnect cycle at 2026-10-22T15:34:07.884Z
+2026-10-22T15:34:16.135Z reconnect cycle done in 8250 ms; traffic resumed (acked so far: 9450)
+2026-10-22T15:35:07.935Z progress: acked 9625, bursts 18, reconnects 3, samples 182, rss 107.2 MiB, fd 22
+2026-10-22T16:04:21.091Z burst 21: 150 messages at 28672 chars in 440 ms; acked total 10950
+2026-10-22T16:05:07.938Z progress: acked 10975, bursts 21, reconnects 3, samples 212, rss 107.7 MiB, fd 22
+2026-10-22T16:34:07.884Z reconnect cycle at 2026-10-22T16:34:07.884Z
+2026-10-22T16:34:16.127Z reconnect cycle done in 8242 ms; traffic resumed (acked so far: 12145)
+2026-10-22T16:35:07.941Z progress: acked 12320, bursts 24, reconnects 4, samples 242, rss 115.7 MiB, fd 22
+2026-10-22T17:05:07.948Z progress: acked 13670, bursts 27, reconnects 4, samples 272, rss 114.0 MiB, fd 22
+2026-10-22T17:34:07.885Z reconnect cycle at 2026-10-22T17:34:07.884Z
+2026-10-22T17:34:16.085Z reconnect cycle done in 8200 ms; traffic resumed (acked so far: 14840)
+2026-10-22T17:35:07.956Z progress: acked 15015, bursts 30, reconnects 5, samples 302, rss 118.9 MiB, fd 22
+2026-10-22T17:44:25.788Z burst 31: 150 messages at 32768 chars in 463 ms; acked total 15445
+2026-10-22T18:05:07.963Z progress: acked 16370, bursts 33, reconnects 5, samples 332, rss 116.7 MiB, fd 22
+2026-10-22T18:34:07.884Z reconnect cycle at 2026-10-22T18:34:07.884Z
+2026-10-22T18:34:16.106Z reconnect cycle done in 8222 ms; traffic resumed (acked so far: 17540)
+2026-10-22T18:35:07.971Z progress: acked 17715, bursts 36, reconnects 6, samples 362, rss 116.6 MiB, fd 22
+2026-10-22T19:05:07.978Z progress: acked 19065, bursts 39, reconnects 6, samples 392, rss 116.7 MiB, fd 22
+2026-10-22T19:24:30.615Z burst 41: 150 messages at 32768 chars in 497 ms; acked total 19945
+2026-10-22T19:34:07.884Z reconnect cycle at 2026-10-22T19:34:07.884Z
+2026-10-22T19:34:16.171Z reconnect cycle done in 8287 ms; traffic resumed (acked so far: 20235)
+2026-10-22T19:35:07.986Z progress: acked 20415, bursts 42, reconnects 7, samples 422, rss 113.4 MiB, fd 22
+2026-10-22T20:05:07.995Z progress: acked 21765, bursts 45, reconnects 7, samples 452, rss 116.8 MiB, fd 22
+2026-10-22T20:34:07.885Z reconnect cycle at 2026-10-22T20:34:07.885Z
+2026-10-22T20:34:16.171Z reconnect cycle done in 8286 ms; traffic resumed (acked so far: 22935)
+2026-10-22T20:35:08.005Z progress: acked 23110, bursts 48, reconnects 8, samples 482, rss 116.9 MiB, fd 22
+2026-10-22T21:04:35.698Z burst 51: 150 messages at 32768 chars in 477 ms; acked total 24445
+2026-10-22T21:05:08.013Z progress: acked 24460, bursts 51, reconnects 8, samples 512, rss 116.9 MiB, fd 22
+2026-10-22T21:34:07.884Z reconnect cycle at 2026-10-22T21:34:07.884Z
+2026-10-22T21:34:16.127Z reconnect cycle done in 8243 ms; traffic resumed (acked so far: 25635)
+2026-10-22T21:35:08.018Z progress: acked 25810, bursts 54, reconnects 9, samples 542, rss 117.2 MiB, fd 22
+2026-10-22T22:05:08.019Z progress: acked 27155, bursts 57, reconnects 9, samples 572, rss 119.5 MiB, fd 22
+2026-10-22T22:34:07.884Z reconnect cycle at 2026-10-22T22:34:07.884Z
+2026-10-22T22:34:16.153Z reconnect cycle done in 8269 ms; traffic resumed (acked so far: 28330)
+2026-10-22T22:35:08.029Z progress: acked 28510, bursts 60, reconnects 10, samples 602, rss 117.4 MiB, fd 22
+2026-10-22T22:44:40.669Z burst 61: 150 messages at 32768 chars in 487 ms; acked total 28945
+2026-10-22T23:05:08.041Z progress: acked 29855, bursts 63, reconnects 10, samples 632, rss 117.4 MiB, fd 22
+2026-10-22T23:34:07.885Z reconnect cycle at 2026-10-22T23:34:07.884Z
+2026-10-22T23:34:16.141Z reconnect cycle done in 8256 ms; traffic resumed (acked so far: 31030)
+2026-10-22T23:35:08.052Z progress: acked 31205, bursts 66, reconnects 11, samples 662, rss 117.4 MiB, fd 22
+2026-10-23T00:05:08.064Z progress: acked 32555, bursts 69, reconnects 11, samples 692, rss 114.0 MiB, fd 22
+2026-10-23T00:24:45.832Z burst 71: 150 messages at 32768 chars in 476 ms; acked total 33440
+2026-10-23T00:35:08.120Z final drain: verifying 33725 acknowledged messages across 5 rooms
+2026-10-23T00:38:33.248Z REL-3 soak verdict: PASS — {"finalWindow":{"windowMs":14400000,"samples":240,"elapsedMs":14340026,"startRssBytes":122527744,"endRssBytes":120250368,"growthRatio":-0.018586614962893627,"slopeBytesPerMs":0.04778181104083644,"impliedGrowthRatio":0.0055921409330174365,"slopePctOfStartPerSecond_reportedNotGated":0.0000389967279907124,"bound":0.02,"rule":"(endRSS - startRSS_of_window) / RSS_at_window_start <= 0.02, and the least-squares slope's implied growth across the window <= 0.02 — FR-13's single pass rule (the final four hours). The endpoint growth is reported, never gated: FR-13 ratifies one band, and the endpoint term was never ratified. Not the Story 2.4 per-second rate.","pass":true,"gatedTerm":"slope_implied_growth","reportedOnly":{"endpoint_growthRatio":-0.018586614962893627,"endpoint_bound":0.02,"endpoint_pass":true,"note":"the endpoint term is reported, never gated: FR-13 ratifies one band (the slope), and this term was never ratified"}},"fds":{"baselineAfterMs":3600000,"baselineFd":23,"samplesAfterBaseline":661,"worstAbsDrift":1,"corridor":5,"rule":"every sample at or after duration/8 (one hour at the default 8) sits within +-5 of the hour-one baseline","pass":true},"zeroLoss":{"acked":33725,"readable":33725,"duplicates":0,"lostOrPhantom":0},"samples":721}
+2026-10-23T00:38:33.270Z world kept for autopsy: /root/rel1-soak6/.soak-world/agent-room-rel3-soak-od97iB
+2026-10-23T00:38:33.270Z REL-3 soak finished with status pass; results in /root/rel1-soak6/.soak-world/evidence
