@@ -70,8 +70,8 @@ development_status:
   4-4-the-four-rate-gates-full-send-statuses: done
   4-5-ban-by-identity-key: done
   4-6-storage-admission-control: done
-  4-7-self-hosting-deployment-guide: backlog
-  4-8-remote-churn-the-dress-rehearsal-blocking-gate-ruling-q3: backlog
+  4-7-self-hosting-deployment-guide: done
+  4-8-remote-churn-the-dress-rehearsal-blocking-gate-ruling-q3: done
   epic-4-retrospective: done
 
   epic-5: backlog
@@ -298,7 +298,7 @@ action_items:
     action: "The evidence verifier should recompute, not grep: it does not parse freshness.json,
       does not read the recording, and cannot tell a first transmission from an idempotent
       replay"
-    owner: "release"
+    owner: "Epic 7 (story 7.5)"
     status: open
     ref: "docs/implementation/epic-6-retro-2026-10-21.md"
   - id: "epic-6-retro-item-a1-the-packaged-docs-are-shipping-bytes"
@@ -309,28 +309,29 @@ action_items:
       the first time"
     owner: "release"
     status: open
-    ref: "docs/implementation/epic-6-retro-2026-10-21.md"
+    ref: "docs/implementation/epic-6-retro-2026-10-21.md (standing rule; recorded as Epic 7's preamble rule)"
   - id: "epic-6-retro-item-a2-automatic-unattended-crash-recovery-is-not-built"
     epic: 6
     action: "Automatic unattended crash recovery is not built: identifying the rightful
       successor process needs session-resume ownership evidence the Actor key alone
       cannot provide"
-    owner: "v0.3"
+    owner: "Epic 7 (story 7.4)"
     status: open
     ref: "docs/implementation/epic-6-retro-2026-10-21.md"
-  - id: "epic-6-retro-item-a3-cookie-lifetime-question"
+  - id: "epic-6-retro-item-a3-copyfile-disable-package-copy-recipe"
     epic: 6
-    action: "Cookie lifetime question (session vs persistent) is a product question
-      for real viewer use"
-    owner: "post-launch"
-    status: open
-    ref: "docs/implementation/epic-6-retro-2026-10-21.md"
+    action: "The macOS tar AppleDouble artifact must never be CREATED by the copy:
+      use COPYFILE_DISABLE=1 in the transfer recipe (the runbook carries it; the
+      release act proved it - zero AppleDouble entries in the shipped archives)"
+    owner: "operator"
+    status: done
+    ref: "docs/rel1-runbook.md"
   - id: "epic-6-retro-item-a4-the-viewer-freshness-probe-belongs-in-the-flight-kit"
     epic: 6
     action: "The viewer-freshness observer belongs in the Operator Flight Kit as a
       script: it is the measurement the AC asks for and it should not need to be re-invented
       per run"
-    owner: "release"
+    owner: "Epic 7 (story 7.5)"
     status: open
     ref: "docs/implementation/epic-6-retro-2026-10-21.md"
   - id: "epic-6-retro-item-a12-quiet-host-contract-measured"
@@ -342,8 +343,8 @@ action_items:
       the foreign state only, and freezes the thresholds in a digested file that a
       named scorer reads"
     owner: "release"
-    status: open
-    ref: "docs/implementation/epic-6-retro-2026-10-21.md"
+    status: done
+    ref: "docs/release-evidence/v0.2.0-soak-attempts/ - the observer, scorer and frozen thresholds attempt 6's adjudication used"
   - id: "epic-6-retro-item-a13-instrument-validation-and-named-scorer"
     epic: 6
     action: "A13 - a pre-registration that names an instrument must include that instrument's
@@ -352,5 +353,14 @@ action_items:
       is relied on (the REL-3 observer has a self-check proven on the host; the scorer
       has 43 fixtures)"
     owner: "release"
+    status: done
+    ref: "docs/release-evidence/v0.2.0-soak-attempts/ - the observer's on-host self-check and the scorer's 43 fixtures"
+  - id: "epic-6-retro-item-a11-retained-state-threshold-calibration"
+    epic: 6
+    action: "The REL-3 memory rule's calibration: the amendment is ratified, but the
+      retained-state diagnostic's threshold is PROVISIONAL until a 12-hour trace
+      calibrates it - attempt 6 is that first trace; the calibration decision and
+      any retainer repair belong to Epic 7's Story 7.6"
+    owner: "Epic 7 (story 7.6)"
     status: open
-    ref: "docs/implementation/epic-6-retro-2026-10-21.md"
+    ref: "docs/implementation/spec-6-2-rel-3-the-formal-soak.md.amendment-2026-10-22.md"

@@ -627,7 +627,9 @@ So that "claimed" means "proven."
 
 ## Epic 7: The Session Authority, Hardened (v0.3)
 
-Every session-authority defect the release gates executed is repaired at the root, and the recovery story is designed. The scope is the Epic 6 retrospective's v0.3 ledger (A5–A9, A2) plus the two shipped-comment corrections the v0.2.0 release gate recorded; the instruments and the retained-state finding ride along. Standing process rule for every story here (retro A1): the packaged docs (CHANGELOG.md, README.md) land WITH the story that changes what they describe — never after the candidate is frozen.
+Every session-authority defect the release gates found is repaired at the root, and the recovery question gets its design. The scope is the Epic 6 retrospective's v0.3 ledger (A5–A9, A2) plus the two shipped-comment corrections the v0.2.0 release gate recorded; the release-ledger instrument items (A4, A10) are ADOPTED here as a visible scope choice, and the retained-state finding (A11's open part) gets its disposition. Standing process rule for every story (retro A1): the packaged docs (CHANGELOG.md, README.md) land WITH the story that changes what they describe — never after the candidate is frozen. Honesty note: not every defect below was experimentally reproduced — A5 and A7 were executed against the shipped server, A9 was derived from source reading and is so labeled.
+
+**Story order, as ruled by the two-vendor design gate of 2026-10-26** (both round-tables archived at `docs/implementation/reviews/epic-7-design-gate-{codex,agy}.md`): Stories 7.1 and 7.3 proceed immediately — neither can be invalidated by the A2 outcome. Story 7.4's design-or-refusal runs BEFORE Story 7.2's wire/spine amendment freezes (a paper round-table is cheap; re-amending `POST /api/session`, the transfer seam and the Spine twice is not). The 7.2-vs-7.4 ordering disagreement is recorded, not blended: codex's room ratified this hold; agy's John and Grumbal dissented in favor of repair-first (7.2 is a committed correctness fix on a path that never goes away), and their dissent stands in the record. Stories 7.5 and 7.6 run in parallel at any point.
 
 ### Story 7.1: The fence never lies
 
@@ -637,11 +639,13 @@ So that no reader — human or agent — can build on a claim the server does no
 
 **Acceptance Criteria:**
 
-**Given** a body-carrying request that was admitted before a same-Actor takeover completed, **When** its body finishes arriving, **Then** the session authority is REVALIDATED after the last awaited input step and directly before the handler runs — the request is refused at the fence, closing the window the release-gate review executed (retro A5; the corrected Story 6.4 clause above becomes literally true). A bodyless route's behavior is unchanged.
+**Given** a body-carrying request that was admitted before a same-Actor takeover completed, **When** its body finishes arriving, **Then** the handoff fence is REVALIDATED after `readRequestFields` resolves and synchronously before `handler(context)` is invoked — with no await between that check and the (all-synchronous) mutating handlers — and the request is refused at the fence (the executed gap, closed). The check is FENCE-ONLY: the ban check is NOT re-run there, because FR-15's recorded contract is "in-flight requests refused at next request" and the ban's enforcement boundary is not this story's to change. `AuthzStage` keeps its stage slot so already-superseded requests are refused before a body is ever read.
 
-**Given** more supersessions than the old 1,000-entry bound, **When** a superseded session's key would be forgotten while a request admitted before its handoff can still exist, **Then** the fence retention is unexhaustible — an entry leaves only when no such request can exist (retro A7; the retention mechanism is ratified at the epic's design gate before the build starts).
+**Given** an in-flight request, **When** its session is displaced, **Then** its fence entry survives until no request holding that key can still be inside the admission→handler window. The mechanism (ratified by both lanes after refusing the first draft): the pipeline PINS the sessionKey in `runPipeline` immediately when the auth stage succeeds and the session key exists — before `BudgetStage` runs, because the send route's budget stage awaits the body inside the stage loop — and releases it exactly once in a `finally` covering every exit path; the pin is acquired in `runPipeline`, never inside `AuthStage.process`, so standalone-stage unit tests cannot leak counts. In the session registry, an entry whose pin count is above zero is NEVER evicted under any circumstance; the old 1,000 bound gates only idle tombstones (zero-count entries, evicted oldest-first); there is NO hard cap on protected entries and no overflow error mid-transfer. Retention is proportional to genuinely outstanding displaced requests — "unexhaustible" is the guarantee about requests, not a claim of bounded memory independent of concurrency.
 
-**Given** the shipped source, **When** read, **Then** the two comments that overstated the fence's guarantee (the fenced-set age claim and the "immediately before the handler runs" timing claim in `server/api/session.mjs`) state exactly the repaired behavior, and the test row that PINS the old gap as a known limitation now pins the closed behavior instead.
+**Given** a long-poll that entered its handler before the takeover, **When** it wakes to check for new messages, **Then** it stops serving the displaced session — the poll wakeup loop re-checks the fence alongside the ban check (in-handler continuation policy is explicitly outside this story's mutations; this check is the one-line parity the design gate asked for).
+
+**Given** the shipped source and docs, **When** read, **Then** every place that narrates the old A5 window states the closed behavior instead: the two `server/api/session.mjs` comments, the pipeline's check-placement block, the takeover route's "does not cancel an already-admitted request" prose in `server/api/server.mjs`, the CLI's takeover explanation in `server/cli/session-commands.mjs`, `ARCHITECTURE-SPINE.md`'s handoff clause, and the packaged `README.md`/`CHANGELOG.md` — including the stale Epic 1 viewer fossil in `README.md`. Per A1 these land with THIS story. The test row that pins the A5 gap as a known limitation now pins the closed behavior (refused, handler never called, ownership unchanged), and focused regressions cover the pinned-fence accounting: more supersessions than the old bound with pinned predecessors keeps every one fenced; with none pinned the idle-tombstone bound still evicts; the send-route interleaving that broke the first draft (a request paused in the budget stage's body read) is covered by the early pin.
 
 ### Story 7.2: The observed incumbent
 
@@ -651,35 +655,37 @@ So that a stale intent is refused instead of displacing whoever holds the name n
 
 **Acceptance Criteria:**
 
-**Given** a takeover intent, **When** it is created, **Then** it is bound to an opaque conflict ticket tied to the Actor, the normalized Chat ID and the OBSERVED incumbent (never a bearer or a token digest — retro A6), and **When** the takeover executes against a different incumbent than the one observed, **Then** it is refused with a coded collision instead of displacing the current holder.
+**Given** a takeover intent, **When** it is created, **Then** it is bound to an opaque conflict ticket tied to the authenticated Actor, the normalized Chat ID and the OBSERVED incumbent (never a bearer or a token digest — retro A6), the ticket is carried unchanged to the takeover (never refreshed on retry), and **When** the takeover executes against a different incumbent than the one observed, **Then** it is refused with a coded collision instead of displacing the current holder. The ticket is SAME-ACTOR CONFIDENTIAL: a foreign Actor colliding with a held name receives the bare `chat_id_taken` with no ticket and no incumbent metadata — rotation state of another key's name leaks to no one. This is a wire change and carries its own Architecture Spine amendment, the client confirmation flow's amendment, and the flip of the test that currently lets two sequential takeovers both succeed. Per the design gate's ordering rule, this story's wire does not freeze until Story 7.4 concludes.
 
 ### Story 7.3: Always let go
 
 As the client host,
-I want every teardown path of the MCP adapter to release the Chat ID,
-So that a killed or half-started child never leaves its name reserved by accident.
+I want the MCP adapter's teardown paths to release the Chat ID under a bounded, testable lifecycle contract,
+So that the polite exits stop leaving names reserved by accident.
 
 **Acceptance Criteria:**
 
-**Given** a host that SIGTERM/SIGINTs the MCP child, **When** the signal arrives, **Then** the adapter completes the session release before exiting (retro A8) — a one-shot vendor CLI no longer leaves its Chat ID reserved behind the orderly-exit race.
+**Given** a host that SIGTERM/SIGINTs the MCP child, **When** the signal arrives, **Then** the adapter completes the session release before exiting (retro A8) — one shared, bounded shutdown operation that stops admission and late recovery, coordinates pending auth/bind, prevents late token publication, and releases the resulting session when the server is reachable; repeated close/SIGTERM/SIGINT paths join the same operation. On timeout or unreachable server, the state is recorded as failed/unknown and the process exits under the declared deadline.
 
-**Given** stdin closing while the FIRST authentication/bind is still pending, **When** the shutdown release runs, **Then** it cannot be followed by a later bind assigning a token the release already released (retro A9) — the bind-after-shutdown race is closed and pinned by a test.
+**Given** stdin closing while the FIRST authentication/bind is still pending, **When** the shutdown release runs, **Then** it cannot be followed by a later bind assigning a token the release already released (retro A9 — derived from source, not reproduced), and the bind-after-shutdown race is closed and pinned by a test. Out of scope, stated honestly: SIGKILL, OOM kills, power loss, and a dead remote peer — those are exactly Story 7.4's subject.
 
 ### Story 7.4: The automatic recovery design
 
 As the builder,
 I want a design round-table for automatic unattended crash recovery,
-So that the most likely v0.3 story starts from a ratified design, not an improvisation.
+So that the recovery question is answered by a ratified design or a recorded refusal.
 
 **Acceptance Criteria:**
 
-**Given** the recorded blocker (identifying the rightful successor process needs session-resume ownership evidence the Actor key alone cannot provide — retro A2), **When** the round-table concludes, **Then** a design exists (or a refusal with reasons) that names the ownership evidence, the trust boundary it crosses, and the exact server surface — and the two vendor advisor lanes have both had the power to refuse it.
+**Given** the recorded blocker (identifying the rightful successor process needs session-resume ownership evidence the Actor key alone cannot provide — retro A2), **When** the round-table concludes, **Then** a design exists (or a reasoned refusal — the default baseline) that names the ownership evidence, the trust boundary it crosses, the exact server surface, the replay/crash behavior, and the consent model. It pre-commits to NOTHING: no mechanism, no schema, no implementation. The falsification bar every candidate must clear is the Two-Tab Co-Tenancy Test — two live processes sharing one `${PLUGIN_DATA}` are indistinguishable from a crash-restart pair to any disk-token scheme, so a disk-only recovery secret FAILS by construction. Named candidates for the table: a disk-only one-time recovery secret (fails co-tenancy); a kernel-enforced liveness probe (a `node:net` Unix domain socket in `${PLUGIN_DATA}` whose `ECONNREFUSED` is the OS's own death certificate, paired with a server-bound one-time recovery ticket — the only zero-dependency candidate that separates the two worlds, to be judged on `sockaddr_un` path limits, startup unlink races, SIGSTOP false-dead detection, and the Spine amendment a non-interactive resume transition requires); a shortened lease TTL with a background heartbeat (refused by prior recorded decision); and self-reported process lineage (refused — unverifiable over Remote Mode). The consent question is explicit: narrow prior delegation to a trusted supervisor is a possible NEW policy to be ratified, never a silent rename of an automatic takeover.
 
 ### Story 7.5: Instruments that recompute
 
 As the release owner,
 I want the flight kit to measure and verify by computation,
 So that evidence is judged by arithmetic, not by string search.
+
+*(Provenance, per the design gate: A4 and A10 are open RELEASE-ledger items the retro recorded without assigning to v0.3 — Epic 7 adopts them as a visible scope choice. A13's rule applies to any instrument introduced here before it is relied on.)*
 
 **Acceptance Criteria:**
 
@@ -691,8 +697,10 @@ So that evidence is judged by arithmetic, not by string search.
 
 As the builder,
 I want the retained-state diagnostic's rise explained,
-So that "rising 0.65%/hour" becomes either a fixed defect or a recorded non-defect.
+So that "rising 0.65%/hour" becomes a fixed defect, a recorded non-defect, or an honest INCONCLUSIVE.
+
+*(Per the design gate: the disposition may be INCONCLUSIVE — a finite trace may establish neither a leak nor a bound — and an inconclusive outcome states the unresolved question and the follow-up instead of claiming bounded behavior. FR-13's settled-window RSS gate is untouched; this story works only on the diagnostic and any concrete retainer it can prove.)*
 
 **Acceptance Criteria:**
 
-**Given** attempt 6's `--trace-gc` capture and the soak harness, **When** the retained-state rise is profiled against the post-reconnect cycle, **Then** the finding is dispositioned: a repair lands if it is a defect; otherwise the observation is recorded as bounded behavior with the measurement that proves the bound.
+**Given** attempt 6's `--trace-gc` capture and the soak harness, **When** the retained-state rise is profiled against the post-reconnect cycle, **Then** the finding is dispositioned with calibrated coverage: a repair lands if it is a defect; a bounded-behavior record lands with the measurement that proves the bound; or the outcome is INCONCLUSIVE with the next measurement named — and the provisional threshold is either calibrated or its provisionality is restated.
