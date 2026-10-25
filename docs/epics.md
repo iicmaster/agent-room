@@ -624,3 +624,75 @@ So that "claimed" means "proven."
 
 **Given** the final dual packages, **When** validated, **Then** `claude plugin validate --strict` passes and each claimed client (Claude Code, Zcode — NFR-2 candidates become claims here) smoke-tests the materialized artifact: install, connect, one DM round-trip.
 **Given** release notes, **When** written, **Then** they document the one-time v1→v2 cursor reset and the SM-C1 re-measurement against the pre-Epic-1 v0.1 snapshot (`docs/v01-baseline.md`): steps + wall-clock to first message on five fresh installs, passing per SM-C1's rule.
+
+## Epic 7: The Session Authority, Hardened (v0.3)
+
+Every session-authority defect the release gates executed is repaired at the root, and the recovery story is designed. The scope is the Epic 6 retrospective's v0.3 ledger (A5–A9, A2) plus the two shipped-comment corrections the v0.2.0 release gate recorded; the instruments and the retained-state finding ride along. Standing process rule for every story here (retro A1): the packaged docs (CHANGELOG.md, README.md) land WITH the story that changes what they describe — never after the candidate is frozen.
+
+### Story 7.1: The fence never lies
+
+As the builder,
+I want the handoff fence's guarantee to be exactly what the code does,
+So that no reader — human or agent — can build on a claim the server does not keep.
+
+**Acceptance Criteria:**
+
+**Given** a body-carrying request that was admitted before a same-Actor takeover completed, **When** its body finishes arriving, **Then** the session authority is REVALIDATED after the last awaited input step and directly before the handler runs — the request is refused at the fence, closing the window the release-gate review executed (retro A5; the corrected Story 6.4 clause above becomes literally true). A bodyless route's behavior is unchanged.
+
+**Given** more supersessions than the old 1,000-entry bound, **When** a superseded session's key would be forgotten while a request admitted before its handoff can still exist, **Then** the fence retention is unexhaustible — an entry leaves only when no such request can exist (retro A7; the retention mechanism is ratified at the epic's design gate before the build starts).
+
+**Given** the shipped source, **When** read, **Then** the two comments that overstated the fence's guarantee (the fenced-set age claim and the "immediately before the handler runs" timing claim in `server/api/session.mjs`) state exactly the repaired behavior, and the test row that PINS the old gap as a known limitation now pins the closed behavior instead.
+
+### Story 7.2: The observed incumbent
+
+As the operator,
+I want a takeover intent to name the holder I actually saw,
+So that a stale intent is refused instead of displacing whoever holds the name now.
+
+**Acceptance Criteria:**
+
+**Given** a takeover intent, **When** it is created, **Then** it is bound to an opaque conflict ticket tied to the Actor, the normalized Chat ID and the OBSERVED incumbent (never a bearer or a token digest — retro A6), and **When** the takeover executes against a different incumbent than the one observed, **Then** it is refused with a coded collision instead of displacing the current holder.
+
+### Story 7.3: Always let go
+
+As the client host,
+I want every teardown path of the MCP adapter to release the Chat ID,
+So that a killed or half-started child never leaves its name reserved by accident.
+
+**Acceptance Criteria:**
+
+**Given** a host that SIGTERM/SIGINTs the MCP child, **When** the signal arrives, **Then** the adapter completes the session release before exiting (retro A8) — a one-shot vendor CLI no longer leaves its Chat ID reserved behind the orderly-exit race.
+
+**Given** stdin closing while the FIRST authentication/bind is still pending, **When** the shutdown release runs, **Then** it cannot be followed by a later bind assigning a token the release already released (retro A9) — the bind-after-shutdown race is closed and pinned by a test.
+
+### Story 7.4: The automatic recovery design
+
+As the builder,
+I want a design round-table for automatic unattended crash recovery,
+So that the most likely v0.3 story starts from a ratified design, not an improvisation.
+
+**Acceptance Criteria:**
+
+**Given** the recorded blocker (identifying the rightful successor process needs session-resume ownership evidence the Actor key alone cannot provide — retro A2), **When** the round-table concludes, **Then** a design exists (or a refusal with reasons) that names the ownership evidence, the trust boundary it crosses, and the exact server surface — and the two vendor advisor lanes have both had the power to refuse it.
+
+### Story 7.5: Instruments that recompute
+
+As the release owner,
+I want the flight kit to measure and verify by computation,
+So that evidence is judged by arithmetic, not by string search.
+
+**Acceptance Criteria:**
+
+**Given** a REL-1-style run, **When** freshness is observed, **Then** the observer ships as a Flight Kit script (retro A4) — the measurement the AC asks for is no longer re-invented per run.
+
+**Given** the REL-1 evidence bundle, **When** `rel1-verify-evidence.mjs` runs, **Then** it RECOMPUTES the freshness arithmetic and parses the recording's own metadata instead of grepping transcripts for substrings (retro A10), while staying a structural verifier — it still never edits evidence, and a first transmission is distinguishable from an idempotent replay in what it checks.
+
+### Story 7.6: Where the heap goes
+
+As the builder,
+I want the retained-state diagnostic's rise explained,
+So that "rising 0.65%/hour" becomes either a fixed defect or a recorded non-defect.
+
+**Acceptance Criteria:**
+
+**Given** attempt 6's `--trace-gc` capture and the soak harness, **When** the retained-state rise is profiled against the post-reconnect cycle, **Then** the finding is dispositioned: a repair lands if it is a defect; otherwise the observation is recorded as bounded behavior with the measurement that proves the bound.

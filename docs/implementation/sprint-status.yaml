@@ -85,6 +85,14 @@ development_status:
   6-2-rel-3-the-formal-soak: done
   6-3-release-packaging-client-smoke-tests: done
   epic-6-retrospective: done
+
+  epic-7: backlog
+  7-1-the-fence-never-lies: backlog
+  7-2-the-observed-incumbent: backlog
+  7-3-always-let-go: backlog
+  7-4-the-automatic-recovery-design: backlog
+  7-5-instruments-that-recompute: backlog
+  7-6-where-the-heap-goes: backlog
 action_items:
   - id: "epic-1-retro-item-1-add-a-per-epic-ac-sweep-to-the-build-loo"
     epic: 1
