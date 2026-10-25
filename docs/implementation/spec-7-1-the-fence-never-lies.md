@@ -2,7 +2,7 @@
 title: 'The fence never lies — A5 post-input revalidation, A7 unexhaustible retention, the two comment corrections'
 type: 'feature'
 created: '2026-10-26'
-status: 'draft-pending-the-epic-7-design-gate'
+status: 'review'
 baseline_revision: 'working-tree on 8a13348 (Epic 7 authored; this spec drafted before the design gate returns — its mechanism choices are the thing the gate rules on)'
 context:
   - '{project-root}/AGENTS.md'

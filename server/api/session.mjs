@@ -60,12 +60,60 @@ export function createSessionRegistry({
   // The fenced set: session keys displaced by an EXPLICIT same-Actor
   // replacement (the reconnect-recovery takeover). Displacing a session
   // revokes its token — it stops authenticating at once — and leaves its key
-  // here so the pipeline's authorization stage can refuse a request that was
-  // ALREADY admitted when the handoff happened: admission alone is never
-  // authority. The set is bounded like the session map (the oldest fence is
-  // dropped at the bound — a fence that old can no longer describe a request
-  // still in flight), and it holds digests only, never a token.
+  // here so the pipeline can refuse every request the displaced session had
+  // in flight: the authorization stage refuses it on the way in, and the
+  // pipeline's post-input revalidation refuses it again directly before the
+  // handler, after the request's body has fully arrived. RETENTION, exactly:
+  // an entry leaves only when no request holding that key can still be
+  // inside the admission→handler window — the pipeline pins each admitted
+  // request's key (enterInFlight/leaveInFlight below) and a PINNED entry is
+  // never evicted under any circumstance. The bound below gates only IDLE
+  // tombstones (zero pins, evicted oldest-first), so the fence's size is
+  // proportional to genuinely outstanding displaced requests — the guarantee
+  // is about requests, not a claim of bounded memory independent of
+  // concurrency. Entries hold digests only, never a token.
   const superseded = new Map()
+
+  // The pipeline's in-flight pins: one increment per admitted request, one
+  // decrement on every exit path (the finally in runPipeline). A key's pin
+  // count is the number of requests whose post-input revalidation can still
+  // consult the fence.
+  const inFlight = new Map()
+
+  function enterInFlight(sessionKey) {
+    if (typeof sessionKey !== 'string' || sessionKey.length === 0) return
+    inFlight.set(sessionKey, (inFlight.get(sessionKey) ?? 0) + 1)
+  }
+
+  function leaveInFlight(sessionKey) {
+    if (typeof sessionKey !== 'string' || sessionKey.length === 0) return
+    const count = (inFlight.get(sessionKey) ?? 0) - 1
+    if (count > 0) {
+      inFlight.set(sessionKey, count)
+      return
+    }
+    inFlight.delete(sessionKey)
+    // The key may just have become an idle tombstone while the fence sits
+    // over its bound: drain it (and any other idle tombstones) now.
+    evictIdleTombstones()
+  }
+
+  // Evict oldest-first, but ONLY entries no request can still be waiting on:
+  // a pinned entry (in-flight count above zero) is never a candidate. Runs
+  // whenever the fence sits over its idle-tombstone bound.
+  function evictIdleTombstones() {
+    while (superseded.size > maxSessions) {
+      let evicted = false
+      for (const key of superseded.keys()) {
+        if ((inFlight.get(key) ?? 0) === 0) {
+          superseded.delete(key)
+          evicted = true
+          break
+        }
+      }
+      if (!evicted) break
+    }
+  }
 
   function issue(actorFingerprint) {
     if (typeof actorFingerprint !== 'string' || !FINGERPRINT_PATTERN.test(actorFingerprint)) {
@@ -132,22 +180,25 @@ export function createSessionRegistry({
   // The handoff fence. supersede() is the ONE operation that ends a live
   // session's authority on the caller's explicit, operator-authorized
   // replacement: the token stops authenticating (the registry entry goes)
-  // AND the key is remembered as superseded, so a request admitted before
-  // the handoff is refused at the authorization stage instead of landing
-  // after it. Returns whether a live session entry was actually removed.
+  // AND the key is remembered as superseded, so every request the displaced
+  // session had in flight is refused — at the authorization stage on the way
+  // in, and at the pipeline's post-input revalidation directly before the
+  // handler. Returns whether a live session entry was actually removed.
   function supersede(sessionKey) {
     if (typeof sessionKey !== 'string' || sessionKey.length === 0) return false
     const removed = sessions.delete(sessionKey)
     superseded.set(sessionKey, now())
-    while (superseded.size > maxSessions) {
-      const oldest = superseded.keys().next().value
-      superseded.delete(oldest)
-    }
+    evictIdleTombstones()
     return removed
   }
 
-  // Read-only: is this session key fenced? The pipeline's authorization stage
-  // asks this immediately before the handler runs.
+  // Read-only: is this session key fenced? Two placements ask it, in order:
+  // the authorization stage (so a displaced request is refused before the
+  // server reads its body), and the pipeline's post-input revalidation —
+  // run synchronously after the request fields resolve and directly before
+  // the handler is invoked, with no await between the check and the
+  // mutating handlers. A pinned entry survives until its last in-flight
+  // request has passed both checks.
   function isSuperseded(sessionKey) {
     if (typeof sessionKey !== 'string' || sessionKey.length === 0) return false
     return superseded.has(sessionKey)
@@ -170,7 +221,7 @@ export function createSessionRegistry({
     return { actorFingerprint: entry.actorFingerprint }
   }
 
-  return { issue, verify, isLive, revoke, supersede, isSuperseded, sessionKeys }
+  return { issue, verify, isLive, revoke, supersede, isSuperseded, enterInFlight, leaveInFlight, sessionKeys }
 }
 
 // Extract the Bearer credential from request headers. The scheme is

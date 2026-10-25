@@ -524,19 +524,15 @@ test('the fence itself refuses a displaced session at the authorization stage', 
   assert.equal(untouched, undefined, 'an undisplaced session passes the fence')
 })
 
-test('KNOWN GAP (open for the next release): the fence is checked BEFORE the request body is read', async t => {
-  // The release-gate review executed this path and confirmed it: the
-  // authorization stage runs inside the stage sequence, and the request body
-  // is read AFTER the stages — so on a body-carrying route the fence is
-  // checked before the body arrives. A request that authenticated before the
-  // handoff and whose body was still streaming when the handoff happened
-  // therefore still reaches the handler.
-  //
-  // This row pins that gap VISIBLY, so it can never be mistaken for a
-  // covered guarantee: the expectation below is the CURRENT behaviour, and
-  // it FLIPS when the fence moves after the last awaited input step (the
-  // fix both advisors named). The takeover's intended use — taking over a
-  // DEAD session, which has no in-flight request — is not affected.
+test('Story 7.1: a request whose body arrives after the handoff is refused at the post-input revalidation', async t => {
+  // The window Story 6.4 left open — the authorization stage runs before a
+  // body-carrying route's body is read, so a request admitted before the
+  // handoff whose body was still arriving could reach the handler (the
+  // release-gate review executed that path) — is CLOSED by Story 7.1:
+  // runPipeline re-checks the fence after the request fields resolve and
+  // directly before the handler. The old row pinned the gap VISIBLY and
+  // promised to flip when the fence moved after the last awaited input
+  // step; this is that flip, with the same delayed-body shape.
   const auth = createSessionRegistry()
   const live = createLiveSessionRegistry()
   const actor = `sha256:${'a'.repeat(64)}`
@@ -587,13 +583,140 @@ test('KNOWN GAP (open for the next release): the fence is checked BEFORE the req
   assert.equal(auth.verify(oldToken).code, 'unauthorized', 'the displaced token no longer authenticates')
   finish()
   const outcome = await pending
-  assert.equal(handlerRan, true, 'the gap: the admitted request still reached the handler')
-  assert.equal(outcome.ok, true)
-  assert.equal(live.holderOf('Ghost').sessionKey, oldKey, 'and it could still claim a name')
+  assert.equal(handlerRan, false, 'the closed window: the displaced request never reached the handler')
+  assert.equal(outcome.ok, false)
+  assert.equal(outcome.code, 'unauthorized')
+  assert.equal(live.holderOf('Ghost'), null, 'and it claimed nothing')
 
   // The part that DOES hold: every LATER request from the displaced session
   // is refused at the auth stage, because its token no longer authenticates.
   assert.equal(auth.verify(oldToken).code, 'unauthorized')
+})
+
+test('Story 7.1: a pinned fence entry survives eviction pressure no matter how many supersessions follow', async t => {
+  // The A7 defect: the fence was bounded at maxSessions ENTRIES, so the
+  // (maxSessions + 1)th supersession could forget a still-admitted
+  // predecessor — the release-gate review's exploit used exactly that
+  // (supersede the displaced key, then supersede others until it fell off).
+  // The ratified mechanism: the pipeline pins each admitted request's key,
+  // and a PINNED entry is never evicted under any circumstance; the bound
+  // gates only idle tombstones.
+  const auth = createSessionRegistry({ maxSessions: 1 })
+  const actor = `sha256:${'b'.repeat(64)}`
+  const oldToken = auth.issue(actor)
+  const oldKey = sessionKeyFromToken(oldToken)
+
+  // One admitted request, mid-body (the pin the pipeline would hold).
+  auth.enterInFlight(oldKey)
+  auth.supersede(oldKey)
+  assert.equal(auth.isSuperseded(oldKey), true, 'the displaced key is fenced while pinned')
+
+  // Eviction pressure: far more supersessions than the bound, none pinned.
+  for (let i = 0; i < 50; i++) {
+    auth.supersede(sessionKeyFromToken(auth.issue(`sha256:${'c'.repeat(64)}`)))
+  }
+  assert.equal(auth.isSuperseded(oldKey), true, 'eviction pressure cannot forget a pinned predecessor')
+
+  // The in-flight request completes; the tombstone is now idle, and the
+  // next idle eviction (the bound exceeded) drops it — oldest idle first.
+  auth.leaveInFlight(oldKey)
+  auth.supersede(sessionKeyFromToken(auth.issue(`sha256:${'c'.repeat(64)}`)))
+  assert.equal(auth.isSuperseded(oldKey), false, 'an idle tombstone is the first eviction candidate once the bound is exceeded')
+
+  // And without any pin at all, the old over-the-bound supersessions evict
+  // oldest-first as before.
+  const first = sessionKeyFromToken(auth.issue(actor))
+  auth.supersede(first)
+  for (let i = 0; i < 50; i++) {
+    auth.supersede(sessionKeyFromToken(auth.issue(`sha256:${'d'.repeat(64)}`)))
+  }
+  assert.equal(auth.isSuperseded(first), false, 'the idle-tombstone bound still holds without pins')
+})
+
+test('Story 7.1: the pipeline releases the pin exactly once and the fence drains after the request ends', async t => {
+  // Every exit path must release exactly once — a leaked pin would make the
+  // pinned entry immortal and grow the fence without bound.
+  const auth = createSessionRegistry({ maxSessions: 1 })
+  const live = createLiveSessionRegistry()
+  const actor = `sha256:${'e'.repeat(64)}`
+  const token = auth.issue(actor)
+  const context = {
+    method: 'GET',
+    route: { class: 'actor' },
+    headers: { authorization: `Bearer ${token}` },
+    sessionRegistry: auth,
+    liveSessionRegistry: live,
+  }
+  const outcome = await runPipeline(
+    [new AuthStage({ sessionVerifier: createSessionVerifier({ registry: auth }) }), new AuthzStage()],
+    context,
+    () => ({ ok: true }),
+  )
+  assert.equal(outcome.ok, true)
+  // No pin remains: superseding the key now leaves an evictable tombstone.
+  const key = sessionKeyFromToken(token)
+  auth.supersede(key)
+  for (let i = 0; i < 5; i++) {
+    auth.supersede(sessionKeyFromToken(auth.issue(`sha256:${'f'.repeat(64)}`)))
+  }
+  assert.equal(auth.isSuperseded(key), false, 'no pin leaked after a normal completion')
+
+  // The same for a REJECTED pipeline (an unauthorized request never pins —
+  // auth failed — and the finally must not throw or double-release).
+  const badContext = {
+    method: 'GET',
+    route: { class: 'actor' },
+    headers: {},
+    sessionRegistry: auth,
+    liveSessionRegistry: live,
+  }
+  const refused = await runPipeline(
+    [new AuthStage({ sessionVerifier: createSessionVerifier({ registry: auth }) }), new AuthzStage()],
+    badContext,
+    () => ({ ok: true }),
+  )
+  assert.equal(refused.ok, false, 'an unauthenticated request is refused as before')
+})
+
+test('Story 7.1: a long-poll displaced mid-hold stops serving its holder on the next wake', async t => {
+  // The poll loop re-checked the ban on every wake but never the fence, so a
+  // session displaced while its long-poll held kept draining messages that
+  // arrived after the handoff. The fence now rides the same wake.
+  const { dataDir, server, liveSessionRegistry } = await makeServer(t)
+  const localToken = loadOrCreateLocalToken(dataDir)
+  const alice = installation()
+
+  const { token: deadToken } = await bindSession(server.port, localToken, alice, 'Agent')
+  const deadKey = sessionKeyFromToken(deadToken)
+  assert.equal(liveSessionRegistry.holderOf('Agent').sessionKey, deadKey)
+
+  const status = await request(server.port, 'GET', '/api/status', {
+    headers: { [PROTOCOL_KEY]: '1', authorization: `Bearer ${deadToken}` },
+  })
+  assert.equal(status.status, 200, status.text)
+  const broadcastRoomId = status.json.result.broadcast_room_id
+
+  // The long-poll enters its hold with nothing new to deliver.
+  const pollPromise = request(
+    server.port,
+    'GET',
+    `/api/rooms/${broadcastRoomId}/messages?after_seq=0&wait_ms=10000`,
+    { headers: { [PROTOCOL_KEY]: '1', authorization: `Bearer ${deadToken}` } },
+  )
+  await new Promise(resolvePromise => { setTimeout(resolvePromise, 250) })
+
+  // The explicit takeover displaces the polling session while it holds.
+  const restarted = await exchange(server.port, alice, localToken)
+  const takeover = await sessionRequest(server.port, 'POST', restarted, {
+    chat_id: 'Agent', client_type: 'mcp', replace_existing: true,
+  })
+  assert.equal(takeover.status, 200, takeover.text)
+  assert.equal(liveSessionRegistry.holderOf('Agent').sessionKey !== deadKey, true)
+
+  // The very next wake answers the fence, not a page of messages.
+  const pollOutcome = await pollPromise
+  assert.equal(pollOutcome.status, 401, pollOutcome.text)
+  assert.equal(pollOutcome.json?.error?.code, 'unauthorized')
 })
 
 test('a failed durable write leaves the incumbent intact', async t => {

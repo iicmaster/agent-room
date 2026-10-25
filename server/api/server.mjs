@@ -490,14 +490,13 @@ function sessionPrincipalOf(context) {
 //
 // The displaced session's authority ends WITH the handoff: its token stops
 // authenticating (so it cannot take the name back by re-authenticating) and
-// its key is fenced, so a request admitted BEFORE the handoff is refused at
-// the authorization stage. The one window: on a route that carries a body,
-// the authorization stage runs before the body is read, so a request whose
-// body was still arriving when the handoff happened can still reach the
-// handler (the release-gate review executed that path). The takeover's
-// intended use — taking over a DEAD session, which has no in-flight request
-// — is not affected; closing the window is the next release's work
-// (docs/implementation/epic-6-retro-2026-10-21.md, action A5).
+// its key is fenced. Every request the displaced session had in flight is
+// refused: the authorization stage refuses it before the server reads its
+// body, and the pipeline's post-input revalidation refuses it directly
+// before the handler, after the body has fully arrived — no handoff can
+// interleave between that final check and the mutating handlers, which all
+// commit synchronously (Story 7.1 closed the body-arrival window the
+// release-gate review had executed).
 //
 // PATCH keeps the plain collision protection, and no automatic
 // re-authentication ever carries the intent — a takeover is an explicit
@@ -591,14 +590,13 @@ function bindSession(context) {
     })
   // The handoff fence: the displaced session's authority ends HERE, not with
   // its next request. Its token stops authenticating (so it cannot re-bind
-  // the name by re-authenticating) and its key is marked superseded, so a
-  // request that was admitted before the handoff is refused at the
-  // authorization stage. (The authorization stage runs before a body-carrying
-  // route's body is read, so a request whose body was still arriving when
-  // the handoff happened can still reach the handler — the one window, and
-  // the next release's work.) A registry without the fence primitive still
-  // performs the transfer — the displaced session then simply loses its live
-  // row.
+  // the name by re-authenticating) and its key is marked superseded. The
+  // fence entry survives while any request of the displaced session is still
+  // inside the admission→handler window (the pipeline pins each admitted
+  // request's key), and every such request is refused — at the authorization
+  // stage, or at the pipeline's post-input revalidation directly before the
+  // handler. A registry without the fence primitive still performs the
+  // transfer — the displaced session then simply loses its live row.
   const displaced = state.displacedSessionKey ?? null
   if (displaced !== null && typeof context.sessionRegistry?.supersede === 'function') {
     context.sessionRegistry.supersede(displaced)
@@ -849,6 +847,12 @@ registerHandler('GET /api/rooms/:id/messages', async function readMessages(conte
     // ban committed while this poll holds — by the operator CLI process,
     // visible here through the store on the very next wake — answers the
     // coded refusal instead of a page, within the hold window.
+    // Story 7.1: the fence rides the same wake — a session displaced while
+    // this poll held stops serving the displaced holder on the next wake,
+    // instead of draining messages for a session whose authority ended.
+    if (context.sessionRegistry?.isSuperseded?.(principal.sessionKey)) {
+      return reject('unauthorized')
+    }
     if (context.store.isActorBanned(principal.actorFingerprint)) {
       return reject('banned')
     }

@@ -19,14 +19,11 @@
 // incumbent against its own rows, writes the durable claim before the
 // memory commit, and fences the displaced session: its token stops
 // authenticating (so it cannot take the name back by re-authenticating) and
-// a request admitted before the handoff is refused at the authorization
-// stage. ONE WINDOW, stated plainly: on a route that carries a body, the
-// authorization stage runs before the body is read, so a request whose body
-// was still arriving when the handoff happened can still reach the handler
-// (the release-gate review executed that path). The takeover's intended use —
-// taking over a DEAD session, which has no in-flight request — is not
-// affected; closing the window is the next release's work
-// (docs/implementation/epic-6-retro-2026-10-21.md, action A5). A session of a
+// every request the displaced session had in flight is refused — at the
+// authorization stage before the server reads its body, and at the
+// pipeline's post-input revalidation directly before the handler, after the
+// body has fully arrived (Story 7.1 closed the body-arrival window the
+// release-gate review had executed). A session of a
 // DIFFERENT key is never displaced — the refusal is the ordinary collision
 // refusal, so the refused operator learns nothing about who holds the name.
 //

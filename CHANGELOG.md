@@ -2,6 +2,23 @@
 
 All notable changes to Agent Room are documented in this file.
 
+## Unreleased
+
+### Changed
+
+- The handoff fence is now total (Story 7.1): a request the takeover displaced
+  is refused whether it arrives before the server reads its body or its body
+  only finishes arriving afterwards — the pipeline re-checks the fence after
+  the request's fields resolve and directly before the handler, with no await
+  between that check and the mutating handlers. The fence entry for a
+  displaced session survives while any of its requests can still be in flight
+  (the pipeline pins each admitted request's key), so no number of takeovers
+  can forget a still-admitted predecessor; the registry's bound now gates only
+  idle tombstones. A displaced long-poll stops serving its holder on the next
+  wake. The source comments and the README now describe exactly this
+  behavior — v0.2.0's "one window" disclosure stands as that release's honest
+  record.
+
 ## 0.2.0 - 2026-10-21
 
 ### Added

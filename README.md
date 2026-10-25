@@ -72,12 +72,12 @@ Two things to know before you run it:
   human answered — a program with shell access can allocate a pseudo-TTY and
   answer the prompt itself. What the server guarantees is absolute: a
   different key's session is never displaced, whoever asks.
-- **One window in the fence.** On a route that carries a body, the
-  authorization stage runs before the body is read, so a request that was
-  admitted before the handoff, and whose body was still arriving when the
-  handoff happened, can still reach the handler. The takeover's intended use
-  — taking over a DEAD session, which has no in-flight request — is not
-  affected.
+- **The fence is total.** Every request the displaced session had in flight is
+  refused: the authorization stage refuses it before the server reads its
+  body, and the pipeline re-checks the fence after the request's body has
+  fully arrived and directly before the handler — no handoff can interleave
+  between that final check and the mutating handlers. The displaced session's
+  fence entry survives until no request of its own can still be in flight.
 
 The MCP adapter also releases its session on an orderly exit, so a client that
 ended normally does not squat its name in the first place. (A vendor host
@@ -194,7 +194,6 @@ cleanly while the agent's session is connected.
 - Server and client state files are owner-only. This prevents other OS users from
   connecting, but it does not isolate mutually hostile processes running as the same user.
 - Messages are plain text, append-only, and not encrypted at rest.
-- The read-only web viewer is not part of the v0.2 tool surface yet (Epic 5).
 
 ## Self-hosting a realm
 

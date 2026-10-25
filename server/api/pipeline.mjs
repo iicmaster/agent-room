@@ -266,7 +266,28 @@ export class AuthStage {
     const verifier = routeClass === 'viewer' ? this.viewerVerifier : this.sessionVerifier
     const outcome = normalizeVerifierOutcome(verifier(context))
     if (isRejection(outcome)) return ensureStatus(outcome)
-    if (outcome) context.session = outcome
+    if (outcome) {
+      context.session = outcome
+      // The in-flight pin (Story 7.1, the fence's retention guarantee),
+      // acquired HERE — synchronously with successful verification, before
+      // any post-authentication await — because the send route's budget
+      // stage awaits the request body INSIDE the stage sequence: a request
+      // can be authenticated and suspended before the loop ends, and its
+      // displaced key's fence entry must already be pinned by then. The pin
+      // runs only when a runPipeline owns this request's pin lifecycle
+      // (pipelinePinManaged) — a standalone `new AuthStage().process()` in
+      // a unit test never pins, so it never leaks a count. runPipeline's
+      // finally releases the pin exactly once on every exit path.
+      if (context.pipelinePinManaged === true && routeClass === 'actor') {
+        const sessionRegistry = context.sessionRegistry
+        const sessionKey = context.session?.sessionKey
+        if (sessionRegistry && typeof sessionRegistry.enterInFlight === 'function'
+          && typeof sessionKey === 'string' && sessionKey.length > 0) {
+          sessionRegistry.enterInFlight(sessionKey)
+          context.pinnedSessionKey = sessionKey
+        }
+      }
+    }
     return undefined
   }
 }
@@ -415,23 +436,20 @@ export class AuthzStage {
 
   process(context) {
     if (context.route?.class !== 'actor') return undefined
-    // The handoff fence (Story 6.4, the v0.2.0 reconnect recovery). A
-    // session displaced by an explicit same-Actor replacement loses its
-    // authority WITH the handoff: its token stops authenticating, and this
-    // stage refuses a request that was admitted before the handoff.
-    // Admission alone is never authority.
+    // The handoff fence (Story 6.4, the v0.2.0 reconnect recovery; Story 7.1,
+    // its completion). A session displaced by an explicit same-Actor
+    // replacement loses its authority WITH the handoff: its token stops
+    // authenticating, and this stage refuses a request that was admitted
+    // before the handoff — BEFORE the server spends memory and bandwidth
+    // reading its body. Admission alone is never authority.
     //
-    // WHERE THIS CHECK SITS, exactly: this is the LAST stage of the
-    // sequence, and the request body is read AFTER the stages. On a route
-    // that carries a body, the body is therefore still arriving when this
-    // check runs — so a request admitted before the handoff whose body
-    // arrives after it can still reach the handler. On a bodyless route
-    // (GET, DELETE) this check IS immediately before the handler. The
-    // release-gate review executed the body-carrying case and confirmed the
-    // window (docs/implementation/reviews/epic-6-release-gate-codex.md);
-    // closing it — revalidating the authority after the last awaited input
-    // step — is the next release's first acceptance criterion
-    // (docs/implementation/epic-6-retro-2026-10-21.md, action A5).
+    // WHERE THIS CHECK SITS, exactly: this is the LAST stage of the sequence,
+    // so on a body-carrying route the body is still arriving when this check
+    // runs — which is why runPipeline runs a SECOND fence look-up (the
+    // post-input revalidation) after the request fields resolve and directly
+    // before the handler: every request the handover displaced is refused at
+    // one of the two, whichever it has reached. This stage keeps the early
+    // refusal so an already-displaced request never costs a body read.
     const sessionRegistry = context.sessionRegistry
     const sessionKey = context.session?.sessionKey
     if (sessionRegistry
@@ -608,27 +626,63 @@ export async function readRequestFields(context) {
 // rejection; gate logic never lives in handlers.
 export async function runPipeline(stages, context, handler) {
   assertStageOrder(stages)
-  for (const stage of stages) {
-    const outcome = await stage.process(context)
-    if (outcome !== undefined && outcome !== null) {
-      if (outcome.refusal === true) return outcome
-      if (isRejection(outcome)) return ensureStatus(outcome)
-    }
-  }
-  const fieldsOutcome = await readRequestFields(context)
-  if (fieldsOutcome) return fieldsOutcome
+  // This pipeline owns the request's pin lifecycle (see AuthStage): the pin
+  // is acquired synchronously with authentication, and the finally below
+  // releases it exactly once on EVERY exit path — stage refusals and
+  // rejections, input rejections, the post-input refusal, handler
+  // rejections and throws, and every normal return. The fence's guarantee
+  // covers the admission→handler-entry window; a live SSE stream (the only
+  // streaming route, a viewer-class route with no session key) is never
+  // pinned in the first place.
+  context.pipelinePinManaged = true
   try {
-    const value = await handler(context)
-    if (value === HANDLER_STREAMED) return value
-    if (isRejection(value)) return ensureStatus(value)
-    return successEnvelope(value ?? null)
-  } catch (error) {
-    // Coded errors map through the status table; anything else — including
-    // internal-only codes — falls back to `request_failed` (500) per AD-8.
-    // The failing detail travels to stderr via internalDetail, never to the
-    // wire: the envelope keeps the canonical fallback message.
-    const failure = reject(error?.code, error?.message)
-    failure.internalDetail = internalDetailOf(error)
-    return failure
+    for (const stage of stages) {
+      const outcome = await stage.process(context)
+      if (outcome !== undefined && outcome !== null) {
+        if (outcome.refusal === true) return outcome
+        if (isRejection(outcome)) return ensureStatus(outcome)
+      }
+    }
+    const fieldsOutcome = await readRequestFields(context)
+    if (fieldsOutcome) return fieldsOutcome
+    // The post-input handoff-fence revalidation (Story 7.1): the LAST fence
+    // look-up of the request, run synchronously after the request fields
+    // resolve and DIRECTLY before the handler is invoked — with no await
+    // between this check and the mutating handlers, all of which commit
+    // synchronously, so no handoff can interleave between the check and the
+    // commit. FENCE-ONLY by recorded contract: the ban check is not re-run
+    // here (FR-15: in-flight requests are refused at next request; the ban's
+    // enforcement boundary is Story 4.5's, not this fence's). Gated on the
+    // actor class and the presence of an authz stage so partial-pipeline
+    // unit tests without one are unaffected.
+    if (context.route?.class === 'actor' && stages.some((stage) => stage.name === 'authz')) {
+      const sessionRegistry = context.sessionRegistry
+      const sessionKey = context.session?.sessionKey
+      if (sessionRegistry && typeof sessionRegistry.isSuperseded === 'function'
+        && typeof sessionKey === 'string' && sessionKey.length > 0
+        && sessionRegistry.isSuperseded(sessionKey)) {
+        return reject('unauthorized')
+      }
+    }
+    try {
+      const value = await handler(context)
+      if (value === HANDLER_STREAMED) return value
+      if (isRejection(value)) return ensureStatus(value)
+      return successEnvelope(value ?? null)
+    } catch (error) {
+      // Coded errors map through the status table; anything else — including
+      // internal-only codes — falls back to `request_failed` (500) per AD-8.
+      // The failing detail travels to stderr via internalDetail, never to the
+      // wire: the envelope keeps the canonical fallback message.
+      const failure = reject(error?.code, error?.message)
+      failure.internalDetail = internalDetailOf(error)
+      return failure
+    }
+  } finally {
+    if (typeof context.pinnedSessionKey === 'string' && context.pinnedSessionKey.length > 0) {
+      context.sessionRegistry?.leaveInFlight?.(context.pinnedSessionKey)
+      context.pinnedSessionKey = null
+    }
+    context.pipelinePinManaged = false
   }
 }
