@@ -9,8 +9,11 @@ voids it and restarts the gate chain. Both gates returned their verdicts (REL-3
 attempt 6 `status: pass` with the host window adjudicated `eligible`; REL-1
 verified, `rel1-verify-evidence.mjs` exit 0), and the two-lane release-gate
 review of 2026-10-25 (`docs/implementation/reviews/epic-6-release-gate-2026-10-25-{codex,agy,resolution}.md`)
-cleared the release act — its resolution record carries the threshold decision
-and the publication erratum.
+judged the release act — the verdict history is exactly this: the codex lane
+refused the first plan 3–1 and the agy lane approved the frozen bytes 4–1;
+the resolution record then made the explicit threshold decision and erratum
+the refusals named, and the confirmation round that followed it approved the
+revised act 4–0 with one recorded threshold dissent.
 
 ## What v0.2 is
 

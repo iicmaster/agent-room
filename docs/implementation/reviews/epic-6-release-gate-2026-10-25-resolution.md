@@ -84,8 +84,11 @@ are met by this record and the publication text.
    term) and **0.276 s** cross-machine (seq 4; raw 0.172 s plus the measured
    clock offset 104 ms, with ±~0.9 s Date-header quantization uncertainty) —
    both far inside the 5 s bound; the canaries are seq 3 and seq 4, and the
-   viewer rendered FOUR distinct broadcast texts (each appearing twice in
-   `viewer-state.json`'s dump: its catch-up page and its live arrival).
+   viewer rendered FOUR distinct broadcast texts. (Correction, from the
+   confirmation round: `viewer-state.json`'s `messages[]` and `arrivals[]`
+   record the SAME four messages, and `viewer-session.md` states all four
+   arrived as live SSE — the earlier "each appearing twice: catch-up page and
+   live arrival" reading here was wrong.)
    **Superseded:** the passage in `docs/release-evidence/v0.2.0-rel1/VERIFICATION.md`
    that narrates "eight broadcasts, canaries seq 7/8, 0.107 s / 0.217 s", and
    the completion-audit narrative's "0.217 s" parenthetical (the audit's own
