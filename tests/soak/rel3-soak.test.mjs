@@ -36,7 +36,13 @@ test('REL-3 compressed validation: the soak harness runs the candidate artifact 
   const parent = mkdtempSync(join(tmpdir(), 'agent-room-rel3-soak-validate-'))
   try {
     const outDir = join(parent, 'evidence')
-    const document = await runSoak({ durationMinutes: 5, outDir })
+    // developmentTree: the suite runs DURING v0.3 development, so the tree is
+    // intentionally ahead of the shipped v0.2.0 candidate the frozen record
+    // pins. This mode keeps every mechanic (including a determinism gate: a
+    // second materialization must reproduce the digests) and records the
+    // explicit development verdict; the release path's strict refusal is
+    // untouched (runSoak without the flag still refuses a drifted candidate).
+    const document = await runSoak({ durationMinutes: 5, outDir, developmentTree: true })
 
     // The run's own verdict, judged by the same rules at compressed scale.
     assert.equal(
@@ -46,9 +52,10 @@ test('REL-3 compressed validation: the soak harness runs the candidate artifact 
     )
 
     // Identity: the soak ran the RC artifact, not the repository tree, and
-    // the candidate-immutability proof resolved (exact or runtime-pinned).
+    // the candidate-immutability proof resolved (exact, runtime-pinned, or —
+    // during v0.3 development only — the development-tree determinism gate).
     assert.ok(
-      ['candidate-exact', 'runtime-pinned-docs-drift'].includes(document.candidate.identityVerdict),
+      ['candidate-exact', 'runtime-pinned-docs-drift', 'development-tree-deterministic'].includes(document.candidate.identityVerdict),
       `the identity verdict must be an allowed pass verdict, received ${document.candidate.identityVerdict}`,
     )
     assert.ok(document.candidate.candidateCommit, 'the candidate commit is recorded')

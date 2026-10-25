@@ -20,10 +20,11 @@
 // memory commit, and fences the displaced session: its token stops
 // authenticating (so it cannot take the name back by re-authenticating) and
 // every request the displaced session had in flight is refused — at the
-// authorization stage before the server reads its body, and at the
-// pipeline's post-input revalidation directly before the handler, after the
-// body has fully arrived (Story 7.1 closed the body-arrival window the
-// release-gate review had executed). A session of a
+// stage check as early as its sequence reaches, and at the pipeline's
+// post-input revalidation directly before the handler, after the request's
+// fields have resolved (Story 7.1 closed the body-arrival window the
+// release-gate review had executed). Work already inside a handler is not
+// torn back out: a long-poll stops at its next wake. A session of a
 // DIFFERENT key is never displaced — the refusal is the ordinary collision
 // refusal, so the refused operator learns nothing about who holds the name.
 //

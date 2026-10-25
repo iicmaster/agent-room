@@ -491,12 +491,13 @@ function sessionPrincipalOf(context) {
 // The displaced session's authority ends WITH the handoff: its token stops
 // authenticating (so it cannot take the name back by re-authenticating) and
 // its key is fenced. Every request the displaced session had in flight is
-// refused: the authorization stage refuses it before the server reads its
-// body, and the pipeline's post-input revalidation refuses it directly
-// before the handler, after the body has fully arrived — no handoff can
+// refused: the stage check refuses it as early as its stage sequence reaches,
+// and the pipeline's post-input revalidation refuses it directly before the
+// handler, after the request's fields have fully resolved — no handoff can
 // interleave between that final check and the mutating handlers, which all
 // commit synchronously (Story 7.1 closed the body-arrival window the
-// release-gate review had executed).
+// release-gate review had executed). Work already inside a handler is not
+// torn back out: a long-poll stops at its next wake.
 //
 // PATCH keeps the plain collision protection, and no automatic
 // re-authentication ever carries the intent — a takeover is an explicit

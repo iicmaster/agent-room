@@ -73,11 +73,13 @@ Two things to know before you run it:
   answer the prompt itself. What the server guarantees is absolute: a
   different key's session is never displaced, whoever asks.
 - **The fence is total.** Every request the displaced session had in flight is
-  refused: the authorization stage refuses it before the server reads its
-  body, and the pipeline re-checks the fence after the request's body has
-  fully arrived and directly before the handler — no handoff can interleave
-  between that final check and the mutating handlers. The displaced session's
-  fence entry survives until no request of its own can still be in flight.
+  refused: the stage check refuses it as early as its stage sequence reaches,
+  and the pipeline re-checks the fence after the request's fields have fully
+  resolved and directly before the handler — no handoff can interleave between
+  that final check and the mutating handlers. The displaced session's fence
+  entry survives until no request of its own can still be in flight. (Work
+  already inside a handler is not torn back out: a long-poll stops at its
+  next wake.)
 
 The MCP adapter also releases its session on an orderly exit, so a client that
 ended normally does not squat its name in the first place. (A vendor host

@@ -449,7 +449,7 @@ async function runtimeIdentityProof(candidateCommit, frozen, actual) {
   }
 }
 
-async function establishCandidateIdentity(world) {
+async function establishCandidateIdentity(world, { developmentTree = false } = {}) {
   const record = JSON.parse(readFileSync(CANDIDATE_RECORD, 'utf8'))
   const candidateCommit = record.source?.git_commit
   assert.ok(typeof candidateCommit === 'string' && candidateCommit.length > 0, 'the candidate record names no git commit')
@@ -481,6 +481,27 @@ async function establishCandidateIdentity(world) {
   if (exactMatch) {
     verdict = 'candidate-exact'
     note = 'the fresh materialization reproduces the frozen candidate digests byte-for-byte'
+  } else if (developmentTree) {
+    // Post-release development: the tree is INTENTIONALLY ahead of the
+    // shipped candidate (the frozen record is that release's evidence —
+    // never edited). The determinism gate stands in for the frozen-digest
+    // compare: a second fresh materialization must reproduce these digests
+    // exactly. The release path (no flag) keeps its strict refusal, so a
+    // qualifying soak can never run on a drifted candidate by accident.
+    const secondReleaseDir = join(resolvedParent, 'release-2')
+    const { stdout: secondStdout } = await execFilePromise(process.execPath, [PACKAGER_ENTRY, '--out', secondReleaseDir], { cwd: ROOT, timeoutMs: PACKAGER_TIMEOUT_MS })
+    assert.equal(secondStdout.trim(), secondReleaseDir, 'the packager printed exactly its output path')
+    const secondActual = {
+      portable: artifactDigest(join(secondReleaseDir, 'agent-room-agent-plugin')),
+      claude_code: artifactDigest(join(secondReleaseDir, 'agent-room-claude-code')),
+    }
+    assert.deepEqual(
+      secondActual,
+      actual,
+      'the development-tree materialization is not deterministic — investigate before trusting the run',
+    )
+    verdict = 'development-tree-deterministic'
+    note = "the tree is intentionally ahead of the shipped v0.2.0 candidate (the frozen record is that release's evidence); two fresh materializations reproduce identical digests, and the release path keeps its strict refusal"
   } else {
     const proof = await runtimeIdentityProof(candidateCommit, frozen, actual)
     verdict = proof.verdict === 'runtime-pinned' ? 'runtime-pinned-docs-drift' : 'refused'
@@ -1363,6 +1384,7 @@ export async function runSoak({
   durationMinutes,
   outDir = join(ROOT, 'docs', 'release-evidence'),
   keepWorld = false,
+  developmentTree = false,
 } = {}) {
   assert.ok(
     (Number.isFinite(durationHours) && durationHours > 0) || (Number.isFinite(durationMinutes) && durationMinutes > 0),
@@ -1480,7 +1502,7 @@ export async function runSoak({
     })}`)
 
     // S1 — identity: materialize the candidate artifact and prove it.
-    world.artifact = await establishCandidateIdentity(world)
+    world.artifact = await establishCandidateIdentity(world, { developmentTree })
     if (world.artifact.identityVerdict === 'refused') {
       throw new Error(`the candidate identity proof refused the soak: ${world.artifact.note}`)
     }

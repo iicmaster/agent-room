@@ -192,13 +192,14 @@ export function createSessionRegistry({
     return removed
   }
 
-  // Read-only: is this session key fenced? Two placements ask it, in order:
-  // the authorization stage (so a displaced request is refused before the
-  // server reads its body), and the pipeline's post-input revalidation —
-  // run synchronously after the request fields resolve and directly before
-  // the handler is invoked, with no await between the check and the
-  // mutating handlers. A pinned entry survives until its last in-flight
-  // request has passed both checks.
+  // Read-only: is this session key fenced? THREE placements ask it, in
+  // order: the authorization stage (so a displaced request is refused as
+  // early as its stage sequence reaches — before the body for most routes),
+  // the pipeline's post-input revalidation — run synchronously after the
+  // request fields resolve and directly before the handler is invoked, with
+  // no await between the check and the mutating handlers — and the long-poll
+  // route's per-wake check. A pinned entry survives until its last in-flight
+  // request has passed all of the checks it will reach.
   function isSuperseded(sessionKey) {
     if (typeof sessionKey !== 'string' || sessionKey.length === 0) return false
     return superseded.has(sessionKey)

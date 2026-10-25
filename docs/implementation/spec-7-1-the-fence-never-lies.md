@@ -2,7 +2,7 @@
 title: 'The fence never lies — A5 post-input revalidation, A7 unexhaustible retention, the two comment corrections'
 type: 'feature'
 created: '2026-10-26'
-status: 'review'
+status: 'done'
 baseline_revision: 'working-tree on 8a13348 (Epic 7 authored; this spec drafted before the design gate returns — its mechanism choices are the thing the gate rules on)'
 context:
   - '{project-root}/AGENTS.md'
@@ -32,54 +32,75 @@ problem: |
     A5). The v0.2.0 release shipped them under a recorded threshold acceptance;
     v0.3 corrects them at the root, with the behavior they describe.
 approach: |
-  **1. The post-input revalidation (A5).** In `runPipeline`, after the stage
-  loop completes and `readRequestFields` resolves (the last awaited input step
-  for every route — bodyless routes set an empty body there), and directly
+  AS BUILT (the design gate refused this spec's first draft — a late pin and
+  a 10× overflow cap — and both lanes ratified the corrected mechanism; the
+  review round then ratified this guarded-in-AuthStage formulation, recorded
+  below). Three moved parts:
+
+  **1. The post-input revalidation (A5).** In `runPipeline`, after
+  `readRequestFields` resolves (the last awaited input step) and directly
   before `handler(context)` is invoked, re-run the handoff-fence check:
   `sessionRegistry.isSuperseded(context.session?.sessionKey)` → reject
-  `unauthorized` on a fenced key. This makes the corrected Story 6.4 clause
-  literally true for EVERY route (a bodyless route already passed the stage
-  check microseconds earlier; re-checking it is strictly better and costs one
-  Map lookup). The re-validation re-runs the FENCE only — the ban check is a
-  policy gate whose semantics were not in the executed finding, and widening
-  it is a decision for its own story, not this one.
+  `unauthorized`. No await sits between the check and the mutating handlers,
+  all of which commit synchronously. The re-validation re-runs the FENCE
+  only — the ban check is not re-run (FR-15's recorded contract: in-flight
+  requests are refused at next request). Gated on the actor class and the
+  presence of an authz stage so partial-pipeline unit tests are unaffected;
+  AuthzStage keeps its early slot.
 
-  **2. Unexhaustible retention (A7) — the mechanism this spec proposes for the
-  design gate.** The fence entry for a displaced session key may be DROPPED
-  only when it is provably safe: no request holding that key can still be
-  inside the admission→handler window. Mechanism: a per-sessionKey live-request
-  count, incremented in `runPipeline` after the stage loop completes (all
-  stages passed = admitted), decremented in a `finally` that covers every exit
-  path (rejection, refusal, handler result, error, the HANDLER_STREAMED
-  sentinel). A superseded key's fence entry survives while its live count is
-  above zero; eviction (oldest-first, on insert) considers only entries whose
-  live count is zero; the hard 1,000 bound becomes a GENEROUS safety cap
-  (10× the registry's maxSessions) whose overflow REFUSES the supersession
-  loudly (`fence_overflow`) rather than silently forgetting a live predecessor
-  — a takeover that cannot be fenced safely must not happen. A displaced
-  token can never authenticate again, so a live count only falls: the fence
-  drains, and memory stays bounded by genuinely in-flight displaced requests.
+  **2. Request-counted retention (A7) — the ratified mechanism.** The
+  pipeline PINS each admitted request's session key. Placement ruling
+  (recorded interpretation of the two gate rules, which read literally
+  against each other — codex demanded the pin be one non-yielding operation
+  with successful verification; agy forbade incrementing inside
+  `AuthStage.process` to protect standalone stage tests): the pin is
+  acquired INSIDE `AuthStage.process`, synchronously with successful
+  verification, ONLY when `runPipeline` owns the request's pin lifecycle
+  (`context.pipelinePinManaged`, set before the stage loop) — a standalone
+  `new AuthStage().process()` never pins, so it never leaks; and
+  `runPipeline`'s `finally` releases the pin exactly once on every exit
+  path, then clears the flag. In the registry (`server/api/session.mjs`):
+  `enterInFlight`/`leaveInFlight` keep per-key counts; a superseded key's
+  fence entry is PINNED while its count is above zero and is NEVER evicted
+  under any circumstance; the 1,000 bound gates only IDLE TOMBSTONES
+  (zero-count entries, evicted oldest-first — on insert and on the
+  leaveInFlight that frees one); there is NO hard cap on protected entries
+  and no overflow error after a transfer (an overflow refusal placed after
+  bindSession's durable write would itself be unsafe). Retention is
+  proportional to genuinely outstanding displaced requests — "unexhaustible"
+  is the guarantee about requests, not a claim of bounded memory independent
+  of concurrency.
 
-  **3. The comments state the repaired truth.** The fenced-set comment
-  describes the in-flight-counted retention; `isSuperseded`'s comment states
-  the true placement (the authorization stage AND the post-input revalidation
-  directly before the handler). No other prose rides with this story.
+  **3. The prose states the repaired truth, placement-accurately.** The
+  fence is asked at THREE placements: the authorization stage (as early as
+  the stage sequence reaches — before the body for most routes; the send
+  route's budget stage reads first), runPipeline's post-input revalidation,
+  and the long-poll route's per-wake check (a displaced poll stops serving
+  its holder on the next wake — work already inside a handler is not torn
+  back out). Every comment, README paragraph, CHANGELOG entry and the Spine
+  amendment say exactly this; the v0.2.0 CHANGELOG entry's honest "one
+  limit" disclosure stands as that release's record.
 
-  **4. The pinned gap flips.** The test row in
-  `tests/session-replacement.test.mjs` that pins the 1,000-entry forget as a
-  KNOWN LIMITATION is rewritten to pin the closed behavior: supersessions
-  beyond the old bound with live in-flight requests keep every one of them
-  fenced; supersessions beyond the bound with NO in-flight requests still
-  evict (the memory bound is real, and now provably safe).
+  **4. The committed regressions.** The A5 gap row FLIPPED (refused, handler
+  never called, nothing claimed); the send-route interleaving row (pin
+  acquired with authentication, proved by spies, before the budget stage's
+  body wait; churn cannot forget the pinned predecessor); the thirteen-exit
+  exactly-once matrix (one enter/leave pair per shape, context bookkeeping
+  cleared); the 1,002-protected-predecessors row (all fenced past the bound
+  through revoke/re-supersede/re-issue; each release drains without a
+  supersession following); the multi-request-per-key row (the fence holds
+  until the LAST request ends); and the displaced-long-poll row (takeover
+  ~1 s into a 10 s hold — a hundred-fold margin over admission — with the
+  early 401 itself as the wake-check evidence).
 acceptance_criteria: |
   | # | Given | When | Then |
   |---|---|---|---|
   | 1 | A request admitted before a same-Actor takeover, its body still arriving | the body completes after the handoff | the post-input revalidation refuses it (`unauthorized`) at the fence — the handler never runs (the executed gap, closed) |
   | 2 | The same request | the handoff lands after its revalidation | it completes (the check is a point-in-time truth, not a retroactive one) |
-  | 3 | More supersessions than the old bound, each displaced session holding a live in-flight request | the fence is queried for every displaced key | every one is still fenced — retention is unexhaustible |
-  | 4 | More supersessions than the old bound, none in flight | the fence is queried | the oldest entries were evicted (the memory bound holds, safely) |
-  | 5 | The safety cap overflowing with ALL entries live | a new supersession is requested | it is refused loudly (`fence_overflow`) — never a silent forget |
-  | 6 | The shipped source | read | both comments state exactly the repaired behavior; no other prose changed |
+  | 3 | More supersessions than the old bound, each displaced session holding a live in-flight request | the fence is queried for every displaced key | every one is still fenced — retention is unexhaustible (1,002 keys proven on the default bound) |
+  | 4 | More supersessions than the old bound, none in flight | the fence is queried | the oldest idle tombstones were evicted (the memory bound holds, safely) |
+  | 5 | A long-poll that entered its hold before the takeover | its next wake | the fence check beside the ban check refuses the displaced poll |
+  | 6 | The shipped source and docs | read | every placement-accurate statement of the repaired behavior — the two session.mjs comments, the pipeline block, the takeover prose in server.mjs and the CLI (help text included), the README, the CHANGELOG's Unreleased entry, the Spine amendment |
 files: |
   - `server/api/pipeline.mjs` — the post-input revalidation in `runPipeline`; the live-request register/release around it (finally-covered).
   - `server/api/session.mjs` — the fence's eviction policy (safe-only), the safety cap and its loud refusal, both comment corrections.

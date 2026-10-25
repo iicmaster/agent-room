@@ -37,7 +37,7 @@ import { createLiveSessionRegistry } from '../server/core/session-registry.mjs'
 import { createSessionRegistry, sessionKeyFromToken } from '../server/api/session.mjs'
 import { fingerprintFromPublicKey, loadOrCreateKeypair } from '../server/keys.mjs'
 import { startServer } from '../server/api/server.mjs'
-import { AuthzStage, AuthStage, runPipeline } from '../server/api/pipeline.mjs'
+import { AuthzStage, AuthStage, BudgetStage, runPipeline, reject, HANDLER_STREAMED } from '../server/api/pipeline.mjs'
 import { createSessionVerifier } from '../server/api/session.mjs'
 import { createAgentRoomClient } from '../server/client/api-client.mjs'
 import { main } from '../server/cli/agent-room.mjs'
@@ -491,12 +491,12 @@ test('the takeover preserves the durable claim row and the client\'s cursor file
 })
 
 test('the fence itself refuses a displaced session at the authorization stage', async t => {
-  // The mechanism behind "admission alone is never authority": the
-  // authorization stage re-checks the fence immediately before the handler
-  // runs, so a request admitted BEFORE the handoff is refused rather than
-  // landing after it. This row drives the stage directly — the HTTP rows
-  // above prove the token is revoked, this one proves the in-flight request
-  // is refused.
+  // The EARLY half of the fence (Story 6.4, refined by Story 7.1): the
+  // authorization stage refuses a displaced key on the way in — before the
+  // server spends memory reading its body for most routes (the send route's
+  // budget stage reads first; the post-input revalidation still catches it).
+  // This row drives the stage directly — the HTTP rows above prove the token
+  // is revoked, this one proves the in-flight request is refused.
   const { sessionRegistry } = await makeServer(t)
   const key = 'session-key-under-test'
   const superseded = sessionRegistry.supersede(key)
@@ -696,14 +696,20 @@ test('Story 7.1: a long-poll displaced mid-hold stops serving its holder on the 
   assert.equal(status.status, 200, status.text)
   const broadcastRoomId = status.json.result.broadcast_room_id
 
-  // The long-poll enters its hold with nothing new to deliver.
+  // The long-poll enters its hold with nothing new to deliver. The takeover
+  // waits ~1 s — roughly a hundred-fold margin over an in-process request's
+  // admission cost — so the displacement provably lands while the poll is
+  // inside its hold, and the refusal that follows can only come from the
+  // wake-time fence check (a poll without it would hold to the deadline and
+  // answer 200 with an empty page).
+  const pollStartedAt = Date.now()
   const pollPromise = request(
     server.port,
     'GET',
     `/api/rooms/${broadcastRoomId}/messages?after_seq=0&wait_ms=10000`,
     { headers: { [PROTOCOL_KEY]: '1', authorization: `Bearer ${deadToken}` } },
   )
-  await new Promise(resolvePromise => { setTimeout(resolvePromise, 250) })
+  await new Promise(resolvePromise => { setTimeout(resolvePromise, 1000) })
 
   // The explicit takeover displaces the polling session while it holds.
   const restarted = await exchange(server.port, alice, localToken)
@@ -713,10 +719,190 @@ test('Story 7.1: a long-poll displaced mid-hold stops serving its holder on the 
   assert.equal(takeover.status, 200, takeover.text)
   assert.equal(liveSessionRegistry.holderOf('Agent').sessionKey !== deadKey, true)
 
-  // The very next wake answers the fence, not a page of messages.
+  // The very next wake answers the fence, not a page of messages — and the
+  // early return itself is evidence: the poll never reached its deadline.
   const pollOutcome = await pollPromise
   assert.equal(pollOutcome.status, 401, pollOutcome.text)
   assert.equal(pollOutcome.json?.error?.code, 'unauthorized')
+  assert.ok(Date.now() - pollStartedAt < 9000, 'the refusal came from a wake-time fence check, not the deadline')
+})
+
+test('Story 7.1: the pipeline acquires the pin WITH authentication, before the send route waits on its body in the budget stage', async t => {
+  // The interleaving that broke the first draft: on the send route the
+  // budget stage awaits the request body INSIDE the stage sequence, so a
+  // request can be authenticated and suspended before the loop ends. The
+  // pin must therefore be acquired synchronously with successful
+  // verification — this row spies both pin calls and proves the enter
+  // happened before the body gate resolved, and that the SEND-churn
+  // supersessions cannot forget the pinned predecessor.
+  const auth = createSessionRegistry({ maxSessions: 1 })
+  const events = []
+  const registry = {
+    ...auth,
+    enterInFlight(k) { events.push('enter'); auth.enterInFlight(k) },
+    leaveInFlight(k) { events.push('leave'); auth.leaveInFlight(k) },
+  }
+  const actor = `sha256:${'7'.repeat(64)}`
+  const token = auth.issue(actor)
+  const key = sessionKeyFromToken(token)
+  let enterBody
+  let finishBody
+  const bodyEntered = new Promise(resolve => { enterBody = resolve })
+  const bodyGate = new Promise(resolve => { finishBody = resolve })
+  const context = {
+    method: 'POST',
+    route: { class: 'actor', path: '/api/rooms/:id/messages', requestFields: ['client_message_id'] },
+    params: { id: 'room' },
+    headers: { authorization: `Bearer ${token}` },
+    sessionRegistry: registry,
+    bodyStream: (async function* () {
+      enterBody()
+      await bodyGate
+      yield Buffer.from('{"client_message_id":"id"}')
+    })(),
+  }
+  let handlerCalled = false
+  const pending = runPipeline(
+    [
+      new AuthStage({ sessionVerifier: createSessionVerifier({ registry }) }),
+      new BudgetStage({ sendBucketGate: { check() { return { ok: true } } } }),
+      new AuthzStage(),
+    ],
+    context,
+    () => { handlerCalled = true },
+  )
+  await bodyEntered
+  assert.deepEqual(events, ['enter'], 'the pin was acquired with authentication, before the body resolved')
+  assert.equal(context.pinnedSessionKey, key)
+  // The takeover, then eviction pressure, while the request waits in the
+  // budget stage's body read.
+  auth.supersede(key)
+  for (let i = 0; i < 50; i++) {
+    auth.supersede(sessionKeyFromToken(auth.issue(`sha256:${'8'.repeat(64)}`)))
+  }
+  assert.equal(auth.isSuperseded(key), true, 'the churn cannot forget the pinned predecessor')
+  finishBody()
+  const outcome = await pending
+  assert.equal(outcome.ok, false)
+  assert.equal(outcome.code, 'unauthorized', 'the post-input revalidation refuses it')
+  assert.equal(handlerCalled, false)
+  assert.deepEqual(events, ['enter', 'leave'], 'exactly one pin pair for the whole request')
+})
+
+test('Story 7.1: the pin is released exactly once across every pipeline exit shape', async t => {
+  // Each exit shape must produce exactly one enter/leave pair, clear the
+  // context's pin bookkeeping, and (where the pipeline stops the request)
+  // never reach the handler. The spy counts DOUBLE releases too.
+  const actor = `sha256:${'9'.repeat(64)}`
+  const exits = [
+    'normal', 'stage-refusal', 'stage-rejection', 'stage-throw',
+    'stage-async-rejection', 'input-rejection', 'input-abort',
+    'post-input-refusal', 'handler-rejection', 'handler-throw',
+    'handler-async-rejection', 'handler-awaited', 'streamed',
+  ]
+  for (const label of exits) {
+    const auth = createSessionRegistry()
+    const events = []
+    const registry = {
+      ...auth,
+      enterInFlight(k) { events.push('enter'); auth.enterInFlight(k) },
+      leaveInFlight(k) { events.push('leave'); auth.leaveInFlight(k) },
+    }
+    const token = auth.issue(actor)
+    const context = {
+      method: 'GET',
+      route: { class: 'actor', requestFields: [] },
+      headers: { authorization: `Bearer ${token}` },
+      sessionRegistry: registry,
+    }
+    const stages = [new AuthStage({ sessionVerifier: createSessionVerifier({ registry }) })]
+    const stageOutcomes = {
+      'stage-refusal': () => ({ refusal: true }),
+      'stage-rejection': () => reject('unauthorized'),
+      'stage-throw': () => { throw new Error('stage') },
+      'stage-async-rejection': () => Promise.reject(new Error('stage-async')),
+    }
+    if (stageOutcomes[label]) stages.push({ name: 'budgets', process: stageOutcomes[label] })
+    stages.push(new AuthzStage())
+    if (label === 'input-rejection') context.query = { unknown: 'field' }
+    if (label === 'input-abort') {
+      context.method = 'POST'
+      context.bodyStream = (async function* () { throw new Error('abort') })()
+    }
+    if (label === 'post-input-refusal') {
+      context.method = 'POST'
+      const key = sessionKeyFromToken(token)
+      context.bodyStream = (async function* () { auth.supersede(key); yield Buffer.from('{}') })()
+    }
+    let handlerCalled = false
+    const handler = () => {
+      handlerCalled = true
+      if (label === 'handler-rejection') return reject('invalid_request')
+      if (label === 'handler-throw') throw new Error('sync-handler')
+      if (label === 'handler-async-rejection') return Promise.reject(new Error('async-handler'))
+      if (label === 'handler-awaited') return Promise.resolve().then(() => {
+        assert.deepEqual(events, ['enter'], `${label}: the pin holds through an awaited handler`)
+        return { value: true }
+      })
+      if (label === 'streamed') return HANDLER_STREAMED
+      return { value: true }
+    }
+    const pending = runPipeline(stages, context, handler)
+    assert.deepEqual(events, ['enter'], `${label}: acquire before the first yield`)
+    if (label === 'stage-throw' || label === 'stage-async-rejection') {
+      await assert.rejects(pending, undefined, label)
+    } else {
+      await pending
+    }
+    assert.deepEqual(events, ['enter', 'leave'], `${label}: exactly one release`)
+    assert.equal(context.pinnedSessionKey, null, label)
+    assert.equal(context.pipelinePinManaged, false, label)
+    if (label.startsWith('stage-') || label.startsWith('input-') || label === 'post-input-refusal') {
+      assert.equal(handlerCalled, false, `${label}: the handler never ran`)
+    }
+  }
+})
+
+test('Story 7.1: protected predecessors survive far beyond the bound, and their release drains without a further supersession', async t => {
+  const registry = createSessionRegistry()
+  const actor = `sha256:${'a'.repeat(64)}`
+  const keys = []
+  for (let i = 0; i < 1002; i++) {
+    const key = sessionKeyFromToken(registry.issue(actor))
+    keys.push(key)
+    registry.enterInFlight(key)
+    registry.supersede(key)
+  }
+  assert.equal(registry.isSuperseded(keys[0]), true)
+  assert.ok(keys.every(key => registry.isSuperseded(key)), 'every pinned predecessor survives past the 1,000 bound')
+  // Revoke, re-supersede, and a fresh issue touch nothing protected.
+  registry.revoke(keys[0])
+  registry.supersede(keys[0])
+  registry.issue(actor)
+  assert.ok(keys.every(key => registry.isSuperseded(key)))
+  // Each release drains that key alone, with no supersession following.
+  registry.leaveInFlight(keys[0])
+  assert.equal(registry.isSuperseded(keys[0]), false)
+  registry.leaveInFlight(keys[1])
+  assert.equal(registry.isSuperseded(keys[1]), false)
+  assert.ok(keys.slice(2).every(key => registry.isSuperseded(key)), 'the still-pinned entries stay fenced')
+})
+
+test('Story 7.1: multiple in-flight requests share one pin count; the fence holds until the LAST one ends', async t => {
+  const multi = createSessionRegistry({ maxSessions: 1 })
+  const actor = `sha256:${'b'.repeat(64)}`
+  const first = sessionKeyFromToken(multi.issue(actor))
+  const second = sessionKeyFromToken(multi.issue(actor))
+  multi.enterInFlight(first)
+  multi.enterInFlight(first)
+  multi.supersede(first)
+  multi.enterInFlight(second)
+  multi.supersede(second)
+  multi.leaveInFlight(first)
+  assert.equal(multi.isSuperseded(first), true, 'one request of the key remains; the entry stays pinned')
+  multi.leaveInFlight(first)
+  assert.equal(multi.isSuperseded(first), false, 'the last release makes it an evictable idle tombstone')
+  assert.equal(multi.isSuperseded(second), true)
 })
 
 test('a failed durable write leaves the incumbent intact', async t => {

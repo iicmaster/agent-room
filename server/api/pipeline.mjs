@@ -439,17 +439,21 @@ export class AuthzStage {
     // The handoff fence (Story 6.4, the v0.2.0 reconnect recovery; Story 7.1,
     // its completion). A session displaced by an explicit same-Actor
     // replacement loses its authority WITH the handoff: its token stops
-    // authenticating, and this stage refuses a request that was admitted
-    // before the handoff — BEFORE the server spends memory and bandwidth
-    // reading its body. Admission alone is never authority.
+    // authenticating, and this stage refuses a displaced request at the
+    // earliest point the stage sequence reaches it — for most routes that is
+    // before the server reads the body; for the send route the budget stage
+    // reads the body first, and the post-input revalidation in runPipeline
+    // still catches the request before its handler. Admission alone is never
+    // authority.
     //
     // WHERE THIS CHECK SITS, exactly: this is the LAST stage of the sequence,
-    // so on a body-carrying route the body is still arriving when this check
-    // runs — which is why runPipeline runs a SECOND fence look-up (the
-    // post-input revalidation) after the request fields resolve and directly
-    // before the handler: every request the handover displaced is refused at
-    // one of the two, whichever it has reached. This stage keeps the early
-    // refusal so an already-displaced request never costs a body read.
+    // so on a body-carrying route the body may already have been read (the
+    // send route's budget stage reads it) or still be arriving — which is why
+    // runPipeline runs a SECOND fence look-up (the post-input revalidation)
+    // after the request fields resolve and directly before the handler: every
+    // request the handover displaced is refused at one of the two, whichever
+    // it has reached. This stage keeps the early refusal so an
+    // already-displaced request never costs more than it must.
     const sessionRegistry = context.sessionRegistry
     const sessionKey = context.session?.sessionKey
     if (sessionRegistry
