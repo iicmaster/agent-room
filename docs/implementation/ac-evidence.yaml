@@ -1439,11 +1439,15 @@
         file: "tests/viewer-exposure.test.mjs"
 
 # --- Epic 6 (Release) -----------------------------------------------------------
-# Story 6.3 is closed; 6.1 and 6.2 are open (REL-1's human demonstration and
-# REL-3's formal soak pin the candidate this story froze), so the epic-level
-# sweep stays loud on those two until they carry their own evidence.
+# All four stories are closed (2026-10-23): the completion audit's AC sweep is
+# clean, and 6.1/6.2 — which pin the candidate Story 6.3 froze — returned their
+# verdicts (REL-1 verified against 3929cc7; soak attempt 6 PASSED and the host
+# window was adjudicated eligible).
 
-  6.1:                       # REL-1 — the cross-everything demonstration
+  6.1:                       # REL-1 — the cross-everything demonstration (CLOSED 2026-10-23:
+                             # the physical two-machine two-vendor demonstration is DONE and
+                             # VERIFIED — docs/release-evidence/v0.2.0-rel1/, verifier exit 0;
+                             # the note below records the precursor cross-machine run)
     note: >-
       A REAL two-machine demonstration (docs/release-evidence/v0.2.0-cross-machine/):
       the Room Server in Docker on ngs-2 (Ubuntu, TLS with a private CA, published

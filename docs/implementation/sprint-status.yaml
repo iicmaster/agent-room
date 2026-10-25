@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 09-21-2026 08:52
-last_updated: '10-21-2026 21:30'
+last_updated: '10-25-2026 22:23'
 project: agent-room
 project_key: NOKEY
 tracking_system: file-system
@@ -80,11 +80,11 @@ development_status:
   5-3-remote-exposure-check: done
   epic-5-retrospective: done
 
-  epic-6: in-progress
-  6-1-rel-1-the-cross-everything-demonstration: backlog
-  6-2-rel-3-the-formal-soak: in-progress
+  epic-6: done
+  6-1-rel-1-the-cross-everything-demonstration: done
+  6-2-rel-3-the-formal-soak: done
   6-3-release-packaging-client-smoke-tests: done
-  epic-6-retrospective: optional
+  epic-6-retrospective: done
 action_items:
   - id: "epic-1-retro-item-1-add-a-per-epic-ac-sweep-to-the-build-loo"
     epic: 1
@@ -322,6 +322,27 @@ action_items:
     action: "The viewer-freshness observer belongs in the Operator Flight Kit as a
       script: it is the measurement the AC asks for and it should not need to be re-invented
       per run"
+    owner: "release"
+    status: open
+    ref: "docs/implementation/epic-6-retro-2026-10-21.md"
+  - id: "epic-6-retro-item-a12-quiet-host-contract-measured"
+    epic: 6
+    action: "A12 - a quiet-host contract must be written against the host it will
+      actually run on: as an absolute (no other node process, the load average under
+      2) it can be unsatisfiable on a host that legitimately carries services of its
+      own; the corrected form compares against the host's own measured baseline, gates
+      the foreign state only, and freezes the thresholds in a digested file that a
+      named scorer reads"
+    owner: "release"
+    status: open
+    ref: "docs/implementation/epic-6-retro-2026-10-21.md"
+  - id: "epic-6-retro-item-a13-instrument-validation-and-named-scorer"
+    epic: 6
+    action: "A13 - a pre-registration that names an instrument must include that instrument's
+      validation and name the scorer that computes its verdict: no pre-registered
+      rule ships without a validator and a scorer, both exercised before the rule
+      is relied on (the REL-3 observer has a self-check proven on the host; the scorer
+      has 43 fixtures)"
     owner: "release"
     status: open
     ref: "docs/implementation/epic-6-retro-2026-10-21.md"

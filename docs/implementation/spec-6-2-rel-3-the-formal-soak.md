@@ -2,7 +2,7 @@
 title: 'REL-3 — the formal soak'
 type: 'feature'
 created: '2026-10-06'
-status: 'in-progress'
+status: 'done'
 baseline_revision: 'working-tree on 48bbf0d (Story 6.2 adds the soak runner, its compressed-validation test, this spec, and the evidence entry; the 8-hour run is in flight — its results land in docs/release-evidence/ when it settles)'
 context:
   - 'project context: Node >=24.15, native ESM, node:sqlite STRICT WAL with synchronous=FULL, zero external runtime dependencies, real processes only'
@@ -20,7 +20,7 @@ warnings:
   - 'The 8-hour run is launched detached (nohup) and outlives the building session; its evidence lands in docs/release-evidence/v0.2.0-soak-results.{json,md} when it settles. Nothing is committed until then (the harness + spec + evidence entry commit now, the runner marked in-flight).'
 deferred:
   - 'The REL-4 counter-metric (idle footprint, 0–5 Actors) is RECORDED by this story''s runner, never gated — the criterion''s own "reported, not optimized". Its verdict, if any, belongs to a story that would optimize it.'
-  - 'The 8-hour run''s PASS/FAIL verdict is not claimable until the detached run settles; this spec and the evidence entry are marked in-flight until then.'
+  - 'The run''s PASS/FAIL verdict is not claimable until the detached run settles. SETTLED 2026-10-23: attempt 6 (the twelve-hour qualifying run against the final candidate 3929cc7) returned status: pass and the host window was adjudicated eligible — docs/release-evidence/v0.2.0-soak-results.md is the release evidence.'
 ---
 
 <!-- AMENDED 2026-10-22: the pass rule's measurement was amended by
