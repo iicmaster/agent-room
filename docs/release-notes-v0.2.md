@@ -1,12 +1,16 @@
-# Agent Room v0.2 — Release Notes (Release Candidate)
+# Agent Room v0.2 — Release Notes (v0.2.0, released)
 
-Status: **release candidate, frozen**. Every gate below ran against the materialized
+Status: **RELEASED**. Every gate below ran against the materialized
 artifacts recorded in `docs/release-evidence/v0.2.0-candidate.json`. Per the Epic 6
 execution consensus (`docs/implementation/reviews/epic-6-execution-agy.md`,
 `-luna.md`), the formal endurance soak (Story 6.2 / REL-3 — a twelve-hour run, amended and pre-registered after the first attempts showed the eight-hour profile measured the process EQUILIBRATING rather than settled) and the physical
 two-machine demonstration (Story 6.1 / REL-1) pin THIS candidate: any code change
-voids it and restarts the gate chain. v0.2.0 is not tagged or shipped until both
-of those gates return a verdict.
+voids it and restarts the gate chain. Both gates returned their verdicts (REL-3
+attempt 6 `status: pass` with the host window adjudicated `eligible`; REL-1
+verified, `rel1-verify-evidence.mjs` exit 0), and the two-lane release-gate
+review of 2026-10-25 (`docs/implementation/reviews/epic-6-release-gate-2026-10-25-{codex,agy,resolution}.md`)
+cleared the release act — its resolution record carries the threshold decision
+and the publication erratum.
 
 ## What v0.2 is
 
@@ -83,7 +87,8 @@ slightly busier machine. Across those six runs: thirty fresh installs, zero
 failures, every run inside the rule.
 
 **The frozen run of THIS candidate** (the tree that carries the reconnect
-recovery, commit `6d6b45f`) was measured again, on a quiet machine, before the
+recovery — the repair landed in commit `6d6b45f`, re-cut and frozen at
+`3929cc7`) was measured again, on a quiet machine, before the
 REL-1 round: 0.454 / 0.463 / 0.472 / 0.458 / 0.455 s (mean **0.460 s**, median
 0.458), adjusted 0.257 / 0.268 / 0.279 / 0.261 / 0.259 s (mean **0.265 s**),
 zero failures across five fresh installs. The numbers below are that run's.
@@ -144,17 +149,24 @@ v0.2.0 closes it with three things:
   refused with the ordinary collision error. The command asks for an interactive
   confirmation and refuses a piped stdin.
 
-  Three honest limits, all recorded in the Epic 6 retrospective as open work:
+  Five honest limits, all recorded in the Epic 6 retrospective as open work:
   the authorization-stage check happens BEFORE the request body is read, so a
   request whose body was still streaming when the handoff happened can still
   reach the handler (the takeover is for a DEAD session, which has no
   in-flight request; the window matters only if an operator takes over a LIVE
   one, which the command warns against); the takeover displaces whoever holds
   the name AT THE MOMENT it runs, not an incumbent the operator observed
-  earlier, so a name that changed hands in between is displaced too; and the
-  `isTTY` gate stops an ACCIDENTAL non-interactive invocation — it is not proof
-  of human consent, because a shell-capable agent can allocate a pseudo-TTY and
-  answer the prompt itself (the REL-1 run recorded exactly that).
+  earlier, so a name that changed hands in between is displaced too; the
+  displaced-session fence the server keeps is bounded at 1,000 entries, so a
+  1,001st supersession can forget a predecessor whose request was still
+  admitted (the bound is a count, not an age, so it proves nothing about
+  in-flight requests); a shutdown during the client's INITIAL bind can race
+  the first token assignment — stdin can close while the first
+  authentication/bind is still pending, leaving the name reserved rather than
+  released; and the `isTTY` gate stops an ACCIDENTAL non-interactive
+  invocation — it is not proof of human consent, because a shell-capable agent
+  can allocate a pseudo-TTY and answer the prompt itself (the REL-1 run
+  recorded exactly that).
 - **The client says so.** A `chat_id_taken` collision now names the command
   that recovers the name, instead of leaving the operator to read a coded
   error.
@@ -219,3 +231,30 @@ release-gate review found it (the Epic 6 retro, finding F8 and action A1). The t
 - Package size grew from v0.1's 136 KiB / 13 files to 772 KiB / 46 files per
   package (remote mode, viewer assets, trust/held pipeline, migration, drills'
   runtime surface) — no external dependencies were added.
+
+## Release erratum (2026-10-25, from the two-lane release-gate review)
+
+Full record: `docs/implementation/reviews/epic-6-release-gate-2026-10-25-resolution.md`.
+Zero packaged bytes are affected; these are publication-accuracy corrections.
+
+- **Attempt 6's retained-state diagnostic is RISING (~0.65%/hour** — post-GC
+  used heap 9.2 → 9.3 MiB over 46 natural major collections in the final
+  four-hour window). Per the ratified REL-3 amendment it is reported, never
+  gated, and is carried to v0.3; no leak-free claim is made.
+- **REL-1 viewer freshness, authoritative figures:** 0.150 s same-machine
+  (no clock term) and 0.276 s cross-machine (raw 0.172 s + the measured clock
+  offset 104 ms; ±~0.9 s Date-header quantization uncertainty) — both far
+  inside the 5 s bound. The canaries are seq 3 and seq 4, and the viewer
+  rendered FOUR distinct broadcast texts. Superseded: the passage in the
+  REL-1 `VERIFICATION.md` narrating "eight broadcasts, canaries seq 7/8,
+  0.107 s / 0.217 s" (the raw evidence files were never edited; the evidence
+  verifier's structural checks are unaffected).
+- **Two shipped source comments in `server/api/session.mjs` overstate the
+  session-fence guarantee** (one calls the 1,000-entry bound an age-style
+  guarantee about in-flight requests; one places the fence check "immediately
+  before the handler runs" when it runs before a body-carrying request's body
+  is read). The behavior is exactly as disclosed in the honest limits above —
+  A5 and A7 — and the comments are corrected in v0.3 with the A5 fix. The
+  acceptance of these two comment occurrences for v0.2.0 is recorded as an
+  explicit new threshold decision in the resolution record, not claimed as
+  prior approval.
