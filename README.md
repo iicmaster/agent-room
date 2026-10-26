@@ -81,10 +81,14 @@ Two things to know before you run it:
   already inside a handler is not torn back out: a long-poll stops at its
   next wake.)
 
-The MCP adapter also releases its session on an orderly exit, so a client that
-ended normally does not squat its name in the first place. (A vendor host
-that tears its MCP child down can still win that race; the takeover above is
-the recovery for it.)
+The MCP adapter releases its session on every polite exit: stdin closing,
+SIGTERM, and SIGINT all join one bounded shutdown operation that hands the
+Chat ID back before the process ends — so a one-shot vendor CLI no longer
+leaves its name reserved behind that race. A shutdown during the very first
+bind cannot leave a name behind either: a bind that completes after the
+shutdown began is released again and never published. (SIGKILL, OOM kills,
+and power loss are outside any teardown path's reach; the takeover above is
+the recovery for those.)
 
 ## Tools
 

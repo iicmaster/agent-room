@@ -1169,6 +1169,232 @@ test('the MCP adapter hands its name back when its stdin closes', async t => {
   assert.equal(afterExit.bound.status, 200, afterExit.bound.text)
 })
 
+// One real server child + one real MCP child, wired the way the stdin-close
+// row (above) wires them: the tool call binds the name, and the teardown
+// triggers (SIGTERM / SIGINT / stdin close) exercise the Story 7.3 shutdown.
+// waitForExit() bounds the wait so a wedged child fails the row instead of
+// the suite.
+async function spawnMcpChild(t) {
+  const parent = mkdtempSync(join(tmpdir(), 'agent-room-mcp-signals-'))
+  t.after(() => rmSync(parent, { recursive: true, force: true }))
+  const sharedData = join(parent, 'shared')
+  const pluginData = join(parent, 'plugin-data')
+  mkdirSync(sharedData, { recursive: true, mode: 0o700 })
+  mkdirSync(pluginData, { recursive: true, mode: 0o700 })
+  atomicWriteJson(join(pluginData, 'config.json'), { chat_id: 'Agent' })
+
+  const serverChild = spawn(process.execPath, [join(ROOT, 'server', 'api', 'server.mjs')], {
+    env: { ...process.env, AGENT_ROOM_DATA_DIR: sharedData },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  t.after(async () => {
+    if (serverChild.exitCode === null && serverChild.signalCode === null) {
+      serverChild.kill('SIGKILL')
+      await once(serverChild, 'exit').catch(() => {})
+    }
+  })
+  const runtimePath = join(sharedData, 'runtime.json')
+  let port = 0
+  for (let attempt = 0; attempt < 400 && port === 0; attempt += 1) {
+    await sleep(25)
+    if (!existsSync(runtimePath)) continue
+    try {
+      const record = JSON.parse(readFileSync(runtimePath, 'utf8'))
+      if (Number.isInteger(record.port) && record.port > 0) port = record.port
+    } catch { /* atomic rename: readers retry */ }
+  }
+  assert.ok(port > 0, 'the server child never became ready')
+
+  const child = spawn(process.execPath, [MCP_ENTRY], {
+    cwd: pluginData,
+    env: {
+      PATH: process.env.PATH || '',
+      PLUGIN_DATA: pluginData,
+      AGENT_ROOM_DATA_DIR: sharedData,
+    },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  })
+  t.after(() => {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+  })
+  child.stdout.setEncoding('utf8')
+  child.stderr.resume()
+
+  let stdout = ''
+  child.stdout.on('data', chunk => {
+    stdout += chunk
+  })
+
+  const call = async (method, params) => {
+    const id = Math.floor(Math.random() * 1e9)
+    const response = new Promise((resolvePromise, rejectPromise) => {
+      const timer = setTimeout(() => rejectPromise(new Error(`the MCP child never answered ${method}; stdout=${stdout}`)), 15_000)
+      const onData = () => {
+        for (const line of stdout.split('\n')) {
+          if (!line) continue
+          try {
+            const message = JSON.parse(line)
+            if (message.id !== id) continue
+            clearTimeout(timer)
+            child.stdout.off('data', onData)
+            resolvePromise(message)
+          } catch { /* not a frame yet */ }
+        }
+      }
+      child.stdout.on('data', onData)
+    })
+    child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`)
+    return response
+  }
+
+  const waitForExit = () => Promise.race([
+    once(child, 'exit').then(() => {}),
+    sleep(15_000).then(() => { throw new Error(`the MCP child never exited after its teardown trigger; stdout=${stdout}`) }),
+  ])
+
+  return { sharedData, child, port, call, waitForExit }
+}
+
+test('Story 7.3: SIGTERM releases the name before the child exits (A8)', async t => {
+  const { child, port, call, waitForExit, sharedData } = await spawnMcpChild(t)
+
+  await call('initialize', {
+    protocolVersion: '2025-06-18',
+    capabilities: {},
+    clientInfo: { name: 'TakeoverTest', version: '1.0.0' },
+  })
+  const presence = await call('tools/call', { name: 'room_presence', arguments: {} })
+  assert.equal(presence.error, undefined, JSON.stringify(presence.error))
+  assert.equal(presence.result.isError, undefined, 'the presence tool succeeded, so the adapter bound the name')
+
+  const localToken = loadOrCreateLocalToken(sharedData)
+  const stranger = installation()
+  const blocked = await bindSession(port, localToken, stranger, 'Agent')
+  assert.equal(blocked.bound.status, 409, 'the adapter holds the name while it is alive')
+
+  // The polite kill: the adapter runs its bounded shutdown (the release)
+  // and only then exits.
+  const startedAt = Date.now()
+  child.kill('SIGTERM')
+  await waitForExit()
+  const exitMs = Date.now() - startedAt
+  assert.ok(exitMs < 15_000, `the child exited under the declared bound (took ${exitMs} ms)`)
+
+  const afterExit = await bindSession(port, localToken, stranger, 'Agent')
+  assert.equal(afterExit.bound.status, 200, afterExit.bound.text)
+})
+
+test('Story 7.3: SIGINT joins the same shutdown, repeated signals land once (A8)', async t => {
+  const { child, port, call, waitForExit, sharedData } = await spawnMcpChild(t)
+
+  await call('initialize', {
+    protocolVersion: '2025-06-18',
+    capabilities: {},
+    clientInfo: { name: 'TakeoverTest', version: '1.0.0' },
+  })
+  const presence = await call('tools/call', { name: 'room_presence', arguments: {} })
+  assert.equal(presence.error, undefined, JSON.stringify(presence.error))
+
+  // Three teardown triggers in quick succession: SIGINT, SIGINT again, and
+  // stdin closing — all join ONE shutdown operation (single-flight), the
+  // process exits once, cleanly.
+  child.kill('SIGINT')
+  child.kill('SIGINT')
+  child.stdin.end()
+  await waitForExit()
+
+  const localToken = loadOrCreateLocalToken(sharedData)
+  const stranger = installation()
+  const afterExit = await bindSession(port, localToken, stranger, 'Agent')
+  assert.equal(afterExit.bound.status, 200, afterExit.bound.text)
+})
+
+test('Story 7.3: a bind in flight when shutdown begins never publishes (A9, gated)', async t => {
+  // The race: the shutdown release runs while the FIRST bind is in flight.
+  // The old release read a null token and returned, and the late bind then
+  // reserved the name for a dying process. The fix: release() marks the
+  // client shutting down BEFORE it reads the token; a bind that completes
+  // after that rolls the just-bound session back and never publishes its
+  // token. The gate makes the ordering PROVABLE: a forwarding proxy holds
+  // the bind's response until this test has begun the shutdown, so the
+  // overlap is by construction, not by timing (the design gate asked for a
+  // "gated shutdown during initial bind" row).
+  const { dataDir, server, liveSessionRegistry } = await makeServer(t)
+
+  let openBindGate
+  const bindGate = new Promise(resolve => { openBindGate = resolve })
+  let bindSeen
+  const bindSeenPromise = new Promise(resolve => { bindSeen = resolve })
+  let bindGateArmed = true
+  const proxy = http.createServer((req, res) => {
+    const chunks = []
+    req.on('data', chunk => chunks.push(chunk))
+    req.on('end', () => {
+      const gated = bindGateArmed && req.method === 'POST' && req.url === '/api/session'
+      if (gated) {
+        bindGateArmed = false
+        bindSeen()
+      }
+      const upstream = http.request(
+        { host: '127.0.0.1', port: server.port, method: req.method, path: req.url, headers: req.headers },
+        up => {
+          const upstreamChunks = []
+          up.on('data', chunk => upstreamChunks.push(chunk))
+          up.on('end', async () => {
+            if (gated) await bindGate
+            res.writeHead(up.statusCode, up.headers)
+            res.end(Buffer.concat(upstreamChunks))
+          })
+        },
+      )
+      upstream.on('error', () => { try { res.destroy() } catch { } })
+      upstream.end(Buffer.concat(chunks))
+    })
+  })
+  const proxyPort = await new Promise(resolvePromise => {
+    proxy.listen(0, '127.0.0.1', () => resolvePromise(proxy.address().port))
+  })
+  t.after(() => new Promise(resolvePromise => proxy.close(resolvePromise)))
+
+  // The client attaches through the proxy: the runtime record's port is
+  // rewritten to it (the health probe forwards), while the data dir — and
+  // with it the local token file the exchange needs — stays the server's.
+  const record = JSON.parse(readFileSync(join(dataDir, 'runtime.json'), 'utf8'))
+  atomicWriteJson(join(dataDir, 'runtime.json'), { ...record, port: proxyPort })
+
+  const localToken = loadOrCreateLocalToken(dataDir)
+  const pluginData = makePluginData(t, 'Agent')
+  const client = createAgentRoomClient({ dataDir, pluginDataDir: pluginData })
+
+  // The tool-call shape: one call runs ensure → the local exchange passes
+  // through → the bind arrives at the gate and is HELD.
+  const inFlight = client.presence()
+  await bindSeenPromise
+  // Shutdown begins while the bind is provably in flight: the release finds
+  // no token yet (it was never published) and marks the client shutting down.
+  const releaseOutcome = await client.release()
+  assert.equal(releaseOutcome.released, false, 'nothing was bound-and-published yet')
+  assert.equal(releaseOutcome.reason, 'no_session')
+
+  // The bind's response is released; the client must roll the bind back.
+  openBindGate()
+  const lateFailure = await inFlight.then(() => null, error => error)
+  assert.ok(lateFailure instanceof Error, 'the in-flight call was refused')
+  assert.equal(lateFailure.code, 'shutdown', `the coded shutdown refusal (got ${lateFailure.code}: ${lateFailure.message})`)
+
+  // The rollback is best-effort and asynchronous: wait for it to land.
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (liveSessionRegistry.holderOf('Agent') === null) break
+    await sleep(25)
+  }
+  assert.equal(liveSessionRegistry.holderOf('Agent'), null, 'the late bind rolled back — the name is free')
+
+  // And the name is truly bindable by a stranger right away.
+  const stranger = installation()
+  const bound = await bindSession(server.port, localToken, stranger, 'Agent')
+  assert.equal(bound.bound.status, 200, bound.bound.text)
+})
+
 // --- The operator surface ---------------------------------------------------------
 
 function makePluginData(t, chatId) {

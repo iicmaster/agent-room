@@ -457,12 +457,27 @@ export function createAgentRoomClient({
   // takeover is an operator's explicit decision, taken by hand through
   // "agent-room session replace" — never something a reconnect decides for
   // itself, and never something a second process may use to seize a name.
+  //
+  // The shutdown guard (Story 7.3, A9): a bind in flight when release()
+  // began NEVER publishes its token. The HTTP bind may complete after the
+  // shutdown release ran — the dying process would otherwise bind the name
+  // it just failed to release — so the freshly bound session is deleted
+  // again (best-effort, bounded), the token is never assigned, and the
+  // caller sees the coded shutdown refusal.
   async function bindWithToken(token) {
     try {
       const bind = await rawRequest('POST', '/api/session', {
         body: { chat_id: config.chatId, client_type: MCP_CLIENT_TYPE },
         bearer: token,
       })
+      if (shuttingDown) {
+        rawRequest('DELETE', '/api/session', { bearer: token }).catch(() => {
+          // Best-effort by design: a lost rollback leaves only a lease —
+          // the same honest outcome as a failed orderly release.
+        })
+        sessionToken = null
+        throw new AgentRoomRuntimeError('shutdown', 'this client is shutting down; the session bound during shutdown was released again')
+      }
       sessionToken = token
       return bind
     } catch (error) {
@@ -493,7 +508,12 @@ export function createAgentRoomClient({
   // release a name would create the very session it claims to close.
   // Best-effort and bounded: the durable claim row survives either way, so
   // a failed release leaves only a lease to wait out.
+  //
+  // Story 7.3 (A9): set by release() before it reads the token — the point
+  // after which this client never creates or publishes another session.
+  let shuttingDown = false
   async function release({ timeoutMs = CLIENT_RELEASE_TIMEOUT_MS } = {}) {
+    shuttingDown = true
     const token = sessionToken
     if (token === null) return { released: false, reason: 'no_session' }
     sessionToken = null
@@ -582,6 +602,12 @@ export function createAgentRoomClient({
   // undeclared, unconfigured default keeps the local exchange
   // byte-for-byte.
   async function authenticate() {
+    if (shuttingDown) {
+      // Story 7.3 (A9): a dying client never creates a session. The ensure
+      // path joins this refusal naturally — a tool call arriving after the
+      // shutdown began is refused, not bound.
+      throw new AgentRoomRuntimeError('shutdown', 'this client is shutting down; no new session is created')
+    }
     if (connectionMode === REMOTE_TRANSPORT || remoteBase !== null) {
       let token
       try {

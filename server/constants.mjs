@@ -394,6 +394,11 @@ export const PUBLIC_ERROR_STATUS = Object.freeze({
   // are FR-22's scope). 507 is the Insufficient Storage class — the one HTTP
   // status whose name is this condition.
   storage_low: 507,
+  // Story 7.3: the client-side shutdown refusal (a tool call or re-bind that
+  // reaches a client after its release began). Client-side only — the server
+  // never produces it; the status table is the one code-to-status mirror
+  // (AD-9) and a coded error belongs in it regardless of producer.
+  shutdown: 400,
   unauthorized: 401,
   unknown_field: 400,
 })

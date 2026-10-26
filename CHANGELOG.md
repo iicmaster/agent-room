@@ -6,6 +6,17 @@ All notable changes to Agent Room are documented in this file.
 
 ### Changed
 
+- The MCP adapter's teardown is now signal-safe (Story 7.3): SIGTERM and
+  SIGINT join the stdin-close path in ONE bounded shutdown operation that
+  releases the Chat ID before the process exits — a one-shot vendor CLI no
+  longer leaves its name reserved because the orderly release lost the race
+  against the kill. The release outcome is recorded (released / no_session /
+  release_failed) and the process exits under the declared 2,000 ms bound. A
+  shutdown during the very first authentication/bind cannot leave a name
+  behind either: the bind that completes after the shutdown began is released
+  again and its token is never published (the coded `shutdown` refusal).
+  SIGKILL, OOM kills, and power loss remain outside any teardown path's
+  reach (the recovery is the explicit takeover).
 - The handoff fence is now total (Story 7.1): a request the takeover displaced
   is refused whether it arrives before the server reads its body or its body
   only finishes arriving afterwards — the pipeline re-checks the fence after
