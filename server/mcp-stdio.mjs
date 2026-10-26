@@ -85,6 +85,10 @@ import {
   sharedDataDirectory,
 } from './runtime.mjs'
 import { createAgentRoomClient } from './client/api-client.mjs'
+import { CLIENT_RELEASE_TIMEOUT_MS } from './constants.mjs'
+
+// One wall-clock pause (the shutdown budget's timer).
+const delay = ms => new Promise(resolvePromise => { setTimeout(resolvePromise, ms) })
 import {
   applyTrustMatrix,
   loadAllowlist,
@@ -467,12 +471,15 @@ export function createMcpServer({
   // trigger joins the first invocation: stdin closing, SIGTERM, SIGINT, and
   // the returned close(). It aborts every in-flight call (admission stops —
   // the process never lingers on a held long-poll with no host attached),
-  // then awaits the client's release, which is bounded by the declared
-  // CLIENT_RELEASE_TIMEOUT_MS inside the client. The outcome is recorded on
-  // the adapter's own stderr — released, no_session, release_failed, or
-  // unknown — so an unreachable server is an honest recorded failure, never
-  // a silent one, and the process exits under the declared deadline (the
-  // release's own bound) rather than being held open by it.
+  // then awaits the client's release — which first lets a pending first
+  // bind settle so its rollback is coordinated (A9) — under a TOTAL budget:
+  // the declared CLIENT_RELEASE_TIMEOUT_MS bounds the whole operation by
+  // wall clock (the socket idle timeout inside the release alone is not a
+  // total bound — a trickle can starve it), and a budget overrun is
+  // recorded as 'timeout'. The outcome is recorded on the adapter's own
+  // stderr; the signal path exits as soon as the operation settles (always
+  // inside the budget), and the stdin-close path forces the exit when the
+  // budget was overrun (a held socket would otherwise outlive the bound).
   let shutdownPromise = null
   const shutdown = () => {
     if (shutdownPromise !== null) return shutdownPromise
@@ -483,8 +490,13 @@ export function createMcpServer({
       if (clientPromise !== null) {
         try {
           const readyClient = await clientPromise
-          const result = await readyClient.release()
-          outcome = result.released === true ? 'released' : (result.reason ?? 'unknown')
+          outcome = await Promise.race([
+            readyClient.release().then(result => {
+              if (result.released === true) return result.rolled_back === true ? 'released' : 'released'
+              return result.reason ?? 'unknown'
+            }),
+            delay(CLIENT_RELEASE_TIMEOUT_MS).then(() => 'timeout'),
+          ])
         } catch {
           outcome = 'unknown'
         }
@@ -500,16 +512,24 @@ export function createMcpServer({
   // The polite-kill path (Story 7.3, A8): a host that SIGTERM/SIGINTs the
   // child — what a one-shot vendor CLI does on exit — now runs the same
   // bounded shutdown before exiting, so the orderly release no longer loses
-  // the race against the kill. SIGKILL, OOM kills, power loss, and a dead
-  // remote peer are outside any teardown path's reach (Story 7.4's subject).
+  // the race against the kill. The handlers stay registered for the WHOLE
+  // shutdown (a repeated signal while the release is still crossing the
+  // wire re-enters this guard instead of falling through to the default
+  // kill) and are removed only when the exit runs. SIGKILL, OOM kills,
+  // power loss, and a dead remote peer are outside any teardown path's
+  // reach (Story 7.4's subject).
   let signalExit = false
   const exitAfterShutdown = () => {
     if (signalExit) return
     signalExit = true
-    shutdown().finally(() => process.exit())
+    shutdown().finally(() => {
+      process.removeListener('SIGTERM', exitAfterShutdown)
+      process.removeListener('SIGINT', exitAfterShutdown)
+      process.exit()
+    })
   }
-  process.once('SIGTERM', exitAfterShutdown)
-  process.once('SIGINT', exitAfterShutdown)
+  process.on('SIGTERM', exitAfterShutdown)
+  process.on('SIGINT', exitAfterShutdown)
 
   const realmIdOf = async () => {
     if (realmId !== null) return realmId
@@ -791,7 +811,11 @@ export function createMcpServer({
     // The JSON-RPC channel is gone: the shared shutdown aborts every
     // in-flight call, hands the Chat ID back so a clean exit does not squat
     // the name (Story 6.4), and records the release outcome (Story 7.3).
-    void shutdown()
+    // A budget overrun forces the exit — a held socket must not outlive
+    // the declared deadline.
+    void shutdown().then(outcome => {
+      if (outcome === 'timeout') process.exit()
+    })
   })
 
   return {

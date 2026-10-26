@@ -1174,7 +1174,7 @@ test('the MCP adapter hands its name back when its stdin closes', async t => {
 // triggers (SIGTERM / SIGINT / stdin close) exercise the Story 7.3 shutdown.
 // waitForExit() bounds the wait so a wedged child fails the row instead of
 // the suite.
-async function spawnMcpChild(t) {
+async function spawnMcpChild(t, { gate = null } = {}) {
   const parent = mkdtempSync(join(tmpdir(), 'agent-room-mcp-signals-'))
   t.after(() => rmSync(parent, { recursive: true, force: true }))
   const sharedData = join(parent, 'shared')
@@ -1205,6 +1205,66 @@ async function spawnMcpChild(t) {
   }
   assert.ok(port > 0, 'the server child never became ready')
 
+  // The optional gate: a forwarding proxy the MCP child attaches to instead
+  // of the server directly (the runtime record's port is rewritten). It
+  // holds the FIRST matching request's response until the test opens the
+  // gate, which makes "shutdown began while X was in flight" provable for
+  // the A8/A9 rows (gate='delete' holds the release's DELETE; gate='bind'
+  // holds the first bind's POST).
+  let gateSeenResolve
+  let gateOpenResolve
+  const gateSeen = new Promise(resolvePromise => { gateSeenResolve = resolvePromise })
+  const gateOpen = new Promise(resolvePromise => { gateOpenResolve = resolvePromise })
+  const gateHandle = {
+    seen: gateSeen,
+    open: () => gateOpenResolve(),
+  }
+  if (gate !== null) {
+    let armed = true
+    const proxy = http.createServer((req, res) => {
+      const chunks = []
+      req.on('data', chunk => chunks.push(chunk))
+      req.on('end', () => {
+        const gated = armed
+          && ((gate === 'delete' && req.method === 'DELETE' && req.url === '/api/session')
+            || (gate === 'bind' && req.method === 'POST' && req.url === '/api/session'))
+        if (gate === 'blackhole' && req.method === 'DELETE' && req.url === '/api/session') {
+          // Never forwarded, never answered: the request vanishes. The
+          // client's socket stays open until the process exits.
+          if (armed) {
+            armed = false
+            gateSeenResolve()
+          }
+          return
+        }
+        if (gated) {
+          armed = false
+          gateSeenResolve()
+        }
+        const upstream = http.request(
+          { host: '127.0.0.1', port, method: req.method, path: req.url, headers: req.headers },
+          up => {
+            const upstreamChunks = []
+            up.on('data', chunk => upstreamChunks.push(chunk))
+            up.on('end', async () => {
+              if (gated) await gateOpen
+              res.writeHead(up.statusCode, up.headers)
+              res.end(Buffer.concat(upstreamChunks))
+            })
+          },
+        )
+        upstream.on('error', () => { try { res.destroy() } catch { } })
+        upstream.end(Buffer.concat(chunks))
+      })
+    })
+    const proxyPort = await new Promise(resolvePromise => {
+      proxy.listen(0, '127.0.0.1', () => resolvePromise(proxy.address().port))
+    })
+    t.after(() => new Promise(resolvePromise => proxy.close(resolvePromise)))
+    const record = JSON.parse(readFileSync(runtimePath, 'utf8'))
+    atomicWriteJson(runtimePath, { ...record, port: proxyPort })
+  }
+
   const child = spawn(process.execPath, [MCP_ENTRY], {
     cwd: pluginData,
     env: {
@@ -1218,7 +1278,11 @@ async function spawnMcpChild(t) {
     if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
   })
   child.stdout.setEncoding('utf8')
-  child.stderr.resume()
+  let stderr = ''
+  child.stderr.setEncoding('utf8')
+  child.stderr.on('data', chunk => {
+    stderr += chunk
+  })
 
   let stdout = ''
   child.stdout.on('data', chunk => {
@@ -1248,11 +1312,11 @@ async function spawnMcpChild(t) {
   }
 
   const waitForExit = () => Promise.race([
-    once(child, 'exit').then(() => {}),
+    once(child, 'exit').then(([exitCode, exitSignal]) => ({ code: exitCode, signal: exitSignal })),
     sleep(15_000).then(() => { throw new Error(`the MCP child never exited after its teardown trigger; stdout=${stdout}`) }),
   ])
 
-  return { sharedData, child, port, call, waitForExit }
+  return { sharedData, child, port, call, waitForExit, gate: gateHandle, stderr: () => stderr }
 }
 
 test('Story 7.3: SIGTERM releases the name before the child exits (A8)', async t => {
@@ -1273,13 +1337,101 @@ test('Story 7.3: SIGTERM releases the name before the child exits (A8)', async t
   assert.equal(blocked.bound.status, 409, 'the adapter holds the name while it is alive')
 
   // The polite kill: the adapter runs its bounded shutdown (the release)
-  // and only then exits.
+  // and only then exits — cleanly (exit code 0, not killed by the signal).
+  child.kill('SIGTERM')
+  const exit = await waitForExit()
+  assert.deepEqual(exit, { code: 0, signal: null }, `a clean exit, not a signal death (got ${JSON.stringify(exit)})`)
+
+  const afterExit = await bindSession(port, localToken, stranger, 'Agent')
+  assert.equal(afterExit.bound.status, 200, afterExit.bound.text)
+})
+
+test('Story 7.3: a repeated SIGTERM while the release is held joins the shutdown and still exits cleanly (A8)', async t => {
+  const { sharedData, child, port, call, waitForExit, gate } = await spawnMcpChild(t, { gate: 'delete' })
+
+  await call('initialize', {
+    protocolVersion: '2025-06-18',
+    capabilities: {},
+    clientInfo: { name: 'TakeoverTest', version: '1.0.0' },
+  })
+  const presence = await call('tools/call', { name: 'room_presence', arguments: {} })
+  assert.equal(presence.error, undefined, JSON.stringify(presence.error))
+
+  // The release's DELETE is held by the gate: the shutdown is provably in
+  // flight when the SECOND SIGTERM arrives — with the old process.once
+  // wiring the listener was gone and the default kill won (the executed
+  // finding this row pins).
+  child.kill('SIGTERM')
+  await gate.seen
+  child.kill('SIGTERM')
+  gate.open()
+  const exit = await waitForExit()
+  assert.deepEqual(exit, { code: 0, signal: null }, `the repeated signal joined instead of killing (got ${JSON.stringify(exit)})`)
+
+  const localToken = loadOrCreateLocalToken(sharedData)
+  const stranger = installation()
+  const afterExit = await bindSession(port, localToken, stranger, 'Agent')
+  assert.equal(afterExit.bound.status, 200, afterExit.bound.text)
+})
+
+test('Story 7.3: a release that never answers exits under the declared deadline and records the failure (A8)', async t => {
+  const { sharedData, child, port, call, waitForExit, gate, stderr } = await spawnMcpChild(t, { gate: 'blackhole' })
+
+  await call('initialize', {
+    protocolVersion: '2025-06-18',
+    capabilities: {},
+    clientInfo: { name: 'TakeoverTest', version: '1.0.0' },
+  })
+  const presence = await call('tools/call', { name: 'room_presence', arguments: {} })
+  assert.equal(presence.error, undefined, JSON.stringify(presence.error))
+
+  // The release's DELETE never reaches the server (the blackhole gate
+  // accepts it, forwards nothing, answers nothing): the TOTAL budget
+  // (2,000 ms wall clock, not the socket idle timeout) must end the
+  // shutdown, the outcome must be recorded on the adapter's stderr, and
+  // the exit must be clean — the process is never held hostage by the
+  // held socket.
   const startedAt = Date.now()
   child.kill('SIGTERM')
-  await waitForExit()
-  const exitMs = Date.now() - startedAt
-  assert.ok(exitMs < 15_000, `the child exited under the declared bound (took ${exitMs} ms)`)
+  const exit = await waitForExit()
+  const elapsedMs = Date.now() - startedAt
+  assert.deepEqual(exit, { code: 0, signal: null }, `a clean, bounded exit (got ${JSON.stringify(exit)} after ${elapsedMs} ms)`)
+  assert.ok(elapsedMs >= 1_500 && elapsedMs < 9_000, `the exit landed at the budget, not the 15 s harness cap (took ${elapsedMs} ms)`)
+  assert.ok(stderr().includes('timeout'), `the timeout outcome is recorded (stderr: ${stderr().trim()})`)
 
+  // The honest outcome: the release never completed, so the name is still
+  // held — a lease remains, and the record says so.
+  const localToken = loadOrCreateLocalToken(sharedData)
+  const stranger = installation()
+  const blocked = await bindSession(port, localToken, stranger, 'Agent')
+  assert.equal(blocked.bound.status, 409, 'the unreleased name is honestly still held')
+})
+
+test('Story 7.3: a bind held when SIGTERM arrives is coordinated and rolled back before exit (A9, child composition)', async t => {
+  const { sharedData, child, port, call, waitForExit, gate } = await spawnMcpChild(t, { gate: 'bind' })
+
+  await call('initialize', {
+    protocolVersion: '2025-06-18',
+    capabilities: {},
+    clientInfo: { name: 'TakeoverTest', version: '1.0.0' },
+  })
+  // The tool call starts the FIRST bind; the gate holds its response, so
+  // the bind is provably in flight (committed server-side, unanswered
+  // client-side) when the SIGTERM lands.
+  const presenceCall = call('tools/call', { name: 'room_presence', arguments: {} })
+  await gate.seen
+  child.kill('SIGTERM')
+  gate.open()
+  const exit = await waitForExit()
+  assert.deepEqual(exit, { code: 0, signal: null }, `the shutdown coordinated the pending bind and exited cleanly (got ${JSON.stringify(exit)})`)
+  // The aborted tool call was answered in the adapter's own JSON-RPC voice
+  // (an error result or a rejection — either way it never hung the row);
+  // its outcome is not this row's substance.
+  await presenceCall.then(() => {}, () => {})
+
+  // The coordinated rollback freed the name: a stranger binds at once.
+  const localToken = loadOrCreateLocalToken(sharedData)
+  const stranger = installation()
   const afterExit = await bindSession(port, localToken, stranger, 'Agent')
   assert.equal(afterExit.bound.status, 200, afterExit.bound.text)
 })
@@ -1301,7 +1453,8 @@ test('Story 7.3: SIGINT joins the same shutdown, repeated signals land once (A8)
   child.kill('SIGINT')
   child.kill('SIGINT')
   child.stdin.end()
-  await waitForExit()
+  const exit = await waitForExit()
+  assert.deepEqual(exit, { code: 0, signal: null }, `a clean exit, not a signal death (got ${JSON.stringify(exit)})`)
 
   const localToken = loadOrCreateLocalToken(sharedData)
   const stranger = installation()
@@ -1369,16 +1522,22 @@ test('Story 7.3: a bind in flight when shutdown begins never publishes (A9, gate
   // The tool-call shape: one call runs ensure → the local exchange passes
   // through → the bind arrives at the gate and is HELD.
   const inFlight = client.presence()
+  // Attach the rejection handler NOW: the refusal must never be an
+  // asynchronously-handled rejection (the row reads it after the release
+  // settles, several ticks later).
+  const lateFailurePromise = inFlight.then(() => null, error => error)
   await bindSeenPromise
-  // Shutdown begins while the bind is provably in flight: the release finds
-  // no token yet (it was never published) and marks the client shutting down.
-  const releaseOutcome = await client.release()
-  assert.equal(releaseOutcome.released, false, 'nothing was bound-and-published yet')
-  assert.equal(releaseOutcome.reason, 'no_session')
-
-  // The bind's response is released; the client must roll the bind back.
+  // Shutdown begins while the bind is provably in flight: the release
+  // captures the in-flight auth (coordination) and marks the client shutting
+  // down before any token can be published. The gate then opens, the bind
+  // response arrives, and the shutdown operation owns the rollback.
+  const releasePromise = client.release()
   openBindGate()
-  const lateFailure = await inFlight.then(() => null, error => error)
+  const releaseOutcome = await releasePromise
+  assert.equal(releaseOutcome.released, true, 'the shutdown operation freed the name')
+  assert.equal(releaseOutcome.rolled_back, true, 'the name was freed by the coordinated rollback of the late bind')
+
+  const lateFailure = await lateFailurePromise
   assert.ok(lateFailure instanceof Error, 'the in-flight call was refused')
   assert.equal(lateFailure.code, 'shutdown', `the coded shutdown refusal (got ${lateFailure.code}: ${lateFailure.message})`)
 

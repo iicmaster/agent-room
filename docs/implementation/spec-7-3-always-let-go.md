@@ -2,7 +2,7 @@
 title: 'Always let go — the bounded shutdown operation (A8 signal-safe teardown, A9 bind-after-shutdown)'
 type: 'feature'
 created: '2026-10-26'
-status: 'review'
+status: 'done'
 baseline_revision: 'working-tree on f421027 (Story 7.1 closed; this story touches server/mcp-stdio.mjs and server/client/api-client.mjs)'
 context:
   - '{project-root}/AGENTS.md'
@@ -67,7 +67,9 @@ schedule: |
   1. Implement client guard + adapter operation. 2. Tests. 3. Full suite
   (serial, 600 s). 4. Codex review round. 5. A1 doc sweep in the same commit.
 notes: |
-  - `PUBLIC_ERROR_STATUS` needs the new `shutdown` code's status (400) in the
-    constants module (AD-9: one table, never per-route).
+  - The `shutdown` code is CLIENT-LOCAL (AgentRoomRuntimeError carries any
+    code; it never becomes a wire envelope), so the server's frozen public
+    vocabulary gains nothing — the Spine's standing rule — and
+    PUBLIC_ERROR_STATUS is untouched.
   - The stdin-close row already green must stay green (the release still runs
     on stdin close; only the bookkeeping changed).

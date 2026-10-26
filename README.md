@@ -81,14 +81,17 @@ Two things to know before you run it:
   already inside a handler is not torn back out: a long-poll stops at its
   next wake.)
 
-The MCP adapter releases its session on every polite exit: stdin closing,
-SIGTERM, and SIGINT all join one bounded shutdown operation that hands the
-Chat ID back before the process ends — so a one-shot vendor CLI no longer
-leaves its name reserved behind that race. A shutdown during the very first
-bind cannot leave a name behind either: a bind that completes after the
-shutdown began is released again and never published. (SIGKILL, OOM kills,
-and power loss are outside any teardown path's reach; the takeover above is
-the recovery for those.)
+The MCP adapter's teardown paths — stdin closing, SIGTERM, SIGINT — join ONE
+bounded shutdown operation. When the server is reachable, the Chat ID is
+handed back before the process exits, so a one-shot vendor CLI no longer
+leaves its name reserved behind that race; a shutdown during the very first
+bind is coordinated, and a bind that completes after the shutdown began is
+rolled back and never published. When the server is NOT reachable, the
+failure is recorded (`release_failed` / `timeout`) and the process still
+exits inside the declared 2,000 ms bound — a lease may remain until it
+expires, and the record says so. (SIGKILL, OOM kills, and power loss are
+outside any teardown path's reach; the takeover above is the recovery for
+those.)
 
 ## Tools
 

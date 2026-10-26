@@ -463,7 +463,10 @@ export function createAgentRoomClient({
   // shutdown release ran — the dying process would otherwise bind the name
   // it just failed to release — so the freshly bound session is deleted
   // again (best-effort, bounded), the token is never assigned, and the
-  // caller sees the coded shutdown refusal.
+  // caller sees the coded shutdown refusal. The rollback is TRACKED (see
+  // release()) so the shutdown operation can await it instead of exiting
+  // over it.
+  let rollbackPromise = null
   async function bindWithToken(token) {
     try {
       const bind = await rawRequest('POST', '/api/session', {
@@ -471,12 +474,11 @@ export function createAgentRoomClient({
         bearer: token,
       })
       if (shuttingDown) {
-        rawRequest('DELETE', '/api/session', { bearer: token }).catch(() => {
-          // Best-effort by design: a lost rollback leaves only a lease —
-          // the same honest outcome as a failed orderly release.
-        })
+        rollbackPromise = rawRequest('DELETE', '/api/session', { bearer: token, timeoutMs: CLIENT_RELEASE_TIMEOUT_MS })
+          .then(() => true)
+          .catch(() => false)
         sessionToken = null
-        throw new AgentRoomRuntimeError('shutdown', 'this client is shutting down; the session bound during shutdown was released again')
+        throw new AgentRoomRuntimeError('shutdown', 'this client is shutting down; the just-bound session is being released again')
       }
       sessionToken = token
       return bind
@@ -514,7 +516,26 @@ export function createAgentRoomClient({
   let shuttingDown = false
   async function release({ timeoutMs = CLIENT_RELEASE_TIMEOUT_MS } = {}) {
     shuttingDown = true
-    const token = sessionToken
+    let token = sessionToken
+    if (token === null && authPromise !== null) {
+      // A first authentication/bind may still be in flight (the A9 initial
+      // bind): let it settle — its bind either publishes (and this release
+      // then deletes it) or hits the shutdown guard and rolls itself back —
+      // so the shutdown operation coordinates the pending bind instead of
+      // exiting over it. Bounded by the caller's budget, never by this await.
+      try {
+        await authPromise
+      } catch {
+        // The in-flight call's own refusal belongs to its own caller.
+      }
+      token = sessionToken
+    }
+    if (token === null && rollbackPromise !== null) {
+      // The pending bind rolled itself back: the shutdown operation owns
+      // that rollback's outcome now — it does not exit over a held socket.
+      await rollbackPromise
+      return { released: true, rolled_back: true }
+    }
     if (token === null) return { released: false, reason: 'no_session' }
     sessionToken = null
     try {
@@ -605,7 +626,9 @@ export function createAgentRoomClient({
     if (shuttingDown) {
       // Story 7.3 (A9): a dying client never creates a session. The ensure
       // path joins this refusal naturally — a tool call arriving after the
-      // shutdown began is refused, not bound.
+      // shutdown began is refused, not bound. The code is CLIENT-LOCAL: it
+      // never crosses the wire, so the server's frozen public vocabulary
+      // gains nothing (the Spine's standing rule).
       throw new AgentRoomRuntimeError('shutdown', 'this client is shutting down; no new session is created')
     }
     if (connectionMode === REMOTE_TRANSPORT || remoteBase !== null) {
