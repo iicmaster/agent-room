@@ -1,61 +1,54 @@
 ---
-title: 'The automatic recovery design — A2 round-table (BLOCKED on the advisor-lane infrastructure)'
+title: 'The automatic recovery design — A2 round-table: RECORDED REFUSAL'
 type: 'design'
 created: '2026-10-28'
-status: 'blocked-on-the-advisor-lane-infrastructure'
-baseline_revision: 'working-tree on 68e4573 (Story 7.3 closed; this story needs its two-vendor round-table before anything else moves)'
+status: 'done — the refusal is the deliverable'
+baseline_revision: 'working-tree on 45d1aa8 (the round-table ran against this tree; the release-truth fix below rode with the record)'
 context:
-  - '{project-root}/docs/epics.md (Story 7.4 — pre-commits to nothing; the Two-Tab Co-Tenancy Test is the falsification bar)'
-  - '{project-root}/docs/implementation/reviews/epic-7-a2-recovery-design-brief.md (the dispatched brief, verbatim)'
-  - '{project-root}/docs/implementation/reviews/epic-7-design-gate-{codex,agy}.md (the named candidates and their known failure modes)'
-  - '{project-root}/docs/implementation/reviews/epic-6-lease-astra.md (the v0.2 ruling that refused leases/heartbeats)'
+  - '{project-root}/docs/epics.md (Story 7.4)'
+  - '{project-root}/docs/implementation/reviews/epic-7-a2-recovery-design-codex.md (the round-table verdict, verbatim)'
+  - '{project-root}/docs/implementation/reviews/epic-7-a2-recovery-design-brief.md (the dispatched brief)'
 problem: |
-  The story IS a two-vendor design round-table; the round-table instrument is
-  down. Every dispatch attempt on 2026-10-28 failed on INFRASTRUCTURE, not on
-  the question:
-
-  - **agy** (`gemini-4-argon-high`, identity verified at dispatch): the first
-    run went `awaiting_agent → suspected_stalled → process gone` with no
-    terminal state and no outbox (a hard kill / OOM shape); the immediate
-    re-dispatch stalled the same way and was stopped.
-  - **codex** (`gpt-6.1-sol[ultra]`): two dispatches hung with ZERO liveness
-    and an empty runner log — the lane never reached identity
-    acknowledgement. Root cause localized: the companion's adapter resolution
-    runs a recursive scan over `~/.npm/_npx`, and `~/.npm` itself now HANGS
-    on `readdir` (os.listdir with an 8-second alarm times out; `stat` on the
-    directory answers instantly; `~/.bun` reads in 3 ms). A filesystem-level
-    wedge on that one directory tree blocks every scan that touches it —
-    this also explains why the plugin's own handshake probes time out.
-  - **claude** (the recorded substitute voice): dispatched per the lane-ops
-    playbook, but the `claude-qwen` wrapper derives its credential from
-    `QWEN_API_KEY`, which is absent from this session's environment (the
-    qwen profile's settings.json carries no key), so the lane cannot
-    authenticate. It was stopped and cleaned up.
-
-  All five dispatch attempts were cleaned up (dispatch-pids and liveness
-  files removed; no half-written state). The brief is archived verbatim so
-  the round-table can be re-run the moment the instrument returns.
-what-was-verified-anyway: |
-  - The story's framing survives its own design gate: the brief embeds the
-    amended AC (pre-commit to nothing; reasoned refusal is the default
-    baseline; Two-Tab Co-Tenancy as the falsification bar), the four named
-    candidates with their recorded failure modes, the consent/trust/surface/
-    ping-pong questions, and the Story 7.3 delta (the residual squat
-    scenarios shrank to SIGKILL / OOM / power loss / dead peer).
-  - No design, decision, or preference was recorded in the lanes' absence —
-    synthesizing the round-table's answer myself would be attestation, the
-    one thing this project does not accept.
-unblock: |
-  Any ONE of these returns the story to executable:
-
-  1. The `~/.npm` directory wedge clears (typically: close the processes
-     holding vnodes there, or reboot; `ls ~/.npm` answering instantly is the
-     test) — then re-run the codex lane with the archived brief.
-  2. A working agy seat (re-dispatch; the hard death may have been the same
-     disk storm or the seat's own outage).
-  3. `QWEN_API_KEY` exported for the claude substitute lane (the wrapper at
-     /Users/ngs/bin/claude-qwen reads it from the environment).
-
-  Then: dispatch BOTH voices on the archived brief, archive both outboxes
-  verbatim, write the design-or-refusal record, and only then does 7.2's
-  wire work start (the design gate's ordering rule).
+  Whether an automatic unattended crash-recovery design exists that survives
+  the Two-Tab Co-Tenancy Test, or the reasoned refusal is the answer.
+outcome: |
+  **RECORDED REFUSAL** (the AC's default baseline, delivered): all four named
+  candidates FAIL — the disk-only secret by construction (two live tabs share
+  `${PLUGIN_DATA}`); the kernel-socket probe on its own evidence (Apple XNU
+  can return ECONNREFUSED to a LIVE listener whose accept queue is full or
+  whose allocation failed — "ECONNREFUSED is the OS's death certificate" is
+  REFUTED from primary sources, and the shared-pathname stale-unlink race has
+  a worked counterexample; immutable per-generation paths would fix the race
+  but not the macOS ambiguity, and the remote server still witnesses nothing);
+  the lease/heartbeat (prior refusal confirmed — silence is policy, not
+  death); and self-reported lineage (server cannot verify remote processes).
+  Consent: per-event explicit decision stays the supported contract for this
+  release; narrow prior delegation to a named supervisor is RECORDED as a
+  possible NEW policy (Sally's standing dissent — ratifiable only with a
+  supervisor that demonstrably keeps the Two-Tab exclusion, and a five-part
+  honest-consent shape now written into the record). No server surface
+  changes. The ping-pong answer: supported reconnect never carries intent, so
+  no automatic war can start from supported clients; last-explicit-intent-
+  wins remains the human-level rule until Story 7.2.
+provenance: |
+  ONE VENDOR, RECORDED: the codex lane (`gpt-6.1-sol[ultra] (matched)`) is
+  the sole voice of record — the agy seat returned RESOURCE_EXHAUSTED (429,
+  resets ~2026-11-01) on every attempt, and the claude substitute lane cannot
+  authenticate (QWEN_API_KEY absent). Per the recorded playbook the
+  substitution is disclosed, not smoothed: this verdict is one vendor's
+  round-table, strengthened by its own primary-source work (Apple XNU,
+  Node 24 docs). A second vendor may be run later against the archived brief;
+  the refusal's substance is mechanical enough that a disagreement would be
+  about product appetite (Sally's), not the evidence.
+hygiene-rider: |
+  Vex's source finding in Story 7.3's release path — the coordinated
+  rollback's boolean was awaited but not read, so a FAILED rollback still
+  reported released:true — is fixed in this change set (the boolean is now
+  the released value; the gated A9 row stays green). No story is reopened.
+unblock-record: |
+  The earlier block (the ~/.npm readdir wedge) cleared by itself: the
+  directory emptied (its contents now live at ~/.kingston-cache/npm — the
+  cache root moved), after which the pinned codex adapter reinstalled with
+  matching digests and the lane dispatched cleanly. The full outage
+  diagnosis and the gh-account switch note are recorded in the session
+  memory, not here.

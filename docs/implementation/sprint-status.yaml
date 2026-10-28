@@ -90,7 +90,7 @@ development_status:
   7-1-the-fence-never-lies: done
   7-2-the-observed-incumbent: backlog
   7-3-always-let-go: done
-  7-4-the-automatic-recovery-design: in-progress
+  7-4-the-automatic-recovery-design: done
   7-5-instruments-that-recompute: backlog
   7-6-where-the-heap-goes: backlog
 action_items:

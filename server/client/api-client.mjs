@@ -533,8 +533,8 @@ export function createAgentRoomClient({
     if (token === null && rollbackPromise !== null) {
       // The pending bind rolled itself back: the shutdown operation owns
       // that rollback's outcome now — it does not exit over a held socket.
-      await rollbackPromise
-      return { released: true, rolled_back: true }
+      const rolledBack = await rollbackPromise
+      return { released: rolledBack === true, rolled_back: true }
     }
     if (token === null) return { released: false, reason: 'no_session' }
     sessionToken = null
