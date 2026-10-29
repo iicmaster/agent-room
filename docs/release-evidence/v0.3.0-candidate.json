@@ -29,7 +29,7 @@
   },
   "gates": {
     "validator": "claude plugin validate <materialized>/agent-room-claude-code --strict → passed (claude-cli 2.1.310)",
-    "suite": "node --test --test-concurrency=1 --test-timeout=600000 → running against this commit; the tag waits for green",
+    "suite": "node --test --test-concurrency=1 --test-timeout=600000 → GREEN against this commit: 654 pass / 0 fail / 0 skipped (2026-10-29)",
     "ac_sweep": "node scripts/ac-sweep.mjs --epic 7 → clean; --epic 6 → clean (the 6.4 pointer repaired)"
   },
   "soak_question": "Open, put to the confirmation gate: the codex room split (Winston+Vex demand a fresh qualifying 12-hour soak; John+Sally accept the targeted repair plus a recorded waiver) and the agy room unanimously granted the waiver for THIS session-authority repair because the traffic-bound memory surface is unchanged and the new state is bounded (the defect that voided the waiver argument — the unbounded history — is repaired with its regression). The confirmation round rules on it with the fixes in hand; if the soak is required, it launches detached on the quiet host and the tag waits for its verdict."
