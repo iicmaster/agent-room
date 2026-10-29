@@ -59,6 +59,6 @@ test('the shipped results file keeps its recorded diagnostic untouched (reported
   // captured — the two coexist by design.
   const disposition = readFileSync(join(ROOT, 'docs', 'implementation', 'rel3-retained-state-disposition-2026-10-29.md'), 'utf8')
   assert.match(disposition, /RECORDED NON-DEFECT/)
-  assert.match(disposition, /below the instrument.s own resolution/)
+  assert.match(disposition, /below the instrument.s own\s+resolution/)
   assert.match(disposition, /never edited/)
 })
