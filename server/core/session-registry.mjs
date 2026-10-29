@@ -191,6 +191,15 @@ export function createLiveSessionRegistry({ now = Date.now, leaseMs = SESSION_TT
     }
   }
 
+  // The zero-ABA rule (the release-gate confirmation's executed finding):
+  // an EVICTED entry reads null — NEVER a fallback 0. Zero must never be
+  // observable, because two independent occupancies of the same name could
+  // both read 0 under churn and a ticket pinned to {holder, 0} would then
+  // wrongly allow the second. With null semantics, every observable value
+  // is a unique, never-reused sequence stamp: mint REFUSES when the
+  // generation is unknown, and redemption refuses on null or inequality —
+  // so eviction can only ever make a takeover refuse, structurally.
+
   // The name's CURRENT generation (0 before its first observed transition):
   // what a conflict ticket pins at mint time and what the takeover compares
   // at redemption — under the same live view the commit itself uses.
@@ -198,7 +207,7 @@ export function createLiveSessionRegistry({ now = Date.now, leaseMs = SESSION_TT
     const forms = chatIdForms(chatId)
     if (forms === null) return null
     const generation = generations.get(forms.normalized)
-    return generation === undefined ? 0 : generation
+    return generation === undefined ? null : generation
   }
 
   const snapshot = row => ({

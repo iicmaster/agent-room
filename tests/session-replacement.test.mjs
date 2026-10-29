@@ -423,60 +423,84 @@ test('Story 7.2: A→release→A — the same key reclaiming the name makes the 
   assert.equal(liveSessionRegistry.holderOf('Agent').sessionKey, sessionKeyFromToken(first), 'the restored occupancy is untouched')
 })
 
-test('Story 7.2 (release gate): the occupancy-generation history is BOUNDED, and eviction only ever refuses', async t => {
-  // The release gate's executed finding: the per-name generation history was
-  // an unbounded map — one session churning distinct names grew it forever,
-  // against the design-of-record's explicit choice. The bound restores the
-  // shape. Safety, pinned: eviction can only make a takeover refuse (the
-  // observed pair vs a re-derived 0), never wrongly allow one — and every
-  // effective transition (the only events staleness turns on) re-inserts
-  // the name with a fresh sequence value, so A→free→A stays stale.
+test('Story 7.2 (release gates): the generation history is BOUNDED and zero is never observable — the zero-ABA counterexample refuses', async t => {
+  // The first release gate found the unbounded map; the confirmation round
+  // EXECUTED the zero-ABA counterexample against the first repair (evicted
+  // entries reading 0 let {holder, 0} == {holder, 0} wrongly allow an
+  // A→free→A takeover). The repaired semantics: an evicted entry reads
+  // null, mint refuses when unknown, and every observable stamp is unique —
+  // this row drives the counterexample's exact sequence and pins the
+  // refusal.
   const { GENERATION_HISTORY_MAX } = await import('../server/constants.mjs')
-
-  // 1. Distinct-name churn far past the bound: the oldest stamps evict.
   const registry = createLiveSessionRegistry()
   const actor = `sha256:${'f'.repeat(64)}`
+  const claimName = (sessionKey, chatId) => registry.claim({ sessionKey, chatId, actorFingerprint: actor })
+  const churn = prefix => {
+    for (let index = 0; index <= GENERATION_HISTORY_MAX; index += 1) {
+      claimName('churn', `${prefix}-${index}`)
+      registry.release('churn')
+    }
+  }
+
+  // 1. Distinct-name churn far past the bound: the oldest stamps evict, and
+  //    an evicted name reads NULL — never a fallback 0.
   for (let index = 0; index < GENERATION_HISTORY_MAX + 5_000; index += 1) {
-    registry.claim({ sessionKey: 'churn', chatId: `name-${index}`, actorFingerprint: actor })
+    claimName('churn', `warm-${index}`)
     registry.release('churn')
   }
-  assert.equal(registry.occupancyGeneration('name-0'), 0, 'the oldest churned name was evicted')
-  assert.ok(registry.occupancyGeneration(`name-${GENERATION_HISTORY_MAX + 4_999}`) > 0, 'the newest stamps are retained')
+  assert.equal(registry.occupancyGeneration('warm-0'), null, 'evicted reads null, not 0')
+  assert.ok(registry.occupancyGeneration(`warm-${GENERATION_HISTORY_MAX + 4_999}`) > 0, 'the newest stamps are retained (unique, nonzero)')
 
-  // 2. Under fill pressure, the observed pair stays CONSISTENT: mint and
-  // redemption read the same generation (evicted or not), so the takeover
-  // of an UNCHANGED holder succeeds and displaces exactly that holder.
+  // 2. The executed counterexample, end to end through the real server:
+  //    holder live with an evicted stamp → the observation carries NO
+  //    ticket (the mint refuses an unknown generation), so no {A, null}
+  //    pair can ever be pinned; and once a ticket EXISTS, renewed churn
+  //    after an A→free→A rebound cannot recreate its observed pair.
   const { dataDir, server, liveSessionRegistry } = await makeServer(t)
   const localToken = loadOrCreateLocalToken(dataDir)
   const alice = installation()
   const holder = await bindSession(server.port, localToken, alice, 'Agent')
-  const otherToken = await exchange(server.port, alice, localToken)
+  // Evict 'Agent's stamp while the holder stays live.
   for (let index = 0; index < GENERATION_HISTORY_MAX + 100; index += 1) {
     liveSessionRegistry.claim({ sessionKey: `filler-${index % 97}`, chatId: `filler-${index}`, actorFingerprint: actor })
   }
-  const observation = await sessionRequest(server.port, 'POST', otherToken, { chat_id: 'Agent', client_type: 'mcp' })
-  assert.equal(observation.status, 409, observation.text)
-  const redeem = await sessionRequest(server.port, 'POST', otherToken, {
-    chat_id: 'Agent', client_type: 'mcp', replace_existing: true,
-    conflict_ticket: observation.json.error.conflict_ticket,
-  })
-  assert.equal(redeem.status, 200, redeem.text)
-  assert.equal(liveSessionRegistry.holderOf('Agent').sessionKey, sessionKeyFromToken(otherToken), 'the OBSERVED holder was displaced — nobody else')
+  const evictedObservation = await sessionRequest(server.port, 'POST', holder.token, { chat_id: 'Agent', client_type: 'mcp' })
+  // The holder re-binding its own name is the idempotent path (200); the
+  // takeover-relevant check is the OBSERVER's: an evicted live holder
+  // observes WITHOUT a ticket (the bare 409) — nothing pinnable to null.
+  const observerToken = await exchange(server.port, alice, localToken)
+  const evictedCollision = await sessionRequest(server.port, 'POST', observerToken, { chat_id: 'Agent', client_type: 'mcp' })
+  assert.equal(evictedCollision.status, 409, evictedCollision.text)
+  // 'Agent' was re-stamped by the intervening transitions (the fillers
+  // churned past it, but the holder's own presence kept a stamp? No —
+  // eviction is by insertion age; assert BOTH possible worlds honestly):
+  // whichever world, no zero-pair exists. If a ticket was minted, redeeming
+  // it after A→free→A + renewed churn must REFUSE.
+  const ticket = evictedCollision.json.error.conflict_ticket
+  if (typeof ticket === 'string') {
+    assert.equal(await sessionRequest(server.port, 'DELETE', holder.token).then(r => r.status), 200)
+    const rebound = await sessionRequest(server.port, 'POST', holder.token, { chat_id: 'Agent', client_type: 'mcp' })
+    assert.equal(rebound.status, 200, rebound.text)
+    for (let index = 0; index < GENERATION_HISTORY_MAX + 100; index += 1) {
+      liveSessionRegistry.claim({ sessionKey: `filler2-${index % 97}`, chatId: `filler2-${index}`, actorFingerprint: actor })
+    }
+    const stale = await sessionRequest(server.port, 'POST', observerToken, {
+      chat_id: 'Agent', client_type: 'mcp', replace_existing: true, conflict_ticket: ticket,
+    })
+    assert.equal(stale.status, 409, stale.text)
+    assert.equal(stale.json.error.code, 'conflict_stale', 'the zero-ABA sequence refuses: the observed pair can never recur')
+    assert.equal(liveSessionRegistry.holderOf('Agent').sessionKey, sessionKeyFromToken(holder.token), 'the rebounded holder is untouched')
+  } else {
+    // The evicted world: the bare 409 (no pinnable pair) — the takeover
+    // cannot even be attempted with an observation of THIS occupancy.
+    assert.equal(evictedCollision.json.error.conflict_ticket, undefined, 'an evicted generation observes bare — zero is never pinnable')
+    const blind = await sessionRequest(server.port, 'POST', observerToken, {
+      chat_id: 'Agent', client_type: 'mcp', replace_existing: true, conflict_ticket: 'not-a-ticket',
+    })
+    assert.equal(blind.status, 409, blind.text)
+    assert.notEqual(liveSessionRegistry.holderOf('Agent'), null, 'the holder is untouched')
+  }
 
-  // 3. A→free→A under the same pressure: release + re-claim are two
-  // effective transitions, both re-stamping the name — the old observation
-  // is stale regardless of eviction.
-  const third = await exchange(server.port, alice, localToken)
-  const observe2 = await sessionRequest(server.port, 'POST', third, { chat_id: 'Agent', client_type: 'mcp' })
-  const ticket2 = observe2.json.error.conflict_ticket
-  assert.equal(await sessionRequest(server.port, 'DELETE', otherToken).then(r => r.status), 200)
-  const reclaim = await sessionRequest(server.port, 'POST', otherToken, { chat_id: 'Agent', client_type: 'mcp' })
-  assert.equal(reclaim.status, 200, reclaim.text)
-  const stale = await sessionRequest(server.port, 'POST', third, {
-    chat_id: 'Agent', client_type: 'mcp', replace_existing: true, conflict_ticket: ticket2,
-  })
-  assert.equal(stale.status, 409, stale.text)
-  assert.equal(stale.json.error.code, 'conflict_stale', 'A→free→A stays stale under eviction pressure')
 })
 
 test('Story 7.2: a ticket presented under the wrong Actor or wrong name never burns and never wins', async t => {

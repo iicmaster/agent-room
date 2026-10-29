@@ -459,9 +459,11 @@ Commands:
       asks for an
       interactive y/N first and refuses a non-interactive stdin — that
       confirmation guards against accidents, it is not proof that a human
-      answered. The name is released again right away, so the client that
-      uses it can bind it on its next call. The optional Chat ID defaults to
-      the configured one.
+      answered. When the server acknowledges the release the name is free
+      again immediately, so the client that uses it can bind it on its next
+      call; if the release cannot complete, the receipt says so and this
+      command's lease holds the name until it expires. The optional Chat ID
+      defaults to the configured one.
 
   agent-room help
       Show this help.

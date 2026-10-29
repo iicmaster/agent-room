@@ -553,11 +553,12 @@ export const CONFLICT_TICKET_TTL_MS = 120_000
 export const CONFLICT_TICKET_MAX_OUTSTANDING = 4_096
 export const CONFLICT_TICKET_MAX_PER_ACTOR = 64
 
-// Story 7.2 (release-gate finding): the occupancy-generation history is a
-// bounded FIFO of per-name stamps. The bound never gates a ticket's
-// correctness — eviction can only make a stale takeover refuse (a fresh
-// transition re-inserts the name), never wrongly allow one — it keeps the
-// history map's memory honest against distinct-name churn.
+// Story 7.2 (release-gate findings): the occupancy-generation history is a
+// bounded FIFO of per-name stamps whose EVICTED entries read null, never a
+// fallback zero (the zero-ABA rule — two occupancies must never share an
+// observable 0). With null semantics every observable stamp is unique and
+// never reused, so the bound can only make a takeover refuse, never wrongly
+// allow one, while the map stays honest against distinct-name churn.
 export const GENERATION_HISTORY_MAX = 4_096
 
 // Server-side long-poll wake-up cadence (GET /api/rooms/:id/messages): the

@@ -626,6 +626,7 @@ function bindSession(context) {
       && typeof context.sessionRegistry?.isLive === 'function'
       && context.sessionRegistry.isLive(holder.sessionKey) === true
       && typeof registry.occupancyGeneration === 'function'
+      && registry.occupancyGeneration(chatId) !== null
       && typeof conflictTickets.mint === 'function'
     ) {
       // Story 7.2: the same-Actor LIVE collision is exactly the observation
@@ -640,6 +641,9 @@ function bindSession(context) {
         chatId,
         observerSessionKey: principal.sessionKey,
         incumbentSessionKey: holder.sessionKey,
+        // Known (non-null) by the branch guard — a UNIQUE stamp: two
+        // occupancies can never share it, so a redeemed pair names exactly
+        // the occupancy it observed (the zero-ABA repair).
         observedGeneration: registry.occupancyGeneration(chatId),
       })
       if (minted.rateLimited === true) {

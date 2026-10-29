@@ -61,8 +61,9 @@ handoff. The server grants it only when the live holder is the SAME key — a
 session of a different key is never displaced — moves the name atomically (the
 durable claim write first, the memory transfer second), and fences the
 displaced session so it cannot take the name back by reconnecting. The name is
-released again right away, so the client that uses it can bind it on its next
-call.
+released again when the server acknowledges the release — if it cannot
+complete, the receipt says so and the command's own lease holds the name
+until it expires.
 
 Two things to know before you run it:
 
