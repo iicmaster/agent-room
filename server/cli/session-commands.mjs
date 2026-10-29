@@ -55,6 +55,7 @@ import { createInterface } from 'node:readline'
 
 import {
   CHAT_ID_INVALID_MESSAGE,
+  CLIENT_RELEASE_TIMEOUT_MS,
   CLIENT_REQUEST_TIMEOUT_MS,
   PROTOCOL_HEADER,
   PROTOCOL_VERSION,
@@ -140,13 +141,56 @@ async function authenticate(target, { pluginDataDir, sharedDataDir }) {
   return { token, fingerprint: keypair.fingerprint }
 }
 
-// The takeover itself: bind the name WITH the explicit intent, then release
-// this command's own session so the live client can take the name.
-async function takeOver(target, { token, chatId }) {
+// The observation and the takeover (Story 7.2, the observed incumbent):
+// authenticate, attempt the PLAIN bind — a live same-Actor holder answers
+// 409 with an opaque conflict ticket naming the occupancy the operator is
+// about to confirm against — then, only after the operator's explicit y,
+// bind WITH the intent and THAT ticket, and finally release this command's
+// own session so the live client can take the name. A free name never
+// prompts: the command's own claim is released again immediately and the
+// receipt says so truthfully. A foreign holder answers the bare 409 — this
+// installation cannot displace another key, and the operator learns nothing
+// about who holds the name.
+async function observeIncumbent(target, { token, chatId }) {
+  const bind = await roundTrip(target, 'POST', '/api/session', protocolHeaders(token), {
+    chat_id: chatId,
+    client_type: 'cli',
+  }, CLIENT_REQUEST_TIMEOUT_MS)
+  if (bind.status === 200) {
+    return { kind: 'free' }
+  }
+  const code = bind.body?.error?.code
+  if (bind.status === 409 && code === 'chat_id_taken') {
+    const ticket = bind.body?.error?.conflict_ticket
+    if (typeof ticket === 'string' && ticket.length > 0) {
+      return { kind: 'held', ticket }
+    }
+    return { kind: 'foreign' }
+  }
+  throw new AgentRoomRuntimeError(
+    typeof code === 'string' && code.length > 0 ? code : 'request_failed',
+    bind.body?.error?.message ?? `the agent-room server answered ${bind.status}`,
+  )
+}
+
+async function releaseOwnSession(target, token) {
+  try {
+    const release = await roundTrip(target, 'DELETE', '/api/session', protocolHeaders(token), undefined, CLIENT_RELEASE_TIMEOUT_MS)
+    return release.status === 200
+  } catch {
+    return false
+  }
+}
+
+// The takeover itself: bind the name WITH the explicit intent AND the
+// observed conflict ticket — the server refuses a moved incumbent with the
+// coded conflict_stale instead of displacing whoever holds the name now.
+async function takeOver(target, { token, chatId, conflictTicket }) {
   const bind = await roundTrip(target, 'POST', '/api/session', protocolHeaders(token), {
     chat_id: chatId,
     client_type: 'cli',
     replace_existing: true,
+    conflict_ticket: conflictTicket,
   }, CLIENT_REQUEST_TIMEOUT_MS)
   if (bind.status !== 200) {
     const code = bind.body?.error?.code
@@ -156,6 +200,13 @@ async function takeOver(target, { token, chatId }) {
         'chat_id_taken',
         `the Chat ID "${chatId}" is held by a session this installation cannot displace — another key holds it, or the takeover was refused. `
         + 'Only a session of THIS installation\'s own key can be displaced.',
+      )
+    }
+    if (code === 'conflict_stale') {
+      throw new AgentRoomRuntimeError(
+        'conflict_stale',
+        `the observed holder of "${chatId}" no longer holds it — the name changed hands, went free, or the ticket expired. `
+          + 'Nothing was taken over; run the command again to observe the current holder.',
       )
     }
     throw new AgentRoomRuntimeError(
@@ -168,13 +219,7 @@ async function takeOver(target, { token, chatId }) {
   // name BACK to the live client, not to keep it. A failed release is
   // reported honestly in the receipt — the name would then stay claimed by
   // this command's lease.
-  let released = true
-  try {
-    const release = await roundTrip(target, 'DELETE', '/api/session', protocolHeaders(token), undefined, CLIENT_REQUEST_TIMEOUT_MS)
-    released = release.status === 200
-  } catch {
-    released = false
-  }
+  const released = await releaseOwnSession(target, token)
   return { replaced, released }
 }
 
@@ -231,11 +276,48 @@ export async function runSessionReplace({ input, output, errorOutput, pluginData
     const server = await ensureServer({ dataDir: sharedDataDir })
     target = { kind: 'local', port: server.port }
   }
+  // Observe FIRST (Story 7.2): authenticate as this installation and attempt
+  // the plain bind. The prompt below can then name what the operator is
+  // actually confirming — the OBSERVED incumbent — and a free name or a
+  // foreign holder never reaches a prompt at all. The free-name observation
+  // claims this command's own session and releases it immediately (the
+  // claim-and-release footprint is disclosed here, never smoothed over).
+  const { token, fingerprint } = await authenticate(target, { pluginDataDir, sharedDataDir })
+  const observation = await observeIncumbent(target, { token, chatId: forms.display })
+  if (observation.kind === 'free') {
+    const released = await releaseOwnSession(target, token)
+    return {
+      status: 'ok',
+      command: 'session replace',
+      lines: [line({
+        ok: true,
+        command: 'session replace',
+        chat_id: forms.display,
+        mode: target.kind,
+        server_url: target.kind === 'remote' ? target.serverUrl : null,
+        fingerprint,
+        replaced: false,
+        released,
+        note: released
+          ? 'the Chat ID was already free: no live session was displaced, and this command\'s observation claim was released again'
+          : 'the Chat ID was already free, but this command\'s release failed — the name stays claimed by this command\'s lease until it expires',
+      })],
+    }
+  }
+  if (observation.kind === 'foreign') {
+    return {
+      status: 'refusal',
+      command: 'session replace',
+      code: 'chat_id_taken',
+      message: `the Chat ID "${forms.display}" is held by another key; this installation cannot displace it. `
+        + 'Nothing was changed and no prompt was shown — a takeover only ever displaces this installation\'s own session.',
+    }
+  }
   const confirmed = await askConfirm({
     input,
     errorOutput,
-    question: `Take over the Chat ID "${forms.display}"? The session that currently holds it is displaced and can no longer use it — `
-      + 'use this only when that session is gone. [y/N] ',
+    question: `Take over the Chat ID "${forms.display}"? The session of this installation currently holding it is displaced and can no longer use it — `
+      + 'if that holder changed while you were reading this, the takeover is refused and you can re-observe. [y/N] ',
   })
   if (confirmed === null) {
     return {
@@ -253,8 +335,7 @@ export async function runSessionReplace({ input, output, errorOutput, pluginData
       message: 'agent-room session replace kept the Chat ID with its current holder; nothing was changed',
     }
   }
-  const { token, fingerprint } = await authenticate(target, { pluginDataDir, sharedDataDir })
-  const outcome = await takeOver(target, { token, chatId: forms.display })
+  const outcome = await takeOver(target, { token, chatId: forms.display, conflictTicket: observation.ticket })
   return {
     status: 'ok',
     command: 'session replace',

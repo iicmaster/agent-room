@@ -6,6 +6,23 @@ All notable changes to Agent Room are documented in this file.
 
 ### Changed
 
+- The takeover is bound to the observed incumbent (Story 7.2, retro action
+  A6): a plain bind's same-Actor 409 now carries an opaque `conflict_ticket`
+  (single-use, server-side, voided by any restart, bound to the authenticated
+  Actor and the observing session — never a bearer or a digest), and
+  `replace_existing: true` REQUIRES presenting it. The server redeems the
+  ticket against the exact occupancy it observed — the incumbent session key
+  AND a per-occupancy generation — so a takeover can no longer displace
+  whoever happens to hold the name at the moment it lands: another taker, a
+  briefly-freed name, or even the same key re-claiming after a release all
+  answer the new coded `conflict_stale` (409). `agent-room session replace`
+  now observes first and prompts only against a real same-Actor incumbent (a
+  free name is released again without prompting; a foreign holder aborts
+  without a prompt and learns nothing). A foreign Actor's collision keeps the
+  bare legacy envelope byte-for-byte. The v0.2.0 blind-takeover wire shape
+  (`replace_existing` alone) is retired — this is the deliberate, dated wire
+  change of this story (Architecture Spine AD-8 amendment, additively).
+
 - The MCP adapter's teardown is now signal-safe (Story 7.3): SIGTERM and
   SIGINT join the stdin-close path in ONE bounded shutdown operation under a
   total 2,000 ms wall-clock budget. When the server is reachable, the Chat ID

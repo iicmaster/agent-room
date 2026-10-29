@@ -313,6 +313,7 @@ test('every v0.1 public error code has an HTTP status declared once', () => {
     'chat_id_not_found',
     'chat_id_taken',
     'client_message_id_conflict',
+    'conflict_stale',
     'daemon_start_busy',
     'daemon_start_failed',
     'daemon_start_lock_invalid',

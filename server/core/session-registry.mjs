@@ -160,6 +160,34 @@ export function createLiveSessionRegistry({ now = Date.now, leaseMs = SESSION_TT
   const sessions = new Map()
   const names = new Map()
 
+  // Story 7.2 (A6, the observed incumbent): the occupancy sequence. ONE
+  // global monotonic counter stamps every EFFECTIVE occupancy transition —
+  // a fresh claim, a takeover transfer, a release, a lease-sweep removal,
+  // and a rename away from a name — so each occupancy of each name carries a
+  // distinct, never-reused integer (the conflict ticket's
+  // observedGeneration). Continuous tenure — an idempotent same-name
+  // re-bind, a display-case refresh, a touch — advances nothing. The
+  // sequence never resets inside a process lifetime, and clear() keeps the
+  // stamped history: a restarted process voids every outstanding ticket
+  // anyway, and within a lifetime a ticket pinned to an older generation of
+  // a name is stale forever — which is exactly the guarantee.
+  let occupancySequence = 0
+  const generations = new Map()
+  const stampGeneration = normalized => {
+    occupancySequence += 1
+    generations.set(normalized, occupancySequence)
+  }
+
+  // The name's CURRENT generation (0 before its first observed transition):
+  // what a conflict ticket pins at mint time and what the takeover compares
+  // at redemption — under the same live view the commit itself uses.
+  function occupancyGeneration(chatId) {
+    const forms = chatIdForms(chatId)
+    if (forms === null) return null
+    const generation = generations.get(forms.normalized)
+    return generation === undefined ? 0 : generation
+  }
+
   const snapshot = row => ({
     chatId: row.chatId,
     chatIdNormalized: row.chatIdNormalized,
@@ -178,6 +206,7 @@ export function createLiveSessionRegistry({ now = Date.now, leaseMs = SESSION_TT
       if (timestamp - row.lastSeen > leaseMs) {
         sessions.delete(key)
         if (names.get(row.chatIdNormalized) === key) names.delete(row.chatIdNormalized)
+        stampGeneration(row.chatIdNormalized)
       }
     }
   }
@@ -264,6 +293,15 @@ export function createLiveSessionRegistry({ now = Date.now, leaseMs = SESSION_TT
       sessions.delete(displacedSessionKey)
     }
     if (current !== undefined) names.delete(current.chatIdNormalized)
+    // The occupancy transition stamp (Story 7.2): this name's occupancy is
+    // new — whether it changed hands (the takeover) or was freshly claimed
+    // (the rename-swap's destination included) — and a renamed-away name's
+    // occupancy just ended. Both are effective transitions; the observed
+    // incumbent contract compares against exactly these stamps.
+    stampGeneration(forms.normalized)
+    if (current !== undefined && current.chatIdNormalized !== forms.normalized) {
+      stampGeneration(current.chatIdNormalized)
+    }
     const row = {
       chatId: forms.display,
       chatIdNormalized: forms.normalized,
@@ -336,6 +374,11 @@ export function createLiveSessionRegistry({ now = Date.now, leaseMs = SESSION_TT
     if (current === undefined) return false
     sessions.delete(key)
     if (names.get(current.chatIdNormalized) === key) names.delete(current.chatIdNormalized)
+    // A release ends this name's occupancy: the next claim — even by the
+    // SAME session key — is a new occupancy with a new generation, which is
+    // what makes an A→free→A rebound refuse a ticket observed before the
+    // release (Story 7.2's A→free→A rule).
+    stampGeneration(current.chatIdNormalized)
     return true
   }
 
@@ -465,5 +508,5 @@ export function createLiveSessionRegistry({ now = Date.now, leaseMs = SESSION_TT
     names.clear()
   }
 
-  return Object.freeze({ claim, rename, transfer, release, touch, lookup, holderOf, presenceSnapshot, clear })
+  return Object.freeze({ claim, rename, transfer, release, touch, lookup, holderOf, occupancyGeneration, presenceSnapshot, clear })
 }

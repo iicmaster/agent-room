@@ -184,6 +184,7 @@ import {
 } from './pipeline.mjs'
 import { bearerTokenFromHeaders, createSessionRegistry, createSessionVerifier } from './session.mjs'
 import { createChallengeRegistry } from './challenge.mjs'
+import { createConflictTicketStore } from './conflict-tickets.mjs'
 import { createEnrollRateLimiter } from './enroll-rate-limit.mjs'
 import { createRateGates } from './rate-gates.mjs'
 import { readLocalToken } from './local-token.mjs'
@@ -234,6 +235,10 @@ const CHALLENGE_REGISTRY = createChallengeRegistry()
 // store's chat_id_claims index. startServer({liveSessionRegistry}) overrides
 // it so tests can isolate each server instance.
 const LIVE_SESSION_REGISTRY = createLiveSessionRegistry()
+// Story 7.2: the process-default conflict ticket store (ephemeral by
+// design — a restart voids every outstanding observation, and the operator
+// re-observes).
+const CONFLICT_TICKETS = createConflictTicketStore()
 
 // Constant-time credential comparison; an equal-length dummy compare keeps
 // the timing profile uniform across mismatched lengths.
@@ -502,6 +507,19 @@ function sessionPrincipalOf(context) {
 // PATCH keeps the plain collision protection, and no automatic
 // re-authentication ever carries the intent — a takeover is an explicit
 // decision, never a side effect of a reconnect.
+//
+// Story 7.2 (the observed incumbent, retro A6): the intent must name the
+// holder the operator OBSERVED. A plain bind refused by a LIVE holder of the
+// SAME Actor mints an opaque conflict ticket (carried in the 409's error
+// envelope extras — same-Actor collisions only; a foreign collision keeps
+// the bare legacy envelope and learns nothing). The takeover presents that
+// ticket, and the server redeems it against the exact occupancy pair it was
+// minted for — {incumbentSessionKey, occupancy generation} — refusing with
+// the coded `conflict_stale` when anyone else took the name, the name went
+// free (even briefly), or the SAME key re-claimed it after a release. A
+// replace_existing intent without a ticket is a request-shape refusal: the
+// last-wins takeover is retired. The ticket is server-side, in-memory, and
+// single-use; it is not a credential and binds to the authenticated Actor.
 function bindSession(context) {
   const principal = sessionPrincipalOf(context)
   if (principal.ok === false) return principal
@@ -536,22 +554,60 @@ function bindSession(context) {
     }
     replaceExisting = replaceRaw
   }
+  // Story 7.2: a conflict ticket without the takeover intent is a
+  // request-shape refusal — the ticket exists only to bind an explicit
+  // replacement to its observation, never as a side channel.
+  const ticketRaw = context.body?.conflict_ticket
+  if (ticketRaw !== undefined && ticketRaw !== null && replaceExisting !== true) {
+    return reject('invalid_request', 'conflict_ticket is only accepted when replace_existing is true')
+  }
   const registry = context.liveSessionRegistry ?? LIVE_SESSION_REGISTRY
+  const conflictTickets = context.conflictTickets ?? CONFLICT_TICKETS
   // The incumbent: whoever holds this name right now (the live registry's
   // own answer, read before any change).
   const holder = typeof registry.holderOf === 'function' ? registry.holderOf(chatId) : null
   const heldByAnotherSession = holder !== null && holder.sessionKey !== principal.sessionKey
   let incumbent = null
-  if (heldByAnotherSession) {
+  if (replaceExisting) {
+    // The takeover (Story 6.4, refined by 7.2). A session of a DIFFERENT
+    // Actor is never displaced — and the refusal is the ordinary collision
+    // refusal, so the refused caller learns nothing about who holds the
+    // name. This check runs BEFORE any ticket work: a foreign caller
+    // holding a stolen ticket gets the same bare refusal and burns nothing.
+    if (heldByAnotherSession && holder.actorFingerprint !== principal.actorFingerprint) {
+      return reject('chat_id_taken')
+    }
+    if (typeof registry.transfer !== 'function') return reject('chat_id_taken')
+    // Story 7.2: the intent REQUIRES an observation — the opaque ticket a
+    // same-Actor 409 carried when the operator looked.
+    if (typeof ticketRaw !== 'string' || ticketRaw.length === 0) {
+      return reject('invalid_request', 'conflict_ticket is required when replace_existing is true: attempt a plain bind first and confirm against the ticket its refusal carries')
+    }
+    const observed = conflictTickets.redeem({
+      ticket: ticketRaw,
+      actorFingerprint: principal.actorFingerprint,
+      chatId,
+    })
+    if (observed === null) return reject('conflict_stale')
+    // The occupancy pair comparison — the same live view the commit below
+    // uses, with no await between here and the transfer. The takeover
+    // displaces the OBSERVED incumbent only: a free name (even briefly), a
+    // new holder, or the SAME key on a NEW occupancy are all stale — never
+    // a fallback into an ordinary claim.
+    const currentHolder = typeof registry.holderOf === 'function' ? registry.holderOf(chatId) : null
+    const currentGeneration = typeof registry.occupancyGeneration === 'function'
+      ? registry.occupancyGeneration(chatId)
+      : null
+    if (currentHolder === null
+      || currentHolder.sessionKey !== observed.incumbentSessionKey
+      || currentGeneration === null
+      || currentGeneration !== observed.observedGeneration) {
+      return reject('conflict_stale')
+    }
+    incumbent = currentHolder.sessionKey
+  } else if (heldByAnotherSession) {
     const sameActor = holder.actorFingerprint === principal.actorFingerprint
-    if (replaceExisting) {
-      // The takeover. A session of a DIFFERENT Actor is never displaced —
-      // and the refusal is the ordinary collision refusal, so the refused
-      // caller learns nothing about who holds the name.
-      if (!sameActor) return reject('chat_id_taken')
-      if (typeof registry.transfer !== 'function') return reject('chat_id_taken')
-      incumbent = holder.sessionKey
-    } else if (
+    if (
       sameActor
       && typeof context.sessionRegistry?.isLive === 'function'
       && context.sessionRegistry.isLive(holder.sessionKey) === false
@@ -565,6 +621,31 @@ function bindSession(context) {
       // name re-claimed. A live session (even of the same Actor) is never
       // displaced, and a different Actor never is.
       registry.release(holder.sessionKey)
+    } else if (
+      sameActor
+      && typeof context.sessionRegistry?.isLive === 'function'
+      && context.sessionRegistry.isLive(holder.sessionKey) === true
+      && typeof registry.occupancyGeneration === 'function'
+      && typeof conflictTickets.mint === 'function'
+    ) {
+      // Story 7.2: the same-Actor LIVE collision is exactly the observation
+      // point — the plain bind's refusal carries the opaque ticket the
+      // operator confirms against. Minted after the stages, bound to the
+      // authenticated Actor and the observed occupancy pair, never to a
+      // bearer or a digest. A full store refuses NEW issuance with the
+      // existing rate_limited (naming the retry delay); nothing existing is
+      // evicted.
+      const minted = conflictTickets.mint({
+        actorFingerprint: principal.actorFingerprint,
+        chatId,
+        observerSessionKey: principal.sessionKey,
+        incumbentSessionKey: holder.sessionKey,
+        observedGeneration: registry.occupancyGeneration(chatId),
+      })
+      if (minted.rateLimited === true) {
+        return reject('rate_limited', undefined, { retry_after_ms: minted.retryAfterMs })
+      }
+      return reject('chat_id_taken', undefined, { conflict_ticket: minted.ticket })
     }
   }
   // The durable claim write runs inside the registry's atomic bind step —
@@ -1104,6 +1185,7 @@ async function handleRequest(request, response, options) {  let pathname = null
     webRoot: options.webRoot,
     sessionRegistry: options.sessionRegistry,
     liveSessionRegistry: options.liveSessionRegistry,
+    conflictTickets: options.conflictTickets,
     challengeRegistry: options.challengeRegistry,
     viewerSessions: options.viewerSessions,
     store: options.store,
@@ -1234,6 +1316,7 @@ export async function startServer({
   viewerSessionRegistry,
   sessionRegistry,
   liveSessionRegistry,
+  conflictTickets,
   challengeRegistry,
   claimsTtlMs = CLAIMS_TTL_MS,
   pruneIntervalMs,
@@ -1441,6 +1524,7 @@ export async function startServer({
   // Story 1.6: the process-default live registry receives the operator-tuned
   // presence TTL; an injected registry is the caller's to configure.
   const effectiveLiveRegistry = liveSessionRegistry ?? createLiveSessionRegistry({ presenceTtlMs })
+  const effectiveConflictTickets = conflictTickets ?? CONFLICT_TICKETS
   // Story 4.1: the challenge nonces follow the same default-plus-override
   // pattern; issuance into the session registry always resolves through the
   // effective one so an injected pair stays coherent.
@@ -1559,6 +1643,7 @@ export async function startServer({
         webRoot,
         sessionRegistry: effectiveRegistry,
         liveSessionRegistry: effectiveLiveRegistry,
+        conflictTickets: effectiveConflictTickets,
         challengeRegistry: effectiveChallengeRegistry,
         viewerSessions: effectiveViewerSessions,
         enrollRateLimiter: effectiveEnrollRateLimiter,

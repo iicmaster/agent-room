@@ -232,6 +232,13 @@ export const PUBLIC_ERRORS = Object.freeze({
   banned: 'this key is banned by the operator',
   chat_id_not_found: 'no actor has claimed this chat id',
   chat_id_taken: 'chat id is already claimed by another connected session',
+  // Story 7.2 (the observed incumbent): the one code every stale conflict
+  // observation answers — unknown, expired, already consumed, wrong Actor,
+  // wrong name, or the occupancy pair moved (including the name going free
+  // and being re-claimed by the SAME key). Collapsing the shapes prevents
+  // fine-grained state leaks while giving the operator one clear meaning:
+  // observe again, then confirm.
+  conflict_stale: 'the conflict ticket is invalid, expired, already consumed, or does not match the current incumbent',
   // Story 4.1: the challenge nonce is missing, expired, already consumed, or
   // evicted — the single code every no-longer-answerable challenge answers.
   challenge_invalid: 'challenge nonce is invalid, expired, or already used',
@@ -344,6 +351,7 @@ export const PUBLIC_ERROR_STATUS = Object.freeze({
   banned: 403,
   chat_id_not_found: 404,
   chat_id_taken: 409,
+  conflict_stale: 409,
   challenge_invalid: 401,
   client_message_id_conflict: 409,
   daemon_start_busy: 503,
@@ -533,6 +541,17 @@ export const CLIENT_LONGPOLL_MARGIN_MS = 3_000
 // release that does not answer in time is simply abandoned (the durable
 // claim row survives either way, so only a lease is lost).
 export const CLIENT_RELEASE_TIMEOUT_MS = 2_000
+
+// Story 7.2 (the observed incumbent): the conflict ticket's lifetime and
+// bounds. The TTL is the operator's confirmation window — fixed
+// (non-sliding), 120 s: the CAS comparison makes staleness safe, so the
+// shorter exposure window is the security default. The bounds gate NEW
+// issuance only; an unexpired ticket is never evicted to make room (the
+// fence's lesson), and re-observing the same (Actor, name) pair replaces
+// that pair's outstanding ticket.
+export const CONFLICT_TICKET_TTL_MS = 120_000
+export const CONFLICT_TICKET_MAX_OUTSTANDING = 4_096
+export const CONFLICT_TICKET_MAX_PER_ACTOR = 64
 
 // Server-side long-poll wake-up cadence (GET /api/rooms/:id/messages): the
 // handler re-polls the store at this interval inside the request — no open

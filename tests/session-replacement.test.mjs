@@ -125,13 +125,41 @@ function sessionRequest(port, method, sessionToken, body) {
   })
 }
 
-// One session of one installation: authenticate, then bind a name.
+// Story 7.2 two-step takeover over a raw session token: observe (the plain
+// bind's same-Actor 409 carries the conflict ticket), then present the
+// intent WITH that ticket — exactly what the CLI does.
+async function takeoverBind(port, token, chatId) {
+  const observation = await sessionRequest(port, 'POST', token, { chat_id: chatId, client_type: 'mcp' })
+  const ticket = observation.json?.error?.conflict_ticket
+  return sessionRequest(port, 'POST', token, {
+    chat_id: chatId,
+    client_type: 'mcp',
+    replace_existing: true,
+    ...(typeof ticket === 'string' && ticket.length > 0 ? { conflict_ticket: ticket } : {}),
+  })
+}
+
+// One session of one installation: authenticate, then bind a name. With
+// { replace: true } this performs the Story 7.2 two-step exactly as the CLI
+// does: the plain bind's same-Actor 409 carries the conflict ticket, which
+// the intent call then presents (a moved incumbent would answer
+// conflict_stale).
 async function bindSession(port, localToken, installation_, chatId, { replace = false } = {}) {
   const token = await exchange(port, installation_, localToken)
+  if (!replace) {
+    const bound = await sessionRequest(port, 'POST', token, { chat_id: chatId, client_type: 'mcp' })
+    return { token, bound }
+  }
+  const observation = await sessionRequest(port, 'POST', token, { chat_id: chatId, client_type: 'mcp' })
+  if (observation.status !== 409 || observation.json?.error?.code !== 'chat_id_taken') {
+    return { token, bound: observation }
+  }
+  const ticket = observation.json.error.conflict_ticket
   const body = { chat_id: chatId, client_type: 'mcp' }
-  if (replace) body.replace_existing = true
+  if (typeof ticket === 'string' && ticket.length > 0) body.conflict_ticket = ticket
+  body.replace_existing = true
   const bound = await sessionRequest(port, 'POST', token, body)
-  return { token, bound }
+  return { token, bound, ticket }
 }
 
 // --- The defect, and the repair ---------------------------------------------------
@@ -150,18 +178,23 @@ test('the defect: a client whose process died keeps the name, and the ordinary r
 
   // Alice restarts. A plain re-auth + re-bind is refused: the holder's
   // token still authenticates, so the server cannot tell a dead process
-  // from a quiet one.
+  // from a quiet one. The same-Actor 409 carries the observed incumbent's
+  // conflict ticket (Story 7.2) — the observation this takeover confirms
+  // against.
   const restarted = await exchange(server.port, alice, localToken)
   const plain = await sessionRequest(server.port, 'POST', restarted, { chat_id: 'Agent', client_type: 'mcp' })
   assert.equal(plain.status, 409, plain.text)
   assert.equal(plain.json.error.code, 'chat_id_taken')
+  assert.equal(typeof plain.json.error.conflict_ticket, 'string', 'the same-Actor collision carries the conflict ticket')
   assert.equal(liveSessionRegistry.holderOf('Agent').sessionKey, deadKey, 'the refused bind changed nothing')
 
-  // The explicit takeover: the operator asks for the handoff by name.
+  // The explicit takeover: the operator asks for the handoff by name,
+  // presenting the observation's ticket.
   const takeover = await sessionRequest(server.port, 'POST', restarted, {
     chat_id: 'Agent',
     client_type: 'mcp',
     replace_existing: true,
+    conflict_ticket: plain.json.error.conflict_ticket,
   })
   assert.equal(takeover.status, 200, takeover.text)
   assert.equal(takeover.json.result.chat_id, 'Agent')
@@ -209,11 +242,7 @@ test('the displaced session\'s late requests cannot land, and its DELETE cannot 
 
   const { token: oldToken } = await bindSession(server.port, localToken, alice, 'Agent')
   const takeoverToken = await exchange(server.port, alice, localToken)
-  const takeover = await sessionRequest(server.port, 'POST', takeoverToken, {
-    chat_id: 'Agent',
-    client_type: 'mcp',
-    replace_existing: true,
-  })
+  const takeover = await takeoverBind(server.port, takeoverToken, 'Agent')
   assert.equal(takeover.status, 200, takeover.text)
   const successorKey = liveSessionRegistry.holderOf('Agent').sessionKey
 
@@ -243,11 +272,7 @@ test('no ownership ping-pong: an automatic re-authentication never takes the nam
 
   const { token: deadToken } = await bindSession(server.port, localToken, alice, 'Agent')
   const takeoverToken = await exchange(server.port, alice, localToken)
-  await sessionRequest(server.port, 'POST', takeoverToken, {
-    chat_id: 'Agent',
-    client_type: 'mcp',
-    replace_existing: true,
-  })
+  await takeoverBind(server.port, takeoverToken, 'Agent')
   const winner = liveSessionRegistry.holderOf('Agent').sessionKey
 
   // The displaced client comes back (its token is dead, so it re-authenticates
@@ -261,7 +286,15 @@ test('no ownership ping-pong: an automatic re-authentication never takes the nam
   assert.notEqual(deadToken, zombieToken)
 })
 
-test('two competing takeovers: the last explicit intent wins, and the loser is fenced', async t => {
+test('Story 7.2: two independent observations — the observed incumbent wins, and the stale observation is refused', async t => {
+  // The A6 flip. v0.2.0's rule was "the last explicit intent wins", which
+  // let a takeover displace whoever held the name at the moment it LANDED.
+  // The observed-incumbent contract: B and C both observe A's occupancy
+  // (independent tickets, both pinning A's pair); B redeems and wins; C's
+  // still-unspent, still-unexpired ticket is now provably stale — the
+  // occupancy it observed is gone — and the redemption is refused with the
+  // coded conflict_stale. Only a FRESH observation (of B) can take the name
+  // from B.
   const { dataDir, server, liveSessionRegistry } = await makeServer(t)
   const localToken = loadOrCreateLocalToken(dataDir)
   const alice = installation()
@@ -270,21 +303,177 @@ test('two competing takeovers: the last explicit intent wins, and the loser is f
   const second = await exchange(server.port, alice, localToken)
   const third = await exchange(server.port, alice, localToken)
 
+  // Two independent observations of the SAME incumbent (per-pair slotting
+  // keys on the OBSERVING session's own ticket — each observation mints its
+  // own, and both pin first's occupancy).
+  const observeB = await sessionRequest(server.port, 'POST', second, { chat_id: 'Agent', client_type: 'mcp' })
+  const observeC = await sessionRequest(server.port, 'POST', third, { chat_id: 'Agent', client_type: 'mcp' })
+  assert.equal(observeB.status, 409, observeB.text)
+  assert.equal(observeC.status, 409, observeC.text)
+  const ticketB = observeB.json.error.conflict_ticket
+  const ticketC = observeC.json.error.conflict_ticket
+  assert.equal(typeof ticketB, 'string', 'the same-Actor collision carries a ticket')
+  assert.equal(typeof ticketC, 'string', 'the same-Actor collision carries a ticket')
+
+  // B redeems its observation and takes the name from first.
   const takeTwo = await sessionRequest(server.port, 'POST', second, {
-    chat_id: 'Agent', client_type: 'mcp', replace_existing: true,
+    chat_id: 'Agent', client_type: 'mcp', replace_existing: true, conflict_ticket: ticketB,
   })
   assert.equal(takeTwo.status, 200, takeTwo.text)
+  assert.equal(takeTwo.json.result.replaced, true)
+
+  // C's unspent ticket — pinned to FIRST's occupancy, which no longer
+  // exists — is refused. It is not burned into a win: the current holder
+  // (second) keeps the name, and a replay of B's consumed ticketB is
+  // refused the same coded way.
+  const staleC = await sessionRequest(server.port, 'POST', third, {
+    chat_id: 'Agent', client_type: 'mcp', replace_existing: true, conflict_ticket: ticketC,
+  })
+  assert.equal(staleC.status, 409, staleC.text)
+  assert.equal(staleC.json.error.code, 'conflict_stale')
+  const replayB = await sessionRequest(server.port, 'POST', second, {
+    chat_id: 'Agent', client_type: 'mcp', replace_existing: true, conflict_ticket: ticketB,
+  })
+  assert.equal(replayB.status, 409, replayB.text)
+  assert.equal(replayB.json.error.code, 'conflict_stale', 'a consumed ticket never wins twice')
+  assert.equal(liveSessionRegistry.holderOf('Agent').sessionKey, sessionKeyFromToken(second), 'the stale observation displaced nobody')
+
+  // A fresh observation of the CURRENT holder wins: the command's retry
+  // path is a new observation and a new confirmation, never a ticket
+  // refresh.
+  const observeC2 = await sessionRequest(server.port, 'POST', third, { chat_id: 'Agent', client_type: 'mcp' })
+  assert.equal(observeC2.status, 409, observeC2.text)
   const takeThree = await sessionRequest(server.port, 'POST', third, {
-    chat_id: 'Agent', client_type: 'mcp', replace_existing: true,
+    chat_id: 'Agent', client_type: 'mcp', replace_existing: true, conflict_ticket: observeC2.json.error.conflict_ticket,
   })
   assert.equal(takeThree.status, 200, takeThree.text)
   assert.equal(takeThree.json.result.replaced, true)
 
-  // The middle session is fenced by the last handoff; the first was fenced
-  // by the second.
+  // The chain of displaced sessions is fenced; the name sits with third.
   assert.equal((await sessionRequest(server.port, 'POST', first, { chat_id: 'Agent' })).status, 401)
   assert.equal((await sessionRequest(server.port, 'POST', second, { chat_id: 'Agent' })).status, 401)
   assert.equal(liveSessionRegistry.holderOf('Agent').sessionKey, sessionKeyFromToken(third))
+})
+
+test('Story 7.2: the takeover intent REQUIRES a conflict ticket, and a ticket without the intent is refused', async t => {
+  const { dataDir, server, liveSessionRegistry } = await makeServer(t)
+  const localToken = loadOrCreateLocalToken(dataDir)
+  const alice = installation()
+
+  const { token: holder } = await bindSession(server.port, localToken, alice, 'Agent')
+  const holderKey = sessionKeyFromToken(holder)
+  const other = await exchange(server.port, alice, localToken)
+
+  // Blind takeover (the retired v0.2.0 shape): refused as a request-shape
+  // error before any state changes.
+  const blind = await sessionRequest(server.port, 'POST', other, {
+    chat_id: 'Agent', client_type: 'mcp', replace_existing: true,
+  })
+  assert.equal(blind.status, 400, blind.text)
+  assert.equal(blind.json.error.code, 'invalid_request')
+  assert.equal(liveSessionRegistry.holderOf('Agent').sessionKey, holderKey, 'the blind takeover took nothing')
+
+  // A ticket is not a side channel: without the intent it is refused the
+  // same request-shape way.
+  const sideChannel = await sessionRequest(server.port, 'POST', other, {
+    chat_id: 'Agent', client_type: 'mcp', conflict_ticket: 'not-a-real-ticket',
+  })
+  assert.equal(sideChannel.status, 400, sideChannel.text)
+  assert.equal(sideChannel.json.error.code, 'invalid_request')
+
+  // A malformed ticket under a true intent is a request-shape refusal too.
+  for (const bad of [null, 1, {}, '', undefined]) {
+    const refused = await sessionRequest(server.port, 'POST', other, {
+      chat_id: 'Agent', client_type: 'mcp', replace_existing: true,
+      ...(bad === undefined ? {} : { conflict_ticket: bad }),
+    })
+    assert.equal(refused.status, 400, `conflict_ticket=${JSON.stringify(bad)} was not refused`)
+    assert.equal(refused.json.error.code, 'invalid_request')
+  }
+  assert.equal(liveSessionRegistry.holderOf('Agent').sessionKey, holderKey, 'nothing was taken')
+})
+
+test('Story 7.2: A→release→A — the same key reclaiming the name makes the old observation stale', async t => {
+  const { dataDir, server, liveSessionRegistry } = await makeServer(t)
+  const localToken = loadOrCreateLocalToken(dataDir)
+  const alice = installation()
+
+  const { token: first } = await bindSession(server.port, localToken, alice, 'Agent')
+  const second = await exchange(server.port, alice, localToken)
+
+  // Observe first's occupancy...
+  const observation = await sessionRequest(server.port, 'POST', second, { chat_id: 'Agent', client_type: 'mcp' })
+  assert.equal(observation.status, 409, observation.text)
+  const ticket = observation.json.error.conflict_ticket
+
+  // ...then the holder releases and the SAME session key rebinds: the name
+  // is held by first again, but it is a NEW occupancy (the generation
+  // moved). The takeover presenting the old ticket must be refused — a
+  // sessionKey-only comparison would have evicted the just-restored holder.
+  const release = await sessionRequest(server.port, 'DELETE', first)
+  assert.equal(release.status, 200, release.text)
+  const rebind = await sessionRequest(server.port, 'POST', first, { chat_id: 'Agent', client_type: 'mcp' })
+  assert.equal(rebind.status, 200, rebind.text)
+
+  const stale = await sessionRequest(server.port, 'POST', second, {
+    chat_id: 'Agent', client_type: 'mcp', replace_existing: true, conflict_ticket: ticket,
+  })
+  assert.equal(stale.status, 409, stale.text)
+  assert.equal(stale.json.error.code, 'conflict_stale')
+  assert.equal(liveSessionRegistry.holderOf('Agent').sessionKey, sessionKeyFromToken(first), 'the restored occupancy is untouched')
+})
+
+test('Story 7.2: a ticket presented under the wrong Actor or wrong name never burns and never wins', async t => {
+  const { dataDir, server } = await makeServer(t)
+  const localToken = loadOrCreateLocalToken(dataDir)
+  const alice = installation()
+  const bob = installation()
+
+  const { token: holder } = await bindSession(server.port, localToken, alice, 'Agent')
+  const aliceOther = await exchange(server.port, alice, localToken)
+  const bobToken = await exchange(server.port, bob, localToken)
+
+  // Alice observes her own incumbent; Bob (a foreign Actor) sees the BARE
+  // envelope — no ticket, no metadata, byte-for-byte the legacy shape.
+  const observeAlice = await sessionRequest(server.port, 'POST', aliceOther, { chat_id: 'Agent', client_type: 'mcp' })
+  assert.equal(observeAlice.status, 409, observeAlice.text)
+  const ticket = observeAlice.json.error.conflict_ticket
+  assert.equal(typeof ticket, 'string')
+  const observeBob = await sessionRequest(server.port, 'POST', bobToken, { chat_id: 'Agent', client_type: 'mcp' })
+  assert.equal(observeBob.status, 409, observeBob.text)
+  assert.equal(observeBob.json.error.conflict_ticket, undefined, 'a foreign collision carries no ticket')
+  assert.deepEqual(Object.keys(observeBob.json.error).sort(), ['code', 'message'], 'the foreign envelope is exactly the legacy shape')
+
+  // A thief holding Alice's ticket but Bob's credential learns nothing and
+  // BURNS nothing: the refusal is the bare chat_id_taken, and Alice's
+  // ticket still redeems afterwards.
+  const stolen = await sessionRequest(server.port, 'POST', bobToken, {
+    chat_id: 'Agent', client_type: 'mcp', replace_existing: true, conflict_ticket: ticket,
+  })
+  assert.equal(stolen.status, 409, stolen.text)
+  assert.equal(stolen.json.error.code, 'chat_id_taken', 'the wrong-Actor presentation answers the bare collision refusal')
+
+  const redeemed = await sessionRequest(server.port, 'POST', aliceOther, {
+    chat_id: 'Agent', client_type: 'mcp', replace_existing: true, conflict_ticket: ticket,
+  })
+  assert.equal(redeemed.status, 200, redeemed.text)
+  assert.equal(redeemed.json.result.replaced, true, 'the rightful ticket survived the wrong-Actor presentation')
+
+  // A ticket used against a DIFFERENT name is stale, and the name it was
+  // minted for keeps its holder.
+  const { token: holder2 } = await bindSession(server.port, localToken, alice, 'Agent')
+  const aliceThird = await exchange(server.port, alice, localToken)
+  const observeOther = await sessionRequest(server.port, 'POST', aliceThird, { chat_id: 'Agent', client_type: 'mcp' })
+  const ticketOther = observeOther.json.error.conflict_ticket
+  // A ticket scoped to 'Agent' presented against a FREE 'Agent-2' target:
+  // the redemption fails the name scope, and a free target NEVER falls back
+  // into an ordinary claim under a takeover intent.
+  const wrongName = await sessionRequest(server.port, 'POST', aliceThird, {
+    chat_id: 'Agent-2', client_type: 'mcp', replace_existing: true, conflict_ticket: ticketOther,
+  })
+  assert.equal(wrongName.status, 409, `a mismatched-name ticket is stale, never a free claim: ${wrongName.text}`)
+  assert.equal(wrongName.json.error.code, 'conflict_stale')
+  assert.notEqual(holder2, undefined)
 })
 
 test('the takeover intent is grammar-checked: a non-boolean is refused, an explicit null means false', async t => {
@@ -404,11 +593,7 @@ test('a failed takeover leaves the incumbent\'s authority intact', async t => {
 
   const { token: incumbentToken } = await bindSession(server.port, localToken, alice, 'Agent')
   const takeoverToken = await exchange(server.port, alice, localToken)
-  const failed = await sessionRequest(server.port, 'POST', takeoverToken, {
-    chat_id: 'Agent',
-    client_type: 'mcp',
-    replace_existing: true,
-  })
+  const failed = await takeoverBind(server.port, takeoverToken, 'Agent')
   assert.equal(failed.status, 500, failed.text)
   // The incumbent still holds the name, and its token still authenticates.
   assert.equal(real.holderOf('Agent').sessionKey, sessionKeyFromToken(incumbentToken))
@@ -451,11 +636,7 @@ test('the takeover preserves the durable claim row and the client\'s cursor file
 
   const { token } = await bindSession(server.port, localToken, alice, 'Agent')
   const takeoverToken = await exchange(server.port, alice, localToken)
-  const takeover = await sessionRequest(server.port, 'POST', takeoverToken, {
-    chat_id: 'Agent',
-    client_type: 'mcp',
-    replace_existing: true,
-  })
+  const takeover = await takeoverBind(server.port, takeoverToken, 'Agent')
   assert.equal(takeover.status, 200, takeover.text)
 
   // The durable (name, Actor) claim survives the takeover — the ambiguity
@@ -713,9 +894,7 @@ test('Story 7.1: a long-poll displaced mid-hold stops serving its holder on the 
 
   // The explicit takeover displaces the polling session while it holds.
   const restarted = await exchange(server.port, alice, localToken)
-  const takeover = await sessionRequest(server.port, 'POST', restarted, {
-    chat_id: 'Agent', client_type: 'mcp', replace_existing: true,
-  })
+  const takeover = await takeoverBind(server.port, restarted, 'Agent')
   assert.equal(takeover.status, 200, takeover.text)
   assert.equal(liveSessionRegistry.holderOf('Agent').sessionKey !== deadKey, true)
 
@@ -955,9 +1134,7 @@ test('the takeover leaves the Actor\'s OTHER names, the peer, the room, and the 
 
   // The takeover of 'Agent' — and nothing else.
   const takeoverToken = await exchange(server.port, alice, localToken)
-  const takeover = await sessionRequest(server.port, 'POST', takeoverToken, {
-    chat_id: 'Agent', client_type: 'mcp', replace_existing: true,
-  })
+  const takeover = await takeoverBind(server.port, takeoverToken, 'Agent')
   assert.equal(takeover.status, 200, takeover.text)
 
   // Alice's OTHER name is untouched, and its session still works.

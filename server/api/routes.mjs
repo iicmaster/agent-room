@@ -34,7 +34,7 @@ export const ROUTE_TABLE = Object.freeze([
   // vocabulary — the connecting session may declare its client type from the
   // closed set in the constants module; an omitted declaration stays null
   // (the server never derives one).
-  Object.freeze({ method: 'POST', path: '/api/session', class: 'actor', implemented: true, requestFields: Object.freeze(['chat_id', 'client_type', 'replace_existing']) }),
+  Object.freeze({ method: 'POST', path: '/api/session', class: 'actor', implemented: true, requestFields: Object.freeze(['chat_id', 'client_type', 'replace_existing', 'conflict_ticket']) }),
   Object.freeze({ method: 'PATCH', path: '/api/session', class: 'actor', implemented: true, requestFields: Object.freeze(['chat_id', 'client_type']) }),
   Object.freeze({ method: 'DELETE', path: '/api/session', class: 'actor', implemented: true, requestFields: Object.freeze([]) }),
   // Story 1.6: the presence read is live — one row per live Session within
@@ -165,6 +165,12 @@ export const REQUEST_FIELD_VOCABULARY = Object.freeze([
   // Actor; PATCH does not accept it (a rename never takes a name) and no
   // automatic re-authentication ever carries it.
   'replace_existing',
+  // Story 7.2 (the observed incumbent): the opaque conflict ticket a
+  // same-Actor 409 chat_id_taken carries in its error envelope, presented
+  // back WITH replace_existing to bind the takeover to the incumbent the
+  // operator observed. POST only — PATCH never takes a name, and a ticket
+  // without the intent is a request-shape refusal.
+  'conflict_ticket',
 ])
 
 export const RESPONSE_FIELD_VOCABULARY = Object.freeze([
@@ -202,6 +208,10 @@ export const RESPONSE_FIELD_VOCABULARY = Object.freeze([
   // fact about the caller's own request, never information about another
   // session.
   'replaced',
+  // Story 7.2: the conflict ticket rides the chat_id_taken error envelope
+  // (declared in the pipeline's ERROR_ENVELOPE_EXTRAS) for same-Actor
+  // collisions only.
+  'conflict_ticket',
 ])
 
 // Matching: specific patterns first, wildcard (`/viewer/` + static assets)

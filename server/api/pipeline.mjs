@@ -56,6 +56,10 @@ const BODY_METHODS = new Set(['POST', 'PATCH'])
 export const ERROR_ENVELOPE_EXTRAS = Object.freeze({
   ambiguous_chat_id: Object.freeze(['candidates']),
   rate_limited: Object.freeze(['retry_after_ms']),
+  // Story 7.2 (the observed incumbent): a same-Actor 409 chat_id_taken
+  // carries the opaque conflict ticket the operator confirms against — the
+  // one extra the takeover flow needs (foreign collisions carry none).
+  chat_id_taken: Object.freeze(['conflict_ticket']),
 })
 
 const ENVELOPE_FIXED_FIELDS = new Set(['ok', 'code', 'message', 'status'])

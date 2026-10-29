@@ -121,10 +121,13 @@ test('the AD-8 envelope sentence pins the wire shape and the fallback code', () 
 test('error-envelope extras are a declared allowlist gated by code and can never clobber fixed fields', () => {
   // The Story 1.7 amendment declared ambiguous_chat_id's optional candidates
   // list; the Story 4.4 amendment added rate_limited's retry_after_ms — the
-  // rate-limited refusal always names its retry delay (FR-17).
-  assert.deepEqual(Object.keys(ERROR_ENVELOPE_EXTRAS), ['ambiguous_chat_id', 'rate_limited'])
+  // rate-limited refusal always names its retry delay (FR-17); the Story
+  // 7.2 amendment added chat_id_taken's conflict_ticket — the observed
+  // incumbent the takeover confirms against (same-Actor collisions only).
+  assert.deepEqual(Object.keys(ERROR_ENVELOPE_EXTRAS), ['ambiguous_chat_id', 'rate_limited', 'chat_id_taken'])
   assert.deepEqual([...ERROR_ENVELOPE_EXTRAS.ambiguous_chat_id], ['candidates'])
   assert.deepEqual([...ERROR_ENVELOPE_EXTRAS.rate_limited], ['retry_after_ms'])
+  assert.deepEqual([...ERROR_ENVELOPE_EXTRAS.chat_id_taken], ['conflict_ticket'])
 
   // Fixed fields are construction-time protected: no declared extra may be
   // named ok, code, message, or status, and a spread of unlisted extras is
@@ -286,7 +289,9 @@ test('the implemented mark covers exactly the live frozen routes', () => {
   const connect = ROUTE_TABLE.find(route => routeKey(route) === 'POST /api/session')
   const rename = ROUTE_TABLE.find(route => routeKey(route) === 'PATCH /api/session')
   const disconnect = ROUTE_TABLE.find(route => routeKey(route) === 'DELETE /api/session')
-  assert.deepEqual([...connect.requestFields], ['chat_id', 'client_type', 'replace_existing'])
+  // Story 7.2: the takeover intent REQUIRES its observation — conflict_ticket
+  // joins POST /api/session (PATCH and DELETE never take it).
+  assert.deepEqual([...connect.requestFields], ['chat_id', 'client_type', 'replace_existing', 'conflict_ticket'])
   assert.deepEqual([...rename.requestFields], ['chat_id', 'client_type'])
   assert.deepEqual([...disconnect.requestFields], [])
   // The Story 1.6 reads: the presence query allowlist is exactly the one
