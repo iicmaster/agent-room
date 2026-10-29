@@ -2,7 +2,7 @@
 
 All notable changes to Agent Room are documented in this file.
 
-## Unreleased
+## 0.3.0 - 2026-10-29
 
 ### Changed
 

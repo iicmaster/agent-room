@@ -1667,3 +1667,107 @@
         file: "tests/session-replacement.test.mjs"
       - test: "the field vocabulary is the live spine AD-8 vocabulary, verbatim"
         file: "tests/api-contract.test.mjs"
+
+# --- Epic 7 (The Session Authority, Hardened) ------------------------------------
+# All six stories closed (2026-10-29): 7.1/7.3 built with review rounds; 7.2
+# built to a two-vendor design gate; 7.4's deliverable is the recorded
+# refusal; 7.5/7.6's instruments pin their own evidence.
+
+  7.1:                       # the fence never lies (A5 + A7 + the comment sweep)
+    note: >-
+      CLOSED. The displaced session's in-flight request is refused after its
+      body arrives (runPipeline's post-input revalidation, synchronous before
+      the handler); the fence's retention is request-counted (pinned entries
+      are never evicted; the 1,000 bound gates only idle tombstones); the
+      long-poll stops at its next wake. Does NOT claim bounded memory
+      independent of concurrency.
+    evidence:
+      - test: "Story 7.1: a request whose body arrives after the handoff is refused at the post-input revalidation"
+        file: "tests/session-replacement.test.mjs"
+      - test: "Story 7.1: the pipeline acquires the pin WITH authentication, before the send route waits on its body in the budget stage"
+        file: "tests/session-replacement.test.mjs"
+      - test: "Story 7.1: the pin is released exactly once across every pipeline exit shape"
+        file: "tests/session-replacement.test.mjs"
+      - test: "Story 7.1: protected predecessors survive far beyond the bound, and their release drains without a further supersession"
+        file: "tests/session-replacement.test.mjs"
+      - test: "Story 7.1: multiple in-flight requests share one pin count; the fence holds until the LAST one ends"
+        file: "tests/session-replacement.test.mjs"
+      - test: "Story 7.1: a long-poll displaced mid-hold stops serving its holder on the next wake"
+        file: "tests/session-replacement.test.mjs"
+
+  7.2:                       # the observed incumbent (A6)
+    note: >-
+      CLOSED. Built to the two-vendor design-of-record: the takeover presents
+      an opaque single-use conflict ticket minted on the same-Actor live
+      collision; redemption compares the (incumbent session key, occupancy
+      generation) pair; every stale shape answers conflict_stale. The CLI
+      observes first. Does NOT change the ban boundary or any 6.4 invariant.
+    evidence:
+      - test: "Story 7.2: two independent observations — the observed incumbent wins, and the stale observation is refused"
+        file: "tests/session-replacement.test.mjs"
+      - test: "Story 7.2: the takeover intent REQUIRES a conflict ticket, and a ticket without the intent is refused"
+        file: "tests/session-replacement.test.mjs"
+      - test: "Story 7.2: A→release→A — the same key reclaiming the name makes the old observation stale"
+        file: "tests/session-replacement.test.mjs"
+      - test: "Story 7.2: a ticket presented under the wrong Actor or wrong name never burns and never wins"
+        file: "tests/session-replacement.test.mjs"
+      - test: "the defect: a client whose process died keeps the name, and the ordinary re-bind is refused; the explicit same-Actor takeover recovers it"
+        file: "tests/session-replacement.test.mjs"
+
+  7.3:                       # always let go (A8 + A9)
+    note: >-
+      CLOSED. One bounded shutdown operation joined by stdin close, SIGTERM,
+      SIGINT, and close(); a total 2,000 ms wall-clock budget; the pending
+      first bind is coordinated and rolled back. SIGKILL/OOM/power loss
+      remain honestly out of scope.
+    evidence:
+      - test: "Story 7.3: SIGTERM releases the name before the child exits (A8)"
+        file: "tests/session-replacement.test.mjs"
+      - test: "Story 7.3: a repeated SIGTERM while the release is held joins the shutdown and still exits cleanly (A8)"
+        file: "tests/session-replacement.test.mjs"
+      - test: "Story 7.3: a release that never answers exits under the declared deadline and records the failure (A8)"
+        file: "tests/session-replacement.test.mjs"
+      - test: "Story 7.3: a bind held when SIGTERM arrives is coordinated and rolled back before exit (A9, child composition)"
+        file: "tests/session-replacement.test.mjs"
+      - test: "Story 7.3: a bind in flight when shutdown begins never publishes (A9, gated)"
+        file: "tests/session-replacement.test.mjs"
+
+  7.4:                       # the automatic recovery design (A2)
+    note: >-
+      CLOSED — the deliverable is the RECORDED REFUSAL (the AC's default
+      baseline). All four named candidates fail the Two-Tab Co-Tenancy bar;
+      the socket design's ECONNREFUSED premise is refuted from Apple XNU
+      sources. Prior delegation is recorded as a possible NEW policy, not
+      ratified. One vendor of record (the agy seat was quota-exhausted —
+      disclosed in the spec).
+    evidence:
+      - test: "the defect: a client whose process died keeps the name, and the ordinary re-bind is refused; the explicit same-Actor takeover recovers it"
+        file: "tests/session-replacement.test.mjs"
+
+  7.5:                       # instruments that recompute (A4 + A10)
+    note: >-
+      CLOSED. The flight-kit observer is the one way the freshness canaries
+      are captured, and the verifier RECOMPUTES the bundle's freshness.json
+      through the same shared arithmetic plus the recording's own container
+      metadata. ADOPTED release-ledger scope (provenance recorded in epics).
+    evidence:
+      - test: "the shipped REL-1 freshness document recomputes exactly, from its own raw epochs"
+        file: "tests/rel1-instruments.test.mjs"
+      - test: "a tampered derived number fails the recomputation — the verifier judges arithmetic, not prose"
+        file: "tests/rel1-instruments.test.mjs"
+      - test: "the flight-kit observer computes a document from raw numbers, 0600, exact arithmetic"
+        file: "tests/rel1-instruments.test.mjs"
+      - test: "the evidence verifier recomputes the shipped REL-1 bundle green, with the FR rows present"
+        file: "tests/rel1-instruments.test.mjs"
+
+  7.6:                       # where the heap goes (A11's open part)
+    note: >-
+      CLOSED — disposition: RECORDED NON-DEFECT (below the instrument's own
+      resolution); the provisional threshold is calibrated with the
+      robustness rule. The INCONCLUSIVE branch was not needed: the
+      recomputation is decisive.
+    evidence:
+      - test: "the attempt-6 retained-state disposition: below instrument resolution, no repair"
+        file: "tests/rel3-retained-state-disposition.test.mjs"
+      - test: "the shipped results file keeps its recorded diagnostic untouched (reported, never gated)"
+        file: "tests/rel3-retained-state-disposition.test.mjs"

@@ -86,9 +86,9 @@ development_status:
   6-3-release-packaging-client-smoke-tests: done
   epic-6-retrospective: done
 
-  epic-7: backlog
+  epic-7: done
   7-1-the-fence-never-lies: done
-  7-2-the-observed-incumbent: in-progress
+  7-2-the-observed-incumbent: done
   7-3-always-let-go: done
   7-4-the-automatic-recovery-design: done
   7-5-instruments-that-recompute: done
@@ -364,3 +364,34 @@ action_items:
     owner: "Epic 7 (story 7.6)"
     status: open
     ref: "docs/implementation/spec-6-2-rel-3-the-formal-soak.md.amendment-2026-10-22.md"
+
+  - id: "epic-7-retro-item-b1-blind-takeover-retired-release-note"
+    epic: 7
+    action: "B1 - the A6 wire change retires the blind replace_existing shape;
+      v0.2.0 clients sending it get a 400 - the release notes must say so"
+    owner: "release"
+    status: open
+    ref: "docs/implementation/epic-7-retro-2026-10-29.md"
+  - id: "epic-7-retro-item-b2-ticket-store-is-memory-say-so"
+    epic: 7
+    action: "B2 - a restart voids outstanding conflict tickets by design; the
+      operator guide should state it once"
+    owner: "next docs pass"
+    status: open
+    ref: "docs/implementation/epic-7-retro-2026-10-29.md"
+  - id: "epic-7-retro-item-b3-robustness-rule-confirmation"
+    epic: 7
+    action: "B3 - the retained-state robustness rule is calibrated by ONE trace;
+      the next qualifying soak is its confirmation run (re-run
+      scripts/rel3-retained-state-analysis.mjs, do not re-derive)"
+    owner: "next soak"
+    status: open
+    ref: "docs/implementation/rel3-retained-state-disposition-2026-10-29.md"
+  - id: "epic-7-retro-item-b4-lane-diagnostics-first"
+    epic: 7
+    action: "B4 - on any advisor-lane failure, read the runner log and probe the
+      seat BEFORE re-dispatching (the 2026-10-28 outage was a cache move plus
+      agy quota exhaustion, both visible in logs)"
+    owner: "orchestrator"
+    status: open
+    ref: "docs/implementation/epic-7-retro-2026-10-29.md"

@@ -21,10 +21,14 @@ const PLUGIN_SCHEMA = 'https://agent-plugins.org/schemas/1.0.0/plugin.schema.jso
 const MCP_SCHEMA = 'https://agent-plugins.org/schemas/1.0.0/mcp.schema.json';
 const sourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
+// The canonical manifest is FROZEN PER RELEASE: the version literal moves
+// with the release stamp (the v0.2.0 release notes' rule — the stamp lands
+// BEFORE the candidate is cut, so the frozen artifact and the shipped
+// artifact are the same bytes).
 const expectedPluginManifest = {
   $schema: PLUGIN_SCHEMA,
   name: 'agent-room',
-  version: '0.2.0',
+  version: '0.3.0',
   description: 'Vendor-neutral agent chat rooms over MCP with a live web viewer',
   author: { name: 'NGS' },
   license: 'MIT',
