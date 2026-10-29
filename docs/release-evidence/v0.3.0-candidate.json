@@ -29,7 +29,7 @@
   },
   "gates": {
     "validator": "claude plugin validate <materialized>/agent-room-claude-code --strict → passed (claude-cli 2.1.310)",
-    "suite": "node --test --test-concurrency=1 --test-timeout=600000 → running against this commit; the tag waits for green",
+    "suite": "node --test --test-concurrency=1 --test-timeout=600000 → GREEN against this commit: 654 pass / 0 fail / 0 skipped (2026-10-29; one compressed-soak flake under parallel load, standalone-green — the documented phase-sensitivity)",
     "ac_sweep": "node scripts/ac-sweep.mjs --epic 7 → clean; --epic 6 → clean (the 6.4 pointer repaired)"
   },
   "soak_question": "RESOLVED 2026-10-29 (the final ruling, archived at docs/implementation/reviews/v030-final-codex.md): SOAK-FIRST. The codex room's correctness hold on the zero-ABA counterexample is WITHDRAWN for this candidate; the fresh qualifying 12-hour soak (the frozen REL-3 contract: candidate-exact identity, eligible host telemetry, every gate passing) is the one remaining condition before the tag — launching it detached on the quiet host and holding the tag for its qualified verdict satisfies the ruling. The room's John and Sally, and the other vendor's room (SHIP 4-1), stand recorded in favor of TAG-on-green; the veto holds. The suite re-run is landing; the tag additionally waits for green."
