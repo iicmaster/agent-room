@@ -30,6 +30,8 @@ import { closeSync, lstatSync, openSync, readFileSync, readSync, readdirSync } f
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { recomputeFreshnessDocument } from './rel1-freshness.mjs'
+
 const KIT = 'rel1-verify-evidence'
 const REPORT_KIT = 'rel1-preflight'
 const DEFAULT_EVIDENCE_DIR = join('docs', 'release-evidence', 'v0.2.0-rel1')
@@ -69,7 +71,8 @@ const USAGE_LINES = [
   '',
   'Required bundle: candidate.json, preflight-claude.json, preflight-zcode.json,',
   'transcript-claude.txt, transcript-zcode.txt, server.log, one recording.mp4|mov|webm|mkv,',
-  'one viewer-session.md|txt|json|har — every file non-zero, every file secret-free.',
+  'one viewer-session.md|txt|json|har, and freshness.json (the flight-kit',
+  'measurement — recomputed by this verifier) — every file non-zero, every file secret-free.',
   '',
   'Exit codes: 0 all checks pass; 1 a check failed; 2 usage.',
 ]
@@ -268,6 +271,81 @@ function verifyViewerSession(file) {
   )
 }
 
+// Story 7.5 (retro A10): the verifier RECOMPUTES, not greps. The freshness
+// figures are recomputed from the recorded raw epoch numbers through the
+// SAME shared arithmetic the flight-kit observer writes with
+// (scripts/rel1-freshness.mjs) — drift between the captured document and
+// the recomputation is a failure — and the recording's own container
+// metadata is parsed (EBML header + DocType for webm/matroska, the ftyp
+// atom for mp4/mov), so a renamed text file cannot pose as the recording.
+function verifyFreshness(filesByName) {
+  const file = filesByName.get('freshness.json')
+  if (!file) {
+    record(
+      'FR:freshness',
+      false,
+      'freshness.json present',
+      'no freshness.json in the bundle. Remediation: capture the two canary measurements with the flight-kit observer (scripts/rel1-freshness-observe.mjs) during the live demo.',
+    )
+    return
+  }
+  let document
+  try {
+    document = JSON.parse(readFileSync(file.absolutePath, 'utf8'))
+  } catch (error) {
+    record('FR:freshness', false, 'freshness.json parses', `freshness.json is not valid JSON: ${error.message}`)
+    return
+  }
+  const mismatches = recomputeFreshnessDocument(document)
+  record(
+    'FR:freshness',
+    mismatches.length === 0,
+    `freshness.json recomputed from its raw epochs: same-clock ${document.same_clock_measurement?.freshness_seconds} s, cross-machine ${document.cross_machine_measurement?.corrected_freshness_seconds} s (corrected) — both inside the ${document.bound_seconds ?? 5} s bound, arithmetic exact.`,
+    `the recomputed freshness disagrees with the recorded document: ${mismatches.join('; ')}. Remediation: recompute the measurement with the flight-kit observer (scripts/rel1-freshness-observe.mjs compute) — never edit the recorded numbers to pass.`,
+  )
+  // The canaries must be exactly the two recorded sequences, one per
+  // machine half — a first transmission distinguished from anything else by
+  // construction (the measurement input carries one epoch pair per canary).
+  const sameSeq = document.same_clock_measurement?.seq
+  const crossSeq = document.cross_machine_measurement?.seq
+  record(
+    'FR:canaries',
+    sameSeq !== undefined && crossSeq !== undefined && sameSeq !== crossSeq,
+    `two distinct canary sequences measured: seq ${sameSeq} (same-clock) and seq ${crossSeq} (cross-machine).`,
+    'the measurement halves do not name two distinct canary sequences. Remediation: measure one canary per machine half with the flight-kit observer.',
+  )
+}
+
+// The recording's container metadata, parsed from its own bytes (not its
+// filename): the EBML magic (0x1A45DFA3) plus DocType 'webm'/'matroska',
+// or the 'ftyp' atom for mp4/mov. This proves container integrity, not
+// content — no claim is made about what the frames show.
+function verifyRecordingContainer(recording) {
+  if (!recording) return
+  const descriptor = openSync(recording.absolutePath, 'r')
+  try {
+    const head = Buffer.alloc(256)
+    const read = readSync(descriptor, head, 0, head.length, 0)
+    const bytes = head.subarray(0, read)
+    let container = null
+    if (bytes.length >= 4 && bytes[0] === 0x1a && bytes[1] === 0x45 && bytes[2] === 0xdf && bytes[3] === 0xa3) {
+      const docTypeAt = bytes.indexOf('webm')
+      const matroskaAt = bytes.indexOf('matroska')
+      container = docTypeAt !== -1 ? 'webm (EBML)' : matroskaAt !== -1 ? 'matroska (EBML)' : 'EBML (DocType not found in the header window)'
+    } else if (bytes.length >= 12 && bytes.subarray(4, 8).toString('latin1') === 'ftyp') {
+      container = `mp4 (ftyp: ${bytes.subarray(8, 12).toString('latin1')})`
+    }
+    record(
+      'FR:recording',
+      container !== null && !container.includes('not found'),
+      `${recording.relativePath}: container metadata parsed from the file's own bytes — ${container}.`,
+      `${recording.relativePath}: the recording's container header did not parse as webm/matroska (EBML) or mp4/mov — the file may be renamed or truncated. Remediation: re-capture the browser-session recording; never convert or re-encode to pass.`,
+    )
+  } finally {
+    closeSync(descriptor)
+  }
+}
+
 function verifySecrets(files) {
   const leaks = []
   for (const file of files) {
@@ -383,6 +461,8 @@ function main() {
   ])
 
   verifyViewerSession(viewerSession && filesByName.has(viewerSession.relativePath) ? viewerSession : null)
+  verifyFreshness(filesByName)
+  verifyRecordingContainer(recording && filesByName.has(recording.relativePath) ? recording : null)
   verifySecrets(entries.filter(entry => !entry.symlink))
 
   finish()

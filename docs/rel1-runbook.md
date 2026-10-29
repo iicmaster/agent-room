@@ -316,7 +316,13 @@ back.
 - [ ] **4. Sequences acknowledged:** both client terminals show `status: committed`
   with a `seq` for every send (all four sends), and each DM reply arrived with the
   `<untrusted_message>` envelope naming the sender.
-- [ ] **5. Evidence saved:** stop the recording and write the observation record:
+- [ ] **5. Evidence saved** — the freshness canaries are measured with the
+  Flight Kit observer (no re-invented arithmetic): arm the browser observer
+  (`node "$KIT/scripts/rel1-freshness-observe.mjs snippet`), run the two
+  canary sends, then compute the evidence file from the raw numbers
+  (`…rel1-freshness-observe.mjs compute --input measurement.json --out
+  "$EVID/freshness.json"`). The evidence verifier later RECOMPUTES this
+  file's arithmetic. Stop the recording and write the observation record:
 
 ```sh
 cat > "$EVID/viewer-session.md" <<'EOF'
