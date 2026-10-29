@@ -2,14 +2,14 @@
   "candidate": "v0.3.0",
   "record_type": "release-candidate-freeze",
   "created": "2026-10-29",
-  "status": "frozen-pending-the-confirmation-gate",
+  "status": "frozen-pending-the-final-confirmation",
   "binding": "The v0.3.0 release gates (the two-vendor round archived at docs/implementation/reviews/v030-release-gate-{codex,agy}.md, and the confirmation round on THIS re-cut) pin THIS candidate. Any change to server/ or the packaging inputs voids it: cut a new one before shipping.",
   "source": {
-    "git_commit": "92014de67c1c902e97b0cb2218f825e7ef8462b3",
+    "git_commit": "a0c345f18a90bcb98a8c86cfdcdb2125a2fa2cec",
     "git_branch": "main",
     "packager": "scripts/package-release.mjs",
     "packager_invocation": "node scripts/package-release.mjs --out <fresh-absolute-dir>",
-    "supersedes": "129f70235477c8bfe893ad39c9d70e0a68908793 — voided by the gates' packaged-byte fixes (the unbounded generation history, the missed runtime APP_VERSION stamp, and the honest upgrade/authority text). The gates' verdicts against it are archived; this re-cut answers them."
+    "supersedes": "92014de67c1c902e97b0cb2218f825e7ef8462b3 — voided by the confirmation round's executed zero-ABA finding (evicted generations read a fallback 0; two occupancies of one name could share {holder, 0} and a pinned ticket wrongly allowed the second). The re-cut makes zero unobservable (null semantics; the mint refuses unknown generations; every observable stamp is unique)."
   },
   "artifacts": {
     "digest_algorithm": "SHA-256 folded over every regular file in package-relative path-sorted order: for each file, update with hex(sha256(relative_path)) + '\n' + hex(sha256(file_bytes)) + '\n'; the final hex digest is the tree digest (tests/release-smoke.test.mjs, treeDigest). No metadata (mtimes, modes, inodes) enters the digest.",
@@ -17,19 +17,19 @@
     "portable": {
       "package": "agent-room-agent-plugin",
       "files": 47,
-      "bytes": 831824,
-      "sha256": "9cd46f34f83fe8ddcf78bf77823155829da046ce3ea15f199f445a4556d71f6e"
+      "bytes": 833017,
+      "sha256": "f680085ee7f6a12c1bdf245b17268941ddd203f8105f148aafc1d6823c8d89dc"
     },
     "claude_code": {
       "package": "agent-room-claude-code",
       "files": 47,
-      "bytes": 831684,
-      "sha256": "97e1ddb32c5841d4dc231cffc191f63d01444a327e6277a8db6ee3d6321c57b5"
+      "bytes": 832877,
+      "sha256": "657c02d4ef2857ae351711db69f04e655efe6950e35fda61dd03662e9ef9b700"
     }
   },
   "gates": {
     "validator": "claude plugin validate <materialized>/agent-room-claude-code --strict → passed (claude-cli 2.1.310)",
-    "suite": "node --test --test-concurrency=1 --test-timeout=600000 → GREEN against this commit: 654 pass / 0 fail / 0 skipped (2026-10-29)",
+    "suite": "node --test --test-concurrency=1 --test-timeout=600000 → running against this commit; the tag waits for green",
     "ac_sweep": "node scripts/ac-sweep.mjs --epic 7 → clean; --epic 6 → clean (the 6.4 pointer repaired)"
   },
   "soak_question": "Open, put to the confirmation gate: the codex room split (Winston+Vex demand a fresh qualifying 12-hour soak; John+Sally accept the targeted repair plus a recorded waiver) and the agy room unanimously granted the waiver for THIS session-authority repair because the traffic-bound memory surface is unchanged and the new state is bounded (the defect that voided the waiver argument — the unbounded history — is repaired with its regression). The confirmation round rules on it with the fixes in hand; if the soak is required, it launches detached on the quiet host and the tag waits for its verdict."

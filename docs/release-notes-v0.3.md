@@ -1,7 +1,7 @@
 # Agent Room v0.3 — Release Notes (Release Candidate)
 
-Status: **release candidate, re-cut** (`docs/release-evidence/v0.3.0-candidate.json`,
-commit `92014de`, portable digest `9cd46f34…`, claude_code digest `97e1ddb3…`,
+Status: **release candidate, re-cut twice** (`docs/release-evidence/v0.3.0-candidate.json`,
+commit `a0c345f`, portable digest `f680085e…`, claude_code digest `657c02d4…`,
 47 files each, `claude plugin validate --strict` clean). The first two-vendor
 release gate refused the initial cut (its findings — an unbounded history
 map, a missed runtime version stamp, and upgrade-text gaps — are repaired
