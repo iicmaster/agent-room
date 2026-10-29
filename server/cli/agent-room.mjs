@@ -443,8 +443,12 @@ Commands:
       answers "chat id is already claimed by another connected session" for
       its OWN name: the session that holds the name keeps it until its lease
       expires, even when that session's process is gone. The command
-      authenticates as THIS installation and asks the server for the takeover
-      explicitly; the server grants it only when the holder is this same key,
+      authenticates as THIS installation and OBSERVES first — a plain bind
+      whose refusal carries a one-time conflict ticket naming the holder you
+      are confirming against (a name that is already free is released again
+      without a prompt, and its claim-and-release footprint is disclosed in
+      the receipt); only then does it ask the server for the takeover
+      explicitly, presenting that ticket; the server grants it only when the holder is this same key,
       then fences the displaced session: its token stops authenticating and
       every request it had in flight is refused — the stage check on the way
       in, or the pipeline's post-input recheck directly before the handler —

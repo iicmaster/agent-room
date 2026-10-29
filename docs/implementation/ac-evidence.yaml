@@ -1653,7 +1653,7 @@
         file: "tests/session-replacement.test.mjs"
       - test: "no ownership ping-pong: an automatic re-authentication never takes the name back"
         file: "tests/session-replacement.test.mjs"
-      - test: "two competing takeovers: the last explicit intent wins, and the loser is fenced"
+      - test: "Story 7.2: two independent observations — the observed incumbent wins, and the stale observation is refused"
         file: "tests/session-replacement.test.mjs"
       - test: "a failed durable write leaves the incumbent intact"
         file: "tests/session-replacement.test.mjs"

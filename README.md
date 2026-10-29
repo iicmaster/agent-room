@@ -83,7 +83,8 @@ Two things to know before you run it:
 
 The MCP adapter's teardown paths — stdin closing, SIGTERM, SIGINT — join ONE
 bounded shutdown operation. When the server is reachable, the Chat ID is
-handed back before the process exits, so a one-shot vendor CLI no longer
+handed back before the process exits (when it is not, the failure is
+recorded and a lease may remain — see above), so a one-shot vendor CLI no longer
 leaves its name reserved behind that race; a shutdown during the very first
 bind is coordinated, and a bind that completes after the shutdown began is
 rolled back and never published. When the server is NOT reachable, the
@@ -92,6 +93,17 @@ exits inside the declared 2,000 ms bound — a lease may remain until it
 expires, and the record says so. (SIGKILL, OOM kills, and power loss are
 outside any teardown path's reach; the takeover above is the recovery for
 those.)
+
+## Migrating a takeover script from v0.2.0
+
+The takeover now REQUIRES its observation: `replace_existing: true` alone is
+refused with 400 `invalid_request`. The two-step is observe (a plain bind
+whose same-Actor 409 carries `conflict_ticket` in its error envelope), then
+present `replace_existing: true, conflict_ticket: <that ticket>` — a stale
+observation answers 409 `conflict_stale`. Ordinary reconnects never send the
+intent and are unaffected. One operational note: observing a name that is
+FREE claims it for the CLI session and releases it again immediately (the
+receipt says so) — the observation is not a side-effect-free read.
 
 ## Tools
 

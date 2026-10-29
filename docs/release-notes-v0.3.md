@@ -7,8 +7,9 @@ two-vendor release gate over the whole release diff is the last gate before
 tagging.
 
 v0.3 is **the session authority, hardened** — every defect the v0.2 release
-gates executed or recorded, repaired at the root, plus the two instrument
-debts. No new features; no new external dependencies; Node ≥ 24.15.
+gates executed or recorded is repaired at the root or carries a recorded
+disposition, plus the two instrument debts. No new features; no new external
+dependencies; Node ≥ 24.15.
 
 ## The takeover names the holder you saw (A6 — the observed incumbent)
 
@@ -66,10 +67,16 @@ trace: below the instrument's own resolution (core slope 0.00 %/h, endpoint
 never moves a display bucket, the 9.2-MiB mode held for nine-plus hours) —
 a recorded non-defect, with the threshold calibrated for the next trace.
 
-## Upgrading from v0.2.0
+## Upgrading from v0.2.0 — a coordinated server+client step
 
-- Data and rooms are untouched: same schema, same realm, same durable
-  claims — drop-in replacement of the package.
+- Data and rooms are untouched: same schema, same realm, same durable claims.
+- **Upgrade the SERVER first and restart it** (the local daemon or the
+  remote server): a v0.3 client whose takeover observation reaches a v0.2
+  server sees the bare `chat_id_taken` (the v0.2 server never issues
+  tickets) and reads it as a foreign holder — the versions must move
+  together. Verify the serving version with `GET /health` before switching
+  clients.
 - If you scripted the takeover API: add the two-step (observe → present the
-  ticket); the blind shape is a 400.
+  ticket); the blind shape is a 400. A server restart voids outstanding
+  observations — re-observe after any restart.
 - The full changelog: `CHANGELOG.md` (0.3.0 - 2026-10-29).

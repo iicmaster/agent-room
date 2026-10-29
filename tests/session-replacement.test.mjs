@@ -423,6 +423,62 @@ test('Story 7.2: A→release→A — the same key reclaiming the name makes the 
   assert.equal(liveSessionRegistry.holderOf('Agent').sessionKey, sessionKeyFromToken(first), 'the restored occupancy is untouched')
 })
 
+test('Story 7.2 (release gate): the occupancy-generation history is BOUNDED, and eviction only ever refuses', async t => {
+  // The release gate's executed finding: the per-name generation history was
+  // an unbounded map — one session churning distinct names grew it forever,
+  // against the design-of-record's explicit choice. The bound restores the
+  // shape. Safety, pinned: eviction can only make a takeover refuse (the
+  // observed pair vs a re-derived 0), never wrongly allow one — and every
+  // effective transition (the only events staleness turns on) re-inserts
+  // the name with a fresh sequence value, so A→free→A stays stale.
+  const { GENERATION_HISTORY_MAX } = await import('../server/constants.mjs')
+
+  // 1. Distinct-name churn far past the bound: the oldest stamps evict.
+  const registry = createLiveSessionRegistry()
+  const actor = `sha256:${'f'.repeat(64)}`
+  for (let index = 0; index < GENERATION_HISTORY_MAX + 5_000; index += 1) {
+    registry.claim({ sessionKey: 'churn', chatId: `name-${index}`, actorFingerprint: actor })
+    registry.release('churn')
+  }
+  assert.equal(registry.occupancyGeneration('name-0'), 0, 'the oldest churned name was evicted')
+  assert.ok(registry.occupancyGeneration(`name-${GENERATION_HISTORY_MAX + 4_999}`) > 0, 'the newest stamps are retained')
+
+  // 2. Under fill pressure, the observed pair stays CONSISTENT: mint and
+  // redemption read the same generation (evicted or not), so the takeover
+  // of an UNCHANGED holder succeeds and displaces exactly that holder.
+  const { dataDir, server, liveSessionRegistry } = await makeServer(t)
+  const localToken = loadOrCreateLocalToken(dataDir)
+  const alice = installation()
+  const holder = await bindSession(server.port, localToken, alice, 'Agent')
+  const otherToken = await exchange(server.port, alice, localToken)
+  for (let index = 0; index < GENERATION_HISTORY_MAX + 100; index += 1) {
+    liveSessionRegistry.claim({ sessionKey: `filler-${index % 97}`, chatId: `filler-${index}`, actorFingerprint: actor })
+  }
+  const observation = await sessionRequest(server.port, 'POST', otherToken, { chat_id: 'Agent', client_type: 'mcp' })
+  assert.equal(observation.status, 409, observation.text)
+  const redeem = await sessionRequest(server.port, 'POST', otherToken, {
+    chat_id: 'Agent', client_type: 'mcp', replace_existing: true,
+    conflict_ticket: observation.json.error.conflict_ticket,
+  })
+  assert.equal(redeem.status, 200, redeem.text)
+  assert.equal(liveSessionRegistry.holderOf('Agent').sessionKey, sessionKeyFromToken(otherToken), 'the OBSERVED holder was displaced — nobody else')
+
+  // 3. A→free→A under the same pressure: release + re-claim are two
+  // effective transitions, both re-stamping the name — the old observation
+  // is stale regardless of eviction.
+  const third = await exchange(server.port, alice, localToken)
+  const observe2 = await sessionRequest(server.port, 'POST', third, { chat_id: 'Agent', client_type: 'mcp' })
+  const ticket2 = observe2.json.error.conflict_ticket
+  assert.equal(await sessionRequest(server.port, 'DELETE', otherToken).then(r => r.status), 200)
+  const reclaim = await sessionRequest(server.port, 'POST', otherToken, { chat_id: 'Agent', client_type: 'mcp' })
+  assert.equal(reclaim.status, 200, reclaim.text)
+  const stale = await sessionRequest(server.port, 'POST', third, {
+    chat_id: 'Agent', client_type: 'mcp', replace_existing: true, conflict_ticket: ticket2,
+  })
+  assert.equal(stale.status, 409, stale.text)
+  assert.equal(stale.json.error.code, 'conflict_stale', 'A→free→A stays stale under eviction pressure')
+})
+
 test('Story 7.2: a ticket presented under the wrong Actor or wrong name never burns and never wins', async t => {
   const { dataDir, server } = await makeServer(t)
   const localToken = loadOrCreateLocalToken(dataDir)

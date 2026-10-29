@@ -66,6 +66,7 @@
 
 import {
   CLIENT_TYPES,
+  GENERATION_HISTORY_MAX,
   FINGERPRINT_HEX_LENGTH,
   FINGERPRINT_PATTERN,
   FINGERPRINT_PREFIX,
@@ -176,6 +177,18 @@ export function createLiveSessionRegistry({ now = Date.now, leaseMs = SESSION_TT
   const stampGeneration = normalized => {
     occupancySequence += 1
     generations.set(normalized, occupancySequence)
+    // The history is BOUNDED (the design-of-record chose the global sequence
+    // over an unbounded per-name map; this keeps the map's shape honest).
+    // Eviction is provably safe in the REFUSE direction only: an evicted
+    // name reads generation 0, and every effective transition (the only
+    // events a ticket's staleness turns on) RE-INSERTS the name with a fresh
+    // sequence value — so eviction can make a takeover refuse (observed pair
+    // vs 0), never wrongly allow one, and A→free→A still passes through two
+    // transitions and stays stale.
+    while (generations.size > GENERATION_HISTORY_MAX) {
+      const oldest = generations.keys().next().value
+      generations.delete(oldest)
+    }
   }
 
   // The name's CURRENT generation (0 before its first observed transition):

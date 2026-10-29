@@ -24,7 +24,9 @@ All notable changes to Agent Room are documented in this file.
 - The takeover is bound to the observed incumbent (Story 7.2, retro action
   A6): a plain bind's same-Actor 409 now carries an opaque `conflict_ticket`
   (single-use, server-side, voided by any restart, bound to the authenticated
-  Actor and the observing session — never a bearer or a digest), and
+  Actor and the requested name — its issuance slot is per observing session,
+  but redemption checks the Actor and the observed occupancy, never which
+  session presents it; it is never a bearer or a digest), and
   `replace_existing: true` REQUIRES presenting it. The server redeems the
   ticket against the exact occupancy it observed — the incumbent session key
   AND a per-occupancy generation — so a takeover can no longer displace

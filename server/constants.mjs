@@ -553,6 +553,13 @@ export const CONFLICT_TICKET_TTL_MS = 120_000
 export const CONFLICT_TICKET_MAX_OUTSTANDING = 4_096
 export const CONFLICT_TICKET_MAX_PER_ACTOR = 64
 
+// Story 7.2 (release-gate finding): the occupancy-generation history is a
+// bounded FIFO of per-name stamps. The bound never gates a ticket's
+// correctness — eviction can only make a stale takeover refuse (a fresh
+// transition re-inserts the name), never wrongly allow one — it keeps the
+// history map's memory honest against distinct-name churn.
+export const GENERATION_HISTORY_MAX = 4_096
+
 // Server-side long-poll wake-up cadence (GET /api/rooms/:id/messages): the
 // handler re-polls the store at this interval inside the request — no open
 // read transaction is held while waiting.
