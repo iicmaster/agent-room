@@ -6,6 +6,21 @@ All notable changes to Agent Room are documented in this file.
 
 ### Changed
 
+- The REL-1 flight kit measures and verifies by computation (Story 7.5): the
+  freshness observer (`scripts/rel1-freshness-observe.mjs`) is the one way
+  the canary measurements are captured, and the evidence verifier
+  RECOMPUTES the bundle's freshness.json through the same shared arithmetic
+  (a drift between the recorded document and its recomputation is a
+  failure), parses the recording's own container metadata from its bytes,
+  and requires the two distinct measured canary sequences.
+- The retained-state diagnostic's "rising" reading is dispositioned
+  (Story 7.6): recomputation from the archived attempt-6 trace shows the
+  rise is below the instrument's own resolution (the robust core slope is
+  0.00 %/h, the endpoint never moves a display bucket, and the 9.2-MiB mode
+  holds ~90% of the final window for nine-plus hours) — a recorded
+  non-defect, no retainer repair indicated, and the provisional threshold
+  is calibrated with a robustness rule for the next trace. The shipped
+  results file stands exactly as captured.
 - The takeover is bound to the observed incumbent (Story 7.2, retro action
   A6): a plain bind's same-Actor 409 now carries an opaque `conflict_ticket`
   (single-use, server-side, voided by any restart, bound to the authenticated
