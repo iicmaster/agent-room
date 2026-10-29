@@ -2,13 +2,14 @@
   "candidate": "v0.3.0",
   "record_type": "release-candidate-freeze",
   "created": "2026-10-29",
-  "status": "frozen-pending-the-release-gate",
-  "binding": "The v0.3.0 release gate (both vendor advisors, one round over the whole release diff) pins THIS candidate. Any change to server/ or the packaging inputs after this freeze voids the candidate: cut a new one (re-materialize, re-run the gates) before shipping.",
+  "status": "frozen-pending-the-confirmation-gate",
+  "binding": "The v0.3.0 release gates (the two-vendor round archived at docs/implementation/reviews/v030-release-gate-{codex,agy}.md, and the confirmation round on THIS re-cut) pin THIS candidate. Any change to server/ or the packaging inputs voids it: cut a new one before shipping.",
   "source": {
-    "git_commit": "129f70235477c8bfe893ad39c9d70e0a68908793",
+    "git_commit": "92014de67c1c902e97b0cb2218f825e7ef8462b3",
     "git_branch": "main",
     "packager": "scripts/package-release.mjs",
-    "packager_invocation": "node scripts/package-release.mjs --out <fresh-absolute-dir>"
+    "packager_invocation": "node scripts/package-release.mjs --out <fresh-absolute-dir>",
+    "supersedes": "129f70235477c8bfe893ad39c9d70e0a68908793 — voided by the gates' packaged-byte fixes (the unbounded generation history, the missed runtime APP_VERSION stamp, and the honest upgrade/authority text). The gates' verdicts against it are archived; this re-cut answers them."
   },
   "artifacts": {
     "digest_algorithm": "SHA-256 folded over every regular file in package-relative path-sorted order: for each file, update with hex(sha256(relative_path)) + '\n' + hex(sha256(file_bytes)) + '\n'; the final hex digest is the tree digest (tests/release-smoke.test.mjs, treeDigest). No metadata (mtimes, modes, inodes) enters the digest.",
@@ -16,20 +17,20 @@
     "portable": {
       "package": "agent-room-agent-plugin",
       "files": 47,
-      "bytes": 829486,
-      "sha256": "beb2d2af239e6f37501109a83f2efcc44a60409c76ef6d4139c892fbf73c0054"
+      "bytes": 831824,
+      "sha256": "9cd46f34f83fe8ddcf78bf77823155829da046ce3ea15f199f445a4556d71f6e"
     },
     "claude_code": {
       "package": "agent-room-claude-code",
       "files": 47,
-      "bytes": 829346,
-      "sha256": "4510d48448fa45c6febc525643853eb87a48537d44940be5e325f81081ca0880"
+      "bytes": 831684,
+      "sha256": "97e1ddb32c5841d4dc231cffc191f63d01444a327e6277a8db6ee3d6321c57b5"
     }
   },
   "gates": {
     "validator": "claude plugin validate <materialized>/agent-room-claude-code --strict → passed (claude-cli 2.1.310)",
-    "suite": "node --test --test-concurrency=1 --test-timeout=600000 → pending this record (recorded in the release notes on completion)",
-    "ac_sweep": "node scripts/ac-sweep.mjs --epic 7 → clean (6 stories, 11 criteria, 23 pointers, 648 tests)"
+    "suite": "node --test --test-concurrency=1 --test-timeout=600000 → running against this commit; the tag waits for green",
+    "ac_sweep": "node scripts/ac-sweep.mjs --epic 7 → clean; --epic 6 → clean (the 6.4 pointer repaired)"
   },
-  "notes": "The compressed soak's developmentTree mode (candidate-verdict 'development-tree-deterministic') applies to harness validation during development; a QUALIFYING soak against THIS record has not been run — the release gate below decides whether v0.3.0 ships without one (the changes are session-authority repairs with the suite's real-child coverage; the memory-bound surface the soak guards is unchanged in shape, and story 7.6 dispositioned the retained-state finding as below instrument resolution)."
+  "soak_question": "Open, put to the confirmation gate: the codex room split (Winston+Vex demand a fresh qualifying 12-hour soak; John+Sally accept the targeted repair plus a recorded waiver) and the agy room unanimously granted the waiver for THIS session-authority repair because the traffic-bound memory surface is unchanged and the new state is bounded (the defect that voided the waiver argument — the unbounded history — is repaired with its regression). The confirmation round rules on it with the fixes in hand; if the soak is required, it launches detached on the quiet host and the tag waits for its verdict."
 }

@@ -1,10 +1,12 @@
 # Agent Room v0.3 — Release Notes (Release Candidate)
 
-Status: **release candidate, frozen** (`docs/release-evidence/v0.3.0-candidate.json`,
-commit `129f702`, portable digest `beb2d2af…`, claude_code digest `4510d484…`,
-47 files each, `claude plugin validate --strict` clean). The one-round
-two-vendor release gate over the whole release diff is the last gate before
-tagging.
+Status: **release candidate, re-cut** (`docs/release-evidence/v0.3.0-candidate.json`,
+commit `92014de`, portable digest `9cd46f34…`, claude_code digest `97e1ddb3…`,
+47 files each, `claude plugin validate --strict` clean). The first two-vendor
+release gate refused the initial cut (its findings — an unbounded history
+map, a missed runtime version stamp, and upgrade-text gaps — are repaired
+in this re-cut; both verdicts archived); the confirmation round on this
+candidate is the last gate before tagging.
 
 v0.3 is **the session authority, hardened** — every defect the v0.2 release
 gates executed or recorded is repaired at the root or carries a recorded
