@@ -83,9 +83,15 @@ test('REL-3 compressed validation: the soak harness runs the candidate artifact 
     assert.ok(document.traffic.reads > 0, 'the clients advanced cursors with reads')
 
     // The rules evaluated with the run's own numbers, and all passed (the
-    // status assertion already gates this; these name the numbers).
+    // status assertion already gates this; these name the numbers). The
+    // endpoint term is REPORTED ONLY — the ratified amendment gates the
+    // slope alone, and at compressed scale the endpoint is the documented
+    // phase-sensitive term (the 5-minute window can open on any point of
+    // the allocator's sawtooth); asserting it would judge by a rule the
+    // project never ratified.
     assert.equal(document.rules.finalWindowRss.pass, true, 'the final-window total-growth rule passed')
-    assert.ok(document.rules.finalWindowRss.growthRatio <= 0.02, 'the endpoint growth is within the 2% bound')
+    assert.equal(document.rules.finalWindowRss.gatedTerm, 'slope_implied_growth')
+    assert.ok(Number.isFinite(document.rules.finalWindowRss.growthRatio), 'the endpoint growth is reported (finite)')
     assert.ok(document.rules.finalWindowRss.impliedGrowthRatio <= 0.02, 'the regression-implied growth is within the 2% bound')
     assert.equal(document.rules.fdStability.pass, true, 'the FD corridor rule passed')
     assert.ok(document.rules.fdStability.worstAbsDrift <= 5, 'FD drift stayed within +-5 of the baseline')

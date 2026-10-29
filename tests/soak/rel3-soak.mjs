@@ -165,7 +165,14 @@ import {
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const PACKAGER_ENTRY = join(ROOT, 'scripts', 'package-release.mjs')
-const CANDIDATE_RECORD = join(ROOT, 'docs', 'release-evidence', 'v0.2.0-candidate.json')
+// The frozen candidate record this soak proves its identity against. The
+// default is the record of the release being qualified; AGENT_ROOM_CANDIDATE_RECORD
+// (an absolute or repo-relative path) re-points it — v0.3.0's qualifying run
+// uses docs/release-evidence/v0.3.0-candidate.json. The launcher's identity
+// discipline is untouched: the record's digests are the law either way.
+const CANDIDATE_RECORD = process.env.AGENT_ROOM_CANDIDATE_RECORD !== undefined
+  ? resolve(ROOT, process.env.AGENT_ROOM_CANDIDATE_RECORD)
+  : join(ROOT, 'docs', 'release-evidence', 'v0.2.0-candidate.json')
 const RECORDER_ENTRY = join(ROOT, 'tests', 'drills', 'rel2-recorder-child.mjs')
 const RESULTS_JSON_NAME = 'v0.2.0-soak-results.json'
 const RESULTS_MD_NAME = 'v0.2.0-soak-results.md'
