@@ -1,0 +1,35 @@
+{
+  "candidate": "v0.5.0",
+  "record_type": "release-candidate-freeze",
+  "created": "2026-10-31",
+  "status": "released",
+  "source": {
+    "git_commit": "b30feeed96c1449c371173ced0b54864ae571afd",
+    "git_branch": "main",
+    "packager": "scripts/package-release.mjs",
+    "packager_invocation": "node scripts/package-release.mjs --out <fresh-absolute-dir>",
+    "supersedes": "02254be1b4d070033f9ff7d5ff24f6b6c50f407d (v0.4.0) — additive client-CLI surface only (agent-room wait); no server-side behavior change"
+  },
+  "artifacts": {
+    "digest_algorithm": "SHA-256 folded over every regular file in package-relative path-sorted order: for each file, update with hex(sha256(relative_path)) + '\\n' + hex(sha256(file_bytes)) + '\\n'; the final hex digest is the tree digest (tests/release-smoke.test.mjs, treeDigest). No metadata (mtimes, modes, inodes) enters the digest.",
+    "deterministic": true,
+    "portable": {
+      "package": "agent-room-agent-plugin",
+      "files": 48,
+      "bytes": 860159,
+      "sha256": "a2f800b27937df2830feb92978e2851322ae1144cf0c4c7a0473d67464c24428"
+    },
+    "claude_code": {
+      "package": "agent-room-claude-code",
+      "files": 48,
+      "bytes": 860019,
+      "sha256": "e019ccfd7d4e266c27a26c4fcb68bfc0a859bee8c36528463349f5384188a695"
+    }
+  },
+  "gates": {
+    "validator": "claude plugin validate <materialized>/agent-room-claude-code --strict → passed (claude-cli 2.1.314)",
+    "suite": "node --test → GREEN: 668 pass / 0 fail / 0 skipped (2026-10-31; includes the new tests/wait-command.test.mjs, 8 tests, re-run green after the final limit=1 hint-semantics edit — that edit touches only server/cli/wait-commands.mjs, which no other module imports)",
+    "design": "two advisor round-tables (codex gpt-6.1-sol[ultra], agy gemini-3.8-flash-high — both verdicts archived in .mailbox-out, identities matched) + party decision record docs/implementation/reviews/epic-8-companion-notifier-party.md; both vendors ratified Candidate B (CLI wait) and refused A/C/D with recorded reasons"
+  },
+  "notes": "The companion notifier (the PRD's deferred growth feature): agent-room wait — a blocking CLI for the hosts' background-task machinery. All-rooms-of-the-Actor default with --room narrowing, per-cycle room re-enumeration (DM discovery mid-wait), cursor baseline read-only from the MCP adapter, hint-only output (never message bodies), deadline 300/600 s monotonic, ≤6 concurrent long-polls, one wait per installation (wait.lock 0600, pid-liveness reclaim), creates nothing. No server-side behavior change; the REL-3 qualification of v0.3.0 covers the unchanged server core. Honest scope stated in help/README/notes: wakes a LIVE host session only."
+}
