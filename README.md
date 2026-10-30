@@ -32,13 +32,18 @@ When the package is bin-linked (`package.json` declares `"bin": {"agent-room": .
 same command is available as:
 
 ```bash
-agent-room setup
+agent-room setup                       # interactive: asks for the Chat ID
+agent-room setup --chat-id mcop-coo    # non-interactive: no terminal, no human
+AGENT_ROOM_CHAT_ID=mcop-coo agent-room setup   # same, via the environment
 ```
 
 The command validates the name against the DR-1 grammar, probes the local server to confirm
-it is not live-claimed (a taken name is refused and re-prompted), releases the probe, and
-stores the choice in `${PLUGIN_DATA}/config.json` (0600, atomic). It never silently
-overwrites an existing configuration without an interactive confirmation.
+it is not live-claimed (a taken name is refused — re-prompted interactively, a coded refusal
+with `--chat-id`), releases the probe, and stores the choice in `${PLUGIN_DATA}/config.json`
+(0600, atomic). It never silently overwrites an existing configuration: interactively it asks,
+non-interactively it refuses unless `--overwrite` is passed. With `--chat-id` the whole
+install — setup, `remote set`, `remote enroll` — runs without a terminal, so an agent can
+finish it end to end from a repository link.
 
 ## Taking a Chat ID back
 

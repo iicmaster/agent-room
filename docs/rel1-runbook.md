@@ -134,9 +134,11 @@ node "$PKG_ZCODE/server/cli/agent-room.mjs" remote enroll "ar_inv1_…"   # past
   plugin's own config does).
 
   Two facts worth knowing before you start, both measured on a real run:
-  - **`agent-room setup` needs a TTY.** Run it in a terminal (or a tmux pane),
-    not in a pipeline — a piped stdin closes before readline reads it, and the
-    command answers "setup ended before a Chat ID was chosen".
+  - **`agent-room setup` needs a TTY — or `--chat-id`.** Interactive setup runs
+    in a terminal (or a tmux pane), not in a pipeline — a piped stdin closes
+    before readline reads it, and the command answers "setup ended before a
+    Chat ID was chosen". An agent passes `--chat-id <id>` (or
+    `AGENT_ROOM_CHAT_ID`) instead and no terminal is involved.
   - **Mint and redeem the invite in one step.** An invite has exactly one use;
     minting a spare and redeeming the wrong one leaves the server holding an
     invite the client cannot use (`invite is unknown to this server` when the
