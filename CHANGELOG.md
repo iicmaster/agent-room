@@ -2,6 +2,22 @@
 
 All notable changes to Agent Room are documented in this file.
 
+## 0.4.0 - 2026-10-31
+
+### Added
+
+- The client install is finishable without a terminal (PR #1): `agent-room
+  setup --chat-id <id> [--overwrite]` (or `AGENT_ROOM_CHAT_ID=<id>`) runs the
+  same grammar gate, live probe, and 0600 atomic config write with the
+  questions answered up front — every prompt either supplied or the command
+  refuses (`invalid_request`-family refusal, nothing written). Interactive
+  mode is byte-for-byte unchanged.
+- `agent-room session replace [--yes]` and `agent-room allow-all [--yes]`
+  answer their y/N confirmations up front, so the whole client lifecycle —
+  setup, remote set/enroll, takeover, accept-all — is scriptable by an agent.
+  Bare non-TTY stdin without `--yes` is still refused; takeover keeps the
+  observe-first conflict-ticket flow and the own-key-only rule.
+
 ## 0.3.0 - 2026-10-29
 
 ### Changed
