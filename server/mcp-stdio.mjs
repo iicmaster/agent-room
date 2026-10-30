@@ -99,6 +99,7 @@ import {
   heldList,
   registerHeldMessages,
 } from './client/held.mjs'
+import { notifierEnabled, startNotifier } from './client/notifier.mjs'
 
 // Run the runtime gate before any other work. Direct launches report one
 // diagnosable line and exit 1 with no stack trace; importers get a catchable
@@ -462,6 +463,11 @@ export function createMcpServer({
   // for a missing Chat ID — surfaces per call and never poisons the client.
   let clientPromise = null
   let realmId = null
+  // The companion notifier (server/client/notifier.mjs): started after the
+  // first successful tool call — the first bind — never before, and stopped
+  // by the shared shutdown. A notifier that stopped on a session-level
+  // refusal clears itself, so the next successful call starts a fresh one.
+  let notifier = null
   function getClient() {
     clientPromise ??= createAgentRoomClient({ dataDir, pluginDataDir: pluginData })
     return clientPromise
@@ -484,6 +490,7 @@ export function createMcpServer({
   const shutdown = () => {
     if (shutdownPromise !== null) return shutdownPromise
     shutdownPromise = (async () => {
+      notifier?.stop()
       for (const controller of pending.values()) controller.abort()
       pending.clear()
       let outcome = 'no_session'
@@ -547,6 +554,19 @@ export function createMcpServer({
     return realmId
   }
 
+  const startNotifierOnce = () => {
+    if (notifier !== null || shutdownPromise !== null || clientPromise === null || !notifierEnabled(env)) return
+    const started = startNotifier({
+      client: clientPromise,
+      pluginDataDir: pluginData,
+      realmIdOf,
+      env,
+      errorOutput,
+      onStop: () => { if (notifier === started) notifier = null },
+    })
+    notifier = started
+  }
+
   const callTool = async (name, args, signal) => {
     const invalid = validateArguments(name, args)
     if (invalid) return toolResult({ code: 'invalid_arguments', message: invalid }, true)
@@ -556,11 +576,13 @@ export function createMcpServer({
         return toolResult(await readyClient.presence({ includeOffline: args.include_offline ?? false, signal }))
       }
       if (name === 'room_direct_open') {
-        return toolResult(await readyClient.directOpen({
+        const opened = await readyClient.directOpen({
           chatId: args.chat_id,
           ...(args.target_fingerprint === undefined ? {} : { targetFingerprint: args.target_fingerprint }),
           signal,
-        }))
+        })
+        notifier?.kick()
+        return toolResult(opened)
       }
       if (name === 'message_send') {
         return toolResult(await readyClient.sendMessage({
@@ -768,7 +790,9 @@ export function createMcpServer({
       const controller = new AbortController()
       pending.set(String(id), controller)
       try {
-        write(rpcResult(id, await callTool(message.params.name, message.params.arguments ?? {}, controller.signal)))
+        const result = await callTool(message.params.name, message.params.arguments ?? {}, controller.signal)
+        if (result.isError !== true) startNotifierOnce()
+        write(rpcResult(id, result))
       } finally {
         pending.delete(String(id))
       }

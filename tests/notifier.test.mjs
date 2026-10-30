@@ -22,7 +22,13 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
-import { CLIENT_RELEASE_TIMEOUT_MS, NOTIFIER_ACTIVE_WINDOW_MS, NOTIFIER_PREVIEW_MAX, NOTIFIER_ROOM_LIMIT } from '../server/constants.mjs'
+import {
+  CLIENT_RELEASE_TIMEOUT_MS,
+  NOTIFIER_ACTIVE_WINDOW_MS,
+  NOTIFIER_PREVIEW_MAX,
+  NOTIFIER_ROOM_LIMIT,
+  NOTIFIER_ROOM_REFRESH_MS,
+} from '../server/constants.mjs'
 import { untrustedMessageEnvelope } from '../server/client/api-client.mjs'
 import { REMOTE_TRANSPORT, applyTrustMatrix, emptyAllowlist } from '../server/client/trust.mjs'
 import { INBOX_FILENAME, inboxEntry, selectWatchedRooms } from '../server/client/notifier.mjs'
@@ -31,11 +37,16 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const MCP_ENTRY = join(ROOT, 'server', 'mcp-stdio.mjs')
 const SERVER_ENTRY = join(ROOT, 'server', 'api', 'server.mjs')
 
-// Harness bounds (not product limits): the brief's ≤25 s delivery bound, the
-// server readiness wait, and the stdin-close exit bound — the release budget
-// plus a margin. A long-poll left held after teardown keeps the process alive
-// for the whole hold, far past this bound.
+// Harness bounds (not product limits): the brief's ≤25 s delivery bound; a
+// DM a peer opens is discovered on the next room-list re-read, so that row
+// waits one refresh period plus the delivery margin; a DM opened by alice
+// herself (room_direct_open kicks the re-read) must land well inside one
+// refresh period; the server readiness wait; and the stdin-close exit bound —
+// the release budget plus a margin. A long-poll left held after teardown
+// keeps the process alive for the whole hold, far past this bound.
 const DELIVERY_TIMEOUT_MS = 25_000
+const PEER_DM_TIMEOUT_MS = NOTIFIER_ROOM_REFRESH_MS + 10_000
+const KICKED_DM_TIMEOUT_MS = 5_000
 const SERVER_READY_TIMEOUT_MS = 10_000
 const EXIT_AFTER_STDIN_CLOSE_MS = CLIENT_RELEASE_TIMEOUT_MS + 2_000
 const LINE_KEYS = ['chat_id', 'fingerprint', 'held', 'preview', 'room_id', 'seq', 'ts']
@@ -217,15 +228,30 @@ test('the notifier writes one inbox line per foreign message, skips its own, fol
   // followed from its first message — the room is new, so all of it is news.
   const dm = structured(await bob.tool('room_direct_open', { chat_id: 'alice' })).room_id
   const dmFirst = structured(await bob.tool('message_send', { room_id: dm, client_message_id: 'b-dm-1', text: 'first dm' }))
-  await waitFor(() => inboxLines(alicePlugin).some(entry => entry.room_id === dm), 'the later-opened DM line')
+  await waitFor(() => inboxLines(alicePlugin).some(entry => entry.room_id === dm), 'the peer-opened DM line', PEER_DM_TIMEOUT_MS)
   const dmSecond = structured(await bob.tool('message_send', { room_id: dm, client_message_id: 'b-dm-2', text: 'second dm' }))
   await waitFor(() => inboxLines(alicePlugin).filter(entry => entry.room_id === dm).length === 2, 'the second DM line')
+
+  // The DM line above came from a periodic re-read, so the next one is a full
+  // period away: a DM alice opens herself is picked up at once because
+  // room_direct_open kicks the re-read.
+  const carolDm = structured(await alice.tool('room_direct_open', { chat_id: 'carol' })).room_id
+  const carolSent = structured(await carol.tool('message_send', { room_id: carolDm, client_message_id: 'c-dm-1', text: 'from carol' }))
+  await waitFor(() => inboxLines(alicePlugin).some(entry => entry.room_id === carolDm), 'the kicked DM line', KICKED_DM_TIMEOUT_MS)
   lines = inboxLines(alicePlugin)
   assert.deepEqual(
-    lines.map(entry => [entry.room_id, entry.seq, entry.preview]),
-    [[broadcast, bobSent.seq, line.preview], [dm, dmFirst.seq, 'first dm'], [dm, dmSecond.seq, 'second dm']],
+    lines.map(entry => [entry.room_id, entry.seq, entry.chat_id, entry.preview]),
+    [
+      [broadcast, bobSent.seq, 'bob', line.preview],
+      [dm, dmFirst.seq, 'bob', 'first dm'],
+      [dm, dmSecond.seq, 'bob', 'second dm'],
+      [carolDm, carolSent.seq, 'carol', 'from carol'],
+    ],
     'one line per foreign message, in arrival order, no duplicates',
   )
+  const hookLines = () => readFileSync(hookOut, 'utf8').split('\n').filter(Boolean).map(text => JSON.parse(text))
+  await waitFor(() => hookLines().length === lines.length, 'the hook to see every line')
+  assert.deepEqual(hookLines(), lines, 'the hook received exactly the inbox lines, one per run')
 
   // AGENT_ROOM_NOTIFIER=off: carol received the same broadcast but has no inbox.
   assert.equal(existsSync(join(carolPlugin, INBOX_FILENAME)), false, 'a disabled notifier writes nothing')
