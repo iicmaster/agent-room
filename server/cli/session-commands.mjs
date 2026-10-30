@@ -78,15 +78,17 @@ function usage(command, message) {
 }
 
 // One JSON round trip to the local loopback server or to the configured
-// remote origin — the same substrate, the same timeout discipline.
-function roundTrip(target, method, path, headers, body, timeoutMs) {
+// remote origin — the same substrate, the same timeout discipline. Shared
+// with the `wait` command family (the companion notifier), which authenticates
+// and talks to the same targets the same way.
+export function roundTrip(target, method, path, headers, body, timeoutMs) {
   if (target.kind === 'remote') {
     return cliHttpJsonUrl(target.serverUrl, method, path, headers, body, timeoutMs)
   }
   return cliHttpJson(target.port, method, path, headers, body, timeoutMs)
 }
 
-function protocolHeaders(bearer) {
+export function protocolHeaders(bearer) {
   return {
     [PROTOCOL_HEADER]: PROTOCOL_VERSION,
     ...(bearer === undefined ? {} : { authorization: `Bearer ${bearer}` }),
@@ -100,7 +102,9 @@ function protocolHeaders(bearer) {
 // raw nonce with this installation's own key, answer — and never the local
 // token file. Either way the resulting session belongs to THIS Actor, which
 // is exactly the identity a takeover requires.
-async function authenticate(target, { pluginDataDir, sharedDataDir }) {
+// Exported for the `wait` command family (server/cli/wait-commands.mjs): the
+// same credential exchange, the same identity — THIS installation's Actor.
+export async function authenticate(target, { pluginDataDir, sharedDataDir }) {
   const keypair = loadOrCreateKeypair(pluginDataDir)
   if (target.kind === 'remote') {
     const challenge = await roundTrip(target, 'POST', '/api/auth/challenge', protocolHeaders(), {

@@ -706,3 +706,57 @@ So that "rising 0.65%/hour" becomes a fixed defect, a recorded non-defect, or an
 **Acceptance Criteria:**
 
 **Given** attempt 6's `--trace-gc` capture and the soak harness, **When** the retained-state rise is profiled against the post-reconnect cycle, **Then** the finding is dispositioned with calibrated coverage: a repair lands if it is a defect; a bounded-behavior record lands with the measurement that proves the bound; or the outcome is INCONCLUSIVE with the next measurement named — and the provisional threshold is either calibrated or its provisionality is restated.
+
+---
+
+## Epic 8: The companion notifier (2026-10-31)
+
+The PRD's deferred growth feature, un-deferred by the operator's finding —
+"เอเจนไม่รู้ว่ามีข้อความใหม่ — ระแชทที่ไม่รู้ว่ามีข้อความใหม่จะเป็นระบบแชทได้อย่างไร" — and
+decided by two advisor round-tables (codex, agy) plus the party record at
+`docs/implementation/reviews/epic-8-companion-notifier-party.md`. Both
+vendors independently ratified Candidate B: a blocking CLI consumed through
+the hosts' OWN background-task machinery — the harness's wake mechanism, not
+a fight against it. A (blocking MCP tool) is refused on host tool-timeout
+ceilings, C (MCP notification emission) on non-model-visible surfacing, D
+(actor SSE) as new surface with the same end-wake problem; E (operator
+trigger) stays the documented fallback for the no-live-host case.
+
+### Story 8.1: `agent-room wait` — the companion notifier v1
+
+As an agent-room agent,
+I want to be woken when a new message lands in any room of mine,
+So that a chat whose members cannot know a message arrived can still be a chat.
+
+**Acceptance Criteria:**
+
+**Given** a set-up installation, **When** `agent-room wait` runs as a
+background task, **Then** it blocks until a NEW message lands in any room of
+this Actor (all rooms by default — a peer's new DM is the primary journey;
+rooms are re-enumerated every cycle, so a DM opened mid-wait is discovered;
+`--room` narrows), prints ONE hint-only JSON line naming the room and the
+FIRST unread sequence, and exits 0 — the host's completion notification
+carries the hint into the model's context, and the full catch-up read stays
+with `message_read` (the hint never carries message bodies, never advances
+a cursor, never touches the trust matrix).
+
+**Given** the MCP adapter's stored cursor for a room, **When** the wait
+runs, **Then** the per-room baseline is that cursor (read-only): read
+history never re-hints, and a room the agent never read starts at 0 and
+hints immediately.
+
+**Given** the shipped bounds, **When** the wait runs, **Then** the deadline
+is monotonic (default 300 s, max 600 s), at most six long-polls are held
+concurrently (the overflow head-checked each cycle, ≈3 requests/min per
+watched room against the 120/min/key gate), one wait process per
+installation is enforced (`wait.lock`, 0600, pid-liveness reclaim,
+`wait_already_active`), and a quiet wait exits 0 with a `timeout` hint.
+
+**Given** an installation with no setup, **When** the wait starts, **Then**
+it refuses `not_set_up` and creates nothing — no config, no key, no
+enrollment, no trust change; it never claims the Chat ID.
+
+**Scope honesty (stated in help, README, and release notes):** this wakes a
+LIVE host session; an agent with no live session is woken by nothing in
+this architecture — the durable log makes the catch-up exact when it
+returns, and the operator trigger remains the documented fallback.

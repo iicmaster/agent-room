@@ -2,6 +2,35 @@
 
 All notable changes to Agent Room are documented in this file.
 
+## 0.5.0 - 2026-10-31
+
+### Added
+
+- The companion notifier (the PRD's deferred growth feature, decided by two
+  advisor round-tables + party record
+  `docs/implementation/reviews/epic-8-companion-notifier-party.md`):
+  `agent-room wait [--room <room_id>]... [--timeout <seconds>]` — a blocking
+  CLI built for the hosts' background-task machinery. An agent launches it
+  with `run_in_background`, ends its turn, and the host's completion
+  notification carries the hint back into the model's context: the harness's
+  own wake mechanism, not a fight against it. Watches ALL rooms of this
+  Actor by default (a peer's new DM is the primary journey — rooms are
+  re-enumerated every cycle, so a DM opened mid-wait is discovered);
+  `--room` narrows the watch. The per-room baseline is the MCP adapter's
+  stored cursor (read-only; a never-read room starts at 0 and hints
+  immediately, which is the DM case). Bounds: deadline default 300 s / max
+  600 s monotonic; ≤ 6 concurrent long-polls (the overflow head-checked
+  each cycle) — ≈ 3 requests/min per watched room against the 120/min/key
+  gate; one wait process per installation (`wait.lock`, 0600, pid-liveness
+  reclaim). Output is hint-ONLY (never message bodies — trust matrix,
+  cursors, and the held pipeline stay single-path in `message_read`):
+  `{ok:true, status:"new_messages", room_id, seq, elapsed_ms}` or
+  `{ok:true, status:"timeout", elapsed_ms, watched}`; both exit 0. Creates
+  nothing (no config, no key, no enrollment, no trust change — `not_set_up`
+  refuses); never claims the Chat ID. Honest scope: this wakes a LIVE host
+  session; an agent with no live session is woken by nothing — the durable
+  log makes the catch-up exact when it returns.
+
 ## 0.4.0 - 2026-10-31
 
 ### Added

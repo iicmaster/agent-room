@@ -134,6 +134,7 @@ import { runBanFamilyCommand } from './ban-commands.mjs'
 import { runCapacityFamilyCommand } from './capacity-commands.mjs'
 import { runViewerFamilyCommand } from './viewer-commands.mjs'
 import { runSessionFamilyCommand } from './session-commands.mjs'
+import { runWaitFamilyCommand } from './wait-commands.mjs'
 
 const OK_STATUS = 200
 // The collision status is owned by the constants table (chat_id_taken), never restated.
@@ -486,6 +487,29 @@ Commands:
       command's lease holds the name until it expires. The optional Chat ID
       defaults to the configured one.
 
+  agent-room wait [--room <room_id>]... [--timeout <seconds>]
+      The companion notifier: block until a NEW message lands in any room of
+      this Actor (Broadcast and every Direct Room), then print ONE JSON hint
+      line — {ok, command, status:"new_messages", room_id, seq (the FIRST
+      unread sequence), elapsed_ms} —
+      and exit 0, so an agent that launched it as a BACKGROUND task
+      (run_in_background) is woken by its host's completion notification and
+      reads the room with its ordinary message_read (the hint never carries
+      message bodies; cursors and the trust matrix stay message_read's).
+      Rooms are re-enumerated every cycle, so a DM opened mid-wait is
+      discovered; a room the agent has never read starts at sequence 0 and
+      hints immediately. With --room, watch only the named rooms (repeated
+      --room allowed; an unknown room refuses). The deadline defaults to 300
+      seconds (max 600): a quiet wait prints {status:"timeout", elapsed_ms,
+      watched} and still exits 0 — a clean timeout is a hint, and re-arming
+      is the agent's ordinary next action. One wait process per installation
+      (a second refuses with wait_already_active; a crashed one's lock is
+      reclaimed). Creates nothing: setup must be complete first (not_set_up
+      otherwise), and the wait never claims the Chat ID, never writes
+      cursors, and never changes trust. Honest scope: this wakes a LIVE host
+      session; an agent with no live session is woken by nothing — the
+      durable log makes the catch-up exact when it returns.
+
   agent-room help
       Show this help.
 
@@ -670,7 +694,7 @@ export async function main(argv = process.argv.slice(2), {
   // this printer. (Capacity's refuse state keeps its report on stdout and
   // exits 1 through the outcome's exitCode — the report IS the answer, and
   // the exit code is the severity a script keys on.)
-  if (command === 'invite' || command === 'remote' || command === 'ban' || command === 'unban' || command === 'capacity' || command === 'viewer' || command === 'session') {
+  if (command === 'invite' || command === 'remote' || command === 'ban' || command === 'unban' || command === 'capacity' || command === 'viewer' || command === 'session' || command === 'wait') {
     const outcome = command === 'invite'
       ? await runInviteFamilyCommand(subcommand, argv.slice(2), deps)
       : command === 'remote'
@@ -681,7 +705,9 @@ export async function main(argv = process.argv.slice(2), {
             ? await runViewerFamilyCommand(subcommand, argv.slice(2), deps)
             : command === 'session'
               ? await runSessionFamilyCommand(subcommand, argv.slice(2), deps)
-              : await runBanFamilyCommand(command, argv.slice(1), deps)
+              : command === 'wait'
+                ? await runWaitFamilyCommand(argv.slice(1), deps)
+                : await runBanFamilyCommand(command, argv.slice(1), deps)
     if (outcome.status === 'ok') {
       for (const line of outcome.lines) output.write(`${line}\n`)
       if (outcome.exitCode === 1) process.exitCode = 1
