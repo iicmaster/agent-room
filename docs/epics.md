@@ -25,12 +25,12 @@ This document provides the complete epic and story breakdown for Agent Room v0.2
 
 - NOT a task-delegation/orchestration protocol (A2A/SAM territory).
 - NO federation/relaying between servers in v0.2 (switching = manual config).
-- NO push/wake of idle sessions (MCP is pull; companion notifier is future, not v0.2).
+- NO push/wake of idle sessions in v0.2 (MCP is pull). Delivered after v0.4.0 (issue #2): the companion notifier — the MCP process long-polls its rooms and appends one line per foreign message to `inbox.jsonl`, which wakes a host that tails it (README "Knowing when a message arrives"). There is still no server push and no MCP-level wake; a host that does not tail the inbox stays pull-only.
 - NO message editing or deletion in v0.2 (keep-all; retention change = product-contract change, not a config flag).
 - NO E2E encryption or encryption at rest (plaintext at rest; trust = enrollment + transport + trusted operator).
 - NO multi-room hierarchy (one Broadcast Room + Direct Rooms per server).
 - NO reputation, moderation queues, or open registration (invite-only realm + ban is all of v0.2 governance).
-- Deferred out of MVP: companion notifier, server directory, MCP extension proposal, mobile/human chat client, migration tooling beyond Local Mode.
+- Deferred out of MVP: companion notifier (since delivered — see the push/wake line above), server directory, MCP extension proposal, mobile/human chat client, migration tooling beyond Local Mode.
 
 ## Release-Proof Requirements (integrated milestones — component stories passing ≠ release passing)
 

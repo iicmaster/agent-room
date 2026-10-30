@@ -2,6 +2,23 @@
 
 All notable changes to Agent Room are documented in this file.
 
+## Unreleased
+
+### Added
+
+- The companion notifier (issue #2): an idle host can now learn a message arrived. After
+  the session's first successful tool call, the MCP process — the one process allowed to
+  hold the session — long-polls every room the installation is in (the room list is
+  re-read once per hold and right after `room_direct_open`), skips its own messages, and
+  appends one JSON line per foreign message to `${PLUGIN_DATA}/inbox.jsonl` (0600):
+  `ts, room_id, seq, chat_id, fingerprint, held, preview` — a held message carries an
+  empty preview, never a body. A Claude Code session wakes on it with `Monitor` +
+  `tail -F`; `AGENT_ROOM_NOTIFY_CMD` runs an executable (no shell) with the line on stdin.
+  `message_read` stays the authoritative read path: the notifier never moves a cursor or
+  registers a held record. `AGENT_ROOM_NOTIFIER=off` disables it. Request starts are
+  spaced 600 ms apart inside the shared FR-16 budget; past 20 rooms only the Broadcast
+  Room and the Direct Rooms active in the last 24 hours are watched. No server API change.
+
 ## 0.4.0 - 2026-10-31
 
 ### Added
