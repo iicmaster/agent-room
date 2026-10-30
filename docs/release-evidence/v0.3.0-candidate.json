@@ -2,7 +2,7 @@
   "candidate": "v0.3.0",
   "record_type": "release-candidate-freeze",
   "created": "2026-10-29",
-  "status": "frozen-pending-the-final-confirmation",
+  "status": "released",
   "binding": "The v0.3.0 release gates (the two-vendor round archived at docs/implementation/reviews/v030-release-gate-{codex,agy}.md, and the confirmation round on THIS re-cut) pin THIS candidate. Any change to server/ or the packaging inputs voids it: cut a new one before shipping.",
   "source": {
     "git_commit": "a0c345f18a90bcb98a8c86cfdcdb2125a2fa2cec",
@@ -30,7 +30,8 @@
   "gates": {
     "validator": "claude plugin validate <materialized>/agent-room-claude-code --strict → passed (claude-cli 2.1.310)",
     "suite": "node --test --test-concurrency=1 --test-timeout=600000 → GREEN against this commit: 654 pass / 0 fail / 0 skipped (2026-10-29; one compressed-soak flake under parallel load, standalone-green — the documented phase-sensitivity)",
-    "ac_sweep": "node scripts/ac-sweep.mjs --epic 7 → clean; --epic 6 → clean (the 6.4 pointer repaired)"
+    "ac_sweep": "node scripts/ac-sweep.mjs --epic 7 → clean; --epic 6 → clean (the 6.4 pointer repaired)",
+    "soak": "REL-3 attempt 7 → PASS + adjudication eligible (2026-10-30T02:37Z)"
   },
-  "soak_question": "RESOLVED 2026-10-29 (the final ruling, archived at docs/implementation/reviews/v030-final-codex.md): SOAK-FIRST. The codex room's correctness hold on the zero-ABA counterexample is WITHDRAWN for this candidate; the fresh qualifying 12-hour soak (the frozen REL-3 contract: candidate-exact identity, eligible host telemetry, every gate passing) is the one remaining condition before the tag — launching it detached on the quiet host and holding the tag for its qualified verdict satisfies the ruling. The room's John and Sally, and the other vendor's room (SHIP 4-1), stand recorded in favor of TAG-on-green; the veto holds. The suite re-run is landing; the tag additionally waits for green."
+  "soak_question": "RESOLVED AND SATISFIED 2026-10-30: the qualifying 12-hour soak (attempt 7, launched 2026-10-29T14:32Z on the quiet host under the frozen REL-3 contract — thresholds digest 253ef296… matched at launch and scoring) finished 02:37Z with the harness verdict PASS (724.6 wall minutes, candidate-exact against THIS record, 33,875 acknowledged == readable with 0 duplicates/0 lost, FD worst drift 1 of ±5, the final-window slope's implied growth 0.0072 against the 0.02 bound) and the host window's adjudication returned ELIGIBLE. The results are docs/release-evidence/v0.3.0-soak-results.{json,md}; the attempt's own files, telemetry and adjudication live under attempt7-a0c345f.* on the host. Both conditions of the final SOAK-FIRST ruling are met; the tag follows."
 }

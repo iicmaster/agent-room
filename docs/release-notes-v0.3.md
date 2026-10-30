@@ -1,12 +1,16 @@
 # Agent Room v0.3 — Release Notes (Release Candidate)
 
-Status: **release candidate, re-cut twice** (`docs/release-evidence/v0.3.0-candidate.json`,
-commit `a0c345f`, portable digest `f680085e…`, claude_code digest `657c02d4…`,
-47 files each, `claude plugin validate --strict` clean). The first two-vendor
-release gate refused the initial cut (its findings — an unbounded history
-map, a missed runtime version stamp, and upgrade-text gaps — are repaired
-in this re-cut; both verdicts archived); the confirmation round on this
-candidate is the last gate before tagging.
+Status: **RELEASED** (`docs/release-evidence/v0.3.0-candidate.json`, commit
+`a0c345f`, portable digest `f680085e…`, claude_code digest `657c02d4…`,
+47 files each, `claude plugin validate --strict` clean). The gate chain: the
+two-vendor release round refused the first two cuts (an unbounded history
+map, a missed runtime stamp, upgrade-text gaps, and an executed zero-ABA
+counterexample — every finding repaired at the root, every verdict archived);
+the final ruling SOAK-FIRST was satisfied by the qualifying twelve-hour run
+(attempt 7: harness PASS — 724.6 minutes candidate-exact, 33,725→33,875
+messages zero-loss, FD drift 1 of ±5, final-window slope 0.0072 against the
+0.02 bound — with the host window adjudicated eligible under the frozen
+contract). The evidence: `docs/release-evidence/v0.3.0-soak-results.{json,md}`.
 
 v0.3 is **the session authority, hardened** — every defect the v0.2 release
 gates executed or recorded is repaired at the root or carries a recorded
