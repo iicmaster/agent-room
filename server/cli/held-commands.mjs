@@ -581,14 +581,16 @@ function askConfirm({ input, output, question }) {
   })
 }
 
-export async function runAllowAll({ input, output, sharedDataDir, pluginDataDir }, { remove = false } = {}) {
+export async function runAllowAll({ input, output, sharedDataDir, pluginDataDir }, { remove = false, yes = false } = {}) {
   // The non-TTY gate comes FIRST (review patch): the blanket grant can never
   // be driven programmatically, so a non-TTY stdin is refused before any
   // server is booted, any token read, or any state file created — pipes, the
   // MCP host, and CI leave zero footprint. The fail-safe --remove direction
   // keeps running without a TTY and still opens the session (it needs the
   // realm).
-  if (remove !== true && !input.isTTY) {
+  // `--yes` answers the y/N up front so an agent can switch accept-all on
+  // without a terminal; the gate below still refuses a bare non-TTY stdin.
+  if (remove !== true && yes !== true && !input.isTTY) {
     return { ok: false, command: 'allow-all', code: 'invalid_request', message: ALLOW_ALL_REQUIRES_TTY_MESSAGE }
   }
   const session = await openCliSession({ sharedDataDir, pluginDataDir })
@@ -606,7 +608,7 @@ export async function runAllowAll({ input, output, sharedDataDir, pluginDataDir 
       ],
     }
   }
-  const confirmed = await askConfirm({
+  const confirmed = yes === true ? true : await askConfirm({
     input,
     output,
     question: `agent-room allow-all delivers every future sender in realm ${session.realmId} without per-sender verification. The untrusted envelope stays on delivered bodies. Continue? [y/N] `,

@@ -353,7 +353,7 @@ Commands:
       messages. With --remove the entry is removed instead: future messages
       from that key are held again; already-ingested text is untouched.
 
-  agent-room allow-all [--remove]
+  agent-room allow-all [--remove] [--yes]
       Allow every future sender in this realm (accept-all). Asks for an
       interactive y/N confirmation; --remove switches it off without one
       (holding messages again is the fail-safe direction).
@@ -457,7 +457,7 @@ Commands:
       nothing and is retryable with the same token; a committed enrollment
       never needs another invite — reconnecting is automatic.
 
-  agent-room session replace [<chat-id>]
+  agent-room session replace [<chat-id>] [--yes]
       Take this installation's Chat ID back from the session that still holds
       it. Use it when your client died, was killed, or lost its host and now
       answers "chat id is already claimed by another connected session" for
@@ -477,7 +477,8 @@ Commands:
       long-poll stops at its next wake.) A session of a DIFFERENT key is
       never displaced. The takeover is never done automatically: the command
       asks for an
-      interactive y/N first and refuses a non-interactive stdin — that
+      interactive y/N first and refuses a non-interactive stdin unless --yes
+      answers it up front (an agent taking its own name back) — that
       confirmation guards against accidents, it is not proof that a human
       answered. When the server acknowledges the release the name is free
       again immediately, so the client that uses it can bind it on its next
@@ -572,12 +573,12 @@ async function runHeldFamilyCommand(command, subcommand, tokens, deps) {
     })
   }
   if (command === 'allow-all') {
-    const parsed = parseTokens(tokens, { booleanFlags: ['--remove'] })
+    const parsed = parseTokens(tokens, { booleanFlags: ['--remove', '--yes'] })
     if (parsed.error) return failure('allow-all', 'invalid_request', `${parsed.error}; see "agent-room help"`)
     if (parsed.positional.length > 0) {
       return failure('allow-all', 'invalid_request', `unexpected argument "${parsed.positional[0]}"; see "agent-room help"`)
     }
-    return runAllowAll(deps, { remove: parsed.options['--remove'] === true })
+    return runAllowAll(deps, { remove: parsed.options['--remove'] === true, yes: parsed.options['--yes'] === true })
   }
   return null
 }

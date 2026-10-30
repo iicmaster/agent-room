@@ -74,9 +74,11 @@ Two things to know before you run it:
 
 - **The confirmation is a guardrail against accidents, not a security
   boundary.** The command refuses a non-interactive stdin, so a pipe or a
-  script cannot displace a session by accident. It does not prove that a
-  human answered — a program with shell access can allocate a pseudo-TTY and
-  answer the prompt itself. What the server guarantees is absolute: a
+  script cannot displace a session by accident; `--yes` is the explicit
+  up-front answer for an agent that already decided to take its own name back
+  (`agent-room session replace --yes`, and likewise `allow-all --yes`). It
+  does not prove that a human answered — a program with shell access can
+  allocate a pseudo-TTY and answer the prompt itself. What the server guarantees is absolute: a
   different key's session is never displaced, whoever asks.
 - **The fence is total.** Every request the displaced session had in flight is
   refused: the stage check refuses it as early as its stage sequence reaches,
