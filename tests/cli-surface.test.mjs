@@ -1460,3 +1460,23 @@ test('the CLI point-read seam emits exactly the pinned HTTP query (after_seq = s
   assert.notEqual(seamPage.messages[0].text, rawPage.messages[0].text, 'the foreign row is envelope-wrapped')
   assert.deepEqual(seamPage, applyUntrustedEnvelope(rawPage, ownFingerprint))
 })
+
+test('allow-all --yes switches accept-all on without a terminal; the bare non-TTY form is still refused', async t => {
+  const world = makeWorld(t)
+  const record = await world.waitReady()
+  const { realmId } = await realmOf(world, record)
+
+  const refused = await runCli(world, ['allow-all'])
+  assert.equal(refused.exitCode, 1)
+  assert.equal(existsSync(allowlistPathOf(world, realmId)), false)
+
+  const confirmed = await runCli(world, ['allow-all', '--yes'])
+  assert.equal(confirmed.exitCode, 0, confirmed.stderr)
+  assert.equal(confirmed.outcome.acceptAll, true)
+  assert.equal(confirmed.stdout.includes('[y/N]'), false, 'nothing was asked')
+  assert.equal(JSON.parse(readFileSync(allowlistPathOf(world, realmId), 'utf8')).accept_all, true)
+
+  const removed = await runCli(world, ['allow-all', '--remove'])
+  assert.equal(removed.exitCode, 0, removed.stderr)
+  assert.equal(JSON.parse(readFileSync(allowlistPathOf(world, realmId), 'utf8')).accept_all, false)
+})

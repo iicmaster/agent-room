@@ -1902,3 +1902,37 @@ test('the operator command refuses a non-interactive stdin and takes the name on
   const rebound = await bindSession(server.port, localToken, owner, 'Agent')
   assert.equal(rebound.bound.status, 200, rebound.bound.text)
 })
+
+test('--yes answers the takeover question up front: a non-interactive stdin takes the name back, and nothing else changes', async t => {
+  const { dataDir, server, liveSessionRegistry } = await makeServer(t)
+  const localToken = loadOrCreateLocalToken(dataDir)
+  const pluginData = makePluginData(t, 'Agent')
+  const world = { sharedData: dataDir, pluginData }
+  const keypair = loadOrCreateKeypair(pluginData)
+  const owner = {
+    publicKey: keypair.publicKey.toString('base64url'),
+    fingerprint: keypair.fingerprint,
+  }
+  const { token: squatter } = await bindSession(server.port, localToken, owner, 'Agent')
+
+  // Same pipe that the bare command refuses — with --yes it is the answer.
+  const taken = await runCli(world, ['session', 'replace', '--yes'])
+  assert.equal(taken.exitCode, 0, taken.stderr)
+  const receipt = JSON.parse(taken.stdout.trim().split('\n').pop())
+  assert.equal(receipt.ok, true)
+  assert.equal(receipt.replaced, true, 'a live holder was displaced')
+  assert.equal(receipt.released, true)
+  assert.equal((await sessionRequest(server.port, 'POST', squatter, { chat_id: 'Agent' })).status, 401, 'the squatter is fenced')
+  assert.equal(liveSessionRegistry.holderOf('Agent'), null, 'the name is free again')
+
+  // A free name with --yes is still the observe-and-release path (no takeover).
+  const free = await runCli(world, ['session', 'replace', '--yes'])
+  assert.equal(free.exitCode, 0, free.stderr)
+  assert.equal(JSON.parse(free.stdout.trim().split('\n').pop()).replaced, false)
+
+  // Only --yes is accepted; any other option is still a usage error.
+  const unknown = await runCli(world, ['session', 'replace', '--force'])
+  assert.equal(unknown.exitCode, 2, 'usage errors exit 2, as before')
+  assert.match(unknown.stdout + unknown.stderr, /"code":"usage"/)
+  assert.match(unknown.stdout + unknown.stderr, /unknown option/)
+})

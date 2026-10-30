@@ -25,7 +25,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { CHAT_ID_INVALID_MESSAGE } from '../server/constants.mjs'
 import { atomicWriteJson } from '../server/runtime.mjs'
 import { loadOrCreateLocalToken } from '../server/api/local-token.mjs'
-import { runSetup, SETUP_REQUIRES_TTY_MESSAGE } from '../server/cli/agent-room.mjs'
+import { main as cliMain, runSetup, SETUP_REQUIRES_TTY_MESSAGE } from '../server/cli/agent-room.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const SERVER_ENTRY = join(ROOT, 'server', 'api', 'server.mjs')
@@ -407,4 +407,117 @@ test('setup aborts cleanly when the input ends before a name is chosen', async t
   assert.equal(outcome.status, 'aborted')
   assert.match(outcome.message, /no configuration was written/)
   assert.equal(existsSync(join(world.pluginData, CONFIG_FILENAME)), false)
+})
+
+// Non-interactive setup: an agent hands the Chat ID over as an argument and no
+// terminal is involved. The same grammar gate and live probe run; every
+// question a prompt would ask is answered up front or the command refuses.
+test('setup --chat-id configures without a TTY: validated, probed, released, stored 0600', async t => {
+  const world = makeWorld(t)
+  const record = await world.waitReady()
+  const input = new PassThrough() // no isTTY: an agent, a pipe, CI
+  const output = new PassThrough()
+  const echo = collectEcho(output)
+
+  const outcome = await runSetup({
+    input,
+    output,
+    sharedDataDir: world.sharedData,
+    pluginDataDir: world.pluginData,
+    chatId: 'Robo',
+  })
+
+  assert.equal(outcome.status, 'configured')
+  assert.equal(outcome.chatId, 'Robo')
+  const configPath = join(world.pluginData, CONFIG_FILENAME)
+  assert.equal(statSync(configPath).mode & 0o777, 0o600)
+  assert.equal(JSON.parse(readFileSync(configPath, 'utf8')).chat_id, 'Robo')
+  assert.deepEqual(claimRows(world.sharedData).map(row => row.chat_id_normalized), ['robo'])
+  const nextClaim = await connectInstallation(record.port, world.sharedData, 'Robo')
+  assert.ok(nextClaim.sessionToken, 'the probe released the live name')
+  assert.equal(echo.text().includes('Choose a Chat ID'), false, 'nothing was asked')
+  assert.equal(echo.text().includes('session_token'), false)
+})
+
+test('setup --chat-id refuses a malformed name and a live collision without writing', async t => {
+  const world = makeWorld(t)
+  const record = await world.waitReady()
+  const quiet = () => ({ input: new PassThrough(), output: new PassThrough() })
+
+  const malformed = await runSetup({
+    ...quiet(), sharedDataDir: world.sharedData, pluginDataDir: world.pluginData, chatId: 'bad name!',
+  })
+  assert.equal(malformed.status, 'refused')
+  assert.match(malformed.message, /not a valid Chat ID/)
+  assert.deepEqual(claimRows(world.sharedData), [], 'a malformed name is never probed')
+
+  const holder = await connectInstallation(record.port, world.sharedData, 'Taken')
+  assert.ok(holder.sessionToken)
+  const collision = await runSetup({
+    ...quiet(), sharedDataDir: world.sharedData, pluginDataDir: world.pluginData, chatId: 'Taken',
+  })
+  assert.equal(collision.status, 'refused')
+  assert.match(collision.message, /already claimed live/)
+  assert.equal(existsSync(join(world.pluginData, CONFIG_FILENAME)), false)
+})
+
+test('setup --chat-id never replaces an existing Chat ID unless --overwrite is given', async t => {
+  const world = makeWorld(t)
+  await world.waitReady()
+  const configPath = join(world.pluginData, CONFIG_FILENAME)
+  atomicWriteJson(configPath, { chat_id: 'Old', set_up_at: new Date().toISOString() })
+  const quiet = () => ({ input: new PassThrough(), output: new PassThrough() })
+
+  const kept = await runSetup({
+    ...quiet(), sharedDataDir: world.sharedData, pluginDataDir: world.pluginData, chatId: 'New',
+  })
+  assert.equal(kept.status, 'refused')
+  assert.match(kept.message, /--overwrite/)
+  assert.equal(JSON.parse(readFileSync(configPath, 'utf8')).chat_id, 'Old')
+
+  const replaced = await runSetup({
+    ...quiet(), sharedDataDir: world.sharedData, pluginDataDir: world.pluginData, chatId: 'New', overwrite: true,
+  })
+  assert.equal(replaced.status, 'configured')
+  assert.equal(JSON.parse(readFileSync(configPath, 'utf8')).chat_id, 'New')
+})
+
+test('the CLI reads --chat-id / AGENT_ROOM_CHAT_ID / --overwrite for setup and exits 1 on a refusal', async t => {
+  const world = makeWorld(t)
+  await world.waitReady()
+  const configPath = join(world.pluginData, CONFIG_FILENAME)
+  const run = (argv, env = {}) => {
+    const errorOutput = new PassThrough()
+    let stderr = ''
+    errorOutput.setEncoding('utf8')
+    errorOutput.on('data', chunk => { stderr += chunk })
+    const savedExitCode = process.exitCode
+    process.exitCode = undefined
+    return cliMain(argv, {
+      input: new PassThrough(), output: new PassThrough(), errorOutput,
+      sharedDataDir: world.sharedData, pluginDataDir: world.pluginData, env,
+    }).then(outcome => {
+      const exitCode = process.exitCode
+      process.exitCode = savedExitCode
+      return { outcome, exitCode, stderr }
+    })
+  }
+
+  const viaFlag = await run(['setup', '--chat-id', 'Flagged'])
+  assert.equal(viaFlag.outcome.status, 'configured')
+  assert.equal(viaFlag.exitCode, undefined)
+  assert.equal(JSON.parse(readFileSync(configPath, 'utf8')).chat_id, 'Flagged')
+
+  const refused = await run(['setup', '--chat-id', 'Other'])
+  assert.equal(refused.outcome.status, 'refused')
+  assert.equal(refused.exitCode, 1)
+  assert.match(refused.stderr, /--overwrite/)
+
+  const viaEnv = await run(['setup', '--overwrite'], { AGENT_ROOM_CHAT_ID: 'FromEnv' })
+  assert.equal(viaEnv.outcome.status, 'configured')
+  assert.equal(JSON.parse(readFileSync(configPath, 'utf8')).chat_id, 'FromEnv')
+
+  const missingValue = await run(['setup', '--chat-id'])
+  assert.equal(missingValue.outcome.status, 'usage')
+  assert.equal(missingValue.exitCode, 2)
 })

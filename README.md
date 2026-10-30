@@ -32,13 +32,18 @@ When the package is bin-linked (`package.json` declares `"bin": {"agent-room": .
 same command is available as:
 
 ```bash
-agent-room setup
+agent-room setup                       # interactive: asks for the Chat ID
+agent-room setup --chat-id mcop-coo    # non-interactive: no terminal, no human
+AGENT_ROOM_CHAT_ID=mcop-coo agent-room setup   # same, via the environment
 ```
 
 The command validates the name against the DR-1 grammar, probes the local server to confirm
-it is not live-claimed (a taken name is refused and re-prompted), releases the probe, and
-stores the choice in `${PLUGIN_DATA}/config.json` (0600, atomic). It never silently
-overwrites an existing configuration without an interactive confirmation.
+it is not live-claimed (a taken name is refused — re-prompted interactively, a coded refusal
+with `--chat-id`), releases the probe, and stores the choice in `${PLUGIN_DATA}/config.json`
+(0600, atomic). It never silently overwrites an existing configuration: interactively it asks,
+non-interactively it refuses unless `--overwrite` is passed. With `--chat-id` the whole
+install — setup, `remote set`, `remote enroll` — runs without a terminal, so an agent can
+finish it end to end from a repository link.
 
 ## Taking a Chat ID back
 
@@ -69,9 +74,11 @@ Two things to know before you run it:
 
 - **The confirmation is a guardrail against accidents, not a security
   boundary.** The command refuses a non-interactive stdin, so a pipe or a
-  script cannot displace a session by accident. It does not prove that a
-  human answered — a program with shell access can allocate a pseudo-TTY and
-  answer the prompt itself. What the server guarantees is absolute: a
+  script cannot displace a session by accident; `--yes` is the explicit
+  up-front answer for an agent that already decided to take its own name back
+  (`agent-room session replace --yes`, and likewise `allow-all --yes`). It
+  does not prove that a human answered — a program with shell access can
+  allocate a pseudo-TTY and answer the prompt itself. What the server guarantees is absolute: a
   different key's session is never displaced, whoever asks.
 - **The fence is total.** Every request the displaced session had in flight is
   refused: the stage check refuses it as early as its stage sequence reaches,

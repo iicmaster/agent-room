@@ -246,8 +246,12 @@ async function askConfirm({ input, errorOutput, question }) {
 
 // `agent-room session replace [<chat-id>]` — take the name back for this
 // installation.
-export async function runSessionReplace({ input, output, errorOutput, pluginDataDir, sharedDataDir }, rawChatId) {
-  if (!input?.isTTY) {
+export async function runSessionReplace({ input, output, errorOutput, pluginDataDir, sharedDataDir }, rawChatId, { yes = false } = {}) {
+  // `--yes` is the explicit, up-front form of the y/N answer: an agent that
+  // already decided to take its own name back passes it and no terminal is
+  // involved. Everything else — the observe-first step, the own-key-only
+  // rule, the conflict ticket — is unchanged; only the question is skipped.
+  if (!yes && !input?.isTTY) {
     return {
       status: 'refusal',
       command: 'session replace',
@@ -313,7 +317,7 @@ export async function runSessionReplace({ input, output, errorOutput, pluginData
         + 'Nothing was changed and no prompt was shown — a takeover only ever displaces this installation\'s own session.',
     }
   }
-  const confirmed = await askConfirm({
+  const confirmed = yes ? true : await askConfirm({
     input,
     errorOutput,
     question: `Take over the Chat ID "${forms.display}"? The session of this installation currently holding it is displaced and can no longer use it — `
@@ -363,13 +367,15 @@ export async function runSessionReplace({ input, output, errorOutput, pluginData
 export async function runSessionFamilyCommand(subcommand, tokens, deps) {
   try {
     if (subcommand === 'replace') {
-      if (tokens.length > 1) {
-        return usage('replace', 'unexpected extra argument; expected at most one Chat ID: agent-room session replace [<chat-id>]')
+      const yes = tokens.includes('--yes')
+      const rest = tokens.filter(token => token !== '--yes')
+      if (rest.length > 1) {
+        return usage('replace', 'unexpected extra argument; expected at most one Chat ID: agent-room session replace [<chat-id>] [--yes]')
       }
-      if (tokens.length === 1 && tokens[0].startsWith('--')) {
-        return usage('replace', `unknown option "${tokens[0]}"; see "agent-room help"`)
+      if (rest.length === 1 && rest[0].startsWith('--')) {
+        return usage('replace', `unknown option "${rest[0]}"; see "agent-room help"`)
       }
-      return await runSessionReplace(deps, tokens.length === 1 ? tokens[0] : undefined)
+      return await runSessionReplace(deps, rest.length === 1 ? rest[0] : undefined, { yes })
     }
     const attempted = ['session', subcommand].filter(part => part !== undefined).join(' ')
     return usage(String(subcommand ?? ''), `"${attempted}" is not a session command; session commands are: replace`)

@@ -89,8 +89,8 @@
 //
 // stdin discipline: prompting happens ONLY when stdin is a TTY. A non-TTY
 // stdin (pipes, the MCP host, CI) exits with guidance and touches nothing —
-// a command that needs a human answer can never be driven programmatically
-// into one.
+// unless every answer was given up front (`setup --chat-id`, `--overwrite`),
+// in which case nothing is asked and the command either completes or refuses.
 //
 // No name is ever stored unless it passed the grammar gate AND the live
 // probe; a refused probe writes no config, so a half-finished setup leaves
@@ -195,17 +195,25 @@ export async function runSetup({
   sharedDataDir = sharedDataDirectory(),
   pluginDataDir = instanceDataDirectory(),
   waitMs,
+  chatId = null,
+  overwrite = false,
 } = {}) {
-  if (!input.isTTY) {
+  // Non-interactive mode: the Chat ID arrives as an argument (`--chat-id` or
+  // AGENT_ROOM_CHAT_ID), so an agent can finish setup with no human at a
+  // terminal. The grammar gate and the live probe are the same; only the
+  // questions are gone — every answer a prompt would have asked for is either
+  // given up front or the command refuses (status 'refused', nothing written).
+  const nonInteractive = chatId !== null
+  if (!nonInteractive && !input.isTTY) {
     return { status: 'not-a-tty', message: SETUP_REQUIRES_TTY_MESSAGE }
   }
 
-  const lines = createInterface({ input, output, terminal: false })
+  const lines = nonInteractive ? null : createInterface({ input, output, terminal: false })
   // One pending ask at a time. When the interface closes (the human pressed
   // Ctrl-D, or the input ended), the pending question resolves with null so
   // the flow can return an honest aborted outcome instead of hanging.
   let pendingAsk = null
-  lines.once('close', () => {
+  lines?.once('close', () => {
     if (pendingAsk) {
       const resolveAborted = pendingAsk
       pendingAsk = null
@@ -237,7 +245,10 @@ export async function runSetup({
         existing = null
       }
       const existingChatId = typeof existing?.chat_id === 'string' ? existing.chat_id : '(unreadable)'
-      const answer = await ask(`A Chat ID ("${existingChatId}") is already configured for this installation (${configPath}). Overwrite it? [y/N] `)
+      if (nonInteractive && !overwrite) {
+        return { status: 'refused', message: `A Chat ID ("${existingChatId}") is already configured for this installation (${configPath}); pass --overwrite to replace it. Nothing was changed.` }
+      }
+      const answer = nonInteractive ? 'y' : await ask(`A Chat ID ("${existingChatId}") is already configured for this installation (${configPath}). Overwrite it? [y/N] `)
       if (answer === null) {
         return { status: 'aborted', message: 'agent-room setup ended before an answer was given; no configuration was written' }
       }
@@ -253,7 +264,7 @@ export async function runSetup({
     const keypair = loadOrCreateKeypair(pluginDataDir)
 
     for (;;) {
-      const answer = await ask(`Choose a Chat ID: `)
+      const answer = nonInteractive ? chatId : await ask(`Choose a Chat ID: `)
       if (answer === null) {
         return { status: 'aborted', message: 'agent-room setup ended before a Chat ID was chosen; no configuration was written' }
       }
@@ -261,6 +272,9 @@ export async function runSetup({
       const forms = chatIdForms(candidate)
       if (forms === null) {
         say(`"${candidate.slice(0, CHAT_ID_MAX + 16)}" is not a valid Chat ID: ${CHAT_ID_INVALID_MESSAGE}`)
+        if (nonInteractive) {
+          return { status: 'refused', message: `"${candidate.slice(0, CHAT_ID_MAX + 16)}" is not a valid Chat ID: ${CHAT_ID_INVALID_MESSAGE}; no configuration was written` }
+        }
         continue
       }
 
@@ -280,6 +294,9 @@ export async function runSetup({
       }
       if (!probe.claimed) {
         say(`"${forms.display}" is already claimed live by another connected session. Choose another name.`)
+        if (nonInteractive) {
+          return { status: 'refused', message: `"${forms.display}" is already claimed live by another connected session; no configuration was written` }
+        }
         continue
       }
 
@@ -297,7 +314,7 @@ export async function runSetup({
       return { status: 'configured', chatId: forms.display, configPath }
     }
   } finally {
-    lines.close()
+    lines?.close()
   }
 }
 
@@ -313,8 +330,11 @@ const HELP_TEXT = `agent-room — the human side of your Agent Room installation
 
 Commands:
 
-  agent-room setup
-      Choose this installation's Chat ID (one-time, interactive).
+  agent-room setup [--chat-id <chat-id>] [--overwrite]
+      Choose this installation's Chat ID (one-time). Interactive when run in a
+      terminal; with --chat-id (or AGENT_ROOM_CHAT_ID) it needs no terminal and
+      no human — an agent can finish setup by itself. An existing Chat ID is
+      replaced only with --overwrite.
 
   agent-room held list [--room <room_id>]
       List held messages — metadata only (id, chat id, key fingerprint, room,
@@ -333,7 +353,7 @@ Commands:
       messages. With --remove the entry is removed instead: future messages
       from that key are held again; already-ingested text is untouched.
 
-  agent-room allow-all [--remove]
+  agent-room allow-all [--remove] [--yes]
       Allow every future sender in this realm (accept-all). Asks for an
       interactive y/N confirmation; --remove switches it off without one
       (holding messages again is the fail-safe direction).
@@ -437,7 +457,7 @@ Commands:
       nothing and is retryable with the same token; a committed enrollment
       never needs another invite — reconnecting is automatic.
 
-  agent-room session replace [<chat-id>]
+  agent-room session replace [<chat-id>] [--yes]
       Take this installation's Chat ID back from the session that still holds
       it. Use it when your client died, was killed, or lost its host and now
       answers "chat id is already claimed by another connected session" for
@@ -457,7 +477,8 @@ Commands:
       long-poll stops at its next wake.) A session of a DIFFERENT key is
       never displaced. The takeover is never done automatically: the command
       asks for an
-      interactive y/N first and refuses a non-interactive stdin — that
+      interactive y/N first and refuses a non-interactive stdin unless --yes
+      answers it up front (an agent taking its own name back) — that
       confirmation guards against accidents, it is not proof that a human
       answered. When the server acknowledges the release the name is free
       again immediately, so the client that uses it can bind it on its next
@@ -552,12 +573,12 @@ async function runHeldFamilyCommand(command, subcommand, tokens, deps) {
     })
   }
   if (command === 'allow-all') {
-    const parsed = parseTokens(tokens, { booleanFlags: ['--remove'] })
+    const parsed = parseTokens(tokens, { booleanFlags: ['--remove', '--yes'] })
     if (parsed.error) return failure('allow-all', 'invalid_request', `${parsed.error}; see "agent-room help"`)
     if (parsed.positional.length > 0) {
       return failure('allow-all', 'invalid_request', `unexpected argument "${parsed.positional[0]}"; see "agent-room help"`)
     }
-    return runAllowAll(deps, { remove: parsed.options['--remove'] === true })
+    return runAllowAll(deps, { remove: parsed.options['--remove'] === true, yes: parsed.options['--yes'] === true })
   }
   return null
 }
@@ -577,8 +598,20 @@ export async function main(argv = process.argv.slice(2), {
   }
   const deps = { input, output, errorOutput, sharedDataDir, pluginDataDir, env }
   if (command === 'setup') {
-    const outcome = await runSetup({ input, output, sharedDataDir, pluginDataDir })
-    if (outcome.status === 'not-a-tty' || outcome.status === 'aborted') {
+    const setupArgs = argv.slice(1)
+    const chatIdIndex = setupArgs.indexOf('--chat-id')
+    let chatId = chatIdIndex === -1 ? null : setupArgs[chatIdIndex + 1]
+    if (chatIdIndex !== -1 && (chatId === undefined || chatId.startsWith('--'))) {
+      errorOutput.write('agent-room setup --chat-id needs a value\n')
+      process.exitCode = 2
+      return { status: 'usage', message: 'agent-room setup --chat-id needs a value' }
+    }
+    if (chatId === null && typeof env.AGENT_ROOM_CHAT_ID === 'string' && env.AGENT_ROOM_CHAT_ID !== '') {
+      chatId = env.AGENT_ROOM_CHAT_ID
+    }
+    const overwrite = setupArgs.includes('--overwrite')
+    const outcome = await runSetup({ input, output, sharedDataDir, pluginDataDir, chatId, overwrite })
+    if (outcome.status === 'not-a-tty' || outcome.status === 'aborted' || outcome.status === 'refused') {
       errorOutput.write(`${outcome.message}\n`)
       process.exitCode = 1
     }
