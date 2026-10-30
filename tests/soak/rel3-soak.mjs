@@ -732,6 +732,10 @@ function startMcpChild(world, { pluginData, label }) {
       LANG: process.env.LANG || 'C.UTF-8',
       PLUGIN_DATA: pluginData,
       AGENT_ROOM_DATA_DIR: world.sharedData,
+      // The FD corridor models one server socket per pull-only client; the
+      // companion notifier holds one long-poll socket per watched room per
+      // client, a different FD profile this soak was not calibrated for.
+      AGENT_ROOM_NOTIFIER: 'off',
     },
     stdio: ['pipe', 'pipe', 'pipe'],
   })
