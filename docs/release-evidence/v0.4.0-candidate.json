@@ -1,0 +1,35 @@
+{
+  "candidate": "v0.4.0",
+  "record_type": "release-candidate-freeze",
+  "created": "2026-10-31",
+  "status": "released",
+  "source": {
+    "git_commit": "02254be1b4d070033f9ff7d5ff24f6b6c50f407d",
+    "git_branch": "main",
+    "packager": "scripts/package-release.mjs",
+    "packager_invocation": "node scripts/package-release.mjs --out <fresh-absolute-dir>",
+    "supersedes": "a0c345f18a90bcb98a8c86cfdcdb2125a2fa2cec (v0.3.0) — additive CLI surface only (setup --chat-id/--overwrite; session replace --yes; allow-all --yes); no server-side behavior change"
+  },
+  "artifacts": {
+    "digest_algorithm": "SHA-256 folded over every regular file in package-relative path-sorted order: for each file, update with hex(sha256(relative_path)) + '\\n' + hex(sha256(file_bytes)) + '\\n'; the final hex digest is the tree digest (tests/release-smoke.test.mjs, treeDigest). No metadata (mtimes, modes, inodes) enters the digest.",
+    "deterministic": true,
+    "portable": {
+      "package": "agent-room-agent-plugin",
+      "files": 47,
+      "bytes": 837501,
+      "sha256": "e0f3dc317cbf84cf948145a09f9b9c9b38dab67a0383c490ad3cb4999a8398c6"
+    },
+    "claude_code": {
+      "package": "agent-room-claude-code",
+      "files": 47,
+      "bytes": 837361,
+      "sha256": "8a18d5e9315571a237239d9bd2ca6c7bf026b637780706de914173c4231bd78a"
+    }
+  },
+  "gates": {
+    "validator": "claude plugin validate <materialized>/agent-room-claude-code --strict → passed (claude-cli 2.1.310)",
+    "suite": "node --test --test-concurrency=1 --test-timeout=600000 → GREEN: 660 pass / 0 fail / 0 skipped (2026-10-31)",
+    "review": "PR #1 merged (c17c94d) after a read-only review (blind-hunter + edge-case-hunter + verification-gap layers over the PR diff; verification-gap clean; parser/prose findings triaged low, non-blocking) plus the PR author's own focused 67/67 and full-suite evidence"
+  },
+  "notes": "CLI-surface release: non-interactive client install (setup --chat-id / AGENT_ROOM_CHAT_ID / --overwrite) and --yes for session replace and allow-all. No server-side behavior change; the REL-3 qualification of v0.3.0 (attempt 7 PASS + eligible) covers the unchanged server core."
+}
