@@ -1,0 +1,35 @@
+{
+  "candidate": "v0.6.0",
+  "record_type": "release-candidate-freeze",
+  "created": "2026-10-31",
+  "status": "released",
+  "source": {
+    "git_commit": "d6af1984ee57a5e59fb16757f87f8ce4a38d0646",
+    "git_branch": "main",
+    "packager": "scripts/package-release.mjs",
+    "packager_invocation": "node scripts/package-release.mjs --out <fresh-absolute-dir>",
+    "supersedes": "b30feeed96c1449c371173ced0b54864ae571afd (v0.5.0) — adds the always-on companion notifier (Epic 9); no server-side behavior change"
+  },
+  "artifacts": {
+    "digest_algorithm": "SHA-256 folded over every regular file in package-relative path-sorted order: for each file, update with hex(sha256(relative_path)) + '\\n' + hex(sha256(file_bytes)) + '\\n'; the final hex digest is the tree digest (tests/release-smoke.test.mjs, treeDigest). No metadata (mtimes, modes, inodes) enters the digest.",
+    "deterministic": true,
+    "portable": {
+      "package": "agent-room-agent-plugin",
+      "files": 49,
+      "bytes": 880310,
+      "sha256": "52797ebcf3a730643552cdf6b89c3de93961e59579a3bc085e83844bf95fa507"
+    },
+    "claude_code": {
+      "package": "agent-room-claude-code",
+      "files": 49,
+      "bytes": 880170,
+      "sha256": "7d9322287ab8a9689d8d90892e6bbf33877848d2e5dc4e6711cc9f898728afd9"
+    }
+  },
+  "gates": {
+    "validator": "claude plugin validate <materialized>/agent-room-claude-code --strict → passed",
+    "suite": "node --test → GREEN: 674 pass / 0 fail / 0 skipped (2026-10-31; +3 notifier integration/pure rows, +2 wait self-skip rows, +1 setup-parser row over v0.5.0's 668)",
+    "design": "Epic 9 / Story 9.1; the always-on layer is adopted from PR #3 (ngs-th, feat/companion-notifier — author credited in server/client/notifier.mjs and the release notes); the party record carries the Layer-2 amendment (docs/implementation/reviews/epic-8-companion-notifier-party.md)"
+  },
+  "notes": "Real-time chat release. Layer 1: the MCP process long-polls its rooms after the first tool call and writes PLUGIN_DATA/inbox.jsonl (0600) — one line per foreign message, trust-matrix judged, held rows metadata-only; AGENT_ROOM_NOTIFY_CMD (execFile) and tail -F are the host-native wake paths; AGENT_ROOM_NOTIFIER=off disables. Layer 2: agent-room wait fixed per issue #4 (own sends never wake; page read + in-memory baseline). Named follow-up: recalibrate the REL-3 FD corridor if the soak is ever run with the notifier on (children pin it off). No server-side change; the v0.3.0 REL-3 qualification covers the unchanged server core."
+}
