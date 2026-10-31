@@ -1,0 +1,35 @@
+{
+  "candidate": "v0.6.1",
+  "record_type": "release-candidate-freeze",
+  "created": "2026-11-01",
+  "status": "released",
+  "source": {
+    "git_commit": "689f58fdb5f02c41a723db24890d7995f581adc0",
+    "git_branch": "main",
+    "packager": "scripts/package-release.mjs",
+    "packager_invocation": "node scripts/package-release.mjs --out <fresh-absolute-dir>",
+    "supersedes": "d6af1984ee57a5e59fb16757f87f8ce4a38d0646 (v0.6.0) — one client-CLI defect fix + the DDD advisory record; no server-side behavior change"
+  },
+  "artifacts": {
+    "digest_algorithm": "SHA-256 folded over every regular file in package-relative path-sorted order (tests/release-smoke.test.mjs, treeDigest).",
+    "deterministic": true,
+    "portable": {
+      "package": "agent-room-agent-plugin",
+      "files": 49,
+      "bytes": 882152,
+      "sha256": "bf96a8eb17f33a8edbb07734ac1eb3f954ce89ff071a3b78f3a59940f1f05662"
+    },
+    "claude_code": {
+      "package": "agent-room-claude-code",
+      "files": 49,
+      "bytes": 882012,
+      "sha256": "a3cedc245aea47b98d7c776989476cb03a4bc4f980b686147372c252a4816670"
+    }
+  },
+  "gates": {
+    "validator": "claude plugin validate --strict → passed",
+    "suite": "node --test → GREEN: 675 pass / 0 fail (2026-11-01; +1 overflow regression row over v0.6.0's 674)",
+    "review": "DDD advisory round: codex gpt-6.1-sol[ultra] + agy gemini-3.8-flash-high, both seated as the operator's Anti-Consensus Club, identities matched; the overflow defect was found by that review's own code reading and shipped red→green"
+  },
+  "notes": "The overflow head-check of agent-room wait never issued its request (rooms past the six held polls were dead while the timeout hint claimed unwatched: []). Fixed; one-cycle discovery latency for mid-cycle rows documented. Decision record: quarantine-over-retire for the occupancy machinery, three progress semantics, fence enforcement stays."
+}
