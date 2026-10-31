@@ -2,6 +2,35 @@
 
 All notable changes to Agent Room are documented in this file.
 
+## 0.6.1 - 2026-11-01
+
+### Fixed
+
+- `agent-room wait`: rooms beyond the six held long-polls were never
+  actually head-checked — the `wait_ms=0` read returned before issuing any
+  request, so a 7th room's unread rows could not fire a hint while the
+  timeout hint claimed `unwatched: []`. Found by the DDD advisory review
+  (codex gpt-6.1-sol[ultra], traced to the deadline gate in
+  `holdForRoom`); fixed with a red→green regression row (a backlog in the
+  7th room hints on the first cycle). A row landing mid-cycle is found one
+  cycle later (~20 s) — documented overflow latency, unchanged.
+- `docs/statechart/findings.md` corrections from the same review: the wake
+  fatigue rate is bounded by row creation (120/min/key budget, burst 10,
+  ~30 rows/min/key sustained — not "N×120 wakes/min"), and the three read
+  positions are three distinct PROGRESS SEMANTICS (consumed / observed /
+  waited-from), not accidental copies of one cursor.
+
+### Added
+
+- The DDD bounded-contexts advisory record
+  (`docs/implementation/reviews/epic-10-ddd-contexts-decision.md`): the
+  three-context model adopted with trust as client-side delivery policy,
+  occupancy QUARANTINED inside Identity (retirement is the operator's
+  future call), the consumed/observed cursor semantics kept separate, the
+  cross-vendor fence conflict resolved in favor of keeping the post-input
+  recheck exactly where Story 7.1 put it, and strangler-per-slice as the
+  migration shape.
+
 ## 0.6.0 - 2026-10-31
 
 ### Added

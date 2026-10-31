@@ -148,10 +148,10 @@ async function peerOpensDirectRoom(port, peerToken, targetChatId) {
   return opened.json().result
 }
 
-async function peerSends(port, peerToken, roomId, clientMessageId, text) {
+async function peerSends(port, peerToken, roomId, clientMessageId, text, chatId = 'Peer') {
   const sent = await httpRequest(port, 'POST', `/api/rooms/${encodeURIComponent(roomId)}/messages`, {
     headers: actorHeaders(peerToken),
-    body: { chat_id: 'Peer', client_message_id: clientMessageId, text },
+    body: { chat_id: chatId, client_message_id: clientMessageId, text },
   })
   assert.equal(sent.status, 200, sent.text)
   return sent.json().result
@@ -427,4 +427,40 @@ test('wait: usage grammar — bad bounds, unknown options, positionals, duplicat
   } finally {
     process.exitCode = savedExitCode
   }
+})
+
+test('wait: the 7th room is overflow and is really head-checked — its unread row fires (advisory-found defect)', async t => {
+  const world = makeWorld(t)
+  const record = await world.waitReady()
+  await prepareWaitInstallation(record.port, world.sharedData, world.pluginData, 'Watcher')
+  const peer = await connectInstallation(record.port, world.sharedData, 'Peer')
+
+  // Seven rooms, watched via --room in a KNOWN order: held = the first six,
+  // overflow = the seventh. Only the overflow room gets unread content, so a
+  // hint can only come from the head-check the overflow path promises.
+  // Distinct rooms need distinct pairs: one peer per DM (open-or-create
+  // converges a repeated pair to ONE room).
+  const roomIds = []
+  const roomOpeners = []
+  for (let i = 0; i < 7; i += 1) {
+    const dmPeer = await connectInstallation(record.port, world.sharedData, 'Peer' + i)
+    const dm = await peerOpensDirectRoom(record.port, dmPeer.sessionToken, 'Watcher')
+    roomIds.push(dm.room_id)
+    roomOpeners.push(dmPeer)
+  }
+  const tokens = roomIds.map(id => ['--room', id]).flat()
+  // Unread backlog in the SEVENTH room only, present BEFORE the wait arms:
+  // the overflow head-check must find it on the first cycle. (A row landing
+  // mid-cycle is found one cycle later — held holds run ~20 s — which is the
+  // documented overflow latency, not this defect.)
+  const seventh = roomIds[6]
+  const sent = await peerSends(record.port, roomOpeners[6].sessionToken, seventh, 'overflow-1', 'the seventh room speaks', 'Peer6')
+
+  const pending = wait(world, [...tokens, '--timeout', '20'])
+  const outcome = await pending
+  const hint = parseHint(outcome)
+  assert.equal(hint.status, 'new_messages', 'the overflow room\u2019s unread row must fire the hint')
+  assert.equal(hint.room_id, seventh)
+  assert.equal(hint.seq, sent.seq)
+  assert.ok(!outcome.lines[0].includes('the seventh room speaks'))
 })

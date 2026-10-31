@@ -17,7 +17,7 @@ import { dirname, isAbsolute, join, resolve } from 'node:path'
 
 import { DISPLAY_NAME_MAX, IDENTIFIER_MAX, STATE_FILE_MAX_BYTES, VIEWER_TOKEN_PATTERN } from './constants.mjs'
 
-export const APP_VERSION = '0.6.0'
+export const APP_VERSION = '0.6.1'
 export const DAEMON_PROTOCOL_VERSION = 1
 export const MIN_NODE_VERSION = '24.15'
 export const MIN_SQLITE_VERSION = '3.51.3'

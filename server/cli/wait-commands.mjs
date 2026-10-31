@@ -143,8 +143,13 @@ async function holdForRoom({ target, token, roomId, afterSeq, holdMs, ownFingerp
   let cursor = Math.max(afterSeq, baselines.get(roomId) ?? 0)
   for (;;) {
     const remaining = holdDeadline - performance.now()
-    if (remaining <= 0) return null
-    const hold = Math.min(READ_HOLD_MAX_MS, Math.floor(remaining))
+    // A timed hold stops at its deadline; a holdMs=0 HEAD-CHECK (the fence's
+    // overflow path) always issues its one immediate read — the advisory
+    // review (2026-11-01) found this gate returning null before any request,
+    // so rooms beyond the six held ones were never checked at all while the
+    // timeout hint claimed unwatched: [].
+    if (remaining <= 0 && holdMs > 0) return null
+    const hold = Math.min(READ_HOLD_MAX_MS, Math.max(0, Math.floor(remaining)))
     const response = await roundTrip(
       target,
       'GET',

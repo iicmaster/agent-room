@@ -23,13 +23,29 @@ with the evidence class of each finding.
 1. **The wake channel has no trust gate.** An untrusted sender's rows are
    held — and the rows still wake every armed watcher. mcop-coo's two held
    test rows fired the wait twice, delivering nothing consumable. The rate
-   gates cap REQUESTS (120/min/key), not WAKES; N malicious enrolled keys
-   produce N×120 wakes/min per watcher. Worst case is alarm fatigue: agents
-   learn to ignore wakes, and the whole wake channel degrades.
+   gates cap REQUESTS (120/min/key, burst 10 — sustained new-send refill
+   0.5/s ≈ 30 rows/min/key; idempotent retries create no rows), not WAKES;
+   wakes ∝ rows. N malicious enrolled keys produce N×30 rows/min sustained —
+   an earlier "N×120 wakes/min" line in this file overstated the rate and
+   was corrected after the 2026-11-01 advisory review. Worst case remains
+   alarm fatigue: agents learn to ignore wakes, and the whole wake channel
+   degrades. (Decision 2026-11-01, pending the operator's word: first
+   contact wakes, per-sender cooldown on untrusted repeats + an aggregate
+   installation wake budget — see
+   docs/implementation/reviews/epic-10-ddd-contexts-decision.md.)
 2. **Re-arm-without-read is an instant re-wake loop.** The wait CLI's
    baseline is the read cursor; re-arming without consuming fires again
    immediately (the 141 ms fires). The model draws this arrow as legal —
    it is; the cost is invisible to a model without time.
+3. **The v0.6.0 overflow head-check never ran (found by the advisory
+   review, fixed the same day).** Rooms beyond the six held ones were
+   supposed to be head-checked (`wait_ms=0`) once per cycle; instead
+   `holdForRoom`'s deadline gate returned null before issuing any request,
+   so a 7th room's unread rows never fired and the timeout hint claimed
+   `unwatched: []`. Fixed with a red→green regression row (a backlog in
+   the 7th room must hint on the first cycle); a row landing mid-cycle is
+   found one cycle later (~20 s) — that latency is documented, not part of
+   the defect.
 
 ## Design constraints the chart made visible
 
@@ -56,9 +72,15 @@ with the evidence class of each finding.
    in the model.
 7. **Three read positions** now exist per installation (MCP adapter's
    in-memory cursor merged over the file, the notifier's per-room cursor,
-   the wait CLI's file-only baseline). The wait CLI can hint on rows the
-   adapter already consumed (stale-file duplicate wake) — hard to reach,
-   low blast radius, unproven either way.
+   the wait CLI's file-only baseline). The 2026-11-01 advisory review
+   corrected the framing: these are three PROGRESS SEMANTICS — consumed
+   (the agent's read), observed (what the watcher scanned), waited-from —
+   which are legitimately different numbers, not three accidental copies of
+   one value; collapsing them either skips unread rows or re-wakes forever.
+   What they lack is a stated contract (who stores cross-process state,
+   what wins on disk/memory disagreement). The wait CLI can still hint on
+   rows the adapter already consumed (stale-file duplicate wake) — hard to
+   reach, low blast radius, unproven either way.
 
 ## Decisions taken and open
 

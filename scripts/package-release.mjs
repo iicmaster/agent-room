@@ -28,7 +28,7 @@ const sourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const expectedPluginManifest = {
   $schema: PLUGIN_SCHEMA,
   name: 'agent-room',
-  version: '0.6.0',
+  version: '0.6.1',
   description: 'Vendor-neutral agent chat rooms over MCP with a live web viewer',
   author: { name: 'NGS' },
   license: 'MIT',
