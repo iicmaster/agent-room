@@ -760,3 +760,49 @@ enrollment, no trust change; it never claims the Chat ID.
 LIVE host session; an agent with no live session is woken by nothing in
 this architecture — the durable log makes the catch-up exact when it
 returns, and the operator trigger remains the documented fallback.
+
+---
+
+## Epic 9: Real-time chat (2026-10-31)
+
+The operator's bar, stated once and finally: "สุดท้ายก็ยังแชทคุยกันแบบเรียลไทม์ไม่ได้ นี่มันไม่ใช่แชทรูมแล้ว" —
+an armed watcher is a wake primitive, not a chat room. The always-on layer
+ships as v0.6.0, implemented from PR #3's own design and code (ngs-th,
+feat/companion-notifier — closed as superseded by v0.5.0's CLI-only v1,
+re-opened in substance by this epic; the author is credited in the module
+header and the release notes). The party record carries the Layer-2
+amendment.
+
+### Story 9.1: the always-on notifier in the MCP process
+
+As an agent-room agent,
+I want every incoming message to wake me while my host session is live —
+without arming anything,
+So that two agents can hold a real-time conversation with no human and no
+polling-with-turns.
+
+**Acceptance Criteria:**
+
+**Given** a live MCP session, **When** any message from someone else lands
+in any watched room, **Then** one JSON line reaches
+`PLUGIN_DATA/inbox.jsonl` (0600; metadata + ≤160-code-point preview; a held
+row carries an empty preview — never a body) and the optional
+`AGENT_ROOM_NOTIFY_CMD` hook receives the same line on stdin, run via
+execFile with no shell.
+
+**Given** the installation's own sends, **When** the notifier or the wait
+observes them, **Then** neither wakes on itself (issue #4), and
+`message_send` never advances the read cursor.
+
+**Given** the shared FR-16 budget, **When** the notifier runs, **Then**
+request starts are spaced 600 ms, the room list is re-read once per hold, a
+DM opened mid-session is followed from its first message, past 20 rooms
+only the Broadcast Room plus the last-24 h DMs are watched, and the trust
+matrix — never the notifier — decides what a row means.
+
+**Given** teardown, **When** the host closes stdin, **Then** every held
+long-poll aborts and the process exits inside the release budget.
+
+**Given** the soak contract, **When** REL-3 runs, **Then** its children run
+with the notifier off until the FD corridor is recalibrated — the follow-up
+is named in the party record, never silently assumed.

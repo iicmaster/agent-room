@@ -415,7 +415,7 @@ function awaitExit(exited, label, timeoutMs) {
 // SIGTERM/SIGKILL fallback. The child's close is registered into the world's
 // ordered cleanup list at spawn — before any frame is sent. The child process
 // is expected to SURVIVE the server's SIGKILL: only the server dies.
-function startMcpChild(world, { pluginData, label }) {
+function startMcpChild(world, { pluginData, label, env = {} }) {
   const { sharedData } = world
   const child = spawn(process.execPath, [MCP_ENTRY], {
     cwd: pluginData,
@@ -424,6 +424,7 @@ function startMcpChild(world, { pluginData, label }) {
       LANG: process.env.LANG || 'C.UTF-8',
       PLUGIN_DATA: pluginData,
       AGENT_ROOM_DATA_DIR: sharedData,
+      ...env,
     },
     stdio: ['pipe', 'pipe', 'pipe'],
   })
@@ -909,7 +910,11 @@ test('restart survival: acknowledged traffic, sequences, reply links, claims, ro
 
   const alice = startMcpChild(world, { pluginData: world.installations.alice.pluginData, label: 'alice' })
   const bob = startMcpChild(world, { pluginData: world.installations.bob.pluginData, label: 'bob' })
-  const eaves = startMcpChild(world, { pluginData: world.installations.eaves.pluginData, label: 'eaves' })
+  // Eaves is the idle installation the offline-claims premise needs: with the
+  // companion notifier on, an idle MCP process keeps long-polling and
+  // reconnects across the restart (that is the notifier's job), so eaves runs
+  // with it off to stay a session that never calls back in.
+  const eaves = startMcpChild(world, { pluginData: world.installations.eaves.pluginData, label: 'eaves', env: { AGENT_ROOM_NOTIFIER: 'off' } })
   await alice.initialize()
   await bob.initialize()
   await eaves.initialize()

@@ -339,6 +339,67 @@ test('wait: the one-per-installation fence — a live waiter refuses, a crashed 
   assert.equal(existsSync(lockPath), false)
 })
 
+// Send as the wait installation itself (its own keypair, a temporary session
+// released right after): the row `message_send` allocates without ever
+// advancing the MCP read cursor — the issue #4 shape.
+async function sendAsInstallation(port, sharedData, pluginData, chatId, roomId, clientMessageId, text) {
+  const keypair = loadOrCreateKeypair(pluginData)
+  const localToken = loadOrCreateLocalToken(sharedData)
+  const auth = await httpRequest(port, 'POST', '/api/auth/local', {
+    headers: actorHeaders(localToken),
+    body: { public_key: keypair.publicKey.toString('base64url') },
+  })
+  assert.equal(auth.status, 200, auth.text)
+  const sessionToken = auth.json().result.session_token
+  const bound = await httpRequest(port, 'POST', '/api/session', {
+    headers: actorHeaders(sessionToken),
+    body: { chat_id: chatId },
+  })
+  assert.equal(bound.status, 200, bound.text)
+  const sent = await httpRequest(port, 'POST', `/api/rooms/${encodeURIComponent(roomId)}/messages`, {
+    headers: actorHeaders(sessionToken),
+    body: { chat_id: chatId, client_message_id: clientMessageId, text },
+  })
+  assert.equal(sent.status, 200, sent.text)
+  await httpRequest(port, 'DELETE', '/api/session', { headers: actorHeaders(sessionToken) })
+  return sent.json().result
+}
+
+test('wait: the installation\u2019s own sends never wake it (issue #4)', async t => {
+  const world = makeWorld(t)
+  const record = await world.waitReady()
+  await prepareWaitInstallation(record.port, world.sharedData, world.pluginData, 'Watcher')
+  const peer = await connectInstallation(record.port, world.sharedData, 'Peer')
+  const { broadcastRoomId } = await realmFacts(record.port, world.sharedData)
+
+  const pending = wait(world, ['--timeout', '3'])
+  await sleep(500)
+  const own = await sendAsInstallation(record.port, world.sharedData, world.pluginData, 'Watcher', broadcastRoomId, 'own-1', 'the watcher\u2019s own broadcast message')
+  await sleep(300)
+  const peerSent = await peerSends(record.port, peer.sessionToken, broadcastRoomId, 'peer-1', 'a real peer message')
+  assert.notEqual(peerSent.seq, own.seq)
+
+  const outcome = await pending
+  const hint = parseHint(outcome)
+  assert.equal(hint.status, 'new_messages', 'the peer message still fires the hint')
+  assert.equal(hint.seq, peerSent.seq, 'the hint names the PEER seq, never the own send')
+  assert.ok(!outcome.lines[0].includes('own broadcast message'))
+})
+
+test('wait: own sends alone are silence — a quiet wait times out cleanly', async t => {
+  const world = makeWorld(t)
+  const record = await world.waitReady()
+  await prepareWaitInstallation(record.port, world.sharedData, world.pluginData, 'Watcher')
+  const { broadcastRoomId } = await realmFacts(record.port, world.sharedData)
+
+  const pending = wait(world, ['--timeout', '3'])
+  await sleep(500)
+  await sendAsInstallation(record.port, world.sharedData, world.pluginData, 'Watcher', broadcastRoomId, 'own-2', 'only my own message')
+  const hint = parseHint(await pending)
+  assert.equal(hint.status, 'timeout', 'an all-own page is silence: the wait does not wake on itself')
+  assert.ok(hint.elapsed_ms >= 3000)
+})
+
 test('wait: usage grammar — bad bounds, unknown options, positionals, duplicate rooms', async t => {
   const world = makeWorld(t)
   await world.waitReady()

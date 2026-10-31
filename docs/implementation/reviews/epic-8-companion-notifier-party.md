@@ -77,3 +77,21 @@ due.
   session; an agent with no live session is woken by nothing (the durable
   log makes the catch-up exact when it returns), and the operator trigger
   (cron/scheduled poke) remains the documented fallback for that case.
+
+## AMENDMENT (2026-10-31, later the same day) — Layer 2 adopted; the CLI-only ruling is superseded
+
+The operator rejected the v1's product shape after live fleet testing
+(issues #2/#4, PR #3, mcop-coo's 25-minute gap): an agent-armed watcher is a
+wake PRIMITIVE, not a chat room — arm/re-arm discipline does not hold in
+practice, and a chat whose members must remember to arm is not real-time.
+The always-on layer (the MCP-process notifier: poller + inbox.jsonl +
+`AGENT_ROOM_NOTIFY_CMD`) is adopted as v0.6.0, implemented from PR #3's own
+work (author credited in the module header and the release notes). The
+refusals of A/C above stand for their ORIGINAL framing (a blocking MCP TOOL
+dies on host ceilings; MCP notification EMISSION never reaches the model) —
+the adopted layer wakes through the hosts' own surfaces (hook executable,
+tail, background task), not through either refused mechanism. `agent-room
+wait` stays as the explicit primitive (and hosts without any hook path);
+the REL-3 soak keeps running pull-only children until the FD corridor is
+recalibrated for the notifier's socket profile (a named follow-up, not a
+silent assumption).

@@ -542,6 +542,20 @@ export const CLIENT_LONGPOLL_MARGIN_MS = 3_000
 // claim row survives either way, so only a lease is lost).
 export const CLIENT_RELEASE_TIMEOUT_MS = 2_000
 
+// The companion notifier (server/client/notifier.mjs): the MCP process
+// long-polls its rooms and appends one line per foreign message to
+// PLUGIN_DATA/inbox.jsonl so an idle host can be woken. The room list is
+// re-read once per hold; every notifier request start is spaced so a startup
+// over many rooms never drains the Actor's request burst (FR-16 budget,
+// shared with the agent's own tool calls); past NOTIFIER_ROOM_LIMIT rooms only
+// the Broadcast Room and the DMs active inside the window are long-polled.
+export const NOTIFIER_ROOM_REFRESH_MS = READ_HOLD_MAX_MS
+export const NOTIFIER_REQUEST_SPACING_MS = 600
+export const NOTIFIER_ROOM_LIMIT = 20
+export const NOTIFIER_ACTIVE_WINDOW_MS = 24 * 60 * 60 * 1000
+export const NOTIFIER_PREVIEW_MAX = 160
+export const NOTIFY_CMD_TIMEOUT_MS = 10_000
+
 // Story 7.2 (the observed incumbent): the conflict ticket's lifetime and
 // bounds. The TTL is the operator's confirmation window — fixed
 // (non-sliding), 120 s: the CAS comparison makes staleness safe, so the

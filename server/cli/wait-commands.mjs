@@ -71,6 +71,9 @@ const WAIT_CONCURRENCY_MAX = 6
 // never resets mid-wait.
 const WAIT_DEFAULT_TIMEOUT_S = 300
 const WAIT_MAX_TIMEOUT_S = 600
+// The wait reads full pages so own-fingerprint rows (issue #4) can be skipped
+// inside one response instead of one request per row.
+const WAIT_PAGE_LIMIT = 200
 // Every hold request's HTTP timeout must exceed its server hold, or the
 // request dies before the server answers (the default CLIENT_REQUEST_TIMEOUT_MS
 // of 10 s is SHORTER than the 20 s hold — the margin below is what keeps a
@@ -125,27 +128,47 @@ function firstHit(attempts) {
 // One long-poll read of one room. Resolves a hit {room_id, seq} when the
 // page carries messages beyond the baseline, or null on a quiet page. The
 // request timeout is the hold plus margin — see WAIT_HOLD_TIMEOUT_MARGIN_MS.
-// limit=1 pins the hint's semantics: seq is the FIRST unread sequence (an
-// unread backlog of any size fires the same one-row page — the full catch-up
-// read is message_read's job, not the hint's).
-async function holdForRoom({ target, token, roomId, afterSeq, holdMs }) {
-  const response = await roundTrip(
-    target,
-    'GET',
-    `/api/rooms/${encodeURIComponent(roomId)}/messages?after_seq=${afterSeq}&limit=1&wait_ms=${holdMs}`,
-    protocolHeaders(token),
-    undefined,
-    holdMs + WAIT_HOLD_TIMEOUT_MARGIN_MS,
-  )
-  if (response.status !== 200) {
-    throw new AgentRoomRuntimeError(
-      response.body?.error?.code ?? 'request_failed',
-      response.body?.error?.message ?? `the agent-room server answered ${response.status}`,
+// Issue #4 (v0.5.0, found live by the mcop-coo installation): this
+// installation's OWN sends also allocate rows, and `message_send` never
+// advances the MCP read cursor — so the first read after any own send saw
+// the installation's own message and the wait woke on itself. The fix reads
+// a full page, skips every row whose actor_fingerprint is THIS
+// installation's (advancing an in-memory per-room baseline past them, so a
+// skipped row never re-fires), and re-holds with the advanced cursor when a
+// page was all-own. The hint's seq is the FIRST unread sequence from
+// SOMEONE ELSE; an unread backlog of any size fires the same way — the full
+// catch-up read is message_read's job, not the hint's.
+async function holdForRoom({ target, token, roomId, afterSeq, holdMs, ownFingerprint, baselines }) {
+  const holdDeadline = performance.now() + holdMs
+  let cursor = Math.max(afterSeq, baselines.get(roomId) ?? 0)
+  for (;;) {
+    const remaining = holdDeadline - performance.now()
+    if (remaining <= 0) return null
+    const hold = Math.min(READ_HOLD_MAX_MS, Math.floor(remaining))
+    const response = await roundTrip(
+      target,
+      'GET',
+      `/api/rooms/${encodeURIComponent(roomId)}/messages?after_seq=${cursor}&limit=${WAIT_PAGE_LIMIT}&wait_ms=${hold}`,
+      protocolHeaders(token),
+      undefined,
+      hold + WAIT_HOLD_TIMEOUT_MARGIN_MS,
     )
+    if (response.status !== 200) {
+      throw new AgentRoomRuntimeError(
+        response.body?.error?.code ?? 'request_failed',
+        response.body?.error?.message ?? `the agent-room server answered ${response.status}`,
+      )
+    }
+    const messages = response.body?.result?.messages
+    if (!Array.isArray(messages) || messages.length === 0) return null
+    const foreign = messages.filter(row => row?.actor_fingerprint !== ownFingerprint)
+    if (foreign.length > 0) {
+      baselines.set(roomId, Math.max(cursor, messages[messages.length - 1].seq))
+      return { room_id: roomId, seq: foreign[0].seq }
+    }
+    // All-own page: advance past it and re-hold within the same hold window.
+    cursor = messages[messages.length - 1].seq
   }
-  const messages = response.body?.result?.messages
-  if (!Array.isArray(messages) || messages.length === 0) return null
-  return { room_id: roomId, seq: messages[messages.length - 1].seq }
 }
 
 // pid-liveness: ESRCH means the process is gone; EPERM means it lives (and
@@ -327,7 +350,7 @@ export async function runWaitFamilyCommand(tokens, { sharedDataDir, pluginDataDi
       : { kind: 'local', port: (await ensureServer({ dataDir: sharedDataDir })).port }
     // An UNBOUND CLI session — the wait never claims the Chat ID; the live
     // MCP client keeps it. Same identity, no occupancy.
-    const { token } = await authenticate(target, { pluginDataDir, sharedDataDir })
+    const { token, fingerprint: ownFingerprint } = await authenticate(target, { pluginDataDir, sharedDataDir })
     const status = await roundTrip(target, 'GET', '/api/status', protocolHeaders(token), undefined)
     const realmId = status.body?.result?.realm_id
     if (status.status !== 200 || typeof realmId !== 'string') {
@@ -371,7 +394,7 @@ export async function runWaitFamilyCommand(tokens, { sharedDataDir, pluginDataDi
       const attempts = []
       for (const roomId of held) {
         attempts.push(holdForRoom({
-          target, token, roomId, holdMs,
+          target, token, roomId, holdMs, ownFingerprint, baselines,
           afterSeq: baselines.get(roomId) ?? 0,
         }))
       }
@@ -380,7 +403,7 @@ export async function runWaitFamilyCommand(tokens, { sharedDataDir, pluginDataDi
       // never unwatched.
       for (const roomId of overflow) {
         attempts.push(holdForRoom({
-          target, token, roomId, holdMs: 0,
+          target, token, roomId, holdMs: 0, ownFingerprint, baselines,
           afterSeq: baselines.get(roomId) ?? 0,
         }))
       }

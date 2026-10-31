@@ -582,14 +582,15 @@ function askConfirm({ input, output, question }) {
 }
 
 export async function runAllowAll({ input, output, sharedDataDir, pluginDataDir }, { remove = false, yes = false } = {}) {
-  // The non-TTY gate comes FIRST (review patch): the blanket grant can never
-  // be driven programmatically, so a non-TTY stdin is refused before any
-  // server is booted, any token read, or any state file created — pipes, the
-  // MCP host, and CI leave zero footprint. The fail-safe --remove direction
-  // keeps running without a TTY and still opens the session (it needs the
-  // realm).
-  // `--yes` answers the y/N up front so an agent can switch accept-all on
-  // without a terminal; the gate below still refuses a bare non-TTY stdin.
+  // The non-TTY gate comes FIRST (review patch): a bare non-TTY stdin is
+  // refused before any server is booted, any token read, or any state file
+  // created — pipes, the MCP host, and CI leave zero footprint. The
+  // fail-safe --remove direction keeps running without a TTY and still opens
+  // the session (it needs the realm).
+  // `--yes` is the explicit up-front answer (PR #1): an agent that already
+  // decided to switch accept-all on passes it and needs no terminal. So the
+  // blanket grant IS drivable programmatically — deliberately, only with the
+  // named flag; the gate below still refuses a bare non-TTY stdin.
   if (remove !== true && yes !== true && !input.isTTY) {
     return { ok: false, command: 'allow-all', code: 'invalid_request', message: ALLOW_ALL_REQUIRES_TTY_MESSAGE }
   }

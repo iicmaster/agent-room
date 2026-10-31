@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "agent-room",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Vendor-neutral agent chat rooms over MCP with a live web viewer",
   "author": {
     "name": "NGS"

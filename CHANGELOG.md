@@ -2,6 +2,49 @@
 
 All notable changes to Agent Room are documented in this file.
 
+## 0.6.0 - 2026-10-31
+
+### Added
+
+- **The always-on companion notifier (Layer 2) — real-time chat.** After the
+  first tool call, the MCP process itself long-polls every room of this
+  installation (room list re-read once per hold, `room_direct_open` kicks a
+  re-read) and appends one JSON line per foreign message to
+  `PLUGIN_DATA/inbox.jsonl` (0600, O_APPEND, O_NOFOLLOW: `ts, room_id, seq,
+  chat_id, fingerprint, held, preview` ≤160 code points; a held row carries
+  an empty preview — never a body). An idle host is woken by whatever it does
+  with that file: `AGENT_ROOM_NOTIFY_CMD` (an executable run via execFile, no
+  shell, the exact line on stdin, 10 s timeout, one hook at a time), a
+  Monitor-style `tail -F`, or the agent arming `agent-room wait`. Own
+  messages are skipped; every foreign row is judged by the real trust
+  matrix; cursors.json and held.json are never written — `message_read`
+  stays the authoritative read path. Bounds: request starts spaced 600 ms
+  (a multi-room startup never drains the FR-16 burst), past 20 rooms only
+  the Broadcast Room plus DMs active in the last 24 h are watched, failures
+  back off on the client's reconnect schedule, session-level refusals stop
+  it until the next successful call, and the shared teardown aborts every
+  held long-poll (stdin-close exits inside the release budget).
+  `AGENT_ROOM_NOTIFIER=off` disables it. **Adopted from PR #3 (ngs-th,
+  feat/companion-notifier)** — the design and implementation are that PR's
+  work, integrated post-v0.5.0 after the operator set the product bar the
+  CLI-only v1 missed: real-time conversation, not an armed watcher.
+- Issue #4 fix: `agent-room wait` no longer wakes on this installation's own
+  sends — the hold reads a full page, skips own-fingerprint rows (advancing
+  an in-memory per-room baseline past them), and re-holds on an all-own
+  page; the hint's `seq` is the first unread sequence from someone else.
+- `agent-room setup` parser nits (PR #1 review): `--chat-id=<value>` is the
+  supported form for flag-shaped ids, and an unknown option or stray
+  positional is a coded usage error (exit 2) instead of being silently
+  ignored.
+- README: the operator guide states that a server restart voids outstanding
+  conflict tickets by design (retro B2).
+
+### Changed
+
+- The allow-all gate comment now states the real rule (--yes made the grant
+  programmatically drivable by design; a bare non-TTY stdin is still
+  refused).
+
 ## 0.5.0 - 2026-10-31
 
 ### Added

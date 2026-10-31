@@ -10,7 +10,7 @@
 
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { once } from 'node:events'
 import { PassThrough } from 'node:stream'
 import http from 'node:http'
@@ -520,4 +520,48 @@ test('the CLI reads --chat-id / AGENT_ROOM_CHAT_ID / --overwrite for setup and e
   const missingValue = await run(['setup', '--chat-id'])
   assert.equal(missingValue.outcome.status, 'usage')
   assert.equal(missingValue.exitCode, 2)
+})
+
+test('setup parser: --chat-id=<value> form reaches the grammar gate and unknown options are coded usage errors', async t => {
+  const parent = mkdtempSync(join(tmpdir(), 'agent-room-setup-parse-'))
+  t.after(() => rmSync(parent, { recursive: true, force: true }))
+  const sharedData = join(parent, 'shared')
+  const pluginData = join(parent, 'plugin-data')
+  mkdirSync(sharedData, { mode: 0o700 })
+  mkdirSync(pluginData, { mode: 0o700 })
+  const savedExitCode = process.exitCode
+  try {
+    // The `=` form hands the value to the grammar gate (nothing touches a
+    // server first: an invalid id is refused before any probe).
+    const equalForm = await cliMain(['setup', '--chat-id=bad id with spaces'], {
+      input: process.stdin,
+      output: process.stdout,
+      errorOutput: process.stderr,
+      sharedDataDir: sharedData,
+      pluginDataDir: pluginData,
+    })
+    assert.equal(equalForm.status, 'refused', 'the --chat-id=<value> form reached the grammar gate')
+    assert.equal(existsSync(join(pluginData, 'config.json')), false, 'a refused setup wrote no config')
+
+    const unknown = await cliMain(['setup', '--wat'], {
+      input: process.stdin,
+      output: process.stdout,
+      errorOutput: process.stderr,
+      sharedDataDir: sharedData,
+      pluginDataDir: pluginData,
+    })
+    assert.equal(unknown.status, 'usage', 'an unknown option is a coded usage error, never silently ignored')
+    assert.equal(process.exitCode, 2, 'usage exits 2')
+
+    const stray = await cliMain(['setup', 'Alice'], {
+      input: process.stdin,
+      output: process.stdout,
+      errorOutput: process.stderr,
+      sharedDataDir: sharedData,
+      pluginDataDir: pluginData,
+    })
+    assert.equal(stray.status, 'usage', 'a positional is a coded usage error')
+  } finally {
+    process.exitCode = savedExitCode
+  }
 })

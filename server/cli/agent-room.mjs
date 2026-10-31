@@ -622,18 +622,53 @@ export async function main(argv = process.argv.slice(2), {
   }
   const deps = { input, output, errorOutput, sharedDataDir, pluginDataDir, env }
   if (command === 'setup') {
+    // The parser answers the PR #1 review nits: `--chat-id=<value>` is the
+    // supported form for flag-shaped ids (`--chat-id --alice` reads `--alice`
+    // as the flag's own missing value — use `--chat-id=--alice`), and an
+    // unknown option or stray positional is a coded usage error, never a
+    // silently ignored argument.
     const setupArgs = argv.slice(1)
-    const chatIdIndex = setupArgs.indexOf('--chat-id')
-    let chatId = chatIdIndex === -1 ? null : setupArgs[chatIdIndex + 1]
-    if (chatIdIndex !== -1 && (chatId === undefined || chatId.startsWith('--'))) {
-      errorOutput.write('agent-room setup --chat-id needs a value\n')
+    let chatId = null
+    let overwrite = false
+    let parseError = null
+    for (let index = 0; index < setupArgs.length; index += 1) {
+      const token = setupArgs[index]
+      if (token === '--chat-id') {
+        const value = setupArgs[index + 1]
+        if (value === undefined || value.startsWith('--')) {
+          parseError = 'agent-room setup --chat-id needs a value'
+          break
+        }
+        chatId = value
+        index += 1
+        continue
+      }
+      if (token.startsWith('--chat-id=')) {
+        const value = token.slice('--chat-id='.length)
+        if (value === '') {
+          parseError = 'agent-room setup --chat-id needs a value'
+          break
+        }
+        chatId = value
+        continue
+      }
+      if (token === '--overwrite') {
+        overwrite = true
+        continue
+      }
+      parseError = token.startsWith('--')
+        ? `unknown option "${token}"; see "agent-room help"`
+        : `unexpected argument "${token}"; agent-room setup takes options only`
+      break
+    }
+    if (parseError !== null) {
+      errorOutput.write(`agent-room: ${parseError}\n`)
       process.exitCode = 2
-      return { status: 'usage', message: 'agent-room setup --chat-id needs a value' }
+      return { status: 'usage', message: parseError }
     }
     if (chatId === null && typeof env.AGENT_ROOM_CHAT_ID === 'string' && env.AGENT_ROOM_CHAT_ID !== '') {
       chatId = env.AGENT_ROOM_CHAT_ID
     }
-    const overwrite = setupArgs.includes('--overwrite')
     const outcome = await runSetup({ input, output, sharedDataDir, pluginDataDir, chatId, overwrite })
     if (outcome.status === 'not-a-tty' || outcome.status === 'aborted' || outcome.status === 'refused') {
       errorOutput.write(`${outcome.message}\n`)
