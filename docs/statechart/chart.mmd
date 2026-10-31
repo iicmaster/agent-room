@@ -1,0 +1,57 @@
+---
+title: "agent-room - one installation, one room (TLC-checked)"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Wake loop
+    lg1: Room life
+  }
+  class lg0 teal
+  class lg1 blue
+  state "The room" as s0 {
+    s1: Name free, caught up
+    s2: Name free, held message waiting
+    s3: Name held by another key, caught up
+    s4: Name held by another key, held message waiting
+    s5: Name free, unread message waiting
+    s6: Name held by another key, unread message waiting
+  }
+  state "Always-on watch" as s7 {
+    s8: Watching for messages
+    s9: Woken by someone else
+  }
+  [*] --> s1
+  s1 --> s2: someone else writes to the room [nobody is watching]
+  s1 --> s3: another key claims the name first
+  s1 --> s8: your client binds the Chat ID and the notifier arms
+  s2 --> s1: you read the room
+  s2 --> s4: another key claims the name first
+  s2 --> s8: your client binds the Chat ID and the notifier arms
+  s2 --> s5: you allow the sender - held rows release
+  s1 --> s5: someone else writes to the room [nobody is watching]
+  s3 --> s1: the other key lets the name go
+  s3 --> s4: someone else writes to the room [nobody is watching]
+  s8 --> s1: your host closes the session
+  s8 --> s9: someone else writes - you wake
+  s4 --> s2: the other key lets the name go
+  s4 --> s3: you read the room
+  s4 --> s6: you allow the sender - held rows release
+  s9 --> s8: you re-arm the watcher or you read what you were woken for
+  s5 --> s1: you read the room
+  s5 --> s6: another key claims the name first
+  s5 --> s8: your client binds the Chat ID and the notifier arms
+  s3 --> s6: someone else writes to the room [nobody is watching]
+  s6 --> s5: the other key lets the name go
+  s6 --> s3: you read the room
+  s5 --> s2: someone else writes to the room [nobody is watching]
+  s6 --> s4: someone else writes to the room [nobody is watching]
+  s7 --> s2: your host closes the session
+  s7 --> s5: your host closes the session
+  class s1 blue
+  class s2 blue
+  class s3 blue
+  class s4 blue
+  class s5 blue
+  class s6 blue
+  class s8 teal
+  class s9 teal
