@@ -1,7 +1,8 @@
 # AgentRoom
 
-TLC reached 134 states and 389 steps. The chart draws 8 states and 26 arrows.
-The chart does not draw 93 steps that stay in one chart state.
+TLC reached 216 states and 706 steps. The chart draws 10 states and 37 arrows.
+The chart does not draw 121 steps that stay in one chart state.
+The view hides 80 steps, so the chart does not draw them.
 
 ## Rules that hold
 NoBodyWithoutTrust, WokenIsForSomeoneElse, ForeignHolderNeverDisplaced, NoDeadlock, CursorMonotonic

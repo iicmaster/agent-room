@@ -36,9 +36,14 @@ VARIABLES
     \* the agent's read cursor (message_read, strictly increasing)
     cursor,
     \* the wake: "idle" | "watching" (notifier/wait armed) | "woken"
-    wake
+    wake,
+    \* the wake policy (v0.7.0): senders whose held row already woke us and
+    \* whose repeat is silenced until the cooldown window passes
+    cooled,
+    \* what the current wake is for: "none" | "trusted" | "first-contact"
+    lastWakeKind
 
-vars == <<holder, trusted, sent, peerRows, heldRows, sawPeerBody, cursor, wake>>
+vars == <<holder, trusted, sent, peerRows, heldRows, sawPeerBody, cursor, wake, cooled, lastWakeKind>>
 
 Init ==
     /\ holder = NULL
@@ -49,6 +54,8 @@ Init ==
     /\ sawPeerBody = FALSE
     /\ cursor = 0
     /\ wake = "idle"
+    /\ cooled = {}
+    /\ lastWakeKind = "none"
 
 DeliveredRows == (1..sent) \ heldRows
 
@@ -57,7 +64,8 @@ YouBind ==
     /\ holder = NULL
     /\ holder' = "you"
     /\ wake' = "watching"
-    /\ UNCHANGED <<trusted, sent, peerRows, heldRows, sawPeerBody, cursor>>
+    /\ lastWakeKind' = "none"
+    /\ UNCHANGED <<trusted, sent, peerRows, heldRows, sawPeerBody, cursor, cooled>>
 
 (* A foreign key claimed the name first: your binds are refused, and no    *)
 (* action of yours ever takes the name back from a foreign holder (the     *)
@@ -67,18 +75,20 @@ PeerClaims ==
     /\ holder = NULL
     /\ holder' = "peer"
     /\ wake' = "idle"
-    /\ UNCHANGED <<trusted, sent, peerRows, heldRows, sawPeerBody, cursor>>
+    /\ lastWakeKind' = "none"
+    /\ UNCHANGED <<trusted, sent, peerRows, heldRows, sawPeerBody, cursor, cooled>>
 
 PeerReleases ==
     /\ holder = "peer"
     /\ holder' = NULL
-    /\ UNCHANGED <<trusted, sent, peerRows, heldRows, sawPeerBody, cursor, wake>>
+    /\ UNCHANGED <<trusted, sent, peerRows, heldRows, sawPeerBody, cursor, wake, cooled, lastWakeKind>>
 
 YouUnbind ==
     /\ holder = "you"
     /\ holder' = NULL
     /\ wake' = "idle"
-    /\ UNCHANGED <<trusted, sent, peerRows, heldRows, sawPeerBody, cursor>>
+    /\ lastWakeKind' = "none"
+    /\ UNCHANGED <<trusted, sent, peerRows, heldRows, sawPeerBody, cursor, cooled>>
 
 (* Your own send allocates a row and never wakes you (issue #4). *)
 YouSend ==
@@ -86,17 +96,39 @@ YouSend ==
     /\ sent < MaxSeq
     /\ sent' = sent + 1
     /\ wake' = wake
-    /\ UNCHANGED <<holder, trusted, peerRows, heldRows, sawPeerBody, cursor>>
+    /\ UNCHANGED <<holder, trusted, peerRows, heldRows, sawPeerBody, cursor, cooled, lastWakeKind>>
 
-(* Someone else writes. An armed watcher wakes — even on a HELD row (the   *)
-(* wake is metadata-only; the held pipeline stays message_read's).         *)
-PeerSends ==
+(* Someone TRUSTED writes: an armed watcher always wakes. *)
+PeerTrustedSends ==
+    /\ trusted
     /\ sent < MaxSeq
     /\ sent' = sent + 1
     /\ peerRows' = peerRows \cup {sent'}
-    /\ heldRows' = IF trusted THEN heldRows ELSE heldRows \cup {sent'}
     /\ wake' = IF wake = "watching" THEN "woken" ELSE wake
+    /\ lastWakeKind' = IF wake = "watching" THEN "trusted" ELSE lastWakeKind
+    /\ UNCHANGED <<holder, trusted, heldRows, sawPeerBody, cursor, cooled>>
+
+(* Someone UNTRUSTED writes: the row is HELD. The ratified wake policy:    *)
+(* the FIRST held row from a sender wakes (open-DM discovery); a REPEAT    *)
+(* while the sender is inside its cooldown window is SILENCED — the row is *)
+(* allocated, never consumed, and the watcher stays quiet. CooldownExpires *)
+(* (below) is the 300 s window abstracted as a nondeterministic reset.     *)
+PeerHeldSends ==
+    /\ ~trusted
+    /\ sent < MaxSeq
+    /\ sent' = sent + 1
+    /\ peerRows' = peerRows \cup {sent'}
+    /\ heldRows' = heldRows \cup {sent'}
+    /\ wake' = IF wake = "watching" /\ "peer" \notin cooled THEN "woken" ELSE wake
+    /\ lastWakeKind' = IF wake' = "woken" THEN "first-contact" ELSE lastWakeKind
+    /\ cooled' = IF wake = "watching" /\ "peer" \notin cooled THEN cooled \cup {"peer"} ELSE cooled
     /\ UNCHANGED <<holder, trusted, sawPeerBody, cursor>>
+
+(* The cooldown window passing (abstracted: no wall clock in this model). *)
+CooldownExpires ==
+    /\ cooled # {}
+    /\ cooled' = {}
+    /\ UNCHANGED <<holder, trusted, sent, peerRows, heldRows, sawPeerBody, cursor, wake, lastWakeKind>>
 
 (* allow-all: monotone; the held rows release and their bodies deliver. *)
 YouAllowAll ==
@@ -104,7 +136,7 @@ YouAllowAll ==
     /\ trusted' = TRUE
     /\ heldRows' = {}
     /\ sawPeerBody' = (sawPeerBody \/ (peerRows # {}))
-    /\ UNCHANGED <<holder, sent, peerRows, cursor, wake>>
+    /\ UNCHANGED <<holder, sent, peerRows, cursor, wake, cooled, lastWakeKind>>
 
 (* message_read: the authoritative read; the cursor never rewinds; held    *)
 (* rows deliver metadata only — no body. Reading clears a stale wake (the  *)
@@ -114,13 +146,15 @@ YouRead ==
     /\ cursor' = sent
     /\ sawPeerBody' = (sawPeerBody \/ (\E i \in DeliveredRows : i \in peerRows))
     /\ wake' = IF wake = "woken" THEN "watching" ELSE wake
-    /\ UNCHANGED <<holder, trusted, sent, peerRows, heldRows>>
+    /\ lastWakeKind' = IF wake' = "woken" THEN lastWakeKind ELSE "none"
+    /\ UNCHANGED <<holder, trusted, sent, peerRows, heldRows, cooled>>
 
 (* The host wakes, acts, and arms the watcher again. *)
 YouReArm ==
     /\ wake = "woken"
     /\ wake' = "watching"
-    /\ UNCHANGED <<holder, trusted, sent, peerRows, heldRows, sawPeerBody, cursor>>
+    /\ lastWakeKind' = "none"
+    /\ UNCHANGED <<holder, trusted, sent, peerRows, heldRows, sawPeerBody, cursor, cooled>>
 
 AnyStep ==
     \/ YouBind
@@ -128,7 +162,9 @@ AnyStep ==
     \/ PeerReleases
     \/ YouUnbind
     \/ YouSend
-    \/ PeerSends
+    \/ PeerTrustedSends
+    \/ PeerHeldSends
+    \/ CooldownExpires
     \/ YouAllowAll
     \/ YouRead
     \/ YouReArm

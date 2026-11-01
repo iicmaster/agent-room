@@ -1,5 +1,5 @@
 ---
-title: "agent-room - one installation, one room (TLC-checked)"
+title: "agent-room v0.7.0 - one installation, one room, wake policy checked (TLC)"
 ---
 stateDiagram-v2
   state "Legend" as legend {
@@ -18,7 +18,9 @@ stateDiagram-v2
   }
   state "Always-on watch" as s7 {
     s8: Watching for messages
-    s9: Woken by someone else
+    s9: Woken by a stranger (first contact)
+    s10: Watching - a held repeat is silenced by policy
+    s11: Woken by someone else
   }
   [*] --> s1
   s1 --> s2: someone else writes to the room [nobody is watching]
@@ -26,27 +28,38 @@ stateDiagram-v2
   s1 --> s8: your client binds the Chat ID and the notifier arms
   s2 --> s1: you read the room
   s2 --> s4: another key claims the name first
-  s2 --> s8: your client binds the Chat ID and the notifier arms
+  s2 --> s10: your client binds the Chat ID and the notifier arms
   s2 --> s5: you allow the sender - held rows release
-  s1 --> s5: someone else writes to the room [nobody is watching]
+  s1 --> s5: someone trusted writes to the room [nobody is watching]
   s3 --> s1: the other key lets the name go
   s3 --> s4: someone else writes to the room [nobody is watching]
   s8 --> s1: your host closes the session
-  s8 --> s9: someone else writes - you wake
+  s8 --> s9: a stranger's first message - you wake
+  s9 --> s2: your host closes the session
+  s9 --> s10: you re-arm the watcher
+  s9 --> s8: you read what you were woken for or you re-arm the watcher
   s4 --> s2: the other key lets the name go
   s4 --> s3: you read the room
   s4 --> s6: you allow the sender - held rows release
-  s9 --> s8: you re-arm the watcher or you read what you were woken for
+  s10 --> s2: your host closes the session
+  s10 --> s9: a stranger's first message - you wake
+  s10 --> s8: you read the room or you allow the sender - held rows release
   s5 --> s1: you read the room
   s5 --> s6: another key claims the name first
   s5 --> s8: your client binds the Chat ID and the notifier arms
-  s3 --> s6: someone else writes to the room [nobody is watching]
+  s3 --> s6: someone trusted writes to the room [nobody is watching]
+  s8 --> s11: someone trusted writes - you wake
+  s8 --> s5: your host closes the session
+  s8 --> s10: a held repeat arrives [the policy silences it]
+  s9 --> s5: your host closes the session
   s6 --> s5: the other key lets the name go
   s6 --> s3: you read the room
+  s11 --> s5: your host closes the session
+  s11 --> s8: you re-arm the watcher or you read what you were woken for
   s5 --> s2: someone else writes to the room [nobody is watching]
+  s8 --> s2: your host closes the session
   s6 --> s4: someone else writes to the room [nobody is watching]
-  s7 --> s2: your host closes the session
-  s7 --> s5: your host closes the session
+  s2 --> s8: your client binds the Chat ID and the notifier arms
   class s1 blue
   class s2 blue
   class s3 blue
@@ -55,3 +68,5 @@ stateDiagram-v2
   class s6 blue
   class s8 teal
   class s9 teal
+  class s10 teal
+  class s11 teal
