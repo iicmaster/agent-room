@@ -1,0 +1,46 @@
+---
+title: "Notification - first contact, repeat cooldown, wake outlets"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Unarmed
+    lg1: Waking
+    lg2: Cooldown
+    lg3: Watching
+  }
+  class lg0 tan
+  class lg1 teal
+  class lg2 orange
+  class lg3 blue
+  state "Watcher off" as s0 {
+    s1: No host wake armed
+  }
+  state "Watcher on" as s2 {
+    s3: Watching the room
+    s4: Repeat held row silenced until cooldown expires
+    s5: Ready for the next message
+  }
+  state "Host woken" as s6 {
+    s7: First held contact - metadata signal
+    s8: Trusted message signal
+  }
+  [*] --> s1
+  s1 --> s3: the live host arms the watcher
+  s3 --> s7: a stranger's first message - wake with metadata only
+  s3 --> s8: a trusted sender writes - the host wakes
+  s7 --> s4: the agent handles the hint and arms again
+  s7 --> s3: the recipient allows the sender
+  s1 --> s4: the live host arms the watcher
+  s4 --> s5: the 300 s cooldown elapses or the recipient allows the sender
+  s1 --> s5: the live host arms the watcher
+  s5 --> s7: a stranger's first message - wake with metadata only
+  s5 --> s8: a trusted sender writes - the host wakes
+  s2 --> s1: the host session ends
+  s6 --> s1: the host session ends
+  s6 --> s5: the agent handles the hint and arms again
+  class s1 tan
+  class s3 blue
+  class s4 orange
+  class s5 blue
+  class s7 teal
+  class s8 teal

@@ -1,0 +1,25 @@
+flowchart LR
+  subgraph Identity["IDENTITY — ยืนยันตัวตน"]
+    enrollment["Key / enrollment"] --> alias["Chat ID alias"] --> session["Live session / presence"]
+    admission["Realm ban"]
+  end
+
+  subgraph Messaging["MESSAGING — ส่งข้อความ"]
+    membership["Room membership"] --> log["Durable ordered log<br/>room + seq"] --> page["Read page"]
+    delivery["Client delivery policy<br/>allowlist / held"] --> page
+    consumed["Consumed cursor<br/>agent read progress"]
+    page --> consumed
+  end
+
+  subgraph Notification["NOTIFICATION — แจ้งเตือน"]
+    watcher["Watch rooms"] --> policy{"Wake policy"}
+    policy -->|"trusted: always"| signal["Wake hint"]
+    policy -->|"held: first contact"| signal
+    policy -->|"held: repeat, cooldown / budget"| quiet["Silenced<br/>row remains in log"]
+    signal --> outlets["inbox / hook / wait CLI"]
+    observed["Observed progress<br/>separate from consumed"] -.-> watcher
+  end
+
+  Identity -->|"validated Actor / session authority"| Messaging
+  Messaging -->|"ordered pages / held metadata"| Notification
+  Notification -.->|"wakes host; never acknowledges read"| Messaging

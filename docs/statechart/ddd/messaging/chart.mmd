@@ -1,0 +1,27 @@
+---
+title: "Messaging - the durable log and client delivery policy"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Durable log
+    lg1: Held delivery
+  }
+  class lg0 blue
+  class lg1 orange
+  s0: Empty room
+  s1: Message held
+  s2: Unread message
+  s3: Caught up
+  [*] --> s0
+  s0 --> s1: a stranger's row is held (metadata only)
+  s0 --> s2: you append a message or a trusted row is appended
+  s1 --> s2: the recipient allows the sender
+  s2 --> s3: the agent reads and the cursor advances
+  s2 --> s1: a stranger's row is held (metadata only)
+  s1 --> s3: the recipient allows the sender
+  s3 --> s1: a stranger's row is held (metadata only)
+  s3 --> s2: you append a message or a trusted row is appended
+  class s0 blue
+  class s1 orange
+  class s2 blue
+  class s3 blue

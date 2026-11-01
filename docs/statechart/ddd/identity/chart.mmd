@@ -1,0 +1,26 @@
+---
+title: "Identity - who is this sender?"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Enrollment
+    lg1: Directory
+    lg2: Session
+  }
+  class lg0 blue
+  class lg1 orange
+  class lg2 teal
+  s0: Not enrolled
+  s1: Key enrolled
+  s2: Alias claimed
+  s3: Live session
+  [*] --> s0
+  s0 --> s1: the peer's key is enrolled or your key is enrolled
+  s1 --> s2: the peer claims the alias first or you claim the alias
+  s2 --> s1: the alias claim is released
+  s2 --> s3: the peer's client binds the alias or your client binds the alias
+  s3 --> s2: the client session ends (the claim remains)
+  class s0 blue
+  class s1 blue
+  class s2 orange
+  class s3 teal
