@@ -1,0 +1,35 @@
+{
+  "candidate": "v0.7.0",
+  "record_type": "release-candidate-freeze",
+  "created": "2026-11-01",
+  "status": "released",
+  "source": {
+    "git_commit": "7a4a5603e83ea0c38e04538444d281c834cfc1a5",
+    "git_branch": "main",
+    "packager": "scripts/package-release.mjs",
+    "packager_invocation": "node scripts/package-release.mjs --out <fresh-absolute-dir>",
+    "supersedes": "689f58fdb5f02c41a723db24890d7995f581adc0 (v0.6.1) — the ratified wake policy + the DDD contexts map; no server-side behavior change"
+  },
+  "artifacts": {
+    "digest_algorithm": "SHA-256 folded over every regular file in package-relative path-sorted order (tests/release-smoke.test.mjs, treeDigest).",
+    "deterministic": true,
+    "portable": {
+      "package": "agent-room-agent-plugin",
+      "files": 50,
+      "bytes": 891470,
+      "sha256": "e5d628ded47bf1bcfc9be32d505e2549a334104bec686bbcbdc816ad36a90853"
+    },
+    "claude_code": {
+      "package": "agent-room-claude-code",
+      "files": 50,
+      "bytes": 891330,
+      "sha256": "a4a23bc5a1c239d1371252d5d42ef4131a21065fa254b9c8170eb1eebcbcc194"
+    }
+  },
+  "gates": {
+    "validator": "claude plugin validate --strict → passed",
+    "suite": "node --test → GREEN: 681 pass / 0 fail (2026-11-01; +6 wake-policy rows over v0.6.1's 675)",
+    "design": "the DDD advisory round (codex gpt-6.1-sol[ultra] + agy gemini-3.8-flash-high, both seated as the operator's Anti-Consensus Club, identities matched) converged on the wake policy; the operator ratified it the same day; the record lives at docs/implementation/reviews/epic-10-ddd-contexts-decision.md"
+  },
+  "notes": "Wake policy: a stranger's first held row wakes (open-DM discovery); per-sender 300 s cooldown for untrusted repeats; 10/min aggregate installation held-wake budget; ledger client-side only (wake-state.json 0600) shared by the notifier and the wait CLI through server/client/wake-policy.mjs. Suppressed rows are skipped, never consumed; trusted senders never gated. No server-side change; the REL-3 qualification of the unchanged server core stands (soak children keep the notifier off — FD corridor recalibration remains a named follow-up)."
+}
