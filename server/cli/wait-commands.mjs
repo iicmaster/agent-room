@@ -61,6 +61,7 @@ import { loadChatIdConfig } from '../client/api-client.mjs'
 import { ensureServer } from '../client/ensure-server.mjs'
 import { loadRemoteConfig } from '../client/remote-config.mjs'
 import { authenticate, protocolHeaders, roundTrip } from './session-commands.mjs'
+import { decideHeldWake, loadWakePolicy, wakeStatePath } from '../client/wake-policy.mjs'
 
 // The concurrency fence: at most six held long-polls at once. With the 20 s
 // hold that is ≈3 requests/min per watched room — 18/min at the fence —
@@ -138,7 +139,24 @@ function firstHit(attempts) {
 // page was all-own. The hint's seq is the FIRST unread sequence from
 // SOMEONE ELSE; an unread backlog of any size fires the same way — the full
 // catch-up read is message_read's job, not the hint's.
-async function holdForRoom({ target, token, roomId, afterSeq, holdMs, ownFingerprint, baselines }) {
+// One long-poll read of one room. Resolves a hit {room_id, seq} when the
+// page carries messages beyond the baseline, or null on a quiet page. The
+// request timeout is the hold plus margin — see WAIT_HOLD_TIMEOUT_MARGIN_MS.
+// Issue #4 (v0.5.0, found live by the mcop-coo installation): this
+// installation's OWN sends also allocate rows, and `message_send` never
+// advances the MCP read cursor — so the first read after any own send saw
+// the installation's own message and the wait woke on itself. The fix reads
+// a full page, skips every row whose actor_fingerprint is THIS
+// installation's (advancing an in-memory per-room baseline past them, so a
+// skipped row never re-fires), and re-holds with the advanced cursor when a
+// page was all-own. The ratified wake policy (2026-11-01) extends the skip
+// to HELD rows whose sender is within its wake cooldown or whose wake would
+// breach the installation's held-wake budget — a suppressed row is skipped
+// here, never consumed; the next wait re-decides it. The hint's seq is the
+// FIRST wakeable unread sequence from someone else; an unread backlog of
+// any size fires the same way — the full catch-up read is message_read's
+// job, not the hint's.
+async function holdForRoom({ target, token, roomId, afterSeq, holdMs, ownFingerprint, baselines, decideHeld }) {
   const holdDeadline = performance.now() + holdMs
   let cursor = Math.max(afterSeq, baselines.get(roomId) ?? 0)
   for (;;) {
@@ -166,12 +184,15 @@ async function holdForRoom({ target, token, roomId, afterSeq, holdMs, ownFingerp
     }
     const messages = response.body?.result?.messages
     if (!Array.isArray(messages) || messages.length === 0) return null
-    const foreign = messages.filter(row => row?.actor_fingerprint !== ownFingerprint)
-    if (foreign.length > 0) {
+    for (const row of messages) {
+      if (row?.actor_fingerprint === ownFingerprint) continue
+      if (row.held === true && decideHeld(row) === false) continue
       baselines.set(roomId, Math.max(cursor, messages[messages.length - 1].seq))
-      return { room_id: roomId, seq: foreign[0].seq }
+      return { room_id: roomId, seq: row.seq }
     }
-    // All-own page: advance past it and re-hold within the same hold window.
+    // All-own or all-cooled page: advance past it and re-hold within the
+    // same hold window (a cooled row is re-decided by the NEXT wait, which
+    // re-reads from the durable cursor this process never writes).
     cursor = messages[messages.length - 1].seq
   }
 }
@@ -275,7 +296,7 @@ async function enumerateRooms({ target, token }) {
 // `agent-room wait [--room <room_id>]... [--timeout <seconds>]` — the
 // companion notifier. Repeated --room narrows the watch; the default watches
 // every room of this Actor.
-export async function runWaitFamilyCommand(tokens, { sharedDataDir, pluginDataDir }) {
+export async function runWaitFamilyCommand(tokens, { sharedDataDir, pluginDataDir, env = process.env }) {
   const rooms = []
   let timeoutSeconds
   for (let index = 0; index < tokens.length; index += 1) {
@@ -365,6 +386,11 @@ export async function runWaitFamilyCommand(tokens, { sharedDataDir, pluginDataDi
       )
     }
     const baselines = loadBaselineCursors(pluginDataDir, realmId)
+    // The ratified wake policy: the same ledger the always-on notifier uses
+    // gates the wait's held-row hints (server/client/wake-policy.mjs).
+    const policy = loadWakePolicy(env)
+    const wakePath = wakeStatePath(pluginDataDir, realmId)
+    const decideHeld = row => decideHeldWake({ statePath: wakePath, fingerprint: row.actor_fingerprint, policy })
 
     // Fixed rooms (--room) are validated against the enumeration once; the
     // all-rooms default re-enumerates every cycle so a DM opened mid-wait is
@@ -399,7 +425,7 @@ export async function runWaitFamilyCommand(tokens, { sharedDataDir, pluginDataDi
       const attempts = []
       for (const roomId of held) {
         attempts.push(holdForRoom({
-          target, token, roomId, holdMs, ownFingerprint, baselines,
+          target, token, roomId, holdMs, ownFingerprint, baselines, decideHeld,
           afterSeq: baselines.get(roomId) ?? 0,
         }))
       }
@@ -408,7 +434,7 @@ export async function runWaitFamilyCommand(tokens, { sharedDataDir, pluginDataDi
       // never unwatched.
       for (const roomId of overflow) {
         attempts.push(holdForRoom({
-          target, token, roomId, holdMs: 0, ownFingerprint, baselines,
+          target, token, roomId, holdMs: 0, ownFingerprint, baselines, decideHeld,
           afterSeq: baselines.get(roomId) ?? 0,
         }))
       }

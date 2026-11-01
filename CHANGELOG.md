@@ -2,6 +2,30 @@
 
 All notable changes to Agent Room are documented in this file.
 
+## 0.7.0 - 2026-11-01
+
+### Added
+
+- **The ratified wake policy** (the DDD advisory round's point 5, approved
+  by the operator): a stranger's first HELD row wakes the agent — an open
+  DM is still discovered — but repeat wakes from the same untrusted sender
+  cool down for 5 minutes (300 s), and the installation's held-row wakes
+  obey an aggregate budget of 10 per minute, so a flood of strangers
+  cannot produce alarm fatigue (the live mcop-coo finding). Trusted
+  senders are never gated; a suppressed row is skipped, never consumed —
+  the durable log, the held pipeline, and message_read stay untouched,
+  and the next wait re-decides it. The ledger is client-side only
+  (`PLUGIN_DATA/realms/<realm>/wake-state.json`, 0600) and SHARED by both
+  wake substrates — the always-on notifier (server/client/notifier.mjs)
+  and `agent-room wait` (the held gating in holdForRoom) — through one
+  module, server/client/wake-policy.mjs. Env-tunable:
+  AGENT_ROOM_WAKE_COOLDOWN_MS / AGENT_ROOM_WAKE_BUDGET /
+  AGENT_ROOM_WAKE_BUDGET_WINDOW_MS (positive integers; junk falls back).
+- The DDD bounded-contexts model as the architecture's working map
+  (Identity / Messaging / Notification; trust as client-side delivery
+  policy; the occupancy machinery quarantined inside Identity —
+  docs/implementation/reviews/epic-10-ddd-contexts-decision.md).
+
 ## 0.6.1 - 2026-11-01
 
 ### Fixed

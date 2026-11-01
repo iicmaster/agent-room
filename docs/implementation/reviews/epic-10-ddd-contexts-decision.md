@@ -39,8 +39,9 @@ per the 2026-10-29 seat directive).
    metadata hint from a stranger (the open-DM journey the operator defined
    the chat by), add a per-sender cooldown for untrusted senders' repeat
    wakes plus an aggregate installation wake budget (a per-sender gate alone
-   does not stop N keys), state kept client-side only. NOT shipped in this
-   decision — it is a behavior change awaiting the operator's word.
+   does not stop N keys), state kept client-side only. **RATIFIED by the
+   operator the same day ("ยึดตามที่แนะนำมา") and shipped in v0.7.0** as
+   server/client/wake-policy.mjs with both wake substrates as consumers.
 6. **Migration = C now, A (strangler) per slice when justified; B refused.**
    No three-directory split; wire protocol unchanged; the 674-test suite is
    the harness. First extraction candidates named: the wait overflow probe

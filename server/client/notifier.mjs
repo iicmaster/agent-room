@@ -50,6 +50,7 @@ import {
 } from '../constants.mjs'
 import { reconnectDelayMs } from './api-client.mjs'
 import { applyTrustMatrix, loadAllowlist } from './trust.mjs'
+import { decideHeldWake, loadWakePolicy, wakeStatePath } from './wake-policy.mjs'
 
 export const INBOX_FILENAME = 'inbox.jsonl'
 export const NOTIFIER_ENV = 'AGENT_ROOM_NOTIFIER'
@@ -176,12 +177,21 @@ export function startNotifier({
   const deliver = async (roomId, messages) => {
     const foreign = messages.filter(row => row?.actor_fingerprint !== client.fingerprint)
     if (foreign.length === 0) return
+    const realmId = await realmIdOf()
     const judged = applyTrustMatrix({ messages: foreign }, {
       ownFingerprint: client.fingerprint,
       transport: client.transport,
-      allowlist: loadAllowlist(pluginDataDir, await realmIdOf()),
+      allowlist: loadAllowlist(pluginDataDir, realmId),
     }).messages
+    // The ratified wake policy: a held row wakes on FIRST contact from its
+    // sender; repeats cool down, and the installation's held-row wakes obey
+    // an aggregate budget (server/client/wake-policy.mjs). Trusted rows are
+    // never gated; a suppressed row is skipped — never consumed, never
+    // acknowledged.
+    const policy = loadWakePolicy(env)
+    const statePath = wakeStatePath(pluginDataDir, realmId)
     for (const row of judged) {
+      if (row.held === true && decideHeldWake({ statePath, fingerprint: row.actor_fingerprint, policy }) === false) continue
       const line = `${JSON.stringify(inboxEntry(roomId, row))}\n`
       try {
         appendInbox(line)

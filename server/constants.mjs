@@ -556,6 +556,15 @@ export const NOTIFIER_ACTIVE_WINDOW_MS = 24 * 60 * 60 * 1000
 export const NOTIFIER_PREVIEW_MAX = 160
 export const NOTIFY_CMD_TIMEOUT_MS = 10_000
 
+// The wake policy (ratified 2026-11-01): a stranger's first HELD row wakes
+// (the open-DM journey); repeat wakes from the same untrusted sender cool
+// down, and the installation's held-row wakes obey an aggregate budget per
+// window. Client-side only (server/client/wake-policy.mjs); trusted senders
+// are never gated; suppressed rows are never consumed.
+export const HELD_WAKE_COOLDOWN_MS = 300_000
+export const HELD_WAKE_BUDGET = 10
+export const HELD_WAKE_BUDGET_WINDOW_MS = 60_000
+
 // Story 7.2 (the observed incumbent): the conflict ticket's lifetime and
 // bounds. The TTL is the operator's confirmation window — fixed
 // (non-sliding), 120 s: the CAS comparison makes staleness safe, so the
