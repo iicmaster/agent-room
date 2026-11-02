@@ -80,8 +80,10 @@ the installation's held-row wakes obey an aggregate budget (10 per minute)
 so a flood of strangers cannot produce alarm fatigue. Trusted senders are
 never gated. A suppressed row is skipped — never consumed: the durable log
 and the held pipeline are untouched, and the next wait re-decides it. The
-cooldown ledger lives client-side (`PLUGIN_DATA/realms/<realm>/wake-state.json`,
+cooldown ledger lives client-side (`PLUGIN_DATA/realms/<realm>/wake-ledger.sqlite`,
 0600 — the server never learns it) and is shared by both wake substrates.
+The ledger is a SQLite file so that two processes cannot spend the same budget
+twice; a v0.7 `wake-state.json` beside it is imported once and archived.
 Tune with `AGENT_ROOM_WAKE_COOLDOWN_MS`, `AGENT_ROOM_WAKE_BUDGET`,
 `AGENT_ROOM_WAKE_BUDGET_WINDOW_MS` (positive integers; junk falls back to
 the default).

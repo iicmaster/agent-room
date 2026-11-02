@@ -171,6 +171,8 @@ import { resolveStorageThresholds, storageThresholdsFromEnv } from '../store/sto
 import { migrateV1InPlace } from '../store/migrate-v1.mjs'
 import { bootstrapRealm } from '../core/realm.mjs'
 import { createLiveSessionRegistry } from '../core/session-registry.mjs'
+import { bindIdentitySession } from '../identity/session-binding.mjs'
+import { resolveDirectRoom } from '../messaging/direct-room.mjs'
 import { fingerprintFromPublicKey, verifyWithRawPublicKey } from '../keys.mjs'
 import { ROUTE_TABLE, matchRoute, routeKey as routeKeyOf } from './routes.mjs'
 import {
@@ -182,7 +184,7 @@ import {
   reject,
   runPipeline,
 } from './pipeline.mjs'
-import { bearerTokenFromHeaders, createSessionRegistry, createSessionVerifier } from './session.mjs'
+import { bearerTokenFromHeaders, createSessionRegistry, createSessionVerifier } from '../identity/sessions.mjs'
 import { createChallengeRegistry } from './challenge.mjs'
 import { createConflictTicketStore } from './conflict-tickets.mjs'
 import { createEnrollRateLimiter } from './enroll-rate-limit.mjs'
@@ -561,141 +563,23 @@ function bindSession(context) {
   if (ticketRaw !== undefined && ticketRaw !== null && replaceExisting !== true) {
     return reject('invalid_request', 'conflict_ticket is only accepted when replace_existing is true')
   }
-  const registry = context.liveSessionRegistry ?? LIVE_SESSION_REGISTRY
-  const conflictTickets = context.conflictTickets ?? CONFLICT_TICKETS
-  // The incumbent: whoever holds this name right now (the live registry's
-  // own answer, read before any change).
-  const holder = typeof registry.holderOf === 'function' ? registry.holderOf(chatId) : null
-  const heldByAnotherSession = holder !== null && holder.sessionKey !== principal.sessionKey
-  let incumbent = null
-  if (replaceExisting) {
-    // The takeover (Story 6.4, refined by 7.2). A session of a DIFFERENT
-    // Actor is never displaced — and the refusal is the ordinary collision
-    // refusal, so the refused caller learns nothing about who holds the
-    // name. This check runs BEFORE any ticket work: a foreign caller
-    // holding a stolen ticket gets the same bare refusal and burns nothing.
-    if (heldByAnotherSession && holder.actorFingerprint !== principal.actorFingerprint) {
-      return reject('chat_id_taken')
-    }
-    if (typeof registry.transfer !== 'function') return reject('chat_id_taken')
-    // Story 7.2: the intent REQUIRES an observation — the opaque ticket a
-    // same-Actor 409 carried when the operator looked.
-    if (typeof ticketRaw !== 'string' || ticketRaw.length === 0) {
-      return reject('invalid_request', 'conflict_ticket is required when replace_existing is true: attempt a plain bind first and confirm against the ticket its refusal carries')
-    }
-    const observed = conflictTickets.redeem({
-      ticket: ticketRaw,
-      actorFingerprint: principal.actorFingerprint,
-      chatId,
-    })
-    if (observed === null) return reject('conflict_stale')
-    // The occupancy pair comparison — the same live view the commit below
-    // uses, with no await between here and the transfer. The takeover
-    // displaces the OBSERVED incumbent only: a free name (even briefly), a
-    // new holder, or the SAME key on a NEW occupancy are all stale — never
-    // a fallback into an ordinary claim.
-    const currentHolder = typeof registry.holderOf === 'function' ? registry.holderOf(chatId) : null
-    const currentGeneration = typeof registry.occupancyGeneration === 'function'
-      ? registry.occupancyGeneration(chatId)
-      : null
-    if (currentHolder === null
-      || currentHolder.sessionKey !== observed.incumbentSessionKey
-      || currentGeneration === null
-      || currentGeneration !== observed.observedGeneration) {
-      return reject('conflict_stale')
-    }
-    incumbent = currentHolder.sessionKey
-  } else if (heldByAnotherSession) {
-    const sameActor = holder.actorFingerprint === principal.actorFingerprint
-    if (
-      sameActor
-      && typeof context.sessionRegistry?.isLive === 'function'
-      && context.sessionRegistry.isLive(holder.sessionKey) === false
-    ) {
-      // Re-auth recovery (Story 1.7): a client whose session token was
-      // invalidated or expired re-authenticates and re-binds the SAME Chat
-      // ID. The dead session's row still holds the name until its lease,
-      // which would make the client permanently unrecoverable. When — and
-      // only when — the current holder is the SAME Actor and that holder's
-      // session token no longer authenticates, the row is released and the
-      // name re-claimed. A live session (even of the same Actor) is never
-      // displaced, and a different Actor never is.
-      registry.release(holder.sessionKey)
-    } else if (
-      sameActor
-      && typeof context.sessionRegistry?.isLive === 'function'
-      && context.sessionRegistry.isLive(holder.sessionKey) === true
-      && typeof registry.occupancyGeneration === 'function'
-      && registry.occupancyGeneration(chatId) !== null
-      && typeof conflictTickets.mint === 'function'
-    ) {
-      // Story 7.2: the same-Actor LIVE collision is exactly the observation
-      // point — the plain bind's refusal carries the opaque ticket the
-      // operator confirms against. Minted after the stages, bound to the
-      // authenticated Actor and the observed occupancy pair, never to a
-      // bearer or a digest. A full store refuses NEW issuance with the
-      // existing rate_limited (naming the retry delay); nothing existing is
-      // evicted.
-      const minted = conflictTickets.mint({
-        actorFingerprint: principal.actorFingerprint,
-        chatId,
-        observerSessionKey: principal.sessionKey,
-        incumbentSessionKey: holder.sessionKey,
-        // Known (non-null) by the branch guard — a UNIQUE stamp: two
-        // occupancies can never share it, so a redeemed pair names exactly
-        // the occupancy it observed (the zero-ABA repair).
-        observedGeneration: registry.occupancyGeneration(chatId),
-      })
-      if (minted.rateLimited === true) {
-        return reject('rate_limited', undefined, { retry_after_ms: minted.retryAfterMs })
-      }
-      return reject('chat_id_taken', undefined, { conflict_ticket: minted.ticket })
-    }
-  }
-  // The durable claim write runs inside the registry's atomic bind step —
-  // after the collision check, before the memory commit — timestamped by
-  // the registry's own clock (one clock for live and durable recency), so
-  // a refused bind never touches the store and a failed write never
-  // leaves a phantom live row behind.
-  const persist = claimPayload => context.store.upsertChatIdClaim(claimPayload)
-  const state = incumbent === null
-    ? registry.claim({
-      sessionKey: principal.sessionKey,
-      chatId,
-      actorFingerprint: principal.actorFingerprint,
-      clientType: declaredType,
-      persist,
-    })
-    : registry.transfer({
-      sessionKey: principal.sessionKey,
-      chatId,
-      actorFingerprint: principal.actorFingerprint,
-      clientType: declaredType,
-      persist,
-      incumbentSessionKey: incumbent,
-    })
-  // The handoff fence: the displaced session's authority ends HERE, not with
-  // its next request. Its token stops authenticating (so it cannot re-bind
-  // the name by re-authenticating) and its key is marked superseded. The
-  // fence entry survives while any request of the displaced session is still
-  // inside the admission→handler window (the pipeline pins each admitted
-  // request's key), and every such request is refused — at the authorization
-  // stage, or at the pipeline's post-input revalidation directly before the
-  // handler. A registry without the fence primitive still performs the
-  // transfer — the displaced session then simply loses its live row.
-  const displaced = state.displacedSessionKey ?? null
-  if (displaced !== null && typeof context.sessionRegistry?.supersede === 'function') {
-    context.sessionRegistry.supersede(displaced)
-  }
+  const outcome = bindIdentitySession({
+    principal,
+    chatId,
+    clientType: declaredType,
+    replaceExisting,
+    conflictTicket: ticketRaw,
+    liveRegistry: context.liveSessionRegistry ?? LIVE_SESSION_REGISTRY,
+    sessionRegistry: context.sessionRegistry,
+    conflictTickets: context.conflictTickets ?? CONFLICT_TICKETS,
+    persistClaim: claimPayload => context.store.upsertChatIdClaim(claimPayload),
+  })
+  if (outcome.kind === 'refused') return reject(outcome.code, outcome.message, outcome.extra)
   return {
-    chat_id: state.chatId,
-    connected_since: new Date(state.connectedSince).toISOString(),
-    last_seen: new Date(state.lastSeen).toISOString(),
-    // True only when this bind displaced a live holder — the explicit
-    // same-Actor takeover. It is a fact about THIS caller's own request
-    // (the caller asked for the takeover and the server accepted it), never
-    // information about anyone else's session.
-    replaced: displaced !== null,
+    chat_id: outcome.chatId,
+    connected_since: new Date(outcome.connectedSince).toISOString(),
+    last_seen: new Date(outcome.lastSeen).toISOString(),
+    replaced: outcome.displacedSessionKey !== null,
   }
 }
 
@@ -826,46 +710,29 @@ registerHandler('POST /api/rooms/direct', function directOpen(context) {
     return reject('invalid_actor_id', 'target_fingerprint must be sha256: followed by 64 lowercase hex characters')
   }
 
-  const claims = context.store.listClaimsForChatId(forms.display)
-  const mostRecentPerActor = new Map()
-  for (const claim of claims) {
-    if (!mostRecentPerActor.has(claim.actor_fingerprint)) {
-      mostRecentPerActor.set(claim.actor_fingerprint, claim)
-    }
-  }
-  let candidates = [...mostRecentPerActor.values()]
-  if (targetFingerprint !== undefined && targetFingerprint !== null) {
-    candidates = candidates.filter(claim => claim.actor_fingerprint === targetFingerprint)
-  }
-  if (candidates.length === 0) {
+  const outcome = resolveDirectRoom({
+    chatId: forms.display,
+    targetFingerprint,
+    callerFingerprint: principal.actorFingerprint,
+    listClaimsForChatId: value => context.store.listClaimsForChatId(value),
+    openDirectRoom: options => context.store.openDirectRoom(options),
+  })
+  if (outcome.ok === false && outcome.code === 'chat_id_not_found') {
     return reject(
       'chat_id_not_found',
-      targetFingerprint !== undefined && targetFingerprint !== null
-        ? `no claim by the requested fingerprint exists for the chat id "${forms.display}"`
-        : `no actor has claimed the chat id "${forms.display}"`,
+      outcome.requestedFingerprint !== null
+        ? `no claim by the requested fingerprint exists for the chat id "${outcome.chatId}"`
+        : `no actor has claimed the chat id "${outcome.chatId}"`,
     )
   }
-  if (candidates.length > 1) {
+  if (outcome.ok === false && outcome.code === 'ambiguous_chat_id') {
     return reject(
       'ambiguous_chat_id',
-      `the chat id "${forms.display}" is claimed by ${candidates.length} actors; retry with one candidate fingerprint as target_fingerprint`,
-      {
-        candidates: candidates.map(claim => ({
-          fingerprint: claim.actor_fingerprint,
-          last_seen: claim.last_seen_at,
-        })),
-      },
+      `the chat id "${outcome.chatId}" is claimed by ${outcome.candidates.length} actors; retry with one candidate fingerprint as target_fingerprint`,
+      { candidates: outcome.candidates },
     )
   }
-  const target = candidates[0].actor_fingerprint
-  const room = context.store.openDirectRoom({
-    // AD-6/D14: a same-Actor pair is represented by the same fingerprint
-    // twice; the store's canonical pair key and membership insert converge it.
-    actorFingerprints: target === principal.actorFingerprint
-      ? [principal.actorFingerprint, principal.actorFingerprint]
-      : [principal.actorFingerprint, target],
-  })
-  return { room_id: room.id, kind: room.kind }
+  return { room_id: outcome.room_id, kind: outcome.kind }
 }, 'actor')
 
 // GET /api/rooms/:id/messages: the long-poll read. The page semantics are

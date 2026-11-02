@@ -2,6 +2,23 @@
 
 All notable changes to Agent Room are documented in this file.
 
+## Unreleased
+
+### Changed
+
+- **The wake ledger is SQLite, not JSON.** The v0.7 ledger was read-modify-write
+  over `wake-state.json`, so the always-on notifier and an `agent-room wait`
+  could both read "no cooldown" and both wake: a budget two writers can spend
+  twice is not a budget. The ledger is now
+  `PLUGIN_DATA/realms/<realm>/wake-ledger.sqlite` (STRICT, WAL,
+  `synchronous = FULL`, 0600 in a 0700 realm directory) and every decision is
+  one `BEGIN IMMEDIATE` critical section. The POLICY is unchanged: first
+  contact wakes, repeats cool down, the installation obeys its aggregate
+  budget, and a suppressed row is still never consumed. An unreadable ledger
+  now refuses the wake instead of failing open; a transient one yields at most
+  one uncharged hint per process. A v0.7 `wake-state.json` is imported once
+  inside the creating transaction and then archived as `wake-state.json.imported`.
+
 ## 0.7.0 - 2026-11-01
 
 ### Added
@@ -15,7 +32,7 @@ All notable changes to Agent Room are documented in this file.
   senders are never gated; a suppressed row is skipped, never consumed —
   the durable log, the held pipeline, and message_read stay untouched,
   and the next wait re-decides it. The ledger is client-side only
-  (`PLUGIN_DATA/realms/<realm>/wake-state.json`, 0600) and SHARED by both
+  (`PLUGIN_DATA/realms/<realm>/wake-ledger.sqlite`, 0600) and SHARED by both
   wake substrates — the always-on notifier (server/client/notifier.mjs)
   and `agent-room wait` (the held gating in holdForRoom) — through one
   module, server/client/wake-policy.mjs. Env-tunable:

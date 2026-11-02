@@ -66,7 +66,8 @@ import { loadOrCreateKeypair, signWithInstallationKey } from '../keys.mjs'
 import { loadOrCreateLocalToken } from '../api/local-token.mjs'
 import { ensureServer } from '../client/ensure-server.mjs'
 import { loadRemoteConfig } from '../client/remote-config.mjs'
-import { loadChatIdConfig } from '../client/api-client.mjs'
+import { CONNECTION_MODE_ENV, loadChatIdConfig } from '../client/api-client.mjs'
+import { LOCAL_TRANSPORT, REMOTE_TRANSPORT } from '../client/trust.mjs'
 import { cliHttpJson, cliHttpJsonUrl, cliBearerHeaders } from './http.mjs'
 
 const line = object => JSON.stringify(object)
@@ -81,11 +82,11 @@ function usage(command, message) {
 // remote origin — the same substrate, the same timeout discipline. Shared
 // with the `wait` command family (the companion notifier), which authenticates
 // and talks to the same targets the same way.
-export function roundTrip(target, method, path, headers, body, timeoutMs) {
+export function roundTrip(target, method, path, headers, body, timeoutMs, { signal } = {}) {
   if (target.kind === 'remote') {
-    return cliHttpJsonUrl(target.serverUrl, method, path, headers, body, timeoutMs)
+    return cliHttpJsonUrl(target.serverUrl, method, path, headers, body, timeoutMs, { signal })
   }
-  return cliHttpJson(target.port, method, path, headers, body, timeoutMs)
+  return cliHttpJson(target.port, method, path, headers, body, timeoutMs, { signal })
 }
 
 export function protocolHeaders(bearer) {
@@ -104,9 +105,10 @@ export function protocolHeaders(bearer) {
 // is exactly the identity a takeover requires.
 // Exported for the `wait` command family (server/cli/wait-commands.mjs): the
 // same credential exchange, the same identity — THIS installation's Actor.
-export async function authenticate(target, { pluginDataDir, sharedDataDir }) {
+export async function authenticate(target, { pluginDataDir, sharedDataDir, env = process.env } = {}) {
   const keypair = loadOrCreateKeypair(pluginDataDir)
-  if (target.kind === 'remote') {
+  const declaredRemote = env[CONNECTION_MODE_ENV] === 'remote'
+  if (target.kind === 'remote' || declaredRemote) {
     const challenge = await roundTrip(target, 'POST', '/api/auth/challenge', protocolHeaders(), {
       public_key: keypair.publicKey.toString('base64url'),
     }, CLIENT_REQUEST_TIMEOUT_MS)
@@ -129,7 +131,7 @@ export async function authenticate(target, { pluginDataDir, sharedDataDir }) {
         answer.body?.error?.message ?? `the agent-room server answered ${answer.status}`,
       )
     }
-    return { token, fingerprint: keypair.fingerprint }
+    return { token, fingerprint: keypair.fingerprint, transport: REMOTE_TRANSPORT }
   }
   const localToken = loadOrCreateLocalToken(sharedDataDir)
   const exchange = await roundTrip(target, 'POST', '/api/auth/local', protocolHeaders(localToken), {
@@ -142,7 +144,7 @@ export async function authenticate(target, { pluginDataDir, sharedDataDir }) {
       exchange.body?.error?.message ?? `the agent-room server answered ${exchange.status}`,
     )
   }
-  return { token, fingerprint: keypair.fingerprint }
+  return { token, fingerprint: keypair.fingerprint, transport: LOCAL_TRANSPORT }
 }
 
 // The observation and the takeover (Story 7.2, the observed incumbent):

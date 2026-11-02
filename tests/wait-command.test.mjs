@@ -11,7 +11,7 @@
 
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { once } from 'node:events'
 import http from 'node:http'
 import { generateKeyPairSync } from 'node:crypto'
@@ -21,11 +21,16 @@ import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
 import { PROTOCOL_VERSION } from '../server/constants.mjs'
+import { CONNECTION_MODE_ENV } from '../server/client/api-client.mjs'
 import { atomicWriteJson, readJsonFile } from '../server/runtime.mjs'
 import { loadOrCreateLocalToken } from '../server/api/local-token.mjs'
-import { loadOrCreateKeypair } from '../server/keys.mjs'
+import { fingerprintFromPublicKey, loadOrCreateKeypair, signWithInstallationKey } from '../server/keys.mjs'
+import { applyTrustMatrix, loadAllowlist, setAllowlistEntry, setAcceptAll, REMOTE_TRANSPORT } from '../server/client/trust.mjs'
+import { openRoomLog } from '../server/store/room-log.mjs'
+import { TEST_CA_CERT, startTrustedTlsFront } from './remote-tls-fixture.mjs'
 import { main as cliMain } from '../server/cli/agent-room.mjs'
 import { runWaitFamilyCommand } from '../server/cli/wait-commands.mjs'
+import { authenticate } from '../server/cli/session-commands.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const SERVER_ENTRY = join(ROOT, 'server', 'api', 'server.mjs')
@@ -101,6 +106,7 @@ async function connectInstallation(port, sharedData, chatId) {
   const localToken = loadOrCreateLocalToken(sharedData)
   const { publicKey } = generateKeyPairSync('ed25519')
   const raw = publicKey.export({ type: 'spki', format: 'der' }).subarray(-32)
+  const fingerprint = fingerprintFromPublicKey(raw)
   const auth = await httpRequest(port, 'POST', '/api/auth/local', {
     headers: actorHeaders(localToken),
     body: { public_key: raw.toString('base64url') },
@@ -112,7 +118,7 @@ async function connectInstallation(port, sharedData, chatId) {
     body: { chat_id: chatId },
   })
   assert.equal(connected.status, 200, connected.text)
-  return { sessionToken }
+  return { sessionToken, fingerprint }
 }
 
 // The wait installation's own identity pieces: config.json (the gate the
@@ -120,22 +126,61 @@ async function connectInstallation(port, sharedData, chatId) {
 // live MCP client would have created at startup, which is what lets a peer
 // open a DM to this name at all. The claim-and-release mirrors setup's own
 // live probe; the name is free again for the real client.
-async function prepareWaitInstallation(port, sharedData, pluginData, chatId) {
+async function challengeSession(port, pluginData) {
+  const keypair = loadOrCreateKeypair(pluginData)
+  const challenge = await httpRequest(port, 'POST', '/api/auth/challenge', {
+    headers: actorHeaders(),
+    body: { public_key: keypair.publicKey.toString('base64url') },
+  })
+  assert.equal(challenge.status, 200, challenge.text)
+  const nonce = challenge.json().result.nonce
+  const answer = await httpRequest(port, 'POST', '/api/auth/answer', {
+    headers: actorHeaders(),
+    body: { nonce, signature: signWithInstallationKey(pluginData, Buffer.from(nonce, 'base64url')).toString('base64url') },
+  })
+  assert.equal(answer.status, 200, answer.text)
+  return answer.json().result.session_token
+}
+
+async function challengeAndBind(port, pluginData, chatId) {
+  const token = await challengeSession(port, pluginData)
+  const bound = await httpRequest(port, 'POST', '/api/session', { headers: actorHeaders(token), body: { chat_id: chatId } })
+  assert.equal(bound.status, 200, bound.text)
+  return { token, release: () => httpRequest(port, 'DELETE', '/api/session', { headers: actorHeaders(token) }) }
+}
+
+async function prepareWaitInstallation(port, sharedData, pluginData, chatId, { enroll = false, bind = true } = {}) {
   atomicWriteJson(join(pluginData, 'config.json'), { chat_id: chatId, set_up_at: new Date().toISOString() })
   const keypair = loadOrCreateKeypair(pluginData)
   const localToken = loadOrCreateLocalToken(sharedData)
-  const auth = await httpRequest(port, 'POST', '/api/auth/local', {
-    headers: actorHeaders(localToken),
-    body: { public_key: keypair.publicKey.toString('base64url') },
-  })
-  assert.equal(auth.status, 200, auth.text)
-  const sessionToken = auth.json().result.session_token
-  const bound = await httpRequest(port, 'POST', '/api/session', {
-    headers: actorHeaders(sessionToken),
-    body: { chat_id: chatId },
-  })
-  assert.equal(bound.status, 200, bound.text)
-  await httpRequest(port, 'DELETE', '/api/session', { headers: actorHeaders(sessionToken) })
+  if (enroll) {
+    const store = openRoomLog({ dataDir: sharedData })
+    const invite = store.mintInvite({ uses: 1, ttlSeconds: 3600 })
+    store.close()
+    const enrollment = await httpRequest(port, 'POST', '/api/auth/enroll', {
+      headers: actorHeaders(),
+      body: { invite_token: invite.token, public_key: keypair.publicKey.toString('base64url'), signature: signWithInstallationKey(pluginData, Buffer.from(invite.token, 'utf8')).toString('base64url') },
+    })
+    assert.equal(enrollment.status, 200, enrollment.text)
+  }
+  let sessionToken
+  if (enroll) {
+    const challenge = await httpRequest(port, 'POST', '/api/auth/challenge', { headers: actorHeaders(), body: { public_key: keypair.publicKey.toString('base64url') } })
+    assert.equal(challenge.status, 200, challenge.text)
+    const nonce = challenge.json().result.nonce
+    const answer = await httpRequest(port, 'POST', '/api/auth/answer', { headers: actorHeaders(), body: { nonce, signature: signWithInstallationKey(pluginData, Buffer.from(nonce, 'base64url')).toString('base64url') } })
+    assert.equal(answer.status, 200, answer.text)
+    sessionToken = answer.json().result.session_token
+  } else {
+    const auth = await httpRequest(port, 'POST', '/api/auth/local', { headers: actorHeaders(localToken), body: { public_key: keypair.publicKey.toString('base64url') } })
+    assert.equal(auth.status, 200, auth.text)
+    sessionToken = auth.json().result.session_token
+  }
+  if (bind) {
+    const bound = await httpRequest(port, 'POST', '/api/session', { headers: actorHeaders(sessionToken), body: { chat_id: chatId } })
+    assert.equal(bound.status, 200, bound.text)
+    await httpRequest(port, 'DELETE', '/api/session', { headers: actorHeaders(sessionToken) })
+  }
   return keypair
 }
 
@@ -174,10 +219,26 @@ async function realmFacts(port, sharedData) {
   return { realmId: status.json().result.realm_id, broadcastRoomId: broadcast.room_id }
 }
 
-const wait = (world, tokens) => runWaitFamilyCommand(tokens, {
+const wait = (world, tokens, env = process.env) => runWaitFamilyCommand(tokens, {
   sharedDataDir: world.sharedData,
   pluginDataDir: world.pluginData,
+  env,
 })
+
+function waitChild(world, tokens, extraEnv = {}) {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const child = spawn(process.execPath, [join(ROOT, 'tests', 'wait-cli-child.mjs'), ...tokens], {
+      env: { ...process.env, AGENT_ROOM_DATA_DIR: world.sharedData, PLUGIN_DATA: world.pluginData, ...extraEnv },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    let stdout = ''
+    let stderr = ''
+    child.stdout.setEncoding('utf8').on('data', chunk => { stdout += chunk })
+    child.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk })
+    child.once('error', rejectPromise)
+    child.once('close', code => resolvePromise({ code, stdout, stderr }))
+  })
+}
 
 const parseHint = outcome => {
   assert.equal(outcome.status, 'ok')
@@ -365,6 +426,140 @@ async function sendAsInstallation(port, sharedData, pluginData, chatId, roomId, 
   return sent.json().result
 }
 
+// Wait classifies raw server rows with the receiving installation's trust matrix.
+
+test('wait trust: configured Remote Mode holds untrusted rows and allows the exact fingerprint', async t => {
+  const world = makeWorld(t)
+  const record = await world.waitReady()
+  const caPath = join(world.parent, 'wait-test-ca.pem')
+  const previousCa = process.env.NODE_EXTRA_CA_CERTS
+  writeFileSync(caPath, TEST_CA_CERT, { mode: 0o600 })
+  process.env.NODE_EXTRA_CA_CERTS = caPath
+  t.after(() => { if (previousCa === undefined) delete process.env.NODE_EXTRA_CA_CERTS; else process.env.NODE_EXTRA_CA_CERTS = previousCa })
+
+  const receiver = await prepareWaitInstallation(record.port, world.sharedData, world.pluginData, 'Watcher', { enroll: true, bind: false })
+  const receiverSeed = await challengeSession(record.port, world.pluginData, receiver)
+  const seedBind = await httpRequest(record.port, 'POST', '/api/session', { headers: actorHeaders(receiverSeed), body: { chat_id: 'Watcher' } })
+  assert.equal(seedBind.status, 200, seedBind.text)
+  const receiverPresence = await httpRequest(record.port, 'GET', '/api/presence', { headers: actorHeaders(receiverSeed) })
+  assert.equal(receiverPresence.status, 200, receiverPresence.text)
+  const receiverStatus = await httpRequest(record.port, 'GET', '/api/status', { headers: actorHeaders(receiverSeed) })
+  assert.equal(receiverStatus.status, 200, receiverStatus.text)
+  const receiverRooms = await httpRequest(record.port, 'GET', '/api/rooms', { headers: actorHeaders(receiverSeed) })
+  assert.equal(receiverRooms.status, 200, receiverRooms.text)
+  await httpRequest(record.port, 'DELETE', '/api/session', { headers: actorHeaders(receiverSeed) })
+
+  const peerPlugin = join(world.parent, 'remote-peer')
+  mkdirSync(peerPlugin, { mode: 0o700 })
+  atomicWriteJson(join(peerPlugin, 'config.json'), { chat_id: 'PeerRemote' })
+  const peer = await prepareWaitInstallation(record.port, world.sharedData, peerPlugin, 'PeerRemote', { enroll: true, bind: false })
+  const peerSession = await challengeAndBind(record.port, peerPlugin, 'PeerRemote')
+  const peerFingerprint = peer.fingerprint
+  const peerToken = peerSession.token
+  const realmId = receiverStatus.json().result.realm_id
+  const broadcastRoomId = receiverRooms.json().result.rooms.find(room => room.kind === 'broadcast').room_id
+  const front = await startTrustedTlsFront(t)
+  front.setBackend(record.port)
+  atomicWriteJson(join(world.pluginData, 'remote-config.json'), { server_url: front.origin, set_at: new Date().toISOString() })
+
+  const held = await peerSends(record.port, peerToken, broadcastRoomId, 'remote-held', 'HELD BODY MUST NOT LEAK', 'PeerRemote')
+  const firstRun = await waitChild(world, ['--timeout', '5'], { NODE_EXTRA_CA_CERTS: caPath })
+  assert.equal(firstRun.code, 0, firstRun.stderr)
+  const firstHint = JSON.parse(firstRun.stdout.trim())
+  assert.equal(firstHint.status, 'new_messages', 'first held contact is a metadata wake')
+  assert.equal(firstHint.seq, held.seq)
+  assert.ok(!firstRun.stdout.includes('HELD BODY'))
+
+  await peerSends(record.port, peerToken, broadcastRoomId, 'remote-held-repeat', 'REPEAT HELD BODY', 'PeerRemote')
+  const repeatRun = await waitChild(world, ['--timeout', '1'], { NODE_EXTRA_CA_CERTS: caPath })
+  assert.equal(repeatRun.code, 0, repeatRun.stderr)
+  assert.equal(JSON.parse(repeatRun.stdout.trim()).status, 'timeout', 'same untrusted sender repeat is cooled down')
+  assert.ok(!repeatRun.stdout.includes('REPEAT HELD BODY'))
+
+  setAllowlistEntry(world.pluginData, realmId, peerFingerprint, true)
+  const delivered = await peerSends(record.port, peerToken, broadcastRoomId, 'remote-allowed', 'trusted body stays outside hint', 'PeerRemote')
+  const allowedRun = await waitChild(world, ['--timeout', '5'], { NODE_EXTRA_CA_CERTS: caPath })
+  assert.equal(allowedRun.code, 0, allowedRun.stderr)
+  const hint = JSON.parse(allowedRun.stdout.trim())
+  assert.equal(hint.status, 'new_messages')
+  assert.equal(hint.seq, held.seq, 'allowlisting makes the oldest unread held row readable; wake did not consume it')
+  assert.equal(delivered.seq, held.seq + 2, 'the cooled repeat remains in the durable sequence')
+  assert.ok(!allowedRun.stdout.includes('trusted body'))
+})
+
+test('wait trust: declared Remote Mode on loopback uses challenge auth and fails closed on unallowlisted rows', async t => {
+  const world = makeWorld(t)
+  const record = await world.waitReady()
+  const receiver = await prepareWaitInstallation(record.port, world.sharedData, world.pluginData, 'Watcher', { enroll: true, bind: false })
+  const receiverSeed = await challengeSession(record.port, world.pluginData, receiver)
+  const seedBind = await httpRequest(record.port, 'POST', '/api/session', { headers: actorHeaders(receiverSeed), body: { chat_id: 'Watcher' } })
+  assert.equal(seedBind.status, 200, seedBind.text)
+  const receiverStatus = await httpRequest(record.port, 'GET', '/api/status', { headers: actorHeaders(receiverSeed) })
+  const receiverRooms = await httpRequest(record.port, 'GET', '/api/rooms', { headers: actorHeaders(receiverSeed) })
+  assert.equal(receiverStatus.status, 200, receiverStatus.text)
+  assert.equal(receiverRooms.status, 200, receiverRooms.text)
+  const realmId = receiverStatus.json().result.realm_id
+  const broadcastRoomId = receiverRooms.json().result.rooms.find(r => r.kind === 'broadcast').room_id
+  await httpRequest(record.port, 'DELETE', '/api/session', { headers: actorHeaders(receiverSeed) })
+
+  const peer = await connectInstallation(record.port, world.sharedData, 'Peer')
+  const env = { ...process.env, [CONNECTION_MODE_ENV]: REMOTE_TRANSPORT }
+  const held = await peerSends(record.port, peer.sessionToken, broadcastRoomId, 'declared-held', 'DECLARED HELD BODY', 'Peer')
+  const firstHint = parseHint(await wait(world, ['--timeout', '5'], env))
+  assert.equal(firstHint.status, 'new_messages', 'first held contact wakes in declared remote mode')
+  assert.equal(firstHint.seq, held.seq)
+  assert.ok(!JSON.stringify(firstHint).includes('DECLARED HELD BODY'))
+
+  await peerSends(record.port, peer.sessionToken, broadcastRoomId, 'declared-repeat', 'DECLARED REPEAT BODY', 'Peer')
+  const repeatHint = parseHint(await wait(world, ['--timeout', '1'], env))
+  assert.equal(repeatHint.status, 'timeout', 'repeat from the same untrusted fingerprint is cooled down')
+  assert.ok(!JSON.stringify(repeatHint).includes('DECLARED REPEAT BODY'))
+
+  setAllowlistEntry(world.pluginData, realmId, peer.fingerprint, true)
+  await peerSends(record.port, peer.sessionToken, broadcastRoomId, 'declared-allowed', 'allowed', 'Peer')
+  const allowedHint = parseHint(await wait(world, ['--timeout', '5'], env))
+  assert.equal(allowedHint.status, 'new_messages')
+  assert.equal(allowedHint.seq, held.seq, 'after allow, the oldest unread row is eligible')
+})
+
+test('wait trust: declared Remote Mode on loopback challenges and holds an unallowlisted row', async t => {
+  const world = makeWorld(t)
+  const record = await world.waitReady()
+  const receiver = await prepareWaitInstallation(record.port, world.sharedData, world.pluginData, 'Watcher', { enroll: true, bind: false })
+  const receiverToken = await challengeSession(record.port, world.pluginData, receiver)
+  const bound = await httpRequest(record.port, 'POST', '/api/session', { headers: actorHeaders(receiverToken), body: { chat_id: 'Watcher' } })
+  assert.equal(bound.status, 200, bound.text)
+  const rooms = await httpRequest(record.port, 'GET', '/api/rooms', { headers: actorHeaders(receiverToken) })
+  const status = await httpRequest(record.port, 'GET', '/api/status', { headers: actorHeaders(receiverToken) })
+  assert.equal(rooms.status, 200, rooms.text)
+  assert.equal(status.status, 200, status.text)
+  const broadcastRoomId = rooms.json().result.rooms.find(r => r.kind === 'broadcast').room_id
+  const realm = status.json().result.realm_id
+  await httpRequest(record.port, 'DELETE', '/api/session', { headers: actorHeaders(receiverToken) })
+
+  const peer = await connectInstallation(record.port, world.sharedData, 'Peer')
+  const peerFingerprint = peer.fingerprint
+  const env = { ...process.env, [CONNECTION_MODE_ENV]: REMOTE_TRANSPORT }
+  const testTarget = { kind: 'local', port: record.port }
+  const declaredAuth = await authenticate(testTarget, { pluginDataDir: world.pluginData, sharedDataDir: world.sharedData, env })
+  assert.equal(declaredAuth.transport, REMOTE_TRANSPORT)
+  const held = await peerSends(record.port, peer.sessionToken, broadcastRoomId, 'declared-held', 'DECLARED HELD BODY', 'Peer')
+  const firstHint = parseHint(await wait(world, ['--timeout', '5'], env))
+  assert.equal(firstHint.status, 'new_messages', 'declared-remote first held contact wakes')
+  assert.equal(firstHint.seq, held.seq)
+  assert.ok(!JSON.stringify(firstHint).includes('DECLARED HELD BODY'))
+  await peerSends(record.port, peer.sessionToken, broadcastRoomId, 'declared-repeat', 'DECLARED REPEAT BODY', 'Peer')
+  const repeatHint = parseHint(await wait(world, ['--timeout', '1'], env))
+  assert.equal(repeatHint.status, 'timeout', 'declared-remote repeat is cooled down')
+  assert.ok(!JSON.stringify(repeatHint).includes('DECLARED REPEAT BODY'))
+
+  setAllowlistEntry(world.pluginData, realm, peer.fingerprint, true)
+  const delivered = await peerSends(record.port, peer.sessionToken, broadcastRoomId, 'declared-allowed', 'allowed', 'Peer')
+  const allowedHint = parseHint(await wait(world, ['--timeout', '5'], env))
+  assert.equal(allowedHint.status, 'new_messages')
+  assert.equal(allowedHint.seq, held.seq, 'allowlisting releases the oldest unread row first')
+})
+
 test('wait: the installation\u2019s own sends never wake it (issue #4)', async t => {
   const world = makeWorld(t)
   const record = await world.waitReady()
@@ -463,4 +658,66 @@ test('wait: the 7th room is overflow and is really head-checked — its unread r
   assert.equal(hint.room_id, seventh)
   assert.equal(hint.seq, sent.seq)
   assert.ok(!outcome.lines[0].includes('the seventh room speaks'))
+})
+
+test('wait trust: the 7th overflow room classifies a raw remote row as held and emits first-contact metadata', async t => {
+  const world = makeWorld(t)
+  const record = await world.waitReady()
+  const receiver = await prepareWaitInstallation(record.port, world.sharedData, world.pluginData, 'Watcher', { enroll: true, bind: false })
+  const receiverToken = await challengeSession(record.port, world.pluginData, receiver)
+  const bound = await httpRequest(record.port, 'POST', '/api/session', { headers: actorHeaders(receiverToken), body: { chat_id: 'Watcher' } })
+  assert.equal(bound.status, 200, bound.text)
+  const rooms = await httpRequest(record.port, 'GET', '/api/rooms', { headers: actorHeaders(receiverToken) })
+  assert.equal(rooms.status, 200, rooms.text)
+  const roomId = rooms.json().result.rooms.find(room => room.kind === 'broadcast').room_id
+  await httpRequest(record.port, 'DELETE', '/api/session', { headers: actorHeaders(receiverToken) })
+
+  const peers = []
+  const dmRooms = []
+  for (let i = 0; i < 7; i += 1) {
+    const peer = await connectInstallation(record.port, world.sharedData, `OverflowPeer${i}`)
+    const dm = await peerOpensDirectRoom(record.port, peer.sessionToken, 'Watcher')
+    peers.push(peer)
+    dmRooms.push(dm.room_id)
+  }
+  const seventh = dmRooms[6]
+  const sent = await peerSends(record.port, peers[6].sessionToken, seventh, 'overflow-held', 'OVERFLOW HELD BODY', 'OverflowPeer6')
+  const env = { ...process.env, [CONNECTION_MODE_ENV]: REMOTE_TRANSPORT }
+  const roomTokens = dmRooms.map(id => ['--room', id]).flat()
+  const outcome = await wait(world, [...roomTokens, '--timeout', '10'], env)
+  assert.equal(outcome.status, 'ok', JSON.stringify(outcome))
+  const hint = parseHint(outcome)
+  assert.equal(hint.status, 'new_messages', 'the overflow probe must classify and allow first-contact metadata wake')
+  assert.equal(hint.room_id, seventh)
+  assert.equal(hint.seq, sent.seq)
+  assert.ok(!JSON.stringify(hint).includes('OVERFLOW HELD BODY'))
+})
+
+test('wait race: a losing held room does not spend its sender wake grant', async t => {
+  const world = makeWorld(t)
+  const record = await world.waitReady()
+  const receiver = await prepareWaitInstallation(record.port, world.sharedData, world.pluginData, 'Watcher', { enroll: true, bind: false })
+  const receiverToken = await challengeSession(record.port, world.pluginData, receiver)
+  const bound = await httpRequest(record.port, 'POST', '/api/session', { headers: actorHeaders(receiverToken), body: { chat_id: 'Watcher' } })
+  assert.equal(bound.status, 200, bound.text)
+  const rooms = await httpRequest(record.port, 'GET', '/api/rooms', { headers: actorHeaders(receiverToken) })
+  assert.equal(rooms.status, 200, rooms.text)
+  const roomId = rooms.json().result.rooms.find(room => room.kind === 'broadcast').room_id
+  await httpRequest(record.port, 'DELETE', '/api/session', { headers: actorHeaders(receiverToken) })
+
+  const senderA = await connectInstallation(record.port, world.sharedData, 'RacePeerA')
+  const senderB = await connectInstallation(record.port, world.sharedData, 'RacePeerB')
+  // Both messages are already unread when the two room probes start. The
+  // first candidate emits one hint; the other room is a losing probe and must
+  // not reserve cooldown/budget after the wait returns.
+  const sentA = await peerSends(record.port, senderA.sessionToken, roomId, 'race-a', 'first held candidate', 'RacePeerA')
+  const sentB = await peerSends(record.port, senderB.sessionToken, roomId, 'race-b', 'second held candidate', 'RacePeerB')
+  const env = { ...process.env, [CONNECTION_MODE_ENV]: REMOTE_TRANSPORT }
+  const first = parseHint(await wait(world, ['--room', roomId, '--timeout', '5'], env))
+  assert.equal(first.status, 'new_messages')
+  assert.ok([sentA.seq, sentB.seq].includes(first.seq))
+  const loserSeq = first.seq === sentA.seq ? sentB.seq : sentA.seq
+  const next = parseHint(await wait(world, ['--room', roomId, '--timeout', '5'], env))
+  assert.equal(next.status, 'new_messages', 'the losing sender still has its first-contact wake grant')
+  assert.equal(next.seq, loserSeq)
 })

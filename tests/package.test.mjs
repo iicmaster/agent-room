@@ -352,6 +352,21 @@ test('release packaging creates two materialized byte-identical runtime artifact
   // The setup command ships exposed in every artifact: the bin entry and an
   // executable, shebang-carrying CLI (a bin launcher depends on both).
   for (const artifactRoot of [portableRoot, claudeRoot]) {
+    // DDD context modules ship in both plugin forms; do not let the package
+    // manifest/tree parity pass while one bounded context is omitted.
+    for (const contextPath of [
+      'server/identity/claims.mjs',
+      'server/identity/repository.mjs',
+      'server/identity/sessions.mjs',
+      'server/messaging/direct-room.mjs',
+      'server/messaging/rooms.mjs',
+      'server/messaging/messages.mjs',
+      'server/notification/notifier.mjs',
+      'server/notification/wake-policy.mjs',
+      'server/notification/delivery.mjs',
+    ]) {
+      assert.equal((await stat(join(artifactRoot, contextPath))).isFile(), true, `${contextPath} ships in ${artifactRoot}`)
+    }
     const artifactPackage = await readJson(join(artifactRoot, 'package.json'));
     assert.deepEqual(artifactPackage.bin, { 'agent-room': './server/cli/agent-room.mjs' });
     const cliPath = join(artifactRoot, 'server', 'cli', 'agent-room.mjs');

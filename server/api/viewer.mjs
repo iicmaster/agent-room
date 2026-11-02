@@ -69,7 +69,7 @@ import {
 } from '../constants.mjs'
 import { AgentRoomRuntimeError } from '../runtime.mjs'
 import { HANDLER_STREAMED, reject } from './pipeline.mjs'
-import { bearerTokenFromHeaders } from './session.mjs'
+import { bearerTokenFromHeaders } from '../identity/sessions.mjs'
 
 // The digest the cookie registry keys on (and the token digest a mint is
 // remembered under): hashing the presented value and matching the digest has

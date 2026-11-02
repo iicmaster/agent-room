@@ -99,7 +99,7 @@ import {
   heldList,
   registerHeldMessages,
 } from './client/held.mjs'
-import { notifierEnabled, startNotifier } from './client/notifier.mjs'
+import { notifierEnabled, startNotifier } from './notification/notifier.mjs'
 
 // Run the runtime gate before any other work. Direct launches report one
 // diagnosable line and exit 1 with no stack trace; importers get a catchable

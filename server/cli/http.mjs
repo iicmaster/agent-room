@@ -13,7 +13,15 @@ import https from 'node:https'
 import { AgentRoomRuntimeError } from '../runtime.mjs'
 import { CLIENT_REQUEST_TIMEOUT_MS, PROTOCOL_HEADER, PROTOCOL_VERSION } from '../constants.mjs'
 
-export function cliHttpJson(port, method, path, headers, body, timeoutMs = CLIENT_REQUEST_TIMEOUT_MS) {
+function bindAbort(request, signal) {
+  if (!signal) return
+  const abort = () => request.destroy(signal.reason ?? new AgentRoomRuntimeError('request_cancelled', 'request cancelled'))
+  if (signal.aborted) { abort(); return }
+  signal.addEventListener('abort', abort, { once: true })
+  request.on('close', () => signal.removeEventListener('abort', abort))
+}
+
+export function cliHttpJson(port, method, path, headers, body, timeoutMs = CLIENT_REQUEST_TIMEOUT_MS, { signal } = {}) {
   return new Promise((resolvePromise, rejectPromise) => {
     const request = http.request(
       { host: '127.0.0.1', port, method, path, headers, agent: false },
@@ -33,6 +41,7 @@ export function cliHttpJson(port, method, path, headers, body, timeoutMs = CLIEN
     // cannot hang the interactive command.
     request.setTimeout(timeoutMs, () => request.destroy(new AgentRoomRuntimeError('request_failed', 'request timed out')))
     request.on('error', rejectPromise)
+    bindAbort(request, signal)
     if (body !== undefined) request.write(JSON.stringify(body))
     request.end()
   })
@@ -44,7 +53,7 @@ export function cliHttpJson(port, method, path, headers, body, timeoutMs = CLIEN
 // http is accepted only for a loopback origin, which is the Local Mode
 // target. One substrate, two targets: the loopback helper above and this one
 // share the envelope parsing and the timeout discipline.
-export function cliHttpJsonUrl(origin, method, path, headers, body, timeoutMs = CLIENT_REQUEST_TIMEOUT_MS) {
+export function cliHttpJsonUrl(origin, method, path, headers, body, timeoutMs = CLIENT_REQUEST_TIMEOUT_MS, { signal } = {}) {
   return new Promise((resolvePromise, rejectPromise) => {
     let url
     try {
@@ -71,6 +80,7 @@ export function cliHttpJsonUrl(origin, method, path, headers, body, timeoutMs = 
     )
     request.setTimeout(timeoutMs, () => request.destroy(new AgentRoomRuntimeError('request_failed', 'request timed out')))
     request.on('error', rejectPromise)
+    bindAbort(request, signal)
     if (body !== undefined) request.write(JSON.stringify(body))
     request.end()
   })

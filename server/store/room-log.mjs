@@ -55,15 +55,16 @@ import {
   assertSupportedRuntime,
   ensurePrivateDirectory,
 } from '../runtime.mjs'
+import { createIdentityRepository } from '../identity/repository.mjs'
+import { createMessagingRoomOperations } from '../messaging/rooms.mjs'
+import { createMessagingMessageOperations } from '../messaging/messages.mjs'
 import {
   BANNED_ACTORS_COLUMNS,
   bannedActorsTableDdl,
-  createBanOperations,
 } from './bans.mjs'
 import {
   INVITE_CONSUMPTIONS_COLUMNS,
   INVITES_COLUMNS,
-  createInviteOperations,
   inviteConsumptionsTableDdl,
   invitesTableDdl,
 } from './invites.mjs'
@@ -1109,24 +1110,19 @@ export function openRoomLog({
       if (closed) fail('store_connection_closed', 'agent-room store connection is closed')
     }
 
-    // Story 4.5: the ban registry's operations (./bans.mjs), guarded by this
-    // store's closed-connection discipline like every other api method. The
-    // operations are created BEFORE the invite operations so the enrollment
-    // transaction can consult the ban table inside its own transaction.
-    const banOperations = createBanOperations({ database, withImmediateTransaction })
-
-    // Story 4.2: the invite registry's operations (./invites.mjs), wired
-    // with this store's transaction runner and guarded by this store's
-    // closed-connection discipline like every other api method. The ban
-    // reader is the enrollment transaction's post-proof gate: a banned key
-    // is refused `banned` AFTER its possession proof verifies and BEFORE any
-    // use is consumed, all inside the one enrollment transaction — a failed
-    // or banned attempt consumes nothing and reveals ban state to no caller
-    // who cannot prove possession.
-    const inviteOperations = createInviteOperations({
+    // Identity repository operations share this store's one active
+    // DatabaseSync and transaction runner. Identity owns the domain SQL;
+    // this module remains the only runtime connection/schema/migration owner.
+    const identityOperations = createIdentityRepository({
       database,
       withImmediateTransaction,
-      isBanned: actorFingerprint => banOperations.isActorBanned(actorFingerprint),
+      validate: { assertOpen, fail, requireObject, requireChatId, requireFingerprint, requireClaimTimestamp },
+    })
+    const messagingRoomOperations = createMessagingRoomOperations({
+      database,
+      withImmediateTransaction,
+      validate: { assertOpen, fail, requireObject, requireFingerprint, requireRoomId, requireAfterSeq, requireReadLimit, requireTitle },
+      helpers: { selectRoom, requireRoom, requireDirectMembership, canonicalDirectPair, plainRoom, plainMessage, messageProjection: MESSAGE_PROJECTION },
     })
 
     // Story 4.6: the storage admission gate over the data directory — free
@@ -1153,6 +1149,18 @@ export function openRoomLog({
       freeBytesFn: storageFreeBytesFn,
       warn: line => { deferredStorageWarn = line },
     })
+    const messagingMessageOperations = createMessagingMessageOperations({
+      database,
+      withImmediateTransaction,
+      validate: { assertOpen, fail, requireObject, requireRoomId, requireFingerprint, requireChatId, requireClientMessageId, requireMessageText, requireReplyToSeq, requireNowMs },
+      helpers: { requireRoom, requireDirectMembership, selectMessage, plainMessage, messageProjection: MESSAGE_PROJECTION },
+      storageGate,
+      duplicateWindowMs: validDuplicateWindowMs,
+      storageNowMs,
+      resetStorageWarning() { deferredStorageWarn = null },
+      takeStorageWarning() { const line = deferredStorageWarn; deferredStorageWarn = null; return line },
+      storageWarn,
+    })
 
     const api = {
       databasePath,
@@ -1172,113 +1180,19 @@ export function openRoomLog({
       // optional too: the implicit Broadcast Room is bootstrapped before any
       // Actor exists and carries a NULL created_by_fingerprint — the store
       // never fabricates an identity for it.
-      createBroadcastRoom(options) {
-        assertOpen()
-        const { actorFingerprint = null, title } = requireObject(options)
-        const validFingerprint = actorFingerprint === null ? null : requireFingerprint(actorFingerprint)
-        const validTitle = requireTitle(title, DEFAULT_BROADCAST_TITLE)
-        const id = randomBytes(ROOM_ID_ENTROPY_BYTES).toString('base64url')
-        const createdAt = new Date().toISOString()
-
-        return withImmediateTransaction(database, () => {
-          database.prepare(`
-            INSERT INTO rooms (id, kind, title, pair_key, created_by_fingerprint, created_at)
-            VALUES (?, ?, ?, NULL, ?, ?)
-          `).run(id, BROADCAST_KIND, validTitle, validFingerprint, createdAt)
-          return {
-            id,
-            kind: BROADCAST_KIND,
-            title: validTitle,
-            pair_key: null,
-            created_by_fingerprint: validFingerprint,
-            created_at: createdAt,
-          }
-        })
-      },
+      createBroadcastRoom(...args) { assertOpen(); return messagingRoomOperations.createBroadcastRoom(...args) },
 
       // Atomic bootstrap ensure: re-checks for an existing Broadcast Room
       // INSIDE the write transaction, so concurrent or retried bootstraps
       // converge on exactly one commons room instead of racing two inserts.
       // Creates the room with a NULL creator (never a fabricated identity).
-      ensureBroadcastRoom(options = {}) {
-        assertOpen()
-        const { title } = requireObject(options)
-        const validTitle = requireTitle(title, DEFAULT_BROADCAST_TITLE)
-
-        return withImmediateTransaction(database, () => {
-          const existingRow = database.prepare(`
-            SELECT id, kind, title, pair_key, created_by_fingerprint, created_at
-            FROM rooms
-            WHERE kind = 'broadcast'
-            ORDER BY created_at ASC, id ASC
-            LIMIT 1
-          `).get()
-          if (existingRow) return plainRoom(existingRow)
-
-          const id = randomBytes(ROOM_ID_ENTROPY_BYTES).toString('base64url')
-          const createdAt = new Date().toISOString()
-          database.prepare(`
-            INSERT INTO rooms (id, kind, title, pair_key, created_by_fingerprint, created_at)
-            VALUES (?, ?, ?, NULL, NULL, ?)
-          `).run(id, BROADCAST_KIND, validTitle, createdAt)
-          return {
-            id,
-            kind: BROADCAST_KIND,
-            title: validTitle,
-            pair_key: null,
-            created_by_fingerprint: null,
-            created_at: createdAt,
-          }
-        })
-      },
+      ensureBroadcastRoom(...args) { assertOpen(); return messagingRoomOperations.ensureBroadcastRoom(...args) },
 
       // Direct rooms: canonical pair key, idempotent by UNIQUE(pair_key) in
       // either argument order. Same fingerprint twice opens a same-Actor
       // room. Direct rooms carry no stored title — DM labeling belongs to
       // the chat ids on the messages, which are never rewritten.
-      openDirectRoom(options) {
-        assertOpen()
-        const { actorFingerprints } = requireObject(options)
-        if (!Array.isArray(actorFingerprints) || actorFingerprints.length !== 2) {
-          fail('invalid_actor_id', 'actorFingerprints must contain exactly two fingerprints')
-        }
-        const [firstFingerprint, secondFingerprint] = actorFingerprints.map(requireFingerprint)
-        const { min, max, pairKey } = canonicalDirectPair(firstFingerprint, secondFingerprint)
-        const createdAt = new Date().toISOString()
-
-        return withImmediateTransaction(database, () => {
-          const existingRow = database
-            .prepare('SELECT id, kind, title, pair_key, created_by_fingerprint, created_at FROM rooms WHERE pair_key = ?')
-            .get(pairKey)
-          let room
-          if (existingRow) {
-            room = plainRoom(existingRow)
-          } else {
-            const id = randomBytes(ROOM_ID_ENTROPY_BYTES).toString('base64url')
-            database.prepare(`
-              INSERT INTO rooms (id, kind, title, pair_key, created_by_fingerprint, created_at)
-              VALUES (?, ?, NULL, ?, ?, ?)
-            `).run(id, DIRECT_KIND, pairKey, min, createdAt)
-            room = {
-              id,
-              kind: DIRECT_KIND,
-              title: null,
-              pair_key: pairKey,
-              created_by_fingerprint: min,
-              created_at: createdAt,
-            }
-          }
-
-          for (const fingerprint of new Set([firstFingerprint, secondFingerprint])) {
-            database.prepare(`
-              INSERT INTO direct_members (room_id, actor_fingerprint, joined_at)
-              VALUES (?, ?, ?)
-              ON CONFLICT (room_id, actor_fingerprint) DO NOTHING
-            `).run(room.id, fingerprint, createdAt)
-          }
-          return room
-        })
-      },
+      openDirectRoom(...args) { assertOpen(); return messagingRoomOperations.openDirectRoom(...args) },
 
       // Story 4.4: the send-bucket gate's idempotency probe — a pure read of
       // the idempotency tuple (room, actor fingerprint, client_message_id).
@@ -1288,18 +1202,7 @@ export function openRoomLog({
       // consumes nothing, even from an empty bucket. Returns the original
       // committed message or null; it writes nothing and validates like every
       // other store operation.
-      findIdempotentSend(options) {
-        assertOpen()
-        const { roomId, actorFingerprint, clientMessageId } = requireObject(options)
-        const validRoomId = requireRoomId(roomId)
-        const validFingerprint = requireFingerprint(actorFingerprint)
-        const validClientMessageId = requireClientMessageId(clientMessageId)
-        const row = database.prepare(`
-          ${MESSAGE_PROJECTION}
-          WHERE room_id = ? AND actor_fingerprint = ? AND client_message_id = ?
-        `).get(validRoomId, validFingerprint, validClientMessageId)
-        return row ? plainMessage(row) : null
-      },
+      findIdempotentSend(...args) { assertOpen(); return messagingMessageOperations.findIdempotentSend(...args) },
 
       // Append to the durable log. Sequences are room-local, contiguous from
       // 1, and assigned inside this BEGIN IMMEDIATE transaction via
@@ -1339,190 +1242,12 @@ export function openRoomLog({
       // maps to the same coded storage_low: both faces answer explicitly,
       // and withImmediateTransaction has already rolled the write back, so
       // an uncommitted message is never acknowledged.
-      appendMessage(options) {
-        assertOpen()
-        const {
-          roomId,
-          actorFingerprint,
-          chatId,
-          clientMessageId,
-          text,
-          replyToSeq = null,
-          nowMs,
-        } = requireObject(options)
-        const validRoomId = requireRoomId(roomId)
-        const validFingerprint = requireFingerprint(actorFingerprint)
-        const validChatId = requireChatId(chatId)
-        const validClientMessageId = requireClientMessageId(clientMessageId)
-        const validText = requireMessageText(text)
-        const validReplyToSeq = requireReplyToSeq(replyToSeq)
-        // The storage gate's clock (and the append's created_at) defaults to
-        // the wall clock; the open path's storageNowMs injection fills an
-        // omitted nowMs (requireNowMs calls a function argument and validates
-        // what it answers), so the warn interval is drivable through the
-        // server layer where the send route passes no nowMs at all.
-        const gateNowMs = requireNowMs(nowMs ?? storageNowMs)
-
-        try {
-          deferredStorageWarn = null
-          const outcome = withImmediateTransaction(database, () => {
-            const room = requireRoom(validRoomId)
-            requireDirectMembership(room, validFingerprint)
-
-            const existingRow = database.prepare(`
-              ${MESSAGE_PROJECTION}
-              WHERE room_id = ? AND actor_fingerprint = ? AND client_message_id = ?
-            `).get(validRoomId, validFingerprint, validClientMessageId)
-            if (existingRow) {
-              const existing = plainMessage(existingRow)
-              if (existing.text !== validText || existing.reply_to_seq !== validReplyToSeq) {
-                fail(
-                  'client_message_id_conflict',
-                  'clientMessageId was already used with a different message payload',
-                )
-              }
-              return { message: existing, duplicate: true, duplicateDropped: false, original: null }
-            }
-
-            // Reply targets resolve room-locally against (room_id, seq). Only
-            // when the seq is absent from this room does a global lookup
-            // distinguish a cross-room target from a nonexistent one.
-            if (validReplyToSeq !== null) {
-              const localTarget = database
-                .prepare('SELECT 1 AS found FROM messages WHERE room_id = ? AND seq = ?')
-                .get(validRoomId, validReplyToSeq)
-              if (!localTarget) {
-                const foreignTarget = database
-                  .prepare('SELECT 1 AS found FROM messages WHERE seq = ? AND room_id <> ?')
-                  .get(validReplyToSeq, validRoomId)
-                if (foreignTarget) {
-                  fail('reply_room_mismatch', 'replyToSeq identifies a message in another room')
-                }
-                fail('message_not_found', 'replyToSeq does not identify an existing message')
-              }
-            }
-
-            // The duplicate gate (Story 4.4, FR-16): one Actor repeating the
-            // byte-identical payload in one room within the window is an
-            // explicit duplicate_dropped notice naming the original sequence —
-            // never a silent second commit, never an error. The window is
-            // inclusive at its lower boundary (a message exactly windowMs old
-            // is still a duplicate), matching the store's other window
-            // comparisons.
-            const duplicateCutoff = new Date(gateNowMs - validDuplicateWindowMs).toISOString()
-            // The window scan rides idx_messages_duplicate_gate (equality on
-            // room, actor, and the exact text; the DESC seq ordering and the
-            // LIMIT ride the index too) — the query is an exact probe, never
-            // a scan of the room's history.
-            const duplicateRow = database.prepare(`
-              ${MESSAGE_PROJECTION}
-              WHERE room_id = ? AND actor_fingerprint = ? AND text = ? AND reply_to_seq IS ?
-                AND created_at >= ?
-              ORDER BY seq DESC
-              LIMIT 1
-            `).get(validRoomId, validFingerprint, validText, validReplyToSeq, duplicateCutoff)
-            if (duplicateRow) {
-              const original = plainMessage(duplicateRow)
-              return { message: null, duplicate: false, duplicateDropped: true, original }
-            }
-
-            // The storage admission gate (Story 4.6): the insert is about to
-            // allocate durable space, so this is where a full disk refuses.
-            // Below the refuse reserve the coded storage_low throws here —
-            // withImmediateTransaction rolls the (so far read-only)
-            // transaction back and the caller sees an explicit refusal, never
-            // a silent drop and never an acknowledgment. Between the reserves
-            // the append commits and the rate-limited warn line goes out.
-            storageGate.check(gateNowMs)
-
-            const nextSeq = Number(database
-              .prepare('SELECT COALESCE(MAX(seq), 0) + 1 AS next_seq FROM messages WHERE room_id = ?')
-              .get(validRoomId).next_seq)
-            const createdAt = new Date(gateNowMs).toISOString()
-            database.prepare(`
-              INSERT INTO messages (
-                room_id,
-                seq,
-                actor_fingerprint,
-                chat_id,
-                client_message_id,
-                text,
-                reply_to_seq,
-                created_at
-              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            `).run(
-              validRoomId,
-              nextSeq,
-              validFingerprint,
-              validChatId,
-              validClientMessageId,
-              validText,
-              validReplyToSeq,
-              createdAt,
-            )
-            return {
-              message: selectMessage(validRoomId, nextSeq),
-              duplicate: false,
-              duplicateDropped: false,
-              original: null,
-            }
-          })
-          // The commit has returned: the write lock is released, and the
-          // warn line the gate captured for this committed append goes out
-          // now — never while the transaction holds the exclusive lock. A
-          // rolled-back transaction never reaches this emit: its captured
-          // line (if the interval rolled) is dropped, because nothing was
-          // committed and nothing warns. The emit itself is isolated: a
-          // throwing injected sink is a diagnostics failure and must never
-          // recolor work the store has already committed.
-          if (deferredStorageWarn !== null) {
-            try {
-              storageWarn(deferredStorageWarn)
-            } catch {
-              // Committed is committed; a failed warn line is not a failed send.
-            }
-          }
-          return outcome
-        } catch (error) {
-          // The disk filled between the gate's observation and the write:
-          // the insert (or the commit that flushes it) answered SQLITE_FULL.
-          // withImmediateTransaction has already rolled back, so nothing was
-          // written and nothing will be acknowledged; the raw SQLite result
-          // code becomes the same coded refusal the reserve breach answers.
-          if (error?.errcode === SQLITE_FULL) {
-            fail('storage_low', 'the disk holding the agent-room data directory is full; the message was not committed')
-          }
-          throw error
-        }
-      },
+      appendMessage(...args) { assertOpen(); return messagingMessageOperations.appendMessage(...args) },
 
       // Cursor page over the room-local log: strictly-greater afterSeq, seq
       // ASC, bounded limit. Direct rooms deny non-members both here and on
       // append.
-      readPage(options) {
-        assertOpen()
-        const {
-          roomId,
-          actorFingerprint,
-          afterSeq = 0,
-          limit = READ_PAGE_MAX,
-        } = requireObject(options)
-        const validRoomId = requireRoomId(roomId)
-        const validFingerprint = requireFingerprint(actorFingerprint)
-        const validAfterSeq = requireAfterSeq(afterSeq)
-        const validLimit = requireReadLimit(limit)
-
-        const room = requireRoom(validRoomId)
-        requireDirectMembership(room, validFingerprint)
-
-        const rows = database.prepare(`
-          ${MESSAGE_PROJECTION}
-          WHERE room_id = ? AND seq > ?
-          ORDER BY seq ASC
-          LIMIT ?
-        `).all(validRoomId, validAfterSeq, validLimit)
-        return rows.map(plainMessage)
-      },
+      readPage(...args) { assertOpen(); return messagingRoomOperations.readPage(...args) },
 
       // Story 5.2: the VIEWER's page read — the same projection and cursor
       // semantics as readPage, but the ACL is the broadcast kind itself: the
@@ -1534,30 +1259,7 @@ export function openRoomLog({
       // is no fingerprint argument to widen it with. The caller is the
       // cookie-authenticated viewer surface; pages stay bounded by
       // requireReadLimit like every other read.
-      readBroadcastPage(options) {
-        assertOpen()
-        const {
-          roomId,
-          afterSeq = 0,
-          limit = READ_PAGE_MAX,
-        } = requireObject(options)
-        const validRoomId = requireRoomId(roomId)
-        const validAfterSeq = requireAfterSeq(afterSeq)
-        const validLimit = requireReadLimit(limit)
-
-        const room = requireRoom(validRoomId)
-        if (room.kind !== BROADCAST_KIND) {
-          fail('room_not_found', `room ${validRoomId} does not exist`)
-        }
-
-        const rows = database.prepare(`
-          ${MESSAGE_PROJECTION}
-          WHERE room_id = ? AND seq > ?
-          ORDER BY seq ASC
-          LIMIT ?
-        `).all(validRoomId, validAfterSeq, validLimit)
-        return rows.map(plainMessage)
-      },
+      readBroadcastPage(...args) { assertOpen(); return messagingRoomOperations.readBroadcastPage(...args) },
 
       // Story 1.7: the room's head sequence for long-poll responses — the
       // largest allocated room-local seq, or 0 for an empty room. The ACL
@@ -1565,50 +1267,13 @@ export function openRoomLog({
       // so a caller that can learn head_seq can also read the page; the
       // messages handler still orders readPage first, so the coded
       // room-not-found / actor-not-member outcomes come from the page read.
-      headSeq(roomId, options = {}) {
-        assertOpen()
-        const validRoomId = requireRoomId(roomId)
-        const { actorFingerprint = null } = requireObject(options)
-
-        const row = selectRoom(validRoomId)
-        if (!row) fail('room_not_found', `room ${validRoomId} does not exist`)
-
-        if (row.kind === DIRECT_KIND) {
-          if (actorFingerprint === null) {
-            fail('invalid_actor_id', 'actorFingerprint is required to inspect a direct room')
-          }
-          requireDirectMembership(row, requireFingerprint(actorFingerprint))
-        } else if (actorFingerprint !== null) {
-          requireFingerprint(actorFingerprint)
-        }
-        const head = database
-          .prepare('SELECT COALESCE(MAX(seq), 0) AS head FROM messages WHERE room_id = ?')
-          .get(validRoomId)
-        return Number(head.head)
-      },
+      headSeq(...args) { assertOpen(); return messagingRoomOperations.headSeq(...args) },
 
       // Room metadata. Direct rooms are private: the caller must present a
       // member fingerprint (the pair key embeds both fingerprints, so an
       // unguarded row would leak identities to any id-holder). Broadcast
       // rooms stay open; a provided fingerprint is still validated.
-      getRoom(roomId, options = {}) {
-        assertOpen()
-        const validRoomId = requireRoomId(roomId)
-        const { actorFingerprint = null } = requireObject(options)
-
-        const row = selectRoom(validRoomId)
-        if (!row) fail('room_not_found', `room ${validRoomId} does not exist`)
-
-        if (row.kind === DIRECT_KIND) {
-          if (actorFingerprint === null) {
-            fail('invalid_actor_id', 'actorFingerprint is required to inspect a direct room')
-          }
-          requireDirectMembership(row, requireFingerprint(actorFingerprint))
-        } else if (actorFingerprint !== null) {
-          requireFingerprint(actorFingerprint)
-        }
-        return plainRoom(row)
-      },
+      getRoom(...args) { assertOpen(); return messagingRoomOperations.getRoom(...args) },
 
       // Realm bootstrap primitives (Story 1.3, AD-14): getRealmId returns the
       // minted realm id or null before first boot; insertRealm mints exactly
@@ -1681,206 +1346,16 @@ export function openRoomLog({
       // the Actor. The deterministic order is findBroadcastRoom's:
       // created_at ASC, then id ASC. Rows are the store's full shape — the
       // wire projection is the caller's.
-      listRoomsForActor(actorFingerprint) {
-        assertOpen()
-        const validFingerprint = requireFingerprint(actorFingerprint)
-        const rows = database.prepare(`
-          SELECT id, kind, title, pair_key, created_by_fingerprint, created_at
-          FROM rooms
-          WHERE kind = 'broadcast'
-             OR id IN (SELECT room_id FROM direct_members WHERE actor_fingerprint = ?)
-          ORDER BY created_at ASC, id ASC
-        `).all(validFingerprint)
-        return rows.map(plainRoom)
-      },
+      listRoomsForActor(...args) { assertOpen(); return messagingRoomOperations.listRoomsForActor(...args) },
 
-      // Durable chat id claims (Story 1.5, FR-5/FR-21): one row per
-      // (normalized name, actor fingerprint) pair, written on connect and
-      // rename and pruned at CLAIMS_TTL_MS. The row set is the
-      // offline-discovery ambiguity data: multiple Actors may hold claims on
-      // one name, and historical (name, actor) pairs persist after rename or
-      // disconnect — this index never refuses a write and never deletes one
-      // on a connect/rename. Recency is monotonic: a write never moves
-      // last_seen_at backwards (a stale write refreshes only the display
-      // form), so a lagging clock cannot age a live claim out of the prune
-      // window. Live uniqueness is the in-memory live-session registry's
-      // rule, not this table's. Each write is its own BEGIN IMMEDIATE
-      // transaction.
-      upsertChatIdClaim(options) {
-        assertOpen()
-        const { chatId, actorFingerprint, lastSeenAt } = requireObject(options)
-        const validChatId = requireChatId(chatId)
-        const validFingerprint = requireFingerprint(actorFingerprint)
-        const lastSeen = requireClaimTimestamp(lastSeenAt)
-        const normalized = validChatId.toLowerCase()
-
-        return withImmediateTransaction(database, () => {
-          database.prepare(`
-            INSERT INTO chat_id_claims (chat_id_normalized, actor_fingerprint, chat_id_display, last_seen_at)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT (chat_id_normalized, actor_fingerprint) DO UPDATE SET
-              chat_id_display = excluded.chat_id_display,
-              last_seen_at = CASE
-                WHEN excluded.last_seen_at > chat_id_claims.last_seen_at
-                THEN excluded.last_seen_at
-                ELSE chat_id_claims.last_seen_at
-              END
-          `).run(normalized, validFingerprint, validChatId, lastSeen)
-          // Report the row as stored — the effective (monotonic) recency and
-          // display form — never the attempted input.
-          const row = database.prepare(`
-            SELECT chat_id_normalized, actor_fingerprint, chat_id_display, last_seen_at
-            FROM chat_id_claims
-            WHERE chat_id_normalized = ? AND actor_fingerprint = ?
-          `).get(normalized, validFingerprint)
-          return {
-            chat_id: row.chat_id_display,
-            chat_id_normalized: row.chat_id_normalized,
-            actor_fingerprint: row.actor_fingerprint,
-            last_seen_at: row.last_seen_at,
-          }
-        })
-      },
-
-      // Every durable claim on a name, most recently seen first. Lookup is by
-      // the case-insensitive normalized form; the display form rides along so
-      // consumers never re-derive case.
-      listClaimsForChatId(chatId) {
-        assertOpen()
-        const validChatId = requireChatId(chatId)
-        const normalized = validChatId.toLowerCase()
-        const rows = database.prepare(`
-          SELECT chat_id_normalized, actor_fingerprint, chat_id_display, last_seen_at
-          FROM chat_id_claims
-          WHERE chat_id_normalized = ?
-          ORDER BY last_seen_at DESC, actor_fingerprint ASC
-        `).all(normalized)
-        return rows.map(row => ({
-          chat_id: row.chat_id_display,
-          chat_id_normalized: row.chat_id_normalized,
-          actor_fingerprint: row.actor_fingerprint,
-          last_seen_at: row.last_seen_at,
-        }))
-      },
-
-      // Story 1.6's offline source: every durable claim last seen within
-      // windowMs of `now` (an epoch-ms number or a function returning one,
-      // injectable for tests), most recently seen first so the caller's
-      // per-Actor dedupe keeps each Actor's most recent claim. The window is
-      // inclusive at both boundaries — a claim last seen exactly windowMs ago
-      // is still in the set (the same strictness the prune applies: strictly
-      // older rows go), and a claim dated in the FUTURE relative to now is
-      // excluded, so a clock moved backwards can never surface a forward-
-      // dated row in the offline view. The query is bounded by last_seen_at
-      // only: the claims index is pruned at CLAIMS_TTL_MS and indexed on
-      // last_seen_at, so the windowed set is bounded and indexed. Timestamps
-      // are canonical ISO 8601 UTC (normalized at write time), so the string
-      // comparison is chronological.
-      recentClaims(windowMs, now = Date.now) {
-        assertOpen()
-        if (!Number.isSafeInteger(windowMs) || windowMs <= 0) {
-          fail('invalid_argument', 'windowMs must be a positive safe integer')
-        }
-        const timestamp = typeof now === 'function' ? now() : now
-        if (typeof timestamp !== 'number' || !Number.isFinite(timestamp)) {
-          fail('invalid_argument', 'now must be an epoch-millisecond number or a function returning one')
-        }
-        const cutoffMs = timestamp - windowMs
-        if (!Number.isFinite(cutoffMs)) {
-          fail('invalid_argument', 'the window cutoff must be a finite epoch-millisecond value')
-        }
-        const cutoff = new Date(cutoffMs).toISOString()
-        const upperBound = new Date(timestamp).toISOString()
-        const rows = database.prepare(`
-          SELECT chat_id_normalized, actor_fingerprint, chat_id_display, last_seen_at
-          FROM chat_id_claims
-          WHERE last_seen_at >= ? AND last_seen_at <= ?
-          ORDER BY last_seen_at DESC, actor_fingerprint ASC, chat_id_normalized ASC
-        `).all(cutoff, upperBound)
-        return rows.map(row => ({
-          chat_id: row.chat_id_display,
-          chat_id_normalized: row.chat_id_normalized,
-          actor_fingerprint: row.actor_fingerprint,
-          last_seen_at: row.last_seen_at,
-        }))
-      },
-
-      // Prune claim rows whose last_seen_at is older than olderThanMs,
-      // measured against `now` (an epoch-ms number or a function returning
-      // one, injectable for tests). Returns the number of deleted rows. A row
-      // exactly at the cutoff is kept: strictly older rows are deleted. The
-      // cutoff is validated finite — a coded invalid_argument, never a
-      // RangeError from formatting a non-finite date.
-      pruneChatIdClaims(olderThanMs, now = Date.now) {
-        assertOpen()
-        if (!Number.isSafeInteger(olderThanMs) || olderThanMs <= 0) {
-          fail('invalid_argument', 'olderThanMs must be a positive safe integer')
-        }
-        const timestamp = typeof now === 'function' ? now() : now
-        if (typeof timestamp !== 'number' || !Number.isFinite(timestamp)) {
-          fail('invalid_argument', 'now must be an epoch-millisecond number or a function returning one')
-        }
-        const cutoffMs = timestamp - olderThanMs
-        if (!Number.isFinite(cutoffMs)) {
-          fail('invalid_argument', 'the prune cutoff must be a finite epoch-millisecond value')
-        }
-        const cutoff = new Date(cutoffMs).toISOString()
-        return withImmediateTransaction(database, () => {
-          const result = database
-            .prepare('DELETE FROM chat_id_claims WHERE last_seen_at < ?')
-            .run(cutoff)
-          return Number(result.changes)
-        })
-      },
-
-      // Durable enrollment registry (Story 4.1, AD-5): one row per enrolled
-      // Actor — the key registered once, which the challenge-answer route
-      // gates on. The row set is the record a reconnect re-proves against:
-      // enrollment does not expire in v0.2 and is never deleted here, and
-      // re-presentation through the local exchange's success path changes
-      // nothing (INSERT ... DO NOTHING — the first registration's timestamp
-      // sticks, FR-3/FR-12). There is no un-enroll: plugin-data deletion mints
-      // a new fingerprint that is simply not in this table. Each write is its
-      // own BEGIN IMMEDIATE transaction.
-      enrollActor(options) {
-        assertOpen()
-        const { actorFingerprint, enrolledAt } = requireObject(options)
-        const validFingerprint = requireFingerprint(actorFingerprint)
-        const enrolled = requireClaimTimestamp(enrolledAt)
-
-        return withImmediateTransaction(database, () => {
-          database.prepare(`
-            INSERT INTO enrolled_actors (actor_fingerprint, enrolled_at)
-            VALUES (?, ?)
-            ON CONFLICT (actor_fingerprint) DO NOTHING
-          `).run(validFingerprint, enrolled)
-          // Report the row as stored — with the FIRST registration's
-          // timestamp, never the attempted input on a re-presentation.
-          const row = database.prepare(`
-            SELECT actor_fingerprint, enrolled_at
-            FROM enrolled_actors
-            WHERE actor_fingerprint = ?
-          `).get(validFingerprint)
-          return {
-            actor_fingerprint: row.actor_fingerprint,
-            enrolled_at: row.enrolled_at,
-          }
-        })
-      },
-
-      // Whether a fingerprint holds the durable enrollment record the
-      // challenge-answer route gates on. A pure read: it writes nothing and
-      // never creates a row.
-      isActorEnrolled(actorFingerprint) {
-        assertOpen()
-        const validFingerprint = requireFingerprint(actorFingerprint)
-        const row = database.prepare(`
-          SELECT 1 AS found
-          FROM enrolled_actors
-          WHERE actor_fingerprint = ?
-        `).get(validFingerprint)
-        return Boolean(row)
-      },
+      // Identity context operations are delegated to the same-connection
+      // repository; the room-log module remains schema and connection owner.
+      upsertChatIdClaim(...args) { assertOpen(); return identityOperations.upsertChatIdClaim(...args) },
+      listClaimsForChatId(...args) { assertOpen(); return identityOperations.listClaimsForChatId(...args) },
+      recentClaims(...args) { assertOpen(); return identityOperations.recentClaims(...args) },
+      pruneChatIdClaims(...args) { assertOpen(); return identityOperations.pruneChatIdClaims(...args) },
+      enrollActor(...args) { assertOpen(); return identityOperations.enrollActor(...args) },
+      isActorEnrolled(...args) { assertOpen(); return identityOperations.isActorEnrolled(...args) },
 
       // Story 4.2: the invite registry and the atomic invite-gated
       // enrollment (mintInvite / listInvites / revokeInvite /
@@ -1889,22 +1364,22 @@ export function openRoomLog({
       // is the POST /api/auth/enroll route's single durable transaction.
       mintInvite(...args) {
         assertOpen()
-        return inviteOperations.mintInvite(...args)
+        return identityOperations.mintInvite(...args)
       },
 
       listInvites(...args) {
         assertOpen()
-        return inviteOperations.listInvites(...args)
+        return identityOperations.listInvites(...args)
       },
 
       revokeInvite(...args) {
         assertOpen()
-        return inviteOperations.revokeInvite(...args)
+        return identityOperations.revokeInvite(...args)
       },
 
       enrollRemoteActor(...args) {
         assertOpen()
-        return inviteOperations.enrollRemoteActor(...args)
+        return identityOperations.enrollRemoteActor(...args)
       },
 
       // Story 4.5: the operator ban registry (./bans.mjs). banActor and
@@ -1917,17 +1392,17 @@ export function openRoomLog({
       // first-class.
       banActor(...args) {
         assertOpen()
-        return banOperations.banActor(...args)
+        return identityOperations.banActor(...args)
       },
 
       unbanActor(...args) {
         assertOpen()
-        return banOperations.unbanActor(...args)
+        return identityOperations.unbanActor(...args)
       },
 
       isActorBanned(...args) {
         assertOpen()
-        return banOperations.isActorBanned(...args)
+        return identityOperations.isActorBanned(...args)
       },
     }
     return Object.freeze(api)

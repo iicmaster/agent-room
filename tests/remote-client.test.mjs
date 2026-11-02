@@ -52,6 +52,7 @@ import { createAgentRoomClient } from '../server/client/api-client.mjs'
 import { main } from '../server/cli/agent-room.mjs'
 import { fingerprintFromPublicKey } from '../server/keys.mjs'
 import { localTokenPath } from '../server/api/local-token.mjs'
+import { TEST_CA_CERT, TEST_LEAF_CERT, TEST_LEAF_KEY } from './remote-tls-fixture.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const RUNTIME_RECORD_FILENAME = 'runtime.json'
@@ -65,38 +66,6 @@ const sleep = ms => new Promise(resolvePromise => { setTimeout(resolvePromise, m
 // and a standalone SELF-SIGNED certificate (the refusal row's front). All of
 // it is throwaway test material — nothing here approaches production trust;
 // the self-signed pair in particular exists to be refused.
-
-const TEST_CA_CERT = `-----BEGIN CERTIFICATE-----
-MIIBojCCAUegAwIBAgIUD2mVO92poUKwIEasdTszkKpozkwwCgYIKoZIzj0EAwIw
-HTEbMBkGA1UEAwwSYWdlbnQtcm9vbSB0ZXN0IENBMCAXDTI2MDkyOTEzNDIyNVoY
-DzIxMjYwOTA1MTM0MjI1WjAdMRswGQYDVQQDDBJhZ2VudC1yb29tIHRlc3QgQ0Ew
-WTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAASgVzvUD5OUUZeLFAjEheROAdVeglM2
-HvD9nLsxO1McBPUgcY7+kMUVUaj3UfDVyXCFehWBSv/ceYqJAUgLP6iBo2MwYTAd
-BgNVHQ4EFgQUH6+1soSK0M6O3+mzCYboePFUIUAwHwYDVR0jBBgwFoAUH6+1soSK
-0M6O3+mzCYboePFUIUAwDwYDVR0TAQH/BAUwAwEB/zAOBgNVHQ8BAf8EBAMCAgQw
-CgYIKoZIzj0EAwIDSQAwRgIhAO/BNPj39MSrRZ/TPU6YL2Ut7fm4F22j8b0tFvlp
-Ea8tAiEAu6u1cVyOYtS1C2CzvREWDgzPRNwJecRiZisNCClyqOM=
------END CERTIFICATE-----
-`
-
-const TEST_LEAF_CERT = `-----BEGIN CERTIFICATE-----
-MIIBbDCCAROgAwIBAgIUXOwXSVxeSh+6HT1h+2+z0KpY+UgwCgYIKoZIzj0EAwIw
-HTEbMBkGA1UEAwwSYWdlbnQtcm9vbSB0ZXN0IENBMCAXDTI2MDkyOTEzNDIyNVoY
-DzIxMjYwOTA1MTM0MjI1WjAjMSEwHwYDVQQDDBhhZ2VudC1yb29tIGxvb3BiYWNr
-IGxlYWYwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAATQ3AsMwxRYz5RKY0951dBd
-DCWFfG4LU6FnsBFhZhXHe9ZpvFylTFzxlI0xurS71FzDc93/mK8C4j1Bq5Sihntb
-oykwJzAaBgNVHREEEzARhwR/AAABgglsb2NhbGhvc3QwCQYDVR0TBAIwADAKBggq
-hkjOPQQDAgNHADBEAiAk0GyO4d1Z3YrxFL0IaOUJSfIQZMQGG9l9IEm+F57BrwIg
-bCzW4Rc1O/JuhIqlQuVX+OdtS0+XREGjSBhl2pMOL+M=
------END CERTIFICATE-----
-`
-
-const TEST_LEAF_KEY = `-----BEGIN PRIVATE KEY-----
-MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgNYZzhGf/0QoEHqrZ
-XPcK/H+WmhZJVCi7p6sof36zyq2hRANCAATQ3AsMwxRYz5RKY0951dBdDCWFfG4L
-U6FnsBFhZhXHe9ZpvFylTFzxlI0xurS71FzDc93/mK8C4j1Bq5Sihntb
------END PRIVATE KEY-----
-`
 
 const TEST_SELF_SIGNED_CERT = `-----BEGIN CERTIFICATE-----
 MIIBZDCCAQqgAwIBAgIUP4US9tfzG4XwKQqBPcj9CTnrZPQwCgYIKoZIzj0EAwIw

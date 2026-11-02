@@ -31,14 +31,15 @@
 //   every cycle) → the FIRST room with a new message wins, the process
 //   prints the hint and exits; quiet cycles repeat until the deadline.
 //   Requests ≈ 3R/min at R rooms — far inside the 120/min/key gate.
-// - Hint-ONLY output (never message bodies): trust matrix, cursor
-//   advancement, and the held pipeline stay single-path inside the MCP
-//   message_read. One JSON line on stdout:
+// - Hint-ONLY output (never message bodies): the same client-side trust
+//   matrix classifies raw server rows before wake policy; a hint never advances
+//   the consumed cursor or reads/exports held bodies. One JSON line on stdout:
 //   {ok:true, command:'wait', status:'new_messages', room_id, seq, elapsed_ms}
 //   or {ok:true, command:'wait', status:'timeout', elapsed_ms, watched, unwatched}.
 // - Creates NOTHING: the wait reuses the existing installation (config,
-//   keypair, origin) and never writes config, cursor, held, or trust state —
-//   its only disk writes are the wait.lock below. Missing pieces refuse;
+//   keypair, origin) and never writes config, consumed cursor, held cache, or
+//   allowlist — it may write Notification's shared wake ledger plus wait.lock.
+//   Missing pieces refuse;
 //   they are never silently created by a background process.
 // - One wait process per installation: PLUGIN_DATA/wait.lock (0600,
 //   pid-liveness reclaim — a crashed waiter's lock is reclaimed, a live
@@ -57,11 +58,13 @@ import {
   REALM_KEY_PATTERN,
 } from '../constants.mjs'
 import { AgentRoomRuntimeError, atomicWriteJson, readJsonFile } from '../runtime.mjs'
-import { loadChatIdConfig } from '../client/api-client.mjs'
+import { CONNECTION_MODE_ENV, loadChatIdConfig } from '../client/api-client.mjs'
+import { REMOTE_TRANSPORT } from '../client/trust.mjs'
+import { createDeliveryClassifier } from '../notification/delivery.mjs'
 import { ensureServer } from '../client/ensure-server.mjs'
 import { loadRemoteConfig } from '../client/remote-config.mjs'
 import { authenticate, protocolHeaders, roundTrip } from './session-commands.mjs'
-import { decideHeldWake, loadWakePolicy, wakeStatePath } from '../client/wake-policy.mjs'
+import { decideHeldWake, loadWakePolicy } from '../notification/wake-policy.mjs'
 
 // The concurrency fence: at most six held long-polls at once. With the 20 s
 // hold that is ≈3 requests/min per watched room — 18/min at the fence —
@@ -88,38 +91,35 @@ const usageMessage = message => ({
   message,
 })
 
-// First-hit race: resolve with the first attempt that returns a hit, or null
-// once every attempt has settled quiet. Any attempt's error rejects the whole
-// cycle — a waiter never loops silently against a failing server; it exits
-// with the coded refusal and the agent re-arms.
-function firstHit(attempts) {
+// First candidate wins the host wake. Probes are pure (no ledger grant); on
+// the first candidate the shared signal aborts losing HTTP holds, and the
+// caller drains every attempt before deciding/granting/outputting. Thus a
+// losing room can never consume a cooldown or aggregate budget after the
+// winning hint.
+function firstCandidate(attempts, controller) {
   return new Promise((resolvePromise, rejectPromise) => {
     let pending = attempts.length
-    if (pending === 0) {
-      resolvePromise(null)
-      return
-    }
+    if (pending === 0) return resolvePromise(null)
     let settled = false
-    const settleQuiet = () => {
-      if (settled) return
+    const quiet = () => {
       pending -= 1
-      if (pending === 0) {
+      if (!settled && pending === 0) {
         settled = true
         resolvePromise(null)
       }
     }
     for (const attempt of attempts) {
-      attempt.then(value => {
+      attempt.then(candidates => {
         if (settled) return
-        if (value !== null) {
+        if (Array.isArray(candidates) && candidates.length > 0) {
           settled = true
-          resolvePromise(value)
-          return
-        }
-        settleQuiet()
+          controller.abort(new AgentRoomRuntimeError('request_cancelled', 'another room produced the wait candidate'))
+          resolvePromise(candidates[0])
+        } else quiet()
       }, error => {
-        if (settled) return
+        if (settled || controller.signal.aborted) { quiet(); return }
         settled = true
+        controller.abort(error)
         rejectPromise(error)
       })
     }
@@ -156,7 +156,7 @@ function firstHit(attempts) {
 // FIRST wakeable unread sequence from someone else; an unread backlog of
 // any size fires the same way — the full catch-up read is message_read's
 // job, not the hint's.
-async function holdForRoom({ target, token, roomId, afterSeq, holdMs, ownFingerprint, baselines, decideHeld }) {
+async function holdForRoom({ target, token, roomId, afterSeq, holdMs, ownFingerprint, baselines, classifyRow, decideHeld, suppressedSenders, signal }) {
   const holdDeadline = performance.now() + holdMs
   let cursor = Math.max(afterSeq, baselines.get(roomId) ?? 0)
   for (;;) {
@@ -175,7 +175,12 @@ async function holdForRoom({ target, token, roomId, afterSeq, holdMs, ownFingerp
       protocolHeaders(token),
       undefined,
       hold + WAIT_HOLD_TIMEOUT_MARGIN_MS,
-    )
+      { signal },
+    ).catch(error => {
+      if (signal?.aborted) return null
+      throw error
+    })
+    if (response === null) return null
     if (response.status !== 200) {
       throw new AgentRoomRuntimeError(
         response.body?.error?.code ?? 'request_failed',
@@ -184,16 +189,34 @@ async function holdForRoom({ target, token, roomId, afterSeq, holdMs, ownFingerp
     }
     const messages = response.body?.result?.messages
     if (!Array.isArray(messages) || messages.length === 0) return null
+    const candidates = []
+    let allRowsOwn = true
     for (const row of messages) {
       if (row?.actor_fingerprint === ownFingerprint) continue
-      if (row.held === true && decideHeld(row) === false) continue
-      baselines.set(roomId, Math.max(cursor, messages[messages.length - 1].seq))
-      return { room_id: roomId, seq: row.seq }
+      allRowsOwn = false
+      const verdict = classifyRow(row)
+      if (verdict?.held === true) {
+        if (suppressedSenders.has(verdict.actor_fingerprint)) continue
+        // Do not reserve a cooldown/budget grant in a room probe. The outer
+        // wait selects one deterministic winner, then requests exactly one
+        // grant; losing room attempts can never burn policy state.
+        candidates.push({ room_id: roomId, seq: row.seq, verdict })
+      } else {
+        candidates.push({ room_id: roomId, seq: row.seq, verdict })
+      }
     }
-    // All-own or all-cooled page: advance past it and re-hold within the
-    // same hold window (a cooled row is re-decided by the NEXT wait, which
-    // re-reads from the durable cursor this process never writes).
-    cursor = messages[messages.length - 1].seq
+    if (candidates.length > 0) return candidates
+    if (allRowsOwn) {
+      cursor = messages[messages.length - 1].seq
+      continue
+    }
+    // Rows were held but already suppressed during this process. Keep them
+    // unconsumed in durable state, avoid a hot loop, then let another cycle
+    // observe other rooms. The next wait process re-evaluates the ledger.
+    const pauseMs = Math.min(READ_HOLD_MAX_MS, Math.max(0, Math.floor(holdDeadline - performance.now())))
+    if (pauseMs > 0) await new Promise(resolvePromise => setTimeout(resolvePromise, pauseMs))
+    if (performance.now() >= holdDeadline) return null
+    cursor = baselines.get(roomId) ?? afterSeq
   }
 }
 
@@ -356,6 +379,7 @@ export async function runWaitFamilyCommand(tokens, { sharedDataDir, pluginDataDi
     }
   }
 
+  const declaredRemote = env[CONNECTION_MODE_ENV] === REMOTE_TRANSPORT
   const startedMs = performance.now()
   const deadlineAt = startedMs + timeoutSeconds * 1000
   const lock = acquireWaitLock(pluginDataDir, timeoutSeconds * 1000)
@@ -373,10 +397,18 @@ export async function runWaitFamilyCommand(tokens, { sharedDataDir, pluginDataDi
     const remote = loadRemoteConfig(pluginDataDir)
     const target = remote !== null
       ? { kind: 'remote', serverUrl: remote.serverUrl }
-      : { kind: 'local', port: (await ensureServer({ dataDir: sharedDataDir })).port }
+      : { kind: 'local', port: (await ensureServer({
+        dataDir: sharedDataDir,
+        ...(declaredRemote ? { connectionMode: REMOTE_TRANSPORT } : {}),
+      })).port }
     // An UNBOUND CLI session — the wait never claims the Chat ID; the live
-    // MCP client keeps it. Same identity, no occupancy.
-    const { token, fingerprint: ownFingerprint } = await authenticate(target, { pluginDataDir, sharedDataDir })
+    // MCP client keeps it. Same identity, no occupancy. The credential lane
+    // and trust transport are returned by authentication, not inferred from
+    // whether the HTTP target is loopback or HTTPS.
+    const { token, fingerprint: ownFingerprint, transport } = await authenticate(
+      target,
+      { pluginDataDir, sharedDataDir, env },
+    )
     const status = await roundTrip(target, 'GET', '/api/status', protocolHeaders(token), undefined)
     const realmId = status.body?.result?.realm_id
     if (status.status !== 200 || typeof realmId !== 'string') {
@@ -386,11 +418,22 @@ export async function runWaitFamilyCommand(tokens, { sharedDataDir, pluginDataDi
       )
     }
     const baselines = loadBaselineCursors(pluginDataDir, realmId)
+    // The wait reads raw HTTP rows. Apply this receiving installation's local
+    // trust matrix before wake policy; row.held is not present on server rows.
+    // A fresh allowlist read per row observes an allow/revoke while the wait
+    // is active. Transport is the mode earned by this credential exchange,
+    // not guessed from the HTTP endpoint (declared-remote loopback is remote).
+    const delivery = createDeliveryClassifier({ pluginDataDir, realmId, ownFingerprint, transport })
+    const decideDelivery = row => delivery.classifyRow(row)
     // The ratified wake policy: the same ledger the always-on notifier uses
-    // gates the wait's held-row hints (server/client/wake-policy.mjs).
+    // gates the wait's held-row hints (server/notification/wake-policy.mjs).
     const policy = loadWakePolicy(env)
-    const wakePath = wakeStatePath(pluginDataDir, realmId)
-    const decideHeld = row => decideHeldWake({ statePath: wakePath, fingerprint: row.actor_fingerprint, policy })
+    const ledger = { pluginData: pluginDataDir, realmId }
+    const decideHeld = row => decideHeldWake({ ...ledger, fingerprint: row.actor_fingerprint, policy })
+    // A held sender denied during this wait stays in the log but is quiet for
+    // this process lifetime. This prevents repeat reads from busy-looping; a
+    // newly armed wait re-evaluates against the persistent cooldown/allowlist.
+    const suppressedSenders = new Set()
 
     // Fixed rooms (--room) are validated against the enumeration once; the
     // all-rooms default re-enumerates every cycle so a DM opened mid-wait is
@@ -422,36 +465,49 @@ export async function runWaitFamilyCommand(tokens, { sharedDataDir, pluginDataDi
       const holdMs = Math.min(READ_HOLD_MAX_MS, Math.floor(remainingMs))
       const held = watched.slice(0, WAIT_CONCURRENCY_MAX)
       const overflow = watched.slice(WAIT_CONCURRENCY_MAX)
+      const cycleController = new AbortController()
       const attempts = []
       for (const roomId of held) {
         attempts.push(holdForRoom({
-          target, token, roomId, holdMs, ownFingerprint, baselines, decideHeld,
+          target, token, roomId, holdMs, ownFingerprint, baselines,
+          classifyRow: decideDelivery, decideHeld, suppressedSenders,
+          signal: cycleController.signal,
           afterSeq: baselines.get(roomId) ?? 0,
         }))
       }
-      // The fence's overflow: beyond six rooms the extras are head-checked
-      // (wait_ms=0) once per cycle — discovered late by at most one cycle,
-      // never unwatched.
+      // Beyond six held rooms, issue one immediate head-check each cycle.
       for (const roomId of overflow) {
         attempts.push(holdForRoom({
-          target, token, roomId, holdMs: 0, ownFingerprint, baselines, decideHeld,
+          target, token, roomId, holdMs: 0, ownFingerprint, baselines,
+          classifyRow: decideDelivery, decideHeld, suppressedSenders,
+          signal: cycleController.signal,
           afterSeq: baselines.get(roomId) ?? 0,
         }))
       }
-      const hit = await firstHit(attempts)
-      if (hit !== null) {
-        return {
-          status: 'ok',
+      const candidate = await firstCandidate(attempts, cycleController)
+      // Wait for every aborted loser to settle before reserving a grant,
+      // returning output, or releasing wait.lock. Losers never run policy.
+      await Promise.allSettled(attempts)
+      if (candidate === null) continue
+      const hit = candidate.verdict?.held === true
+        ? decideHeldWake({ ...ledger, fingerprint: candidate.verdict.actor_fingerprint, policy })
+        : true
+      if (hit === false) {
+        suppressedSenders.add(candidate.verdict.actor_fingerprint)
+        continue
+      }
+      baselines.set(candidate.room_id, Math.max(baselines.get(candidate.room_id) ?? 0, candidate.seq))
+      return {
+        status: 'ok',
+        command: 'wait',
+        lines: [JSON.stringify({
+          ok: true,
           command: 'wait',
-          lines: [JSON.stringify({
-            ok: true,
-            command: 'wait',
-            status: 'new_messages',
-            room_id: hit.room_id,
-            seq: hit.seq,
-            elapsed_ms: Math.round(performance.now() - startedMs),
-          })],
-        }
+          status: 'new_messages',
+          room_id: candidate.room_id,
+          seq: candidate.seq,
+          elapsed_ms: Math.round(performance.now() - startedMs),
+        })],
       }
     }
     // A clean timeout is a hint, not a failure: the agent re-arms by
