@@ -632,7 +632,7 @@ test('round-4: watch -> evict -> probe never replays delivered rows', async t =>
   // Rows arrive to the evicted room: the probe must deliver only the NEW ones.
   for (let seq = 11; seq <= 15; seq += 1) mail.get(EVICT).push(gateRow('sha256:' + 'b'.repeat(64), seq, `after eviction ${seq}`))
   await waitFor(() => messageLines(pluginData).filter(entry => entry.room_id === EVICT).length === 15,
-    'the probe delivers the post-eviction rows', 20_000)
+    'the probe delivers the post-eviction rows', 18_000)
   const seqs = messageLines(pluginData).filter(entry => entry.room_id === EVICT).map(entry => entry.seq)
   assert.deepEqual(new Set(seqs).size, seqs.length, 'not one delivered row was replayed by the probe')
 })
