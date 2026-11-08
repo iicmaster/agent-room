@@ -135,6 +135,7 @@ import { runCapacityFamilyCommand } from './capacity-commands.mjs'
 import { runViewerFamilyCommand } from './viewer-commands.mjs'
 import { runSessionFamilyCommand } from './session-commands.mjs'
 import { runWaitFamilyCommand } from './wait-commands.mjs'
+import { loadRemoteConfig } from '../client/remote-config.mjs'
 import { runReadFamilyCommand, runSendFamilyCommand, runSessionVerify } from './message-commands.mjs'
 
 const OK_STATUS = 200
@@ -280,6 +281,14 @@ export async function runSetup({
         continue
       }
 
+      // The remote-mode honesty note (v0.8.0, the round-2 provisioning item):
+      // when a remote origin is configured, this probe answers against the
+      // LOCAL server only — it can never certify the name inside the remote
+      // realm. The read-only `session verify` is the remote check.
+      const remoteConfigured = loadRemoteConfig(pluginDataDir) !== null
+      if (remoteConfigured) {
+        say(`Note: a remote origin is configured for this installation. The availability check below answers against the LOCAL server only — verify the remote realm with: agent-room session verify ${forms.display}`)
+      }
       let probe
       try {
         probe = await probeClaim({
