@@ -6,14 +6,15 @@
 // cross-connection serialisation the JSON file could not offer.
 
 import assert from 'node:assert/strict'
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import { DatabaseSync } from 'node:sqlite'
 
 import { HELD_WAKE_BUDGET, HELD_WAKE_COOLDOWN_MS, HELD_WAKE_BUDGET_WINDOW_MS } from '../server/constants.mjs'
-import { decideHeldWake, loadWakePolicy, wakeStatePath } from '../server/client/wake-policy.mjs'
-import { createWakeLedger } from '../server/notification/wake-ledger.mjs'
+import { decideHeldWake, loadWakePolicy, policyIdentity, wakeStatePath } from '../server/client/wake-policy.mjs'
+import { createWakeLedger, REBASELINE_ENV } from '../server/notification/wake-ledger.mjs'
 
 const FP = 'sha256:' + 'a'.repeat(64)
 const FP2 = 'sha256:' + 'b'.repeat(64)
@@ -114,4 +115,136 @@ test('wake policy: the v1 JSON ledger is imported once and then moved aside', t 
   writeFileSync(legacyPath, JSON.stringify({ version: 1, perSender: { [FP]: 1_700_000_000_000 }, heldWakes: [1_700_000_000_000] }), { mode: 0o600 })
   assert.equal(decideHeldWake({ ...world, fingerprint: FP, policy, now: 1_700_000_001_000 }), false, 'the imported cooldown applies')
   assert.equal(statSync(`${legacyPath}.imported`).isFile(), true, 'the legacy file is archived out of the authority path')
+})
+
+// --- The v0.8.0 closures: policy agreement and the restartable migration ---
+
+function metaRows(world) {
+  const db = new DatabaseSync(world.statePath)
+  try {
+    const rows = {}
+    for (const row of db.prepare('SELECT key, value FROM meta').all()) rows[row.key] = row.value
+    return rows
+  } finally {
+    db.close()
+  }
+}
+
+test('wake policy agreement: an explicitly pinned policy refuses a process that carries a different one', t => {
+  const world = ledgerWorld(t)
+  const pinned = { cooldownMs: 300_000, budget: 3, windowMs: 60_000 }
+  const first = createWakeLedger({ pluginData: world.pluginData, realmId: REALM, policy: pinned, identity: { explicit: { budget: 3 } } })
+  t.after(() => first.close())
+  assert.equal(first.decide(FP, 1_700_000_000_000), true, 'the pinning process charges normally')
+
+  // A second process with NO pin (the default budget of 10) on the same ledger:
+  // the explicit layers disagree, so the open refuses and nothing is written.
+  const second = createWakeLedger({ pluginData: world.pluginData, realmId: REALM, policy: { cooldownMs: 300_000, budget: 10, windowMs: 60_000 }, identity: { explicit: {} } })
+  t.after(() => second.close())
+  assert.equal(second.decide(FP2, 1_700_000_000_000), false, 'the disagreeing process is refused')
+  assert.equal(metaRows(world).policy_explicit, JSON.stringify({ budget: 3 }), 'the recorded explicit layer is untouched')
+})
+
+test('wake policy agreement: matching pins agree, and a defaults-only drift is adopted and recorded', t => {
+  const world = ledgerWorld(t)
+  const first = createWakeLedger({ pluginData: world.pluginData, realmId: REALM, policy: { cooldownMs: 300_000, budget: 10, windowMs: 60_000 }, identity: { explicit: {} } })
+  t.after(() => first.close())
+  assert.equal(first.decide(FP, 1_700_000_000_001), true)
+
+  // A release changed the constants: a new process carries a new default
+  // budget with nothing pinned — the drift is adopted and recorded, because a
+  // gate that silently stops waking after an upgrade is worse than a recorded
+  // adoption.
+  const upgraded = createWakeLedger({ pluginData: world.pluginData, realmId: REALM, policy: { cooldownMs: 300_000, budget: 2, windowMs: 60_000 }, identity: { explicit: {} } })
+  t.after(() => upgraded.close())
+  assert.equal(upgraded.decide(FP2, 1_700_000_000_002), true, 'the upgraded process is not refused')
+  assert.equal(metaRows(world).policy, JSON.stringify({ cooldownMs: 300_000, budget: 2, windowMs: 60_000 }), 'the adoption is on record')
+
+  const third = createWakeLedger({ pluginData: world.pluginData, realmId: REALM, policy: { cooldownMs: 300_000, budget: 2, windowMs: 60_000 }, identity: { explicit: {} } })
+  t.after(() => third.close())
+  assert.equal(third.decide(FP3, 1_700_000_000_003), false, 'the adopted budget of 2 now gates the third sender')
+})
+
+test('wake policy agreement: the flagged re-baseline overwrites the record once', t => {
+  const world = ledgerWorld(t)
+  const pinned = createWakeLedger({ pluginData: world.pluginData, realmId: REALM, policy: { cooldownMs: 300_000, budget: 3, windowMs: 60_000 }, identity: { explicit: { budget: 3 } } })
+  t.after(() => pinned.close())
+  assert.equal(pinned.decide(FP, 1_700_000_000_000), true)
+
+  const rebaselined = createWakeLedger({ pluginData: world.pluginData, realmId: REALM, policy: { cooldownMs: 300_000, budget: 10, windowMs: 60_000 }, identity: { explicit: {}, rebaseline: true } })
+  t.after(() => rebaselined.close())
+  assert.equal(rebaselined.decide(FP2, 1_700_000_000_001), true, 'the flagged run accepts the new policy on record')
+  assert.equal(metaRows(world).policy_explicit, JSON.stringify({}), 'the explicit layer is replaced')
+
+  const later = createWakeLedger({ pluginData: world.pluginData, realmId: REALM, policy: { cooldownMs: 300_000, budget: 10, windowMs: 60_000 }, identity: { explicit: {} } })
+  t.after(() => later.close())
+  assert.equal(later.decide(FP3, 1_700_000_000_002), true, 'the re-baselined ledger serves unpinned processes again')
+})
+
+test('wake policy agreement: loadWakePolicy and policyIdentity read the same environment', () => {
+  const env = { AGENT_ROOM_WAKE_BUDGET: '4', [REBASELINE_ENV]: '1' }
+  assert.deepEqual(policyIdentity(env), { explicit: { budget: 4 }, rebaseline: true })
+  assert.deepEqual(policyIdentity({}), { explicit: {}, rebaseline: false })
+  // The policy tuple is unchanged in shape for existing callers.
+  assert.deepEqual(loadWakePolicy(env).budget, 4)
+})
+
+test('restartable migration: a process that died between file creation and import resumes, never skips', t => {
+  const world = ledgerWorld(t)
+  const legacyPath = join(world.pluginData, 'realms', REALM, 'wake-state.json')
+  writeFileSync(legacyPath, JSON.stringify({ version: 1, perSender: { [FP]: 1_700_000_000_000 }, heldWakes: [1_700_000_000_000] }), { mode: 0o600 })
+  // The crash state: a SQLite file with the schema but NO import marker.
+  // (chmod 0600 — DatabaseSync creates with the umask, and the safe-file gate
+  // refuses a world-readable ledger exactly as it should.)
+  const crashed = new DatabaseSync(world.statePath)
+  crashed.exec(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT`)
+  crashed.exec(`CREATE TABLE IF NOT EXISTS sender_wake (fingerprint TEXT PRIMARY KEY, last_at INTEGER NOT NULL) STRICT`)
+  crashed.exec(`CREATE TABLE IF NOT EXISTS wake_event (at INTEGER NOT NULL) STRICT`)
+  crashed.close()
+  chmodSync(world.statePath, 0o600)
+
+  assert.equal(decideHeldWake({ ...world, fingerprint: FP, policy, now: 1_700_000_001_000 }), false, 'the resumed import applies the legacy cooldown')
+  const rows = metaRows(world)
+  assert.equal(rows.imported_from_json, legacyPath, 'the marker is written with the import')
+  assert.equal(existsSync(`${legacyPath}.imported`), true, 'the legacy file is archived after the resumed import')
+})
+
+test('restartable migration: an unparseable legacy file keeps refusing until fixed — it is never skipped', t => {
+  const world = ledgerWorld(t)
+  const legacyPath = join(world.pluginData, 'realms', REALM, 'wake-state.json')
+  writeFileSync(legacyPath, 'not json at all\n', { mode: 0o600 })
+  assert.equal(decideHeldWake({ ...world, fingerprint: FP, policy, now: 1 }), false, 'the refuse-don-t-repair posture holds')
+
+  writeFileSync(legacyPath, JSON.stringify({ version: 1, perSender: { [FP]: 1_700_000_000_000 }, heldWakes: [] }), { mode: 0o600 })
+  assert.equal(decideHeldWake({ ...world, fingerprint: FP2, policy, now: 1_700_000_001_000 }), true, 'a fixed legacy file imports on the next open')
+  assert.equal(decideHeldWake({ ...world, fingerprint: FP, policy, now: 1_700_000_001_500 }), false, 'and the imported cooldown applies')
+})
+
+test('restartable migration: a marker plus a surviving legacy file is history, never a second import', t => {
+  const world = ledgerWorld(t)
+  const legacyPath = join(world.pluginData, 'realms', REALM, 'wake-state.json')
+  // The crash-between-commit-and-rename state: the marker exists, the legacy
+  // file was never renamed, and its sender would re-cool the ledger if the
+  // file were read again.
+  const db = new DatabaseSync(world.statePath)
+  db.exec(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT`)
+  db.exec(`CREATE TABLE IF NOT EXISTS sender_wake (fingerprint TEXT PRIMARY KEY, last_at INTEGER NOT NULL) STRICT`)
+  db.exec(`CREATE TABLE IF NOT EXISTS wake_event (at INTEGER NOT NULL) STRICT`)
+  db.prepare('INSERT INTO meta (key, value) VALUES (?, ?)').run('imported_from_json', legacyPath)
+  db.close()
+  chmodSync(world.statePath, 0o600)
+  writeFileSync(legacyPath, JSON.stringify({ version: 1, perSender: { [FP]: 1_700_000_002_000 }, heldWakes: [] }), { mode: 0o600 })
+
+  assert.equal(decideHeldWake({ ...world, fingerprint: FP, policy, now: 1_700_000_001_000 }), true, 'the legacy rows were not re-imported over the marker')
+  assert.equal(existsSync(`${legacyPath}.imported`), true, 'the surviving file is archived as cleanup')
+  assert.equal(existsSync(legacyPath), false, 'the authority path is clean')
+})
+
+test('wake policy: a world-readable ledger is still refused after the closures', t => {
+  const world = ledgerWorld(t)
+  assert.equal(decideHeldWake({ ...world, fingerprint: FP, policy, now: 1 }), true)
+  chmodSync(world.statePath, 0o644)
+  const fresh = createWakeLedger({ pluginData: world.pluginData, realmId: REALM, policy })
+  t.after(() => fresh.close())
+  assert.equal(fresh.decide(FP2, 2), false, 'a world-readable ledger is refused')
 })

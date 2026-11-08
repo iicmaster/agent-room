@@ -64,7 +64,7 @@ import { createDeliveryClassifier } from '../notification/delivery.mjs'
 import { ensureServer } from '../client/ensure-server.mjs'
 import { loadRemoteConfig } from '../client/remote-config.mjs'
 import { authenticate, protocolHeaders, roundTrip } from './session-commands.mjs'
-import { decideHeldWake, loadWakePolicy } from '../notification/wake-policy.mjs'
+import { decideHeldWake, loadWakePolicy, policyIdentity } from '../notification/wake-policy.mjs'
 
 // The concurrency fence: at most six held long-polls at once. With the 20 s
 // hold that is ≈3 requests/min per watched room — 18/min at the fence —
@@ -427,8 +427,11 @@ export async function runWaitFamilyCommand(tokens, { sharedDataDir, pluginDataDi
     const decideDelivery = row => delivery.classifyRow(row)
     // The ratified wake policy: the same ledger the always-on notifier uses
     // gates the wait's held-row hints (server/notification/wake-policy.mjs).
+    // The identity (explicit env layer + re-baseline flag) rides along so the
+    // shared ledger can verify policy agreement across both substrates.
     const policy = loadWakePolicy(env)
-    const ledger = { pluginData: pluginDataDir, realmId }
+    const identity = policyIdentity(env)
+    const ledger = { pluginData: pluginDataDir, realmId, identity }
     const decideHeld = row => decideHeldWake({ ...ledger, fingerprint: row.actor_fingerprint, policy })
     // A held sender denied during this wait stays in the log but is quiet for
     // this process lifetime. This prevents repeat reads from busy-looping; a

@@ -50,7 +50,7 @@ import {
 } from '../constants.mjs'
 import { reconnectDelayMs } from '../client/api-client.mjs'
 import { createDeliveryClassifier } from './delivery.mjs'
-import { decideHeldWake, loadWakePolicy } from './wake-policy.mjs'
+import { decideHeldWake, loadWakePolicy, policyIdentity } from './wake-policy.mjs'
 
 export const INBOX_FILENAME = 'inbox.jsonl'
 export const NOTIFIER_ENV = 'AGENT_ROOM_NOTIFIER'
@@ -189,9 +189,11 @@ export function startNotifier({
     // sender; repeats cool down, and the installation's held-row wakes obey
     // an aggregate budget (server/notification/wake-policy.mjs). Trusted rows are
     // never gated; a suppressed row is skipped — never consumed, never
-    // acknowledged.
+    // acknowledged. The identity (explicit env layer + re-baseline flag)
+    // rides along so the shared ledger can verify policy agreement.
     const policy = loadWakePolicy(env)
-    const ledger = { pluginData: pluginDataDir, realmId }
+    const identity = policyIdentity(env)
+    const ledger = { pluginData: pluginDataDir, realmId, identity }
     for (const row of judged) {
       if (row.held === true && decideHeldWake({ ...ledger, fingerprint: row.actor_fingerprint, policy }) === false) continue
       const line = `${JSON.stringify(inboxEntry(roomId, row))}\n`

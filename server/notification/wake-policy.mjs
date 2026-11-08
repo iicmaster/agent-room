@@ -29,7 +29,7 @@ import {
   HELD_WAKE_COOLDOWN_MS,
 } from '../constants.mjs'
 
-import { createWakeLedger, wakeLedgerPath } from './wake-ledger.mjs'
+import { createWakeLedger, REBASELINE_ENV, wakeLedgerPath } from './wake-ledger.mjs'
 
 const positiveInt = (value, fallback) => {
   const parsed = Number(value)
@@ -47,6 +47,19 @@ export function loadWakePolicy(env = process.env) {
   }
 }
 
+// The explicit layer the ledger's policy agreement verifies: which AGENT_ROOM_
+// WAKE_* keys THIS process pinned (by presence in the environment, recording
+// the effective value its decisions actually use), and whether the flagged
+// one-shot re-baseline is armed. Shared by both wake substrates so one ledger
+// cannot be written under two rules.
+export function policyIdentity(env = process.env) {
+  const explicit = {}
+  if (env?.AGENT_ROOM_WAKE_COOLDOWN_MS !== undefined) explicit.cooldownMs = positiveInt(env.AGENT_ROOM_WAKE_COOLDOWN_MS, HELD_WAKE_COOLDOWN_MS)
+  if (env?.AGENT_ROOM_WAKE_BUDGET !== undefined) explicit.budget = positiveInt(env.AGENT_ROOM_WAKE_BUDGET, HELD_WAKE_BUDGET)
+  if (env?.AGENT_ROOM_WAKE_BUDGET_WINDOW_MS !== undefined) explicit.windowMs = positiveInt(env.AGENT_ROOM_WAKE_BUDGET_WINDOW_MS, HELD_WAKE_BUDGET_WINDOW_MS)
+  return { explicit, rebaseline: env?.[REBASELINE_ENV] === '1' }
+}
+
 // Kept for callers that only need the realm's state directory.
 export function wakeStatePath(pluginData, realmId) {
   return wakeLedgerPath(pluginData, realmId)
@@ -54,22 +67,24 @@ export function wakeStatePath(pluginData, realmId) {
 
 // One ledger per (pluginData, realm) per process: the connection carries the
 // busy timeout and the schema check, and re-opening it per decision would pay
-// for both on every row.
+// for both on every row. The identity is constant per process (env), so it
+// rides the cached connection.
 const ledgers = new Map()
 
-function ledgerFor(pluginData, realmId, policy) {
+function ledgerFor(pluginData, realmId, policy, identity) {
   const key = `${pluginData}\u0000${realmId}`
   let ledger = ledgers.get(key)
   if (!ledger) {
-    ledger = createWakeLedger({ pluginData, realmId, policy })
+    ledger = createWakeLedger({ pluginData, realmId, policy, identity })
     ledgers.set(key, ledger)
   }
   return ledger
 }
 
 // One held-row wake decision. Returns true when the wake may fire (and
-// records it), false when this sender is within its cooldown or the
-// installation has spent its budget for the current window.
-export function decideHeldWake({ pluginData, realmId, fingerprint, policy, now = Date.now() }) {
-  return ledgerFor(pluginData, realmId, policy).decide(fingerprint, now)
+// records it), false when this sender is within its cooldown, the
+// installation has spent its budget for the current window, or the ledger
+// refused this process's policy (server/notification/wake-ledger.mjs).
+export function decideHeldWake({ pluginData, realmId, fingerprint, policy, identity = {}, now = Date.now() }) {
+  return ledgerFor(pluginData, realmId, policy, identity).decide(fingerprint, now)
 }
