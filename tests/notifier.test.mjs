@@ -29,12 +29,13 @@ import {
   CLIENT_RELEASE_TIMEOUT_MS,
   NOTIFIER_ACTIVE_WINDOW_MS,
   NOTIFIER_PREVIEW_MAX,
+  READ_PAGE_MAX,
   NOTIFIER_ROOM_LIMIT,
   NOTIFIER_ROOM_REFRESH_MS,
 } from '../server/constants.mjs'
 import { untrustedMessageEnvelope } from '../server/client/api-client.mjs'
 import { REMOTE_TRANSPORT, applyTrustMatrix, emptyAllowlist } from '../server/client/trust.mjs'
-import { INBOX_FILENAME, inboxEntry, selectWatchedRooms } from '../server/client/notifier.mjs'
+import { INBOX_FILENAME, NOTIFY_CMD_ENV, STATUS_KIND, inboxEntry, selectWatchedRooms, startNotifier } from '../server/notification/notifier.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const MCP_ENTRY = join(ROOT, 'server', 'mcp-stdio.mjs')
@@ -70,6 +71,16 @@ function inboxLines(pluginData) {
   const path = join(pluginData, INBOX_FILENAME)
   if (!existsSync(path)) return []
   return readFileSync(path, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line))
+}
+
+// Message lines never carry `kind`; everything the notifier says about itself
+// (started, unread_backlog, hook_error) is a `notifier_status` line.
+function messageLines(pluginData) {
+  return inboxLines(pluginData).filter(line => line.kind === undefined)
+}
+
+function statusLines(pluginData) {
+  return inboxLines(pluginData).filter(line => line.kind === 'notifier_status')
 }
 
 function structured(toolResult) {
@@ -188,28 +199,31 @@ test('the notifier writes one inbox line per foreign message, skips its own, fol
   const carol = startMcpChild(t, { pluginData: carolPlugin, sharedData: world.sharedData, env: { AGENT_ROOM_NOTIFIER: 'off' } })
   for (const peer of [alice, bob, carol]) await peer.initialize()
 
-  // Nothing watches before the first bind: the client stays lazy.
-  assert.equal(existsSync(join(alicePlugin, INBOX_FILENAME)), false, 'no inbox before the first tool call')
+  // Receive-ready at connect: the inbox is armed by `initialize` — before ANY
+  // tool call — so wake coverage never depends on the model calling a tool.
+  const inboxPath = join(alicePlugin, INBOX_FILENAME)
+  await waitFor(() => existsSync(inboxPath), "alice's inbox.jsonl after initialize")
 
   const aliceStatus = structured(await alice.tool('room_status'))
   const bobStatus = structured(await bob.tool('room_status'))
   structured(await carol.tool('room_status'))
   const broadcast = aliceStatus.broadcast_room_id
 
-  // The inbox appears (empty, 0600) once the notifier watches the rooms that
-  // existed at start — the readiness a host arms `tail -f` on.
-  const inboxPath = join(alicePlugin, INBOX_FILENAME)
-  await waitFor(() => existsSync(inboxPath), "alice's inbox.jsonl")
+  // The inbox is 0600, and its first line is the honest `started` status.
   assert.equal(lstatSync(inboxPath).isFile(), true)
   assert.equal(lstatSync(inboxPath).mode & 0o777, 0o600, 'inbox.jsonl is 0600')
-  assert.deepEqual(inboxLines(alicePlugin), [], 'history before the start is never replayed')
+  await waitFor(() => statusLines(alicePlugin).some(line => line.event === 'started'), 'the started status line')
+  assert.deepEqual(messageLines(alicePlugin), [], 'history before the start is never replayed')
+  const startedLine = statusLines(alicePlugin).find(line => line.event === 'started')
+  assert.equal(startedLine.hook, 'configured', 'the start line says the hook is armed')
+  assert.equal(startedLine.watched > 0, true, 'the start line names the watch set')
 
   // alice's own message is skipped; bob's (long, multi-line) arrives as one line.
   structured(await alice.tool('message_send', { room_id: broadcast, client_message_id: 'a-1', text: 'from alice herself' }))
   const bobText = `hello alice\nsecond line ${'x'.repeat(300)}`
   const bobSent = structured(await bob.tool('message_send', { room_id: broadcast, client_message_id: 'b-1', text: bobText }))
-  await waitFor(() => inboxLines(alicePlugin).length > 0, "bob's broadcast line")
-  let lines = inboxLines(alicePlugin)
+  await waitFor(() => messageLines(alicePlugin).length > 0, "bob's broadcast line")
+  let lines = messageLines(alicePlugin)
   assert.equal(lines.length, 1, `exactly one line (alice's own message is not written): ${JSON.stringify(lines)}`)
   const [line] = lines
   assert.deepEqual(Object.keys(line).sort(), LINE_KEYS)
@@ -231,17 +245,17 @@ test('the notifier writes one inbox line per foreign message, skips its own, fol
   // followed from its first message — the room is new, so all of it is news.
   const dm = structured(await bob.tool('room_direct_open', { chat_id: 'alice' })).room_id
   const dmFirst = structured(await bob.tool('message_send', { room_id: dm, client_message_id: 'b-dm-1', text: 'first dm' }))
-  await waitFor(() => inboxLines(alicePlugin).some(entry => entry.room_id === dm), 'the peer-opened DM line', PEER_DM_TIMEOUT_MS)
+  await waitFor(() => messageLines(alicePlugin).some(entry => entry.room_id === dm), 'the peer-opened DM line', PEER_DM_TIMEOUT_MS)
   const dmSecond = structured(await bob.tool('message_send', { room_id: dm, client_message_id: 'b-dm-2', text: 'second dm' }))
-  await waitFor(() => inboxLines(alicePlugin).filter(entry => entry.room_id === dm).length === 2, 'the second DM line')
+  await waitFor(() => messageLines(alicePlugin).filter(entry => entry.room_id === dm).length === 2, 'the second DM line')
 
   // The DM line above came from a periodic re-read, so the next one is a full
   // period away: a DM alice opens herself is picked up at once because
   // room_direct_open kicks the re-read.
   const carolDm = structured(await alice.tool('room_direct_open', { chat_id: 'carol' })).room_id
   const carolSent = structured(await carol.tool('message_send', { room_id: carolDm, client_message_id: 'c-dm-1', text: 'from carol' }))
-  await waitFor(() => inboxLines(alicePlugin).some(entry => entry.room_id === carolDm), 'the kicked DM line', KICKED_DM_TIMEOUT_MS)
-  lines = inboxLines(alicePlugin)
+  await waitFor(() => messageLines(alicePlugin).some(entry => entry.room_id === carolDm), 'the kicked DM line', KICKED_DM_TIMEOUT_MS)
+  lines = messageLines(alicePlugin)
   assert.deepEqual(
     lines.map(entry => [entry.room_id, entry.seq, entry.chat_id, entry.preview]),
     [
@@ -307,4 +321,168 @@ test('selectWatchedRooms: up to the limit every room is watched; past it, the Br
   assert.equal(watched[0], 'b', 'the Broadcast Room is always watched')
   assert.equal(watched.includes('old'), false, 'a DM quiet past the window is dropped')
   assert.deepEqual(watched.slice(1), rooms(NOTIFIER_ROOM_LIMIT - 1).map(room => room.roomId), 'the most recently active DMs win')
+})
+
+// --- v0.8.0 receiver correctness: catch-up, the cold-DM sweep, bounded hooks ---
+
+test('catch-up: a message that arrived while the installation was down is announced as one backlog hint, never replayed', async t => {
+  const world = makeWorld(t)
+  await world.waitReady()
+
+  const alicePlugin = world.pluginDataFor('alice')
+  const bobPlugin = world.pluginDataFor('bob')
+
+  const alice = startMcpChild(t, { pluginData: alicePlugin, sharedData: world.sharedData })
+  const bob = startMcpChild(t, { pluginData: bobPlugin, sharedData: world.sharedData })
+  await alice.initialize()
+  await bob.initialize()
+
+  const broadcast = structured(await alice.tool('room_status')).broadcast_room_id
+  await waitFor(() => statusLines(alicePlugin).some(line => line.event === 'started'), 'alice armed')
+  await waitFor(() => statusLines(bobPlugin).some(line => line.event === 'started'), 'bob armed')
+
+  // seq 1 lands while alice is live; her message_read consumes it and
+  // advances her persisted cursor past it.
+  structured(await bob.tool('message_send', { room_id: broadcast, client_message_id: 'b-1', text: 'seen before the restart' }))
+  const readPage = structured(await alice.tool('message_read', { room_id: broadcast }))
+  assert.equal(readPage.messages.length, 1)
+  assert.equal(readPage.next_after_seq, 1, 'the fetched cursor advanced past the read row')
+  assert.notEqual(readPage.cursor_persisted, false, 'the durable cursor persisted (the flag only appears on failure)')
+
+  // alice goes down; two more messages arrive in the dark.
+  await alice.close()
+  structured(await bob.tool('message_send', { room_id: broadcast, client_message_id: 'b-2', text: 'arrived in the dark one' }))
+  structured(await bob.tool('message_send', { room_id: broadcast, client_message_id: 'b-3', text: 'arrived in the dark two' }))
+
+  // alice reconnects and NEVER calls a tool — receive-ready at initialize.
+  const alice2 = startMcpChild(t, { pluginData: alicePlugin, sharedData: world.sharedData })
+  t.after(() => alice2.close())
+  await alice2.initialize()
+  await waitFor(() => statusLines(alicePlugin).some(line => line.event === 'unread_backlog'), 'the backlog hint')
+  const hint = statusLines(alicePlugin).find(line => line.event === 'unread_backlog')
+  assert.equal(hint.room_id, broadcast)
+  assert.equal(hint.unread_from, readPage.next_after_seq, 'the hint names the fetched cursor it measured from')
+  assert.equal(hint.head_seq, 3, 'the hint names the head it measured to')
+  assert.equal(hint.foreign_in_window, 2, 'only the two unseen foreign rows count')
+  // The dark messages are NOT replayed as message lines: message_read stays
+  // the authoritative read path; the hint is the wake.
+  assert.deepEqual(messageLines(alicePlugin).filter(entry => entry.seq > readPage.next_after_seq && entry.seq < 4), [],
+    'the backlog is summarized, never replayed')
+
+  // A NEW message after the restart arrives through the watcher as usual.
+  structured(await bob.tool('message_send', { room_id: broadcast, client_message_id: 'b-4', text: 'live again' }))
+  await waitFor(() => messageLines(alicePlugin).some(entry => entry.seq === 4), 'the live message line', DELIVERY_TIMEOUT_MS)
+})
+
+test('the sweep: a DM past the watch cap is probed round-robin and its new message is delivered', async t => {
+  const parent = mkdtempSync(join(tmpdir(), 'agent-room-notifier-probe-'))
+  t.after(() => rmSync(parent, { recursive: true, force: true }))
+  const pluginData = join(parent, 'plugin-data')
+  mkdirSync(pluginData, { mode: 0o700 })
+
+  const own = 'sha256:' + 'a'.repeat(64)
+  const peer = 'sha256:' + 'b'.repeat(64)
+  const COLD = 'dm-cold'
+  const rooms = [
+    { room_id: 'b', kind: 'broadcast' },
+    ...Array.from({ length: NOTIFIER_ROOM_LIMIT + 4 }, (_, index) => ({ room_id: `dm-${index}`, kind: 'direct' })),
+    { room_id: COLD, kind: 'direct' },
+  ]
+  const mail = new Map(rooms.map(room => [room.room_id, []]))
+  const client = {
+    transport: 'local',
+    fingerprint: own,
+    async listRooms() {
+      return { rooms: rooms.map(room => ({ ...room })) }
+    },
+    async readMessage({ roomId, afterSeq = 0, limit = READ_PAGE_MAX } = {}) {
+      const box = mail.get(roomId) ?? []
+      const rows = box.filter(row => row.seq > afterSeq).slice(0, limit)
+      const head = box.reduce((max, row) => Math.max(max, row.seq), 0)
+      return {
+        messages: rows,
+        next_after_seq: rows.length > 0 ? rows[rows.length - 1].seq : afterSeq,
+        head_seq: head,
+      }
+    },
+  }
+  const realmIdOf = async () => 'probe-realm'
+
+  // startNotifier takes the client OBJECT (createAgentRoomClient is sync; the
+  // adapter's "clientPromise" is the client itself) — the same shape here.
+  const notifier = startNotifier({
+    client,
+    pluginDataDir: pluginData,
+    realmIdOf,
+    env: {},
+    refreshMs: 60,
+    spacingMs: 2,
+  })
+  t.after(() => notifier.stop())
+
+  // 26 DMs against a cap of 20: the cold DM is beyond the watch set, and it
+  // receives its message after the notifier armed — exactly the case the old
+  // first-listing rule starved forever.
+  await waitFor(() => statusLines(pluginData).some(line => line.event === 'started'), 'the probe world armed')
+  const dmRow = { seq: 1, chat_id: 'peer', actor_fingerprint: peer, created_at: new Date().toISOString(), text: 'hello from the cold' }
+  mail.get(COLD).push(dmRow)
+  await waitFor(() => messageLines(pluginData).some(entry => entry.room_id === COLD && entry.seq === 1),
+    'the cold DM message to be delivered by the sweep', 15_000)
+  assert.equal(messageLines(pluginData).find(entry => entry.room_id === COLD).preview, 'hello from the cold')
+})
+
+test('the hook queue is bounded: a burst pokes every line under normal pacing, drops none under the cap, and the inbox always carries all', async t => {
+  const parent = mkdtempSync(join(tmpdir(), 'agent-room-notifier-hook-'))
+  t.after(() => rmSync(parent, { recursive: true, force: true }))
+  const pluginData = join(parent, 'plugin-data')
+  mkdirSync(pluginData, { mode: 0o700 })
+
+  // The hook: slow enough that a burst would pile up behind an unbounded
+  // chain; it appends its stdin (one line per run) to a file.
+  const hookOut = join(parent, 'hook.out')
+  const hook = join(parent, 'hook.sh')
+  writeFileSync(hook, `#!/bin/sh\nsleep 0.05\ncat >> '${hookOut}'\n`, { mode: 0o700 })
+  chmodSync(hook, 0o700)
+
+  const own = 'sha256:' + 'a'.repeat(64)
+  const peer = 'sha256:' + 'b'.repeat(64)
+  const rooms = [{ room_id: 'b', kind: 'broadcast' }]
+  const mail = new Map([[ 'b', [] ]])
+  const client = {
+    transport: 'local',
+    fingerprint: own,
+    async listRooms() { return { rooms: rooms.map(room => ({ ...room })) } },
+    async readMessage({ roomId, afterSeq = 0, limit = READ_PAGE_MAX } = {}) {
+      const box = mail.get(roomId) ?? []
+      const rows = box.filter(row => row.seq > afterSeq).slice(0, limit)
+      const head = box.reduce((max, row) => Math.max(max, row.seq), 0)
+      return {
+        messages: rows,
+        next_after_seq: rows.length > 0 ? rows[rows.length - 1].seq : afterSeq,
+        head_seq: head,
+      }
+    },
+  }
+
+  const notifier = startNotifier({
+    client,
+    pluginDataDir: pluginData,
+    realmIdOf: async () => 'hook-realm',
+    env: { [NOTIFY_CMD_ENV]: hook },
+    refreshMs: 60,
+    spacingMs: 2,
+  })
+  t.after(() => notifier.stop())
+  await waitFor(() => statusLines(pluginData).some(line => line.event === 'started'), 'armed')
+
+  // A burst of five, all delivered to the inbox; every line is poked because
+  // five is far below the queue cap.
+  for (let seq = 1; seq <= 5; seq += 1) {
+    mail.get('b').push({ seq, chat_id: 'peer', actor_fingerprint: peer, created_at: new Date().toISOString(), text: `burst ${seq}` })
+  }
+  await waitFor(() => messageLines(pluginData).length === 5, 'all five inbox lines')
+  await waitFor(() => existsSync(hookOut) && readFileSync(hookOut, 'utf8').split('\n').filter(Boolean).length >= 5,
+    'the hook poked every line', 10_000)
+  const poked = readFileSync(hookOut, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line))
+  assert.deepEqual(poked, messageLines(pluginData), 'the hook saw exactly the inbox lines, in order')
 })

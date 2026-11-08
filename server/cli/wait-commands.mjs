@@ -49,7 +49,8 @@
 //   re-arm is the agent's ordinary next action); a refusal prints ONE JSON
 //   object on stderr and exits 1; usage exits 2.
 
-import { existsSync, unlinkSync } from 'node:fs'
+import { existsSync, linkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { performance } from 'node:perf_hooks'
 
@@ -57,7 +58,7 @@ import {
   READ_HOLD_MAX_MS,
   REALM_KEY_PATTERN,
 } from '../constants.mjs'
-import { AgentRoomRuntimeError, atomicWriteJson, readJsonFile } from '../runtime.mjs'
+import { AgentRoomRuntimeError, readJsonFile } from '../runtime.mjs'
 import { CONNECTION_MODE_ENV, loadChatIdConfig } from '../client/api-client.mjs'
 import { REMOTE_TRANSPORT } from '../client/trust.mjs'
 import { createDeliveryClassifier } from '../notification/delivery.mjs'
@@ -233,12 +234,34 @@ function pidAlive(pid) {
 }
 
 // The one-per-installation fence. The lock is the wait's ONLY disk write
-// (plus its removal). A crashed waiter's lock is reclaimed through pid
-// liveness; a live waiter refuses the newcomer — two waiters on one
-// installation would double the request budget and race each other's hints.
+// (plus its removal). Acquisition is the atomic create-only-if-absent link(2)
+// — the loser's link fails EEXIST instead of replacing the winner's file,
+// which closes the exists/read/replace window two concurrent waiters could
+// both win. A crashed waiter's lock is reclaimed through pid liveness; a live
+// waiter refuses the newcomer — two waiters on one installation would double
+// the request budget and race each other's hints. Release is owner-checked:
+// a lock whose recorded token is not ours (a reclaimer replaced the file
+// under us) is never removed.
 function acquireWaitLock(pluginDataDir, timeoutMs) {
   const path = join(pluginDataDir, 'wait.lock')
-  if (existsSync(path)) {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const token = randomUUID()
+    const temporary = join(pluginDataDir, `.wait.lock.${randomUUID()}.tmp`)
+    writeFileSync(temporary, `${JSON.stringify({
+      pid: process.pid,
+      token,
+      started_at: new Date().toISOString(),
+      timeout_ms: timeoutMs,
+    }, null, 2)}\n`, { flag: 'wx', mode: 0o600 })
+    try {
+      linkSync(temporary, path)
+      try { unlinkSync(temporary) } catch { /* already unlinked */ }
+      return { acquired: true, path, token }
+    } catch (error) {
+      try { unlinkSync(temporary) } catch { /* nothing to clean */ }
+      if (error?.code !== 'EEXIST') throw error
+    }
+    // The lock exists: reclaimable only when its recorded owner is dead.
     let existing = null
     try {
       existing = readJsonFile(path)
@@ -249,18 +272,23 @@ function acquireWaitLock(pluginDataDir, timeoutMs) {
       ? existing.pid
       : null
     if (pid !== null && pid !== process.pid && pidAlive(pid)) {
-      return { acquired: false, path }
+      return { acquired: false, path, token: null }
     }
+    // Stale, self-owned, or unreadable: remove and retry. A concurrent
+    // reclaimer may win the next link; the loop bounds the churn either way.
+    try { unlinkSync(path) } catch { /* someone else already did */ }
   }
-  atomicWriteJson(path, {
-    pid: process.pid,
-    started_at: new Date().toISOString(),
-    timeout_ms: timeoutMs,
-  })
-  return { acquired: true, path }
+  return { acquired: false, path, token: null }
 }
 
-function releaseWaitLock(path) {
+function releaseWaitLock(path, token) {
+  if (token === null) return
+  try {
+    const existing = readJsonFile(path)
+    if (existing?.token !== token) return
+  } catch {
+    return
+  }
   try {
     unlinkSync(path)
   } catch {
@@ -535,6 +563,6 @@ export async function runWaitFamilyCommand(tokens, { sharedDataDir, pluginDataDi
       message: error?.message ?? String(error),
     }
   } finally {
-    releaseWaitLock(lock.path)
+    releaseWaitLock(lock.path, lock.token)
   }
 }

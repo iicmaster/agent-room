@@ -406,7 +406,7 @@ function startDropProxy(t, targetPort, { drop = 'response', matches } = {}) {
 
 // --- Matrix rows ---------------------------------------------------------------
 
-test('tools list: exactly the nine tools (five conversation tools plus the Story 3.2 trust pair and the Story 3.3 held pair), "list agents" phrasing, no native-named aliases, closed schemas', async t => {
+test('tools list: exactly the ten tools (five conversation tools plus room_list, the Story 3.2 trust pair and the Story 3.3 held pair), "list agents" phrasing, no native-named aliases, closed schemas', async t => {
   const world = makeWorld(t)
   await world.waitReady()
   const mcp = startMcpChild(t, world)
@@ -420,6 +420,7 @@ test('tools list: exactly the nine tools (five conversation tools plus the Story
     'room_direct_open',
     'message_send',
     'message_read',
+    'room_list',
     'room_status',
     'room_trust_list',
     'room_trust_set',
@@ -807,7 +808,7 @@ test('stdin purity: JSON-RPC only, parse errors and oversized frames answered, n
 
   // The channel still works: a follow-up tools/list answers normally.
   const listed = await mcp.request('tools/list')
-  assert.equal(listed.result.tools.length, 9)
+  assert.equal(listed.result.tools.length, 10)
 
   assert.equal(mcp.stderr, '')
   await mcp.close()
@@ -828,7 +829,7 @@ test('first run: no configured Chat ID fails with coded guidance and the process
 
   // The process stays alive and answers JSON-RPC afterwards.
   const listed = await mcp.request('tools/list')
-  assert.equal(listed.result.tools.length, 9)
+  assert.equal(listed.result.tools.length, 10)
 
   await mcp.close()
 })
@@ -959,7 +960,7 @@ test('NFR-3 schema-level negatives: every schema is closed, carries no identity-
   const denyList = [
     'actor_id', 'actor', 'display_name', 'fingerprint', 'sender', 'sender_fingerprint', 'sender_chat_id', 'client_type',
   ]
-  assert.equal(TOOL_DESCRIPTORS.length, 9)
+  assert.equal(TOOL_DESCRIPTORS.length, 10)
   for (const tool of TOOL_DESCRIPTORS) {
     assert.equal(tool.inputSchema.additionalProperties, false, `${tool.name} must close its argument set`)
     const properties = Object.keys(tool.inputSchema.properties ?? {})

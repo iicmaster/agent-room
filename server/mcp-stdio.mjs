@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 
-// The MCP stdio adapter (Story 1.7): five conversation tools over the HTTP
+// The MCP stdio adapter (Story 1.7): the conversation tools over the HTTP
 // api-client — room_presence, room_direct_open, message_send, message_read,
-// room_status — plus Story 3.2's two trust tools (room_trust_list,
+// room_status, and the v0.8.0 room_list (room discovery, including DMs opened
+// while offline) — plus Story 3.2's two trust tools (room_trust_list,
 // room_trust_set) over the per-realm allowlist and Story 3.3's two held tools
 // (room_held_list, room_held_count) over the per-realm held pipeline. The
 // v0.1 unix-socket daemon surface (with its create/join verbs, retired per
@@ -170,7 +171,7 @@ const TOOL_DESCRIPTORS = Object.freeze([
   },
   {
     name: 'message_read',
-    description: `Read ordered messages from an Agent Room after after_seq — when omitted, this installation's persisted cursor for the room is used — optionally waiting up to ${READ_HOLD_MAX_MS / 1000} seconds for new messages. Every response carries next_after_seq and head_seq, and the cursor is durably advanced per realm and room, surviving restarts.`,
+    description: `Read ordered messages from an Agent Room after after_seq — when omitted, this installation's persisted cursor for the room is used — optionally waiting up to ${READ_HOLD_MAX_MS / 1000} seconds for new messages. Every response carries next_after_seq and head_seq, and the cursor is durably advanced per realm and room, surviving restarts. The persisted cursor records FETCHED progress: it advances when this page is read, before your turn processes it. A workflow that must not lose messages on a crash passes an explicit after_seq from its own checkpoint and treats replays as possible.`,
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -181,6 +182,15 @@ const TOOL_DESCRIPTORS = Object.freeze([
         limit: { type: 'integer', minimum: 1, maximum: READ_PAGE_MAX, default: READ_PAGE_DEFAULT },
         wait_ms: { type: 'integer', minimum: 0, maximum: READ_HOLD_MAX_MS, default: 0 },
       },
+    },
+  },
+  {
+    name: 'room_list',
+    description: 'List the rooms this installation is a member of in the current Agent Room realm: the Broadcast Room and every pair DM, with id, kind, and title where set. Use it to discover rooms — including DMs opened while this installation was offline — before reading them; message_read resumes each room by cursor or an explicit after_seq.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {},
     },
   },
   {
@@ -250,6 +260,7 @@ export const TOOL_ARGUMENT_FIELDS = Object.freeze(new Map([
   ['room_trust_set', Object.freeze(new Set(['target_fingerprint', 'allowed']))],
   ['room_held_list', Object.freeze(new Set(['room_id']))],
   ['room_held_count', Object.freeze(new Set([]))],
+  ['room_list', Object.freeze(new Set([]))],
 ]))
 
 function rpcError(id, code, message, data) {
@@ -463,10 +474,12 @@ export function createMcpServer({
   // for a missing Chat ID — surfaces per call and never poisons the client.
   let clientPromise = null
   let realmId = null
-  // The companion notifier (server/client/notifier.mjs): started after the
-  // first successful tool call — the first bind — never before, and stopped
-  // by the shared shutdown. A notifier that stopped on a session-level
-  // refusal clears itself, so the next successful call starts a fresh one.
+  // The companion notifier (server/notification/notifier.mjs): started as soon
+  // as the host connects — on `initialize`, before any tool call, so receive-
+  // readiness never depends on the model remembering to call a tool first —
+  // and stopped by the shared shutdown. A notifier that stopped on a
+  // session-level refusal clears itself, so the next successful tool call
+  // starts a fresh one.
   let notifier = null
   function getClient() {
     clientPromise ??= createAgentRoomClient({ dataDir, pluginDataDir: pluginData })
@@ -555,16 +568,25 @@ export function createMcpServer({
   }
 
   const startNotifierOnce = () => {
-    if (notifier !== null || shutdownPromise !== null || clientPromise === null || !notifierEnabled(env)) return
-    const started = startNotifier({
-      client: clientPromise,
-      pluginDataDir: pluginData,
-      realmIdOf,
-      env,
-      errorOutput,
-      onStop: () => { if (notifier === started) notifier = null },
-    })
-    notifier = started
+    if (notifier !== null || shutdownPromise !== null || !notifierEnabled(env)) return
+    try {
+      // The client boots here when the host connected but no tool call has
+      // run yet: construction reads local state only. A construction failure
+      // (nothing configured) leaves receive-ready off — the next tool call
+      // surfaces the reason to the caller, where it belongs.
+      clientPromise ??= createAgentRoomClient({ dataDir, pluginDataDir: pluginData })
+      const started = startNotifier({
+        client: clientPromise,
+        pluginDataDir: pluginData,
+        realmIdOf,
+        env,
+        errorOutput,
+        onStop: () => { if (notifier === started) notifier = null },
+      })
+      notifier = started
+    } catch {
+      // Receive-ready stays off; nothing poisoned the adapter.
+    }
   }
 
   const callTool = async (name, args, signal) => {
@@ -664,7 +686,15 @@ export function createMcpServer({
           try {
             await registerHeldMessages(pluginData, realm, args.room_id, heldRows)
           } catch (error) {
-            notes.push(`held registration failed: ${error?.code ?? 'write_failed'}`)
+            // The rows were consumed by the cursor like any other (FR-20), so
+            // the note carries the recovery recipe: re-read each failed row's
+            // page (after_seq = seq - 1, limit 1) and the trust matrix will
+            // re-register it — the data is not gone, only the metadata row.
+            const seqs = heldRows.map(row => row.seq).join(',')
+            notes.push(
+              `held registration failed for ${args.room_id} seqs ${seqs}: ${error?.code ?? 'write_failed'}`
+              + ' — recover by re-reading each row (message_read after_seq=<seq-1>, limit=1)',
+            )
           }
         }
         const resultPage = notes.length === 0
@@ -672,6 +702,12 @@ export function createMcpServer({
           : { ...page, note: notes.join('; ') }
         if (!cursorPersisted) resultPage.cursor_persisted = false
         return toolResult(resultPage)
+      }
+      if (name === 'room_list') {
+        // Room discovery straight from the server's room list for this
+        // Actor: the Broadcast Room plus every pair DM, including DMs opened
+        // while this installation was offline. No client state is touched.
+        return toolResult(await readyClient.listRooms({ signal }))
       }
       if (name === 'room_status') {
         const status = await readyClient.status({ signal })
@@ -768,6 +804,10 @@ export function createMcpServer({
         capabilities: { tools: { listChanged: false } },
         serverInfo: { name: 'agent-room', version: APP_VERSION },
       }))
+      // Receive-ready at connect: the notifier arms here (catching up the
+      // unread backlog, opening the inbox a host tails) instead of waiting
+      // for the model's first tool call.
+      startNotifierOnce()
       return
     }
     if (message.method === 'ping') {

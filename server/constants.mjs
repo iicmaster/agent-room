@@ -555,6 +555,19 @@ export const NOTIFIER_ROOM_LIMIT = 20
 export const NOTIFIER_ACTIVE_WINDOW_MS = 24 * 60 * 60 * 1000
 export const NOTIFIER_PREVIEW_MAX = 160
 export const NOTIFY_CMD_TIMEOUT_MS = 10_000
+// The unwatched-room sweep (v0.8.0): rooms past the watch cap — the cold DMs
+// the active-window rule dropped — get a bounded probe per refresh cycle
+// (one head read each, round-robin), so a quiet DM's next message is
+// discovered within roughly (rooms / limit) cycles instead of never. The
+// backlog hint scans at most NOTIFIER_BACKLOG_SCAN_MAX rows per room when it
+// estimates the unread window from the adapter's persisted cursor.
+export const NOTIFIER_UNWATCHED_PROBE_LIMIT = 3
+export const NOTIFIER_BACKLOG_SCAN_MAX = 200
+// The hook queue bound: at most this many lines wait for the in-flight
+// AGENT_ROOM_NOTIFY_CMD run, drop-oldest. Under normal traffic every line is
+// poked; under a flood the queue bounds the pending work while the inbox
+// itself still carries every line.
+export const NOTIFIER_HOOK_QUEUE_MAX = 16
 
 // The wake policy (ratified 2026-11-01): a stranger's first HELD row wakes
 // (the open-DM journey); repeat wakes from the same untrusted sender cool
