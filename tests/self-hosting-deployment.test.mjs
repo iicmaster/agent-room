@@ -904,7 +904,7 @@ test('the deployment guide exists and names its required sections, pins, and shi
     ['the Caddy 2.11.x series pin', /v2\.11\.x/],
     ['the concrete Caddy release pin', /v2\.11\.0/],
     ['the loopback-only plaintext rule', /only on loopback/],
-    ['the MCP stdio spec revision pin (verbatim)', /2026-07-28/],
+    ['the MCP stdio spec revision pin (verbatim)', /2025-06-18/],
     ['the start boundary', /## 6\. The start boundary/],
     ['the start boundary success face', /runtime\.json/],
     ['certificate acquisition responsibility', /acquire the chain/],
@@ -949,7 +949,7 @@ test('the deployment guide exists and names its required sections, pins, and shi
 test('README carries the MCP spec-revision pin, the corrected Remote Mode reality, and the deployment-guide pointer', () => {
   const readme = readFileSync(join(ROOT, 'README.md'), 'utf8')
   // AR-15: wherever the MCP surface is described, the revision pin travels.
-  assert.match(readme, /## Tools[\s\S]*?2026-07-28/, 'the MCP tool section carries the 2026-07-28 spec-revision pin')
+  assert.match(readme, /## Tools[\s\S]*?2025-06-18/, 'the MCP tool section carries the negotiated 2025-06-18 spec-revision pin')
   // The stale line is gone, corrected to the shipped Remote Mode reality.
   assert.equal(readme.includes('Remote and multi-host rooms'), false, 'the stale "not part of version 0.2" line is gone')
   assert.match(readme, /Remote Mode \(shipped, epic 4\)/)

@@ -349,6 +349,8 @@ test('every v0.1 public error code has an HTTP status declared once', () => {
     'request_too_large',
     'room_not_found',
     'route_not_found',
+    'sender_claim_ambiguous',
+    'sender_claim_missing',
     'server_port_conflict',
     'server_start_busy',
     'server_start_failed',

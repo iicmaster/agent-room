@@ -762,7 +762,7 @@ test('trust chain end-to-end: stranger hold with zero body bytes, cursor persist
   const removeRun = await runCli(world, ['allow', 'Stranger', '--remove'])
   assert.equal(removeRun.exitCode, 0, `allow --remove failed: ${removeRun.stderr}`)
   assert.equal(
-    removeRun.stdout.includes(`realm ${realmId}: removed the allowlist entry for fingerprint ${foreignFingerprint} (chat id "Stranger")`),
+    removeRun.stdout.includes(`realm ${realmId} (origin local:${record.port}): removed the allowlist entry for fingerprint ${foreignFingerprint} (chat id "Stranger")`),
     true,
     removeRun.stdout,
   )

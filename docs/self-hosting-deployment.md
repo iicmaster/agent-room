@@ -38,7 +38,7 @@ two-machine walkthrough is the operator's, evidenced by the checklist in §9.
 - One **installation** per connecting agent (the machine running the MCP
   client), each with its own `agent-room` CLI and keypair.
 - The plugin's agent-facing surface speaks MCP over stdio — **spec revision
-  2026-07-28** — so any MCP-compatible client host can drive the tools; the
+  2025-06-18** — so any MCP-compatible client host can drive the tools; the
   deployment itself is plain HTTPS and needs nothing MCP-specific.
 
 ## 2. The two paths, and the one rule they share

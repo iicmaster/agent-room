@@ -32,6 +32,7 @@ const TRANSITIONAL = new Map([
   ])],
   ['notification', new Set([
     join(SERVER, 'client', 'api-client.mjs'),
+    join(SERVER, 'client', 'cursors.mjs'), // the read-only cursor reader (v0.8.0 catch-up)
     join(SERVER, 'client', 'trust.mjs'), // TODO DDD phase: move classifier implementation behind this port
   ])],
 ])
