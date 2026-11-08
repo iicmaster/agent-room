@@ -1,0 +1,389 @@
+// The one-shot send/read commands — the non-MCP on-ramp (v0.8.0, the codex
+// round-table's "every tool" item). A tool with no MCP client and no long-
+// lived process can still be a sender and a reader over the same HTTPS wire
+// the MCP adapter uses, through the same authentication (local token lane or
+// the challenge-answer lane against a configured remote origin) and the same
+// receiver-side trust matrix.
+//
+// THE CONTRACT, stated in every receipt so a script never has to guess:
+//   - `send` reports the transport's own statuses — accepted (the log commit;
+//     NOT a wake receipt), duplicate_dropped (the content gate, not the
+//     idempotency key — the caller chose a fresh client_message_id), and
+//     storage_low (the store refused below the reserve; nothing was written).
+//     The client_message_id is printed on every receipt so a lost response
+//     can be retried with the identical id.
+//   - `read` applies this installation's trust matrix before printing (held
+//     rows keep metadata, never a body, exactly like message_read) and NEVER
+//     writes state: no cursor advance, no held registration. Resuming a
+//     one-shot reader is the caller's job — pass --after-seq from the
+//     previous page's next_after_seq; replays are possible, dedup on (room,
+//     seq). The MCP session's cursor belongs to the MCP adapter alone.
+//
+// Receiver lifecycle is deliberately out of scope here: a one-shot process
+// cannot be a receiver owner. For wake coverage, run the MCP adapter (the
+// always-on notifier) or `agent-room wait` (the armed watcher).
+
+import { randomUUID } from 'node:crypto'
+
+import {
+  CHAT_ID_INVALID_MESSAGE,
+  CLIENT_MESSAGE_ID_MAX,
+  MESSAGE_TEXT_MAX,
+  READ_HOLD_MAX_MS,
+  READ_PAGE_DEFAULT,
+  READ_PAGE_MAX,
+  chatIdForms,
+} from '../constants.mjs'
+import { AgentRoomRuntimeError } from '../runtime.mjs'
+import {
+  CONNECTION_MODE_ENV,
+  applyUntrustedEnvelope,
+  loadChatIdConfig,
+} from '../client/api-client.mjs'
+import { REMOTE_TRANSPORT, applyTrustMatrix, loadAllowlist } from '../client/trust.mjs'
+import { ensureServer } from '../client/ensure-server.mjs'
+import { loadRemoteConfig } from '../client/remote-config.mjs'
+import { authenticate, protocolHeaders, roundTrip } from './session-commands.mjs'
+
+const CLIENT_REQUEST_TIMEOUT_MS = 10_000
+
+const usage = (command, message) => ({
+  status: 'usage',
+  command,
+  code: 'usage',
+  message,
+})
+
+const refusal = (command, error) => ({
+  status: 'refusal',
+  command,
+  code: error?.code ?? 'request_failed',
+  message: error?.message ?? String(error),
+})
+
+function parseFlags(tokens, spec) {
+  const flags = {}
+  const rest = []
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index]
+    if (!token.startsWith('--')) {
+      rest.push(token)
+      continue
+    }
+    const name = token.slice(2)
+    const rule = spec.get(name)
+    if (rule === undefined) return { error: `unknown option "--${name}"` }
+    const value = tokens[index + 1]
+    if (value === undefined || value.startsWith('--')) return { error: `--${name} needs a value` }
+    index += 1
+    flags[name] = value
+  }
+  return { flags, rest }
+}
+
+// The same target resolution the wait family uses: a configured remote origin
+// is the remote lane; otherwise the shared local server (booted if not
+// running). The origin label rides every receipt so an operator can see WHICH
+// server a command answered from.
+async function resolveTarget({ pluginDataDir, sharedDataDir, env }) {
+  const remote = loadRemoteConfig(pluginDataDir)
+  if (remote !== null) {
+    return { target: { kind: 'remote', serverUrl: remote.serverUrl }, origin: remote.serverUrl, remote: true }
+  }
+  const server = await ensureServer({
+    dataDir: sharedDataDir,
+    ...(env[CONNECTION_MODE_ENV] === REMOTE_TRANSPORT ? { connectionMode: REMOTE_TRANSPORT } : {}),
+  })
+  return { target: { kind: 'local', port: server.port }, origin: `local:${server.port}`, remote: false }
+}
+
+async function realmIdOf(target, token) {
+  const status = await roundTrip(target, 'GET', '/api/status', protocolHeaders(token), undefined, CLIENT_REQUEST_TIMEOUT_MS)
+  const realmId = status.body?.result?.realm_id
+  if (status.status !== 200 || typeof realmId !== 'string' || realmId.length === 0) {
+    throw new AgentRoomRuntimeError(
+      status.body?.error?.code ?? 'request_failed',
+      status.body?.error?.message ?? `the agent-room server answered ${status.status}`,
+    )
+  }
+  return realmId
+}
+
+// `agent-room send --room <room_id> --text <text> [--reply-to <seq>] [--id <client_message_id>]`
+export async function runSendFamilyCommand(tokens, { pluginDataDir, sharedDataDir, env = process.env }) {
+  const command = 'send'
+  try {
+    const parsed = parseFlags(tokens, new Map([
+      ['room', 'string'], ['text', 'string'], ['reply-to', 'integer'], ['id', 'string'],
+    ]))
+    if (parsed.error !== undefined) return usage(command, parsed.error)
+    const { flags } = parsed
+    if (parsed.rest.length > 0) return usage(command, `unexpected argument "${parsed.rest[0]}"; agent-room send takes options only`)
+    if (flags.room === undefined) return usage(command, '--room is required: agent-room send --room <room_id> --text <text>')
+    if (flags.text === undefined) return usage(command, '--text is required: agent-room send --room <room_id> --text <text>')
+    if (flags.room.length < 1 || flags.room.length > 200) return usage(command, '--room must be 1 to 200 characters')
+    if (flags.text.trim().length < 1 || flags.text.length > MESSAGE_TEXT_MAX) {
+      return usage(command, `--text must contain 1 to ${MESSAGE_TEXT_MAX} characters`)
+    }
+    let replyToSeq
+    if (flags['reply-to'] !== undefined) {
+      if (!/^[0-9]+$/.test(flags['reply-to']) || Number(flags['reply-to']) < 1) {
+        return usage(command, '--reply-to must be a positive integer sequence number')
+      }
+      replyToSeq = Number(flags['reply-to'])
+    }
+    let clientMessageId = flags.id
+    if (clientMessageId !== undefined && (clientMessageId.length < 1 || clientMessageId.length > CLIENT_MESSAGE_ID_MAX)) {
+      return usage(command, `--id must contain 1 to ${CLIENT_MESSAGE_ID_MAX} characters`)
+    }
+    if (clientMessageId === undefined) clientMessageId = randomUUID()
+
+    // Identity discipline: the send is this installation's own words — the
+    // Chat ID comes from the config file, never from an argument.
+    if (!env) return usage(command, 'environment unavailable')
+    let config
+    try {
+      config = loadChatIdConfig(pluginDataDir)
+    } catch (error) {
+      return refusal(command, error)
+    }
+
+    const { target, origin } = await resolveTarget({ pluginDataDir, sharedDataDir, env })
+    const { token, transport } = await authenticate(target, { pluginDataDir, sharedDataDir, env })
+    const realmId = await realmIdOf(target, token)
+    const response = await roundTrip(
+      target,
+      'POST',
+      `/api/rooms/${encodeURIComponent(flags.room)}/messages`,
+      protocolHeaders(token),
+      {
+        chat_id: config.chatId,
+        client_message_id: clientMessageId,
+        text: flags.text,
+        ...(replyToSeq === undefined ? {} : { reply_to_seq: replyToSeq }),
+      },
+      CLIENT_REQUEST_TIMEOUT_MS,
+    )
+    if (response.status !== 200) {
+      throw new AgentRoomRuntimeError(
+        response.body?.error?.code ?? 'request_failed',
+        response.body?.error?.message ?? `the agent-room server answered ${response.status}`,
+      )
+    }
+    const result = response.body?.result
+    if (result?.status === 'storage_low') {
+      // The store rolled back having written nothing — the report IS the
+      // answer, and the exit code is the severity a script keys on.
+      return {
+        status: 'ok',
+        command,
+        exitCode: 1,
+        lines: [JSON.stringify({
+          ok: true,
+          command,
+          status: 'storage_low',
+          client_message_id: clientMessageId,
+          room_id: flags.room,
+          realm_id: realmId,
+          origin,
+          transport,
+          message: 'the store refused below its free-space reserve; nothing was committed — retry the SAME client_message_id after freeing space',
+        })],
+      }
+    }
+    if (result?.status === 'duplicate_dropped') {
+      return {
+        status: 'ok',
+        command,
+        lines: [JSON.stringify({
+          ok: true,
+          command,
+          status: 'duplicate_dropped',
+          room_id: flags.room,
+          original_seq: result.original_seq,
+          client_message_id: clientMessageId,
+          realm_id: realmId,
+          origin,
+          transport,
+          message: 'the content duplicate gate dropped this send; the original row is intact — a retry that must post needs a NEW client_message_id AND changed content',
+        })],
+      }
+    }
+    if (result?.status !== 'committed') {
+      throw new AgentRoomRuntimeError('request_failed', `the agent-room server answered an unreadable send result: ${JSON.stringify(result)}`)
+    }
+    return {
+      status: 'ok',
+      command,
+      lines: [JSON.stringify({
+        ok: true,
+        command,
+        status: 'accepted',
+        room_id: result.room_id,
+        seq: result.seq,
+        client_message_id: clientMessageId,
+        realm_id: realmId,
+        origin,
+        transport,
+        message: 'accepted = the durable log committed; this is NOT a wake receipt — the receiver learns of it through its own notifier or wait',
+      })],
+    }
+  } catch (error) {
+    return refusal(command, error)
+  }
+}
+
+// `agent-room read --room <room_id> [--after-seq <n>] [--limit <n>] [--wait-ms <ms>]`
+export async function runReadFamilyCommand(tokens, { pluginDataDir, sharedDataDir, env = process.env }) {
+  const command = 'read'
+  try {
+    const parsed = parseFlags(tokens, new Map([
+      ['room', 'string'], ['after-seq', 'integer'], ['limit', 'integer'], ['wait-ms', 'integer'],
+    ]))
+    if (parsed.error !== undefined) return usage(command, parsed.error)
+    const { flags } = parsed
+    if (parsed.rest.length > 0) return usage(command, `unexpected argument "${parsed.rest[0]}"; agent-room read takes options only`)
+    if (flags.room === undefined) return usage(command, '--room is required: agent-room read --room <room_id> [--after-seq <n>]')
+    if (flags.room.length < 1 || flags.room.length > 200) return usage(command, '--room must be 1 to 200 characters')
+    let afterSeq = 0
+    if (flags['after-seq'] !== undefined) {
+      if (!/^[0-9]+$/.test(flags['after-seq'])) return usage(command, '--after-seq must be a non-negative integer')
+      afterSeq = Number(flags['after-seq'])
+    }
+    let limit = READ_PAGE_DEFAULT
+    if (flags.limit !== undefined) {
+      if (!/^[0-9]+$/.test(flags.limit) || Number(flags.limit) < 1 || Number(flags.limit) > READ_PAGE_MAX) {
+        return usage(command, `--limit must be between 1 and ${READ_PAGE_MAX}`)
+      }
+      limit = Number(flags.limit)
+    }
+    let waitMs = 0
+    if (flags['wait-ms'] !== undefined) {
+      if (!/^[0-9]+$/.test(flags['wait-ms']) || Number(flags['wait-ms']) > READ_HOLD_MAX_MS) {
+        return usage(command, `--wait-ms must be between 0 and ${READ_HOLD_MAX_MS}`)
+      }
+      waitMs = Number(flags['wait-ms'])
+    }
+
+    const { target, origin } = await resolveTarget({ pluginDataDir, sharedDataDir, env })
+    const { token, fingerprint, transport } = await authenticate(target, { pluginDataDir, sharedDataDir, env })
+    const realmId = await realmIdOf(target, token)
+    const params = new URLSearchParams({
+      after_seq: String(afterSeq),
+      limit: String(limit),
+      wait_ms: String(waitMs),
+    })
+    const page = await roundTrip(
+      target,
+      'GET',
+      `/api/rooms/${encodeURIComponent(flags.room)}/messages?${params}`,
+      protocolHeaders(token),
+      undefined,
+      waitMs + CLIENT_REQUEST_TIMEOUT_MS,
+    )
+    if (page.status !== 200) {
+      throw new AgentRoomRuntimeError(
+        page.body?.error?.code ?? 'request_failed',
+        page.body?.error?.message ?? `the agent-room server answered ${page.status}`,
+      )
+    }
+    // The receiver-side trust matrix, exactly as the MCP adapter applies it:
+    // foreign bodies wrapped (data, never instructions), held rows keep
+    // metadata with the body withheld and the reason recorded.
+    const raw = page.body?.result ?? {}
+    const wrapped = applyUntrustedEnvelope(raw, fingerprint)
+    const judged = applyTrustMatrix(
+      { messages: wrapped.messages, next_after_seq: wrapped.next_after_seq, head_seq: wrapped.head_seq },
+      {
+        ownFingerprint: fingerprint,
+        transport,
+        allowlist: loadAllowlist(pluginDataDir, realmId),
+      },
+    )
+    return {
+      status: 'ok',
+      command,
+      lines: [JSON.stringify({
+        ok: true,
+        command,
+        room_id: flags.room,
+        realm_id: realmId,
+        origin,
+        transport,
+        messages: judged.messages,
+        next_after_seq: judged.next_after_seq,
+        head_seq: judged.head_seq,
+        cursor_written: false,
+        message: 'this one-shot read never advances any cursor — resume with --after-seq from next_after_seq; the MCP session\u2019s cursor belongs to the MCP adapter alone',
+      })],
+    }
+  } catch (error) {
+    return refusal(command, error)
+  }
+}
+
+// `agent-room session verify <chat-id>` — the read-only name check against
+// the ACTIVE server (local or remote): is this Chat ID claimed, and by whom?
+// The remote onboarding gap (setup's probe only answers against the LOCAL
+// server) closed with a verdict an operator or launcher can gate on, without
+// binding anything.
+export async function runSessionVerify(deps, rawChatId) {
+  const command = 'session verify'
+  try {
+    if (rawChatId === undefined) return usage(command, 'one Chat ID is required: agent-room session verify <chat-id>')
+    const forms = chatIdForms(rawChatId)
+    if (forms === null) {
+      return usage(command, `"${String(rawChatId).slice(0, 64)}" is not a valid Chat ID: ${CHAT_ID_INVALID_MESSAGE}`)
+    }
+    const { target, origin } = await resolveTarget(deps)
+    const { token, fingerprint } = await authenticate(target, {
+      pluginDataDir: deps.pluginDataDir, sharedDataDir: deps.sharedDataDir, env: deps.env,
+    })
+    const realmId = await realmIdOf(target, token)
+    const presence = await roundTrip(target, 'GET', '/api/presence?include_offline=true', protocolHeaders(token), undefined, CLIENT_REQUEST_TIMEOUT_MS)
+    if (presence.status !== 200) {
+      throw new AgentRoomRuntimeError(
+        presence.body?.error?.code ?? 'request_failed',
+        presence.body?.error?.message ?? `the agent-room server answered ${presence.status}`,
+      )
+    }
+    const snapshot = presence.body?.result ?? {}
+    const groups = [['online', snapshot.online], ['offline_recently', snapshot.offline ?? snapshot.offline_recently]]
+    let holder = null
+    let group = null
+    for (const [name, rows] of groups) {
+      if (!Array.isArray(rows)) continue
+      const row = rows.find(entry => typeof entry?.chat_id === 'string' && entry.chat_id.toLowerCase() === forms.normalized)
+      if (row !== undefined) {
+        holder = { chat_id: row.chat_id, fingerprint: row.fingerprint, last_seen: row.last_seen ?? null }
+        group = name
+        break
+      }
+    }
+    const verdict = holder === null
+      ? 'unclaimed'
+      : holder.fingerprint === fingerprint
+        ? 'claimed_by_self'
+        : 'claimed_by_other'
+    return {
+      status: 'ok',
+      command,
+      lines: [JSON.stringify({
+        ok: true,
+        command,
+        chat_id: forms.display,
+        verdict,
+        realm_id: realmId,
+        origin,
+        ...(holder === null ? {} : { holder, group }),
+        message: verdict === 'unclaimed'
+          ? 'the name is free on this server as of this check — a concurrent bind can still win it before you do'
+          : verdict === 'claimed_by_self'
+            ? 'this installation\u2019s own key holds the name (a live session or a recent claim)'
+            : 'another key holds the name — binding it needs the holder gone and a session replace, never a guess',
+      })],
+    }
+  } catch (error) {
+    return refusal(command, error)
+  }
+}

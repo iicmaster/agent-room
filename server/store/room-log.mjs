@@ -1352,6 +1352,7 @@ export function openRoomLog({
       // repository; the room-log module remains schema and connection owner.
       upsertChatIdClaim(...args) { assertOpen(); return identityOperations.upsertChatIdClaim(...args) },
       listClaimsForChatId(...args) { assertOpen(); return identityOperations.listClaimsForChatId(...args) },
+      latestClaimForActor(...args) { assertOpen(); return identityOperations.latestClaimForActor(...args) },
       recentClaims(...args) { assertOpen(); return identityOperations.recentClaims(...args) },
       pruneChatIdClaims(...args) { assertOpen(); return identityOperations.pruneChatIdClaims(...args) },
       enrollActor(...args) { assertOpen(); return identityOperations.enrollActor(...args) },

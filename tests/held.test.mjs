@@ -879,15 +879,17 @@ test('the held tools over the real surface: room_held_list carries exactly the m
   assert.equal(afterEvictionText.includes('CANARY-TOOL-'), false, 'zero body bytes — cached, evicted, or recovered — reach the tool result')
   assert.equal(afterEvictionText.includes('gamma artifact'), false)
 
-  // No agent-reachable body accessor: the surface is exactly nine named
-  // tools, none of which is a body or release path, and the adapter's source
-  // never references the human-only functions at all.
+  // No agent-reachable body accessor: the surface is exactly ten named
+  // tools (room_list joined in v0.8.0), none of which is a body or release
+  // path, and the adapter's source never references the human-only
+  // functions at all.
   const tools = await mcp.request('tools/list')
   assert.deepEqual(tools.result.tools.map(tool => tool.name), [
     'room_presence',
     'room_direct_open',
     'message_send',
     'message_read',
+    'room_list',
     'room_status',
     'room_trust_list',
     'room_trust_set',

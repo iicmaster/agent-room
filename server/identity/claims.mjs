@@ -61,8 +61,37 @@ export function createIdentityClaimOperations({ database, withImmediateTransacti
       }))
     },
 
-    recentClaims(windowMs, now = Date.now) {
+    // The unbound send's name resolution (v0.8.0, the codex round-3 decision):
+    // one authenticated key may send WITHOUT holding a live session, and the
+    // server — never the request body — decides which name it speaks as: the
+    // key's most recent claim. Unique-latest wins; a newest-timestamp tie is
+    // returned as `tie: true` (the route refuses it rather than picking
+    // alphabetically); an absent claim returns null (the route refuses with
+    // sender_claim_missing). Claims are a historical directory, so this reads
+    // them without touching recency and never writes.
+    latestClaimForActor(actorFingerprint) {
       assertOpen()
+      const validFingerprint = requireFingerprint(actorFingerprint)
+      const rows = database.prepare(`
+        SELECT chat_id_normalized, actor_fingerprint, chat_id_display, last_seen_at
+        FROM chat_id_claims
+        WHERE actor_fingerprint = ?
+        ORDER BY last_seen_at DESC, chat_id_normalized ASC
+        LIMIT 2
+      `).all(validFingerprint)
+      if (rows.length === 0) return null
+      return {
+        claim: {
+          chat_id: rows[0].chat_id_display,
+          chat_id_normalized: rows[0].chat_id_normalized,
+          actor_fingerprint: rows[0].actor_fingerprint,
+          last_seen_at: rows[0].last_seen_at,
+        },
+        tie: rows.length > 1 && rows[1].last_seen_at === rows[0].last_seen_at,
+      }
+    },
+
+    recentClaims(windowMs, now = Date.now) {      assertOpen()
       if (!Number.isSafeInteger(windowMs) || windowMs <= 0) {
         fail('invalid_argument', 'windowMs must be a positive safe integer')
       }

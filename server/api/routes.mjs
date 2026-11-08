@@ -57,6 +57,18 @@ export const ROUTE_TABLE = Object.freeze([
   // messages pair long-polls reads (wait_ms server hold, deadline = a normal
   // possibly-empty page with next_after_seq/head_seq) over idempotent appends
   // (status committed, or the coded client_message_id_conflict).
+  //
+  // v0.8.0 (the codex round-3 decision B), the UNBOUND SEND: a POST from an
+  // authenticated session with NO live Chat ID is no longer a blanket refusal
+  // — the server resolves the sender's name from that key's unique-latest
+  // durable claim (sender_claim_missing / sender_claim_ambiguous when there
+  // is none or a tie), the request body may only assert that resolved name,
+  // and a foreign key holding the name right now refuses chat_id_taken. The
+  // send claims NO occupancy: no presence, no claim write, no recency
+  // refresh. A retry of an already-committed (room, fingerprint,
+  // client_message_id) tuple keeps the ORIGINAL row's attribution even after
+  // a rename, prune, or takeover — the durable log is the authority of what
+  // was said. A session that IS live-bound sends exactly as before.
   Object.freeze({ method: 'POST', path: '/api/rooms/direct', class: 'actor', implemented: true, requestFields: Object.freeze(['chat_id', 'target_fingerprint']) }),
   Object.freeze({ method: 'GET', path: '/api/rooms/:id/messages', class: 'actor', implemented: true, requestFields: Object.freeze(['after_seq', 'limit', 'wait_ms']) }),
   Object.freeze({ method: 'POST', path: '/api/rooms/:id/messages', class: 'actor', implemented: true, requestFields: Object.freeze(['chat_id', 'client_message_id', 'text', 'reply_to_seq']) }),

@@ -135,6 +135,7 @@ import { runCapacityFamilyCommand } from './capacity-commands.mjs'
 import { runViewerFamilyCommand } from './viewer-commands.mjs'
 import { runSessionFamilyCommand } from './session-commands.mjs'
 import { runWaitFamilyCommand } from './wait-commands.mjs'
+import { runReadFamilyCommand, runSendFamilyCommand, runSessionVerify } from './message-commands.mjs'
 
 const OK_STATUS = 200
 // The collision status is owned by the constants table (chat_id_taken), never restated.
@@ -458,6 +459,34 @@ Commands:
       nothing and is retryable with the same token; a committed enrollment
       never needs another invite — reconnecting is automatic.
 
+  agent-room session verify <chat-id>
+      Read-only name check against the ACTIVE server (local, or the remote
+      origin when one is configured): is this Chat ID unclaimed, claimed by
+      this installation's own key, or held by another key? One JSON receipt
+      with the verdict — the gate a launcher or operator checks before
+      provisioning a session; it binds nothing and changes nothing.
+
+  agent-room send --room <room_id> --text <text> [--reply-to <seq>] [--id <client_message_id>]
+      One-shot send over the same wire the MCP adapter uses (the configured
+      remote origin, or the local server). The receipt names the status:
+      accepted = the durable log committed (NOT a wake receipt),
+      duplicate_dropped = the content duplicate gate, storage_low = the store
+      refused. The client_message_id (auto-generated when omitted) is printed
+      so a lost response can be retried with the identical id. The send never
+      binds the Chat ID: the server resolves the sender name from this key's
+      most recent claim on the target server (sender_claim_missing means
+      bind a name once there first — setup locally, or a first connect in
+      the target realm; sender_claim_ambiguous means two names tie — bind
+      or re-assert exactly one).
+
+  agent-room read --room <room_id> [--after-seq <n>] [--limit <n>] [--wait-ms <ms>]
+      One-shot read: the receiver-side trust matrix applies exactly as in
+      message_read (foreign bodies wrapped, held rows metadata-only), and the
+      command NEVER writes state — no cursor advance, no held registration.
+      Resume with --after-seq from next_after_seq; the MCP session's cursor
+      belongs to the MCP adapter alone. Wake coverage is the notifier's or
+      wait's job, never a one-shot process's.
+
   agent-room session replace [<chat-id>] [--yes]
       Take this installation's Chat ID back from the session that still holds
       it. Use it when your client died, was killed, or lost its host and now
@@ -729,7 +758,7 @@ export async function main(argv = process.argv.slice(2), {
   // this printer. (Capacity's refuse state keeps its report on stdout and
   // exits 1 through the outcome's exitCode — the report IS the answer, and
   // the exit code is the severity a script keys on.)
-  if (command === 'invite' || command === 'remote' || command === 'ban' || command === 'unban' || command === 'capacity' || command === 'viewer' || command === 'session' || command === 'wait') {
+  if (command === 'invite' || command === 'remote' || command === 'ban' || command === 'unban' || command === 'capacity' || command === 'viewer' || command === 'session' || command === 'wait' || command === 'send' || command === 'read') {
     const outcome = command === 'invite'
       ? await runInviteFamilyCommand(subcommand, argv.slice(2), deps)
       : command === 'remote'
@@ -739,10 +768,16 @@ export async function main(argv = process.argv.slice(2), {
           : command === 'viewer'
             ? await runViewerFamilyCommand(subcommand, argv.slice(2), deps)
             : command === 'session'
-              ? await runSessionFamilyCommand(subcommand, argv.slice(2), deps)
+              ? (subcommand === 'verify'
+                ? await runSessionVerify(deps, argv.slice(2)[0])
+                : await runSessionFamilyCommand(subcommand, argv.slice(2), deps))
               : command === 'wait'
                 ? await runWaitFamilyCommand(argv.slice(1), deps)
-                : await runBanFamilyCommand(command, argv.slice(1), deps)
+                : command === 'send'
+                  ? await runSendFamilyCommand(argv.slice(1), deps)
+                  : command === 'read'
+                    ? await runReadFamilyCommand(argv.slice(1), deps)
+                    : await runBanFamilyCommand(command, argv.slice(1), deps)
     if (outcome.status === 'ok') {
       for (const line of outcome.lines) output.write(`${line}\n`)
       if (outcome.exitCode === 1) process.exitCode = 1

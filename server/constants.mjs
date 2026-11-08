@@ -232,6 +232,8 @@ export const PUBLIC_ERRORS = Object.freeze({
   banned: 'this key is banned by the operator',
   chat_id_not_found: 'no actor has claimed this chat id',
   chat_id_taken: 'chat id is already claimed by another connected session',
+  sender_claim_missing: "this installation's key has never bound a Chat ID on this server — bind a name once before sending unbound",
+  sender_claim_ambiguous: "this key's most recent claims tie across several names — bind or re-assert one name, then send again",
   // Story 7.2 (the observed incumbent): the one code every stale conflict
   // observation answers — unknown, expired, already consumed, wrong Actor,
   // wrong name, or the occupancy pair moved (including the name going free
@@ -352,6 +354,8 @@ export const PUBLIC_ERROR_STATUS = Object.freeze({
   chat_id_not_found: 404,
   chat_id_taken: 409,
   conflict_stale: 409,
+  sender_claim_missing: 409,
+  sender_claim_ambiguous: 409,
   challenge_invalid: 401,
   client_message_id_conflict: 409,
   daemon_start_busy: 503,

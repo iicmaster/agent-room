@@ -24,6 +24,8 @@ import test from 'node:test'
 
 import { DatabaseSync } from 'node:sqlite'
 
+import { openRoomLog } from '../server/store/room-log.mjs'
+
 import {
   MESSAGE_TEXT_MAX,
   READ_HOLD_MAX_MS,
@@ -383,10 +385,14 @@ test('NFR-3 attribution: the sender Chat ID comes from the session, never from t
   assert.equal(noChat.status, 400, noChat.text)
   assert.equal(noChat.json().error.code, 'invalid_request')
   assert.match(noChat.json().error.message, /chat_id is required/)
+  // v0.8.0 (the round-3 decision B): an unbound session with NO durable
+  // claim refuses with the coded sender_claim_missing — the guidance names
+  // the one-time bind, never a silent fallback.
   const unconnected = await sessioned(record.port, 'POST', unboundToken,
     `/api/rooms/${roomId}/messages`, { chat_id: 'Stranger', client_message_id: 'x-2', text: 'hi' })
-  assert.equal(unconnected.status, 400, unconnected.text)
-  assert.match(unconnected.json().error.message, /connected Chat ID/)
+  assert.equal(unconnected.status, 409, unconnected.text)
+  assert.equal(unconnected.json().error.code, 'sender_claim_missing')
+  assert.match(unconnected.json().error.message, /bind a name once/)
 
   await stop()
 })
@@ -480,6 +486,136 @@ test('member ACL: a third Actor is denied the pair room by the store; missing ro
     '/api/rooms/bad%20id/messages?after_seq=0')
   assert.equal(malformed.status, 400, malformed.text)
   assert.equal(malformed.json().error.code, 'invalid_room_id')
+
+  await stop()
+})
+
+// --- v0.8.0: the unbound send (the round-3 decision B) --------------------------------
+
+test('the unbound send: the server resolves the name from the key\u2019s unique-latest claim; retries keep the original attribution', async t => {
+  const dataDir = makeDataDir(t)
+  const { waitReady, stop } = spawnServerChild(t, dataDir)
+  const record = await waitReady()
+  const localToken = loadOrCreateLocalToken(dataDir)
+  const solo = installation()
+  const other = installation()
+
+  // Someone to talk to: 'Other' is live and opens a pair room to Solo\u2019s
+  // FUTURE name? No \u2014 the room needs a resolved name. The pair room is
+  // opened between two live installations below, after Solo\u2019s bind.
+  const peerSession = await connectInstallation(record.port, localToken, other, 'Peer')
+
+  // Key K (solo) binds 'Solo' once \u2014 the claim the unbound send will
+  // resolve \u2014 then releases the session (the live row goes away; the
+  // durable claim stays, by design).
+  const soloSession = await connectInstallation(record.port, localToken, solo, 'Solo')
+  const roomId = await openPairRoom(record.port, soloSession.sessionToken, 'Peer')
+  const released = await sessioned(record.port, 'DELETE', soloSession.sessionToken, '/api/session')
+  assert.equal(released.status, 200, released.text)
+
+  // A fresh token of the SAME key \u2014 unbound \u2014 sends as Solo: the
+  // name is resolved server-side from the claim, in its display form, and
+  // the send claims NO occupancy (no presence row, no claim write).
+  const unboundAuth = await request(record.port, 'POST', '/api/auth/local', {
+    headers: {
+      [PROTOCOL_KEY]: '1',
+      authorization: `Bearer ${localToken}`,
+      'content-type': 'application/json; charset=utf-8',
+    },
+    body: JSON.stringify({ public_key: solo.publicKey }),
+  })
+  const unboundToken = unboundAuth.json().result.session_token
+
+  const sent = await sessioned(record.port, 'POST', unboundToken,
+    `/api/rooms/${roomId}/messages`, { chat_id: 'SOLO', client_message_id: 'u-1', text: 'hello unbound' })
+  assert.equal(sent.status, 200, sent.text)
+  assert.equal(sent.json().result.status, 'committed')
+  const unboundSeq = sent.json().result.seq
+
+  const page = await sessioned(record.port, 'GET', peerSession.sessionToken,
+    `/api/rooms/${roomId}/messages?after_seq=0`)
+  const row = page.json().result.messages.find(entry => entry.seq === unboundSeq)
+  assert.equal(row.chat_id, 'Solo', 'attribution is the claim\u2019s server display form')
+
+  // An idempotent retry with the identical tuple keeps the original
+  // attribution even though the name is no longer live-bound.
+  const replay = await sessioned(record.port, 'POST', unboundToken,
+    `/api/rooms/${roomId}/messages`, { chat_id: 'SOLO', client_message_id: 'u-1', text: 'hello unbound' })
+  assert.equal(replay.status, 200, replay.text)
+  assert.equal(replay.json().result.seq, unboundSeq, 'the replay resolves to the original row')
+
+  // A retry asserting a DIFFERENT name is refused \u2014 the stored row is
+  // the authority of what was said.
+  const assertMismatch = await sessioned(record.port, 'POST', unboundToken,
+    `/api/rooms/${roomId}/messages`, { chat_id: 'Peer', client_message_id: 'u-1', text: 'hello unbound' })
+  assert.equal(assertMismatch.status, 400, assertMismatch.text)
+  assert.equal(assertMismatch.json().error.code, 'invalid_request')
+
+  // A NEW send (fresh id) after a rename speaks as the NEW latest claim \u2014
+  // never silently under an old label.
+  const soloSession2 = await connectInstallation(record.port, localToken, solo, 'Solo2')
+  await sessioned(record.port, 'DELETE', soloSession2.sessionToken, '/api/session')
+  const renamed = await sessioned(record.port, 'POST', unboundToken,
+    `/api/rooms/${roomId}/messages`, { chat_id: 'SOLO2', client_message_id: 'u-2', text: 'speaking as the new name' })
+  assert.equal(renamed.status, 200, renamed.text)
+  const renamedOld = await sessioned(record.port, 'POST', unboundToken,
+    `/api/rooms/${roomId}/messages`, { chat_id: 'SOLO', client_message_id: 'u-3', text: 'must refuse' })
+  assert.equal(renamedOld.status, 400, renamedOld.text)
+  assert.equal(renamedOld.json().error.code, 'invalid_request')
+
+  // Live-name uniqueness holds: while a FOREIGN key holds the RESOLVED name
+  // (Solo2, the key's latest claim), the unbound send cannot speak under it —
+  // and the refusal leaks no holder detail.
+  const foreignHolder = await connectInstallation(record.port, localToken, other, 'Solo2')
+  const taken = await sessioned(record.port, 'POST', unboundToken,
+    `/api/rooms/${roomId}/messages`, { chat_id: 'SOLO2', client_message_id: 'u-4', text: 'must refuse while foreign-held' })
+  assert.equal(taken.status, 409, taken.text)
+  assert.equal(taken.json().error.code, 'chat_id_taken')
+  await sessioned(record.port, 'DELETE', foreignHolder.sessionToken, '/api/session')
+
+  // The changed-payload retry is the coded conflict, exactly as the bound
+  // path behaves.
+  const conflict = await sessioned(record.port, 'POST', unboundToken,
+    `/api/rooms/${roomId}/messages`, { chat_id: 'SOLO2', client_message_id: 'u-2', text: 'changed text' })
+  assert.equal(conflict.status, 409, conflict.text)
+  assert.equal(conflict.json().error.code, 'client_message_id_conflict')
+
+  await stop()
+})
+
+test('the unbound send refusals: a newest-timestamp tie across names is ambiguous, never alphabetical', async t => {
+  const dataDir = makeDataDir(t)
+  const { waitReady, stop } = spawnServerChild(t, dataDir)
+  const record = await waitReady()
+  const localToken = loadOrCreateLocalToken(dataDir)
+  const tied = installation()
+
+  // Two claims for one key at the SAME last_seen_at \u2014 written through
+  // the store the way a review harness may (the server is running; WAL
+  // serializes the writes).
+  const store = openRoomLog({ dataDir })
+  const stamp = new Date().toISOString()
+  store.upsertChatIdClaim({ chatId: 'Alpha', actorFingerprint: tied.fingerprint, lastSeenAt: stamp })
+  store.upsertChatIdClaim({ chatId: 'Beta', actorFingerprint: tied.fingerprint, lastSeenAt: stamp })
+  store.close()
+
+  const auth = await request(record.port, 'POST', '/api/auth/local', {
+    headers: {
+      [PROTOCOL_KEY]: '1',
+      authorization: `Bearer ${localToken}`,
+      'content-type': 'application/json; charset=utf-8',
+    },
+    body: JSON.stringify({ public_key: tied.publicKey }),
+  })
+  const token = auth.json().result.session_token
+  const status = await sessioned(record.port, 'GET', token, '/api/status')
+  const broadcast = status.json().result.broadcast_room_id
+
+  const ambiguous = await sessioned(record.port, 'POST', token,
+    `/api/rooms/${broadcast}/messages`, { chat_id: 'Alpha', client_message_id: 't-1', text: 'which name am I?' })
+  assert.equal(ambiguous.status, 409, ambiguous.text)
+  assert.equal(ambiguous.json().error.code, 'sender_claim_ambiguous')
+  assert.match(ambiguous.json().error.message, /tie across several names/)
 
   await stop()
 })

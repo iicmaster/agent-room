@@ -73,11 +73,14 @@ import { loadOrCreateKeypair } from '../keys.mjs'
 import { loadOrCreateLocalToken } from '../api/local-token.mjs'
 import { ensureServer } from '../client/ensure-server.mjs'
 import { applyUntrustedEnvelope } from '../client/api-client.mjs'
+import { loadRemoteConfig } from '../client/remote-config.mjs'
 import { cliHttpJson, cliBearerHeaders } from './http.mjs'
+import { authenticate, protocolHeaders, roundTrip } from './session-commands.mjs'
 import { heldBody, heldClear, heldList } from '../client/held.mjs'
 import { loadAllowlist, setAcceptAll, setAllowlistEntry } from '../client/trust.mjs'
 
 const OK_STATUS = 200
+const CLIENT_REQUEST_TIMEOUT_MS = 10_000
 
 // The preview's injection guard (review patch): every body line is prefixed
 // with this fixed two-character marker, so no body line can ever equal or
@@ -115,9 +118,10 @@ export async function exchangeCliSession({ port, sharedDataDir, pluginDataDir })
 // GET /api/status through the unbound session, guarded by the same
 // REALM_KEY_PATTERN path-escape rule as the MCP adapter's realmIdOf: the
 // realm id keys directories under PLUGIN_DATA, so its shape is verified
-// before any realm state path is built from it.
-export async function resolveRealmId({ port, sessionToken }) {
-  const status = await cliHttpJson(port, 'GET', '/api/status', cliBearerHeaders(sessionToken))
+// before any realm state path is built from it. Target-aware: a local port
+// or a remote origin, the same shape every command's session carries.
+export async function resolveRealmId({ port, target, sessionToken }) {
+  const status = await roundTrip(targetOf({ port, target }), 'GET', '/api/status', protocolHeaders(sessionToken), undefined, CLIENT_REQUEST_TIMEOUT_MS)
   if (status.status !== OK_STATUS || status.body?.ok !== true) {
     throw new AgentRoomRuntimeError(
       status.body?.error?.code ?? 'request_failed',
@@ -134,13 +138,42 @@ export async function resolveRealmId({ port, sessionToken }) {
   return realmId
 }
 
-// ensureServer (boot-or-attach) plus the unbound session plus the realm —
-// the shared preamble of every command.
-async function openCliSession({ sharedDataDir, pluginDataDir }) {
+// One target shape out of the two call conventions the family supports: the
+// legacy `{port}` (local, kept for direct callers and tests) or `{target}`.
+function targetOf({ port, target }) {
+  if (target !== undefined) return target
+  return { kind: 'local', port }
+}
+
+// The shared preamble of every command — unbound in BOTH modes. A configured
+// remote origin is the remote lane: the same challenge-answer authentication
+// the MCP adapter uses, where the key must be ENROLLED on that origin (an
+// unenrolled installation refuses with its coded error — never a silent
+// fallback to the local realm, which is a different trust world). Local Mode
+// boots-or-attaches the shared server and exchanges the local token. The
+// origin rides the session so every receipt can name WHERE it answered.
+async function openCliSession({ sharedDataDir, pluginDataDir, env = process.env }) {
+  const remote = loadRemoteConfig(pluginDataDir)
+  if (remote !== null) {
+    const target = { kind: 'remote', serverUrl: remote.serverUrl }
+    const { token, fingerprint, transport } = await authenticate(target, { pluginDataDir, sharedDataDir, env })
+    const realmId = await resolveRealmId({ target, sessionToken: token })
+    return { target, origin: remote.serverUrl, sessionToken: token, fingerprint, transport, realmId, remote: true }
+  }
   const server = await ensureServer({ dataDir: sharedDataDir })
   const { sessionToken, keypair } = await exchangeCliSession({ port: server.port, sharedDataDir, pluginDataDir })
   const realmId = await resolveRealmId({ port: server.port, sessionToken })
-  return { port: server.port, sessionToken, keypair, realmId }
+  return {
+    target: { kind: 'local', port: server.port },
+    origin: `local:${server.port}`,
+    port: server.port,
+    sessionToken,
+    keypair,
+    fingerprint: keypair.fingerprint,
+    transport: 'local',
+    realmId,
+    remote: false,
+  }
 }
 
 // --- The held id and the listing ---------------------------------------------------
@@ -174,15 +207,16 @@ function metadataLine(row) {
   return `  ${row.room_id}:${row.seq}  chat_id=${row.chat_id} fingerprint=${row.actor_fingerprint} room=${row.room_id} seq=${row.seq} created_at=${row.created_at} size=${row.size}B reason=${row.held_reason}`
 }
 
-function heldListHeader(realmId, count) {
-  if (count === 0) return `realm ${realmId}: no held messages`
-  return `realm ${realmId}: ${count} held message${count === 1 ? '' : 's'}`
+function heldListHeader(realmId, count, origin) {
+  const at = origin === undefined ? '' : ` (origin ${origin})`
+  if (count === 0) return `realm ${realmId}: no held messages${at}`
+  return `realm ${realmId}: ${count} held message${count === 1 ? '' : 's'}${at}`
 }
 
 // The held list: realm-wide, or one room when filtered. The filter gate
 // mirrors the pipeline's own room-filter shape (held.mjs's assertRoomFilter:
 // 1..IDENTIFIER_MAX characters) and names the failing input.
-export async function runHeldList({ sharedDataDir, pluginDataDir }, { roomId } = {}) {
+export async function runHeldList({ sharedDataDir, pluginDataDir, env = process.env }, { roomId } = {}) {
   if (roomId !== undefined
     && (typeof roomId !== 'string' || roomId.length < 1 || roomId.length > IDENTIFIER_MAX)) {
     throw new AgentRoomRuntimeError(
@@ -190,14 +224,16 @@ export async function runHeldList({ sharedDataDir, pluginDataDir }, { roomId } =
       `"${String(roomId)}" is not a room id (1-${IDENTIFIER_MAX} characters); the --room filter takes a room id as shown in the listing`,
     )
   }
-  const session = await openCliSession({ sharedDataDir, pluginDataDir })
+  const session = await openCliSession({ sharedDataDir, pluginDataDir, env })
   const rows = heldList(pluginDataDir, session.realmId, { roomId })
   return {
     ok: true,
     command: 'held list',
     realmId: session.realmId,
+    origin: session.origin,
+    remote: session.remote,
     rows,
-    lines: [heldListHeader(session.realmId, rows.length), ...rows.map(metadataLine)],
+    lines: [heldListHeader(session.realmId, rows.length, session.origin), ...rows.map(metadataLine)],
   }
 }
 
@@ -208,16 +244,19 @@ export async function runHeldList({ sharedDataDir, pluginDataDir }, { roomId } =
 // readMessage does, so the recovered preview byte-matches the cached artifact
 // the delivery pipeline withheld — the same transform, never a downgrade of
 // the framing. Shaped exactly as heldBody's injected seam.
-export function pointReadViaHttp({ port, sessionToken, fingerprint }) {
+export function pointReadViaHttp({ port, target, sessionToken, fingerprint }) {
+  const resolvedTarget = targetOf({ port, target })
   return async ({ roomId, afterSeq, limit }) => {
     const params = new URLSearchParams()
     params.set('after_seq', String(afterSeq))
     params.set('limit', String(limit))
-    const response = await cliHttpJson(
-      port,
+    const response = await roundTrip(
+      resolvedTarget,
       'GET',
       `/api/rooms/${encodeURIComponent(roomId)}/messages?${params.toString()}`,
-      cliBearerHeaders(sessionToken),
+      protocolHeaders(sessionToken),
+      undefined,
+      CLIENT_REQUEST_TIMEOUT_MS,
     )
     if (response.status !== OK_STATUS || response.body?.ok !== true) {
       throw new AgentRoomRuntimeError(
@@ -233,9 +272,9 @@ export function pointReadViaHttp({ port, sessionToken, fingerprint }) {
 // served the body), and the body verbatim between delimiters — no re-wrapping,
 // no unwrapping, no truncation. A record that is not held (never registered,
 // or already released) refuses: a released record's body is never shown again.
-export async function runHeldShow({ sharedDataDir, pluginDataDir }, rawId) {
+export async function runHeldShow({ sharedDataDir, pluginDataDir, env = process.env }, rawId) {
   const { roomId, seq } = parseHeldId(rawId)
-  const session = await openCliSession({ sharedDataDir, pluginDataDir })
+  const session = await openCliSession({ sharedDataDir, pluginDataDir, env })
   const row = heldList(pluginDataDir, session.realmId, { roomId }).find(candidate => candidate.seq === seq)
   if (!row) {
     throw new AgentRoomRuntimeError(
@@ -245,9 +284,9 @@ export async function runHeldShow({ sharedDataDir, pluginDataDir }, rawId) {
   }
   const preview = await heldBody(pluginDataDir, session.realmId, roomId, seq, {
     pointRead: pointReadViaHttp({
-      port: session.port,
+      target: session.target,
       sessionToken: session.sessionToken,
-      fingerprint: session.keypair.fingerprint,
+      fingerprint: session.fingerprint,
     }),
   })
   if (typeof preview.body !== 'string') {
@@ -274,12 +313,14 @@ export async function runHeldShow({ sharedDataDir, pluginDataDir }, rawId) {
     ok: true,
     command: 'held show',
     realmId: session.realmId,
+    origin: session.origin,
+    remote: session.remote,
     id: `${roomId}:${seq}`,
     row,
     body: preview.body,
     evicted: preview.evicted,
     lines: [
-      `held ${roomId}:${seq}  (realm ${session.realmId})`,
+      `held ${roomId}:${seq}  (realm ${session.realmId}, origin ${session.origin})`,
       metadataLine(row),
       preview.evicted
         ? 'provenance: the preview was recovered by point read (after_seq = seq − 1, limit = 1) from the durable log'
@@ -301,7 +342,7 @@ export async function runHeldShow({ sharedDataDir, pluginDataDir }, rawId) {
 // One candidate per fingerprint, merged across both sources; sources keep the
 // freshest presence last-seen. A row without a string fingerprint contributes
 // nothing — a null fingerprint is never matched by name (D13).
-export async function resolveChatIdCandidates({ port, sessionToken, pluginDataDir, realmId, chatName }) {
+export async function resolveChatIdCandidates({ port, target, sessionToken, pluginDataDir, realmId, chatName }) {
   const forms = chatIdForms(chatName)
   if (!forms) {
     throw new AgentRoomRuntimeError(
@@ -335,11 +376,13 @@ export async function resolveChatIdCandidates({ port, sessionToken, pluginDataDi
   }
   // Source 2: presence — the online group and the separately-labeled
   // offline-recently group, both carrying chat id + fingerprint + last-seen.
-  const presence = await cliHttpJson(
-    port,
+  const presence = await roundTrip(
+    targetOf({ port, target }),
     'GET',
     '/api/presence?include_offline=true',
-    cliBearerHeaders(sessionToken),
+    protocolHeaders(sessionToken),
+    undefined,
+    CLIENT_REQUEST_TIMEOUT_MS,
   )
   if (presence.status !== OK_STATUS || presence.body?.ok !== true) {
     throw new AgentRoomRuntimeError(
@@ -397,7 +440,7 @@ export function releaseReportLine(released, residual) {
 // bare fingerprint: a sender aged out of every live resolution source keeps a
 // human revocation path for its standing grant.
 export async function runAllow(
-  { sharedDataDir, pluginDataDir },
+  { sharedDataDir, pluginDataDir, env = process.env },
   rawName,
   { remove = false, fingerprint: fingerprintArg } = {},
 ) {
@@ -418,7 +461,7 @@ export async function runAllow(
     }
     fingerprintFilter = fingerprintArg
   }
-  const session = await openCliSession({ sharedDataDir, pluginDataDir })
+  const session = await openCliSession({ sharedDataDir, pluginDataDir, env })
 
   if (remove === true) {
     // Removal resolves from the ALLOWLIST itself, never from the live
@@ -467,22 +510,24 @@ export async function runAllow(
       ok: true,
       command: 'allow',
       realmId: session.realmId,
+      origin: session.origin,
+      remote: session.remote,
       fingerprint,
       ...(resolvedChatId === undefined ? {} : { chatId: resolvedChatId }),
       removed: true,
       lines: had
         ? [
-            `realm ${session.realmId}: removed the allowlist entry for fingerprint ${fingerprint}${chatIdClause}`,
+            `realm ${session.realmId} (origin ${session.origin}): removed the allowlist entry for fingerprint ${fingerprint}${chatIdClause}`,
             'future messages from this sender are held again; already-ingested text and the durable log are untouched',
           ]
         : [
-            `realm ${session.realmId}: no allowlist entry existed for fingerprint ${fingerprint}${chatIdClause}; nothing was changed`,
+            `realm ${session.realmId} (origin ${session.origin}): no allowlist entry existed for fingerprint ${fingerprint}${chatIdClause}; nothing was changed`,
           ],
     }
   }
 
   const candidates = await resolveChatIdCandidates({
-    port: session.port,
+    target: session.target,
     sessionToken: session.sessionToken,
     pluginDataDir,
     realmId: session.realmId,
@@ -581,7 +626,7 @@ function askConfirm({ input, output, question }) {
   })
 }
 
-export async function runAllowAll({ input, output, sharedDataDir, pluginDataDir }, { remove = false, yes = false } = {}) {
+export async function runAllowAll({ input, output, sharedDataDir, pluginDataDir, env = process.env }, { remove = false, yes = false } = {}) {
   // The non-TTY gate comes FIRST (review patch): a bare non-TTY stdin is
   // refused before any server is booted, any token read, or any state file
   // created — pipes, the MCP host, and CI leave zero footprint. The
@@ -594,7 +639,7 @@ export async function runAllowAll({ input, output, sharedDataDir, pluginDataDir 
   if (remove !== true && yes !== true && !input.isTTY) {
     return { ok: false, command: 'allow-all', code: 'invalid_request', message: ALLOW_ALL_REQUIRES_TTY_MESSAGE }
   }
-  const session = await openCliSession({ sharedDataDir, pluginDataDir })
+  const session = await openCliSession({ sharedDataDir, pluginDataDir, env })
   if (remove === true) {
     // The fail-safe direction: no confirmation, holding messages again.
     const allowlist = setAcceptAll(pluginDataDir, session.realmId, false)
@@ -602,10 +647,12 @@ export async function runAllowAll({ input, output, sharedDataDir, pluginDataDir 
       ok: true,
       command: 'allow-all',
       realmId: session.realmId,
+      origin: session.origin,
+      remote: session.remote,
       acceptAll: false,
       allowlist,
       lines: [
-        `realm ${session.realmId}: accept-all is OFF — future senders without an allowlist entry are held again`,
+        `realm ${session.realmId} (origin ${session.origin}): accept-all is OFF — future senders without an allowlist entry are held again`,
       ],
     }
   }
@@ -635,10 +682,12 @@ export async function runAllowAll({ input, output, sharedDataDir, pluginDataDir 
     ok: true,
     command: 'allow-all',
     realmId: session.realmId,
+    origin: session.origin,
+    remote: session.remote,
     acceptAll: true,
     allowlist,
     lines: [
-      `realm ${session.realmId}: accept-all is ON — every future sender delivers without per-sender verification.`,
+      `realm ${session.realmId} (origin ${session.origin}): accept-all is ON — every future sender delivers without per-sender verification.`,
       'This approval is a human convention (Instructed): same-user processes are not cryptographically distinguishable.',
       'The untrusted envelope stays on delivered bodies.',
     ],

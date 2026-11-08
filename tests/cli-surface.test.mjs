@@ -499,7 +499,7 @@ test('held list: an empty realm names itself with no held messages and creates n
   // Row 1: empty realm — realm named, the no-held line, exit 0, no held.json.
   const empty = await runCli(world, ['held', 'list'])
   assert.equal(empty.exitCode, 0, empty.stderr)
-  assert.equal(empty.stdout, `realm ${realmId}: no held messages\n`)
+  assert.equal(empty.stdout, `realm ${realmId}: no held messages (origin local:${record.port})\n`)
   assert.equal(existsSync(heldPathOf(world, realmId)), false, 'a read never creates held state')
   assert.equal(empty.stderr, '')
 
@@ -541,7 +541,7 @@ test('held list: an empty realm names itself with no held messages and creates n
   // record, sorted by (room_id, seq) — the line shapes are spelled out here,
   // the field values pinned from the seeded rows' real metadata.
   const expectedLines = [
-    `realm ${realmId}: 3 held messages`,
+    `realm ${realmId}: 3 held messages (origin local:${record.port})`,
     ...rows.map(row => expectedMetadataLine(row.room_id, row.seq, foreign.fingerprint, row.created_at, row.size)),
   ]
   assert.equal(listed.stdout, `${expectedLines.join('\n')}\n`)
@@ -555,7 +555,7 @@ test('held list: an empty realm names itself with no held messages and creates n
   const filtered = await runCli(world, ['held', 'list', '--room', directId])
   assert.equal(filtered.exitCode, 0, filtered.stderr)
   const directRows = rows.filter(row => row.room_id === directId)
-  assert.equal(filtered.stdout, `realm ${realmId}: 1 held message\n${
+  assert.equal(filtered.stdout, `realm ${realmId}: 1 held message (origin local:${record.port})\n${
     expectedMetadataLine(directRows[0].room_id, directRows[0].seq, foreign.fingerprint, directRows[0].created_at, directRows[0].size)}\n`)
   assert.equal(filtered.stdout.includes(broadcastId), false, 'the other room\'s records are not listed')
 
@@ -593,7 +593,7 @@ test('held show of a cached record: the metadata block then the full body verbat
   const wrapped = held.wrappedBySeq.get(2)
   const row = held.rowsBySeq.get(2)
   const expectedLines = [
-    `held ${broadcastId}:2  (realm ${realmId})`,
+    `held ${broadcastId}:2  (realm ${realmId}, origin local:${record.port})`,
     expectedMetadataLine(broadcastId, 2, foreign.fingerprint, row.created_at, row.size),
     'provenance: the preview came from the local cache',
     'every body line below is prefixed with "| " so no body line can imitate this output or the delimiters; the preview is otherwise the artifact verbatim',
@@ -926,7 +926,7 @@ test('allow --remove deletes the entry only: held records of every key are untou
   assert.equal(removed.exitCode, 0, removed.stderr)
   assert.equal(removed.outcome.removed, true)
   assert.deepEqual(removed.stdout, [
-    `realm ${realmId}: removed the allowlist entry for fingerprint ${stranger.fingerprint} (chat id "Stranger")`,
+    `realm ${realmId} (origin local:${record.port}): removed the allowlist entry for fingerprint ${stranger.fingerprint} (chat id "Stranger")`,
     'future messages from this sender are held again; already-ingested text and the durable log are untouched',
   ].join('\n') + '\n')
   const allowlist = JSON.parse(readFileSync(allowlistPathOf(world, realmId), 'utf8'))
@@ -1007,7 +1007,7 @@ test('allow-all: a non-TTY stdin is refused with guidance and nothing changed, a
   const promptEnd = confirmed.stdout.indexOf('[y/N] ') + '[y/N] '.length
   assert.ok(promptEnd >= '[y/N] '.length, 'the confirmation prompt was shown')
   assert.equal(confirmed.stdout.slice(promptEnd), [
-    `realm ${realmId}: accept-all is ON — every future sender delivers without per-sender verification.`,
+    `realm ${realmId} (origin local:${record.port}): accept-all is ON — every future sender delivers without per-sender verification.`,
     'This approval is a human convention (Instructed): same-user processes are not cryptographically distinguishable.',
     'The untrusted envelope stays on delivered bodies.',
   ].join('\n') + '\n')
@@ -1019,7 +1019,7 @@ test('allow-all: a non-TTY stdin is refused with guidance and nothing changed, a
   const removed = await runCli(world, ['allow-all', '--remove'])
   assert.equal(removed.exitCode, 0, removed.stderr)
   assert.equal(removed.outcome.acceptAll, false)
-  assert.deepEqual(removed.stdout, `realm ${realmId}: accept-all is OFF — future senders without an allowlist entry are held again\n`)
+  assert.deepEqual(removed.stdout, `realm ${realmId} (origin local:${record.port}): accept-all is OFF — future senders without an allowlist entry are held again\n`)
   const allowlistAfter = JSON.parse(readFileSync(allowlistPathOf(world, realmId), 'utf8'))
   assert.equal(allowlistAfter.accept_all, false)
 })
@@ -1206,7 +1206,7 @@ test('allow <chat-id> --remove resolves from the allowlist itself: a sender sile
   assert.equal(removed.outcome.removed, true)
   assert.equal(removed.outcome.fingerprint, stranger.fingerprint)
   assert.deepEqual(removed.stdout, [
-    `realm ${realmId}: removed the allowlist entry for fingerprint ${stranger.fingerprint} (chat id "Stranger")`,
+    `realm ${realmId} (origin local:${record.port}): removed the allowlist entry for fingerprint ${stranger.fingerprint} (chat id "Stranger")`,
     'future messages from this sender are held again; already-ingested text and the durable log are untouched',
   ].join('\n') + '\n')
   allowlist = JSON.parse(readFileSync(allowlistPath, 'utf8'))

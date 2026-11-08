@@ -873,17 +873,65 @@ registerHandler('POST /api/rooms/:id/messages', function appendMessageRoute(cont
   if (principal.ok === false) return principal
 
   const chatIdField = requiredString(context.body?.chat_id, 'chat_id',
-    'chat_id is required: this session\'s connected Chat ID')
+    'chat_id is required: this session\u0027s connected Chat ID')
   if (chatIdField.error) return chatIdField.error
   const liveRegistry = context.liveSessionRegistry ?? LIVE_SESSION_REGISTRY
   const live = liveRegistry.lookup(principal.sessionKey)
-  if (live === null) {
-    return reject('invalid_request', 'the session has no connected Chat ID; connect before sending')
-  }
-  const forms = chatIdForms(chatIdField.value)
-  if (forms === null) return reject('invalid_chat_id', CHAT_ID_INVALID_MESSAGE)
-  if (forms.normalized !== live.chatIdNormalized) {
-    return reject('invalid_request', 'chat_id does not match this session\'s connected Chat ID; the sender identity always comes from the session token')
+  let senderChatId
+  if (live !== null) {
+    // The bound path, unchanged: the name comes from the session's live row
+    // and the request body may only assert it.
+    const forms = chatIdForms(chatIdField.value)
+    if (forms === null) return reject('invalid_chat_id', CHAT_ID_INVALID_MESSAGE)
+    if (forms.normalized !== live.chatIdNormalized) {
+      return reject('invalid_request', 'chat_id does not match this session\u0027s connected Chat ID; the sender identity always comes from the session token')
+    }
+    senderChatId = live.chatId
+  } else {
+    // The UNBOUND-SEND branch (v0.8.0, the codex round-3 decision B): an
+    // authenticated key may send without holding a live session, and the
+    // SERVER — never this request body — picks the name it speaks as: the
+    // key's most recent durable claim. An idempotent retry of an
+    // already-committed tuple keeps the ORIGINAL message row's name as the
+    // attribution authority (a claim lost to rename, prune, or takeover
+    // never invalidates a committed row), and it goes through the same
+    // append operation — membership is re-checked there, never short-circuited.
+    const clientMessageIdFieldEarly = requiredString(context.body?.client_message_id, 'client_message_id')
+    if (clientMessageIdFieldEarly.error) return clientMessageIdFieldEarly.error
+    const asserted = chatIdForms(chatIdField.value)
+    if (asserted === null) return reject('invalid_chat_id', CHAT_ID_INVALID_MESSAGE)
+    const committed = context.store.findIdempotentSend({
+      roomId: context.params?.id,
+      actorFingerprint: principal.actorFingerprint,
+      clientMessageId: clientMessageIdFieldEarly.value,
+    })
+    if (committed !== null) {
+      if (committed.chat_id.toLowerCase() !== asserted.normalized) {
+        return reject('invalid_request', 'chat_id does not match the name this message was committed under; a retry asserts the original attribution, never a new one')
+      }
+      senderChatId = committed.chat_id
+    } else {
+      const resolved = context.store.latestClaimForActor(principal.actorFingerprint)
+      if (resolved === null) {
+        return reject('sender_claim_missing', 'this installation\u0027s key has no Chat ID claim on this server: bind a name once (setup locally, or a first connect in the target realm) before sending unbound')
+      }
+      if (resolved.tie === true) {
+        return reject('sender_claim_ambiguous', `this key\u0027s most recent claims tie across several names at ${resolved.claim.last_seen_at}; bind or re-assert exactly one name, then send again`)
+      }
+      if (asserted.normalized !== resolved.claim.chat_id_normalized) {
+        return reject('invalid_request', `chat_id does not match the name this key last bound ("${resolved.claim.chat_id}"); the sender name is resolved server-side, never chosen by the caller`)
+      }
+      // Live-name uniqueness holds even for an unbound send: a foreign key
+      // holding the resolved name right now refuses the send (no holder
+      // details leak), while an empty name or this same key passes. The
+      // send claims NO occupancy — it never refreshes the claim's recency
+      // and never appears in presence.
+      const holder = liveRegistry.holderOf(resolved.claim.chat_id)
+      if (holder !== null && holder.actorFingerprint !== principal.actorFingerprint) {
+        return reject('chat_id_taken', 'the resolved name is held by another key right now; the unbound send cannot speak under it')
+      }
+      senderChatId = resolved.claim.chat_id
+    }
   }
 
   const clientMessageIdField = requiredString(context.body?.client_message_id, 'client_message_id')
@@ -891,6 +939,7 @@ registerHandler('POST /api/rooms/:id/messages', function appendMessageRoute(cont
   const textField = requiredString(context.body?.text, 'text')
   if (textField.error) return textField.error
   const replyToSeq = context.body?.reply_to_seq
+
 
   // Story 4.6: the store's storage admission gate refuses below the refuse
   // reserve with the coded storage_low (or the disk-full write maps to the
@@ -907,7 +956,7 @@ registerHandler('POST /api/rooms/:id/messages', function appendMessageRoute(cont
     outcome = context.store.appendMessage({
       roomId: context.params?.id,
       actorFingerprint: principal.actorFingerprint,
-      chatId: live.chatId,
+      chatId: senderChatId,
       clientMessageId: clientMessageIdField.value,
       text: textField.value,
       replyToSeq,
