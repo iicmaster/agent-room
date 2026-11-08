@@ -49,7 +49,7 @@
 //   re-arm is the agent's ordinary next action); a refusal prints ONE JSON
 //   object on stderr and exits 1; usage exits 2.
 
-import { existsSync, linkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, linkSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { performance } from 'node:perf_hooks'
@@ -234,17 +234,21 @@ function pidAlive(pid) {
 }
 
 // The one-per-installation fence. The lock is the wait's ONLY disk write
-// (plus its removal). Acquisition is the atomic create-only-if-absent link(2)
-// — the loser's link fails EEXIST instead of replacing the winner's file,
-// which closes the exists/read/replace window two concurrent waiters could
-// both win. A crashed waiter's lock is reclaimed through pid liveness; a live
-// waiter refuses the newcomer — two waiters on one installation would double
-// the request budget and race each other's hints. Release is owner-checked:
-// a lock whose recorded token is not ours (a reclaimer replaced the file
-// under us) is never removed.
+// (plus its removal). Acquisition is the atomic create-only-if-absent
+// link(2) — the loser's link fails EEXIST instead of replacing the winner's
+// file, which closes the exists/read/replace window two concurrent waiters
+// could both win. A crashed waiter's lock is reclaimed by RENAMING it aside
+// — rename(2) is the atomic take-over: two concurrent reclaimers both read
+// the same dead lock, but exactly one of their renames succeeds; the loser's
+// rename hits ENOENT and re-reads the winner's fresh lock instead of ever
+// touching it (the round-4 finding: an unlink-based reclaim let a stale
+// reader delete the winner's lock). A live waiter refuses the newcomer —
+// two waiters on one installation would double the request budget and race
+// each other's hints. Release is owner-checked: a lock whose recorded token
+// is not ours is never removed.
 function acquireWaitLock(pluginDataDir, timeoutMs) {
   const path = join(pluginDataDir, 'wait.lock')
-  for (let attempt = 0; attempt < 5; attempt += 1) {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
     const token = randomUUID()
     const temporary = join(pluginDataDir, `.wait.lock.${randomUUID()}.tmp`)
     writeFileSync(temporary, `${JSON.stringify({
@@ -274,9 +278,17 @@ function acquireWaitLock(pluginDataDir, timeoutMs) {
     if (pid !== null && pid !== process.pid && pidAlive(pid)) {
       return { acquired: false, path, token: null }
     }
-    // Stale, self-owned, or unreadable: remove and retry. A concurrent
-    // reclaimer may win the next link; the loop bounds the churn either way.
-    try { unlinkSync(path) } catch { /* someone else already did */ }
+    // Stale, self-owned, or unreadable: take the file aside ATOMICALLY and
+    // race the link again. A concurrent reclaimer or a fresh owner wins the
+    // rename, and our ENOENT re-enters the loop against THEIR state.
+    const reclaimed = `${path}.reclaimed.${randomUUID()}`
+    try {
+      renameSync(path, reclaimed)
+    } catch (error) {
+      if (error?.code === 'ENOENT') continue // someone else already took it
+      throw error
+    }
+    try { unlinkSync(reclaimed) } catch { /* best-effort cleanup */ }
   }
   return { acquired: false, path, token: null }
 }

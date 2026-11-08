@@ -486,3 +486,246 @@ test('the hook queue is bounded: a burst pokes every line under normal pacing, d
   const poked = readFileSync(hookOut, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line))
   assert.deepEqual(poked, messageLines(pluginData), 'the hook saw exactly the inbox lines, in order')
 })
+
+// --- round-4 gate: the offline DM, no replay on eviction, reported drops, sink honesty ---
+
+function makeFakeWorld(t, { rooms, mail, hook = null } = {}) {
+  const parent = mkdtempSync(join(tmpdir(), 'agent-room-notifier-gate-'))
+  t.after(() => rmSync(parent, { recursive: true, force: true }))
+  const pluginData = join(parent, 'plugin-data')
+  mkdirSync(pluginData, { mode: 0o700 })
+
+  const own = 'sha256:' + 'a'.repeat(64)
+  const peer = 'sha256:' + 'b'.repeat(64)
+  const client = {
+    transport: 'local',
+    fingerprint: own,
+    async listRooms() {
+      return { rooms: rooms().map(room => ({ ...room })) }
+    },
+    async readMessage({ roomId, afterSeq = 0, limit = READ_PAGE_MAX } = {}) {
+      const box = mail().get(roomId) ?? []
+      const rows = box.filter(row => row.seq > afterSeq).slice(0, limit)
+      const head = box.reduce((max, row) => Math.max(max, row.seq), 0)
+      return {
+        messages: rows,
+        next_after_seq: rows.length > 0 ? rows[rows.length - 1].seq : afterSeq,
+        head_seq: head,
+      }
+    },
+  }
+  const hookOut = hook === null ? null : join(parent, 'hook.out')
+  const notifier = startNotifier({
+    client,
+    pluginDataDir: pluginData,
+    realmIdOf: async () => 'gate-realm',
+    env: hook === null ? {} : { [NOTIFY_CMD_ENV]: hook },
+    refreshMs: 60,
+    spacingMs: 2,
+  })
+  t.after(() => notifier.stop())
+  return { pluginData, own, peer, hookOut }
+}
+
+const gateRow = (peerFingerprint, seq, text) => ({
+  seq, chat_id: 'peer', actor_fingerprint: peerFingerprint, created_at: new Date().toISOString(), text,
+})
+
+test('round-4: a DM a peer opened while the installation was offline hints from 0 and pokes the hook', async t => {
+  const hookOut = null
+  const hookPath = null
+  const parent = mkdtempSync(join(tmpdir(), 'agent-room-notifier-offdm-'))
+  t.after(() => rmSync(parent, { recursive: true, force: true }))
+  const pluginData = join(parent, 'plugin-data')
+  mkdirSync(pluginData, { mode: 0o700 })
+  const hookFile = join(parent, 'hook.out')
+  const hook = join(parent, 'hook.sh')
+  writeFileSync(hook, `#!/bin/sh\ncat >> '${hookFile}'\n`, { mode: 0o700 })
+  chmodSync(hook, 0o700)
+
+  const own = 'sha256:' + 'a'.repeat(64)
+  const peer = 'sha256:' + 'b'.repeat(64)
+  const COLD = 'dm-offline'
+  const rooms = [{ room_id: 'b', kind: 'broadcast' }, { room_id: COLD, kind: 'direct' }]
+  const mail = new Map([
+    ['b', []],
+    [COLD, [gateRow(peer, 1, 'opened in the dark one'), gateRow(peer, 2, 'opened in the dark two')]],
+  ])
+  const client = {
+    transport: 'local',
+    fingerprint: own,
+    async listRooms() { return { rooms: rooms.map(room => ({ ...room })) } },
+    async readMessage({ roomId, afterSeq = 0, limit = READ_PAGE_MAX } = {}) {
+      const box = mail.get(roomId) ?? []
+      const rows = box.filter(row => row.seq > afterSeq).slice(0, limit)
+      const head = box.reduce((max, row) => Math.max(max, row.seq), 0)
+      return { messages: rows, next_after_seq: rows.length > 0 ? rows[rows.length - 1].seq : afterSeq, head_seq: head }
+    },
+  }
+  const notifier = startNotifier({
+    client, pluginDataDir: pluginData, realmIdOf: async () => 'offdm-realm',
+    env: { [NOTIFY_CMD_ENV]: hook }, refreshMs: 60, spacingMs: 2,
+  })
+  t.after(() => notifier.stop())
+
+  await waitFor(() => statusLines(pluginData).some(line => line.event === 'unread_backlog'), 'the offline-DM hint')
+  const hint = statusLines(pluginData).find(line => line.event === 'unread_backlog' && line.room_id === COLD)
+  assert.equal(hint.unread_from, 0, 'a room the model never read is announced from 0')
+  assert.equal(hint.foreign_in_window, 2, 'both dark messages count')
+  await waitFor(() => existsSync(hookFile), 'the hint poked the hook')
+  const poked = readFileSync(hookFile, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line))
+  assert.ok(poked.some(entry => entry.kind === 'notifier_status' && entry.event === 'unread_backlog'),
+    'the hook received the backlog hint, not only message lines')
+})
+
+test('round-4: watch -> evict -> probe never replays delivered rows', async t => {
+  const EVICT = 'dm-evict'
+  // First listing: TWO rooms only, so the seeded DM is WATCHED and its rows
+  // deliver through the watcher. The late-room flood (44 rooms) then pushes
+  // the count past the cap: the 25 fresh late rooms outrank the seeded DM's
+  // last delivery, evicting it from the watch set — the exact path where
+  // a naive probe would replay what the watcher already delivered.
+  const lateFillers = Array.from({ length: 44 }, (_, index) => ({
+    room_id: `dm-late-${index}`, kind: 'direct',
+  }))
+  const rooms = [{ room_id: 'b', kind: 'broadcast' }, { room_id: EVICT, kind: 'direct' }]
+  const mail = new Map([
+    ['b', []],
+    [EVICT, []],
+    ...lateFillers.map(room => [room.room_id, []]),
+  ])
+  let lateRoom = false
+  const client = {
+    transport: 'local',
+    fingerprint: 'sha256:' + 'a'.repeat(64),
+    async listRooms() {
+      const listed = rooms.map(room => ({ ...room }))
+      if (lateRoom) listed.push(...lateFillers.map(room => ({ ...room })))
+      return { rooms: listed }
+    },
+    async readMessage({ roomId, afterSeq = 0, limit = READ_PAGE_MAX } = {}) {
+      const box = mail.get(roomId) ?? []
+      const rows = box.filter(row => row.seq > afterSeq).slice(0, limit)
+      const head = box.reduce((max, row) => Math.max(max, row.seq), 0)
+      return { messages: rows, next_after_seq: rows.length > 0 ? rows[rows.length - 1].seq : afterSeq, head_seq: head }
+    },
+  }
+  const parent = mkdtempSync(join(tmpdir(), 'agent-room-notifier-evict-'))
+  t.after(() => rmSync(parent, { recursive: true, force: true }))
+  const pluginData = join(parent, 'plugin-data')
+  mkdirSync(pluginData, { mode: 0o700 })
+  const notifier = startNotifier({
+    client, pluginDataDir: pluginData, realmIdOf: async () => 'evict-realm',
+    env: {}, refreshMs: 60, spacingMs: 2,
+  })
+  t.after(() => notifier.stop())
+
+  // The watcher delivers the LIVE rows (pre-start history is never replayed
+  // by design): ten rows arrive AFTER the arm, while the room is watched.
+  await waitFor(() => statusLines(pluginData).some(line => line.event === 'started'), 'armed')
+  for (let seq = 1; seq <= 10; seq += 1) mail.get(EVICT).push(gateRow('sha256:' + 'b'.repeat(64), seq, `live ${seq}`))
+  await waitFor(() => messageLines(pluginData).filter(entry => entry.room_id === EVICT).length === 10,
+    'the watcher delivers the live rows')
+  // The late-room flood tips the count past the watch cap: the seeded DM's
+  // last delivery predates the flood, so it drops out of the watch set.
+  lateRoom = true
+  // Rows arrive to the evicted room: the probe must deliver only the NEW ones.
+  for (let seq = 11; seq <= 15; seq += 1) mail.get(EVICT).push(gateRow('sha256:' + 'b'.repeat(64), seq, `after eviction ${seq}`))
+  await waitFor(() => messageLines(pluginData).filter(entry => entry.room_id === EVICT).length === 15,
+    'the probe delivers the post-eviction rows', 20_000)
+  const seqs = messageLines(pluginData).filter(entry => entry.room_id === EVICT).map(entry => entry.seq)
+  assert.deepEqual(new Set(seqs).size, seqs.length, 'not one delivered row was replayed by the probe')
+})
+
+test('round-4: a burst past the hook cap drops the oldest pokes and reports them by key', async t => {
+  const parent = mkdtempSync(join(tmpdir(), 'agent-room-notifier-drop-'))
+  t.after(() => rmSync(parent, { recursive: true, force: true }))
+  const pluginData = join(parent, 'plugin-data')
+  mkdirSync(pluginData, { mode: 0o700 })
+  const hookOut = join(parent, 'hook.out')
+  const hook = join(parent, 'hook.sh')
+  writeFileSync(hook, `#!/bin/sh\nsleep 0.02\ncat >> '${hookOut}'\n`, { mode: 0o700 })
+  chmodSync(hook, 0o700)
+
+  const peer = 'sha256:' + 'b'.repeat(64)
+  const rooms = [{ room_id: 'b', kind: 'broadcast' }]
+  const mail = new Map([['b', []]])
+  const client = {
+    transport: 'local',
+    fingerprint: 'sha256:' + 'a'.repeat(64),
+    async listRooms() { return { rooms: rooms.map(room => ({ ...room })) } },
+    async readMessage({ roomId, afterSeq = 0, limit = READ_PAGE_MAX } = {}) {
+      const box = mail.get(roomId) ?? []
+      const rows = box.filter(row => row.seq > afterSeq).slice(0, limit)
+      const head = box.reduce((max, row) => Math.max(max, row.seq), 0)
+      return { messages: rows, next_after_seq: rows.length > 0 ? rows[rows.length - 1].seq : afterSeq, head_seq: head }
+    },
+  }
+  const notifier = startNotifier({
+    client, pluginDataDir: pluginData, realmIdOf: async () => 'drop-realm',
+    env: { [NOTIFY_CMD_ENV]: hook }, refreshMs: 60, spacingMs: 2,
+  })
+  t.after(() => notifier.stop())
+  await waitFor(() => statusLines(pluginData).some(line => line.event === 'started'), 'armed')
+
+  // 21 rows at once: 1 in flight + 16 queued = 17 pokes; 4 pokes dropped,
+  // each named in a hook_dropped status line.
+  for (let seq = 1; seq <= 21; seq += 1) mail.get('b').push(gateRow(peer, seq, `flood ${seq}`))
+  await waitFor(() => messageLines(pluginData).length === 21, 'all 21 lines are in the inbox')
+  await waitFor(() => statusLines(pluginData).filter(line => line.event === 'hook_dropped').length === 4,
+    'the four dropped pokes are reported')
+  const droppedKeys = statusLines(pluginData)
+    .filter(line => line.event === 'hook_dropped')
+    .map(line => line.message_key)
+  assert.deepEqual(droppedKeys.map(key => Number(key.split(':')[1])), [2, 3, 4, 5], 'drop-oldest, named by message key')
+  await waitFor(() => {
+    if (!existsSync(hookOut)) return false
+    return readFileSync(hookOut, 'utf8').split('\n').filter(Boolean).length >= 17
+  }, 'the hook eventually ran for every kept line', 15_000)
+})
+
+test('round-4: sink failures are counted and the recovery is announced with the lost estimate', async t => {
+  const parent = mkdtempSync(join(tmpdir(), 'agent-room-notifier-sink-'))
+  t.after(() => rmSync(parent, { recursive: true, force: true }))
+  const pluginData = join(parent, 'plugin-data')
+  mkdirSync(pluginData, { mode: 0o700 })
+
+  const peer = 'sha256:' + 'b'.repeat(64)
+  const rooms = [{ room_id: 'b', kind: 'broadcast' }]
+  const mail = new Map([['b', []]])
+  const client = {
+    transport: 'local',
+    fingerprint: 'sha256:' + 'a'.repeat(64),
+    async listRooms() { return { rooms: rooms.map(room => ({ ...room })) } },
+    async readMessage({ roomId, afterSeq = 0, limit = READ_PAGE_MAX } = {}) {
+      const box = mail.get(roomId) ?? []
+      const rows = box.filter(row => row.seq > afterSeq).slice(0, limit)
+      const head = box.reduce((max, row) => Math.max(max, row.seq), 0)
+      return { messages: rows, next_after_seq: rows.length > 0 ? rows[rows.length - 1].seq : afterSeq, head_seq: head }
+    },
+  }
+  // The sink is broken from the start: the inbox path is a DIRECTORY.
+  const inboxPath = join(pluginData, 'inbox.jsonl')
+  mkdirSync(inboxPath, { mode: 0o700 })
+  const sinkErrors = []
+  const notifier = startNotifier({
+    client, pluginDataDir: pluginData, realmIdOf: async () => 'sink-realm',
+    env: {}, refreshMs: 60, spacingMs: 2,
+    errorOutput: { write: text => sinkErrors.push(text) },
+  })
+  t.after(() => notifier.stop())
+
+  // Arm FIRST (the started line fails uncounted — status lines are
+  // best-effort), then let the watcher fail on the wake lines themselves.
+  await waitFor(() => sinkErrors.some(text => text.includes('status write failed')), 'the start attempt hit the broken sink')
+  for (let seq = 1; seq <= 3; seq += 1) mail.get('b').push(gateRow(peer, seq, `lost ${seq}`))
+  await waitFor(() => sinkErrors.filter(text => text.includes('lost since the last success')).length >= 3,
+    'all three wake-line losses are reported on the notifier’s stderr')
+  // Recover: the directory gives way to a writable file path.
+  rmSync(inboxPath, { recursive: true, force: true })
+  for (let seq = 4; seq <= 5; seq += 1) mail.get('b').push(gateRow(peer, seq, `recovered ${seq}`))
+  await waitFor(() => statusLines(pluginData).some(line => line.event === 'sink_recovered'), 'the recovery is announced')
+  const recovered = statusLines(pluginData).find(line => line.event === 'sink_recovered')
+  assert.ok(Number.isInteger(recovered.lost_estimate) && recovered.lost_estimate >= 3,
+    `the lost estimate names the unreadable window: ${JSON.stringify(recovered)}`)
+})

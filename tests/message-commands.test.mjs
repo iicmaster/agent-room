@@ -220,13 +220,14 @@ test('session verify: unclaimed, claimed_by_other, and claimed_by_self against t
   const ghost = parseOne(await runSessionVerify(deps, 'ghost-name'))
   assert.equal(ghost.verdict, 'unclaimed')
   assert.equal(ghost.holder, undefined)
-  assert.match(ghost.message, /the name is free/)
+  assert.match(ghost.message, /free as of this instant/)
+  assert.equal(ghost.probe, 'claimed-and-released', 'the receipt says the probe bound and released')
 
   const other = parseOne(await runSessionVerify(deps, 'peer'))
   assert.equal(other.verdict, 'claimed_by_other')
-  assert.equal(other.holder.fingerprint, peer.fingerprint)
-  assert.equal(other.group, 'online')
-  assert.match(other.message, /never a guess/)
+  assert.equal(other.probe, 'refused-live-holder')
+  assert.equal(other.holder, undefined, 'the probe names no holder detail')
+  assert.match(other.message, /never displaced/)
 
   // This installation binds its own name (the live claim a running MCP
   // session would hold) — the verdict flips to self.
@@ -240,7 +241,8 @@ test('session verify: unclaimed, claimed_by_other, and claimed_by_self against t
   assert.equal(bound.status, 200, bound.text)
   const self = parseOne(await runSessionVerify(deps, 'Sender'))
   assert.equal(self.verdict, 'claimed_by_self', 'the verdict matches case-insensitively')
-  assert.equal(self.holder.fingerprint, peer.fingerprint === self.holder.fingerprint ? peer.fingerprint : self.holder.fingerprint)
+  assert.equal(self.probe, 'refused-live-holder')
+  assert.match(self.message, /session replace/)
 })
 
 test('usage grammar: missing --room, a bad chat id, and an unknown option are coded usage errors (exit 2 path)', async t => {
@@ -363,4 +365,52 @@ test('send: usage grammar \u2014 missing --room/--text and a non-integer --reply
   const badReply = await runSendFamilyCommand(['--room', 'b', '--text', 'hi', '--reply-to', 'x'], deps)
   assert.equal(badReply.status, 'usage')
   assert.match(badReply.message, /--reply-to must be a positive integer/)
+})
+
+test('send: a lost response is an outcome_unknown refusal that names the attempted id', async t => {
+  const parent = mkdtempSync(join(tmpdir(), 'agent-room-sendlost-'))
+  t.after(() => rmSync(parent, { recursive: true, force: true }))
+  const pluginData = join(parent, 'plugin-data')
+  const sharedData = join(parent, 'shared')
+  mkdirSync(pluginData, { mode: 0o700 })
+  mkdirSync(sharedData, { mode: 0o700 })
+  writeFileSync(join(pluginData, 'config.json'), `${JSON.stringify({ chat_id: 'sender' })}\n`, { mode: 0o600 })
+
+  // A half-honest server: /health, /api/auth/local and /api/status answer
+  // exactly like agent-room (so ensure-server reuses the port and the send's
+  // preamble runs), but the message POST gets its socket DESTROYED — from
+  // the CLI's side the outcome is UNKNOWABLE: the request reached a server
+  // and no response ever came back.
+  const httpServer = http.createServer((request, response) => {
+    const answer = payload => {
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({ ok: true, result: payload }))
+    }
+    if (request.method === 'GET' && request.url === '/health') return answer({ version: '0.8.0' })
+    if (request.method === 'POST' && request.url === '/api/auth/local') return answer({ session_token: 'lost-lane-token' })
+    if (request.method === 'GET' && request.url === '/api/status') {
+      return answer({ realm_id: 'lost-realm', version: '0.8.0', broadcast_room_id: 'b' })
+    }
+    if (request.method === 'POST' && request.url.startsWith('/api/rooms/')) {
+      request.resume()
+      response.destroy() // the response is lost mid-flight: outcome unknown
+      return
+    }
+    response.destroy()
+  })
+  await new Promise(resolvePromise => httpServer.listen(0, '127.0.0.1', resolvePromise))
+  t.after(() => httpServer.close())
+  const port = httpServer.address().port
+  // ensure-server reuses this port as a live same-major agent-room server.
+  writeFileSync(join(sharedData, 'runtime.json'),
+    `${JSON.stringify({ pid: process.pid, port, version: '0.8.0' })}\n`, { mode: 0o600 })
+
+  const deps = { pluginDataDir: pluginData, sharedDataDir: sharedData, env: {} }
+  const outcome = await runSendFamilyCommand(['--room', 'b', '--text', 'may or may not have landed'], deps)
+  assert.equal(outcome.status, 'refusal', JSON.stringify(outcome))
+  assert.equal(outcome.extra.outcome_unknown, true, `the receipt marks the unknown outcome: ${JSON.stringify(outcome)}`)
+  assert.ok(typeof outcome.extra.client_message_id === 'string' && outcome.extra.client_message_id.length > 0,
+    'the refusal carries the attempted idempotency key')
+  assert.match(outcome.message, /SAME --id/, 'the guidance names the retry discipline')
+  assert.equal(outcome.extra.client_message_id, outcome.extra.client_message_id, 'the id is stable for the retry')
 })

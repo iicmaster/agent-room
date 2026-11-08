@@ -526,6 +526,15 @@ test('the unbound send: the server resolves the name from the key\u2019s unique-
   })
   const unboundToken = unboundAuth.json().result.session_token
 
+  // The occupancy snapshot (the round-4 gate): an unbound send claims NO
+  // presence and NO claim recency \u2014 compare both before and after.
+  const presenceBefore = await sessioned(record.port, 'GET', peerSession.sessionToken,
+    '/api/presence?include_offline=true')
+  const offlineBefore = (presenceBefore.json().result.offline ?? [])
+    .find(entry => entry.chat_id === 'Solo')?.last_seen ?? null
+  assert.equal((presenceBefore.json().result.online ?? []).some(entry => entry.chat_id === 'Solo'), false,
+    'the released session is not online')
+
   const sent = await sessioned(record.port, 'POST', unboundToken,
     `/api/rooms/${roomId}/messages`, { chat_id: 'SOLO', client_message_id: 'u-1', text: 'hello unbound' })
   assert.equal(sent.status, 200, sent.text)
@@ -536,6 +545,14 @@ test('the unbound send: the server resolves the name from the key\u2019s unique-
     `/api/rooms/${roomId}/messages?after_seq=0`)
   const row = page.json().result.messages.find(entry => entry.seq === unboundSeq)
   assert.equal(row.chat_id, 'Solo', 'attribution is the claim\u2019s server display form')
+
+  const presenceAfter = await sessioned(record.port, 'GET', peerSession.sessionToken,
+    '/api/presence?include_offline=true')
+  assert.equal((presenceAfter.json().result.online ?? []).some(entry => entry.chat_id === 'Solo'), false,
+    'the unbound send never appears in presence')
+  const offlineAfter = (presenceAfter.json().result.offline ?? [])
+    .find(entry => entry.chat_id === 'Solo')?.last_seen ?? null
+  assert.equal(offlineAfter, offlineBefore, 'the unbound send never refreshes the claim\u2019s recency')
 
   // An idempotent retry with the identical tuple keeps the original
   // attribution even though the name is no longer live-bound.
@@ -563,6 +580,15 @@ test('the unbound send: the server resolves the name from the key\u2019s unique-
   assert.equal(renamedOld.status, 400, renamedOld.text)
   assert.equal(renamedOld.json().error.code, 'invalid_request')
 
+  // The round-4 gate, pinned explicitly: a retry of the ORIGINAL tuple
+  // AFTER the rename still resolves to the original row \u2014 the durable
+  // log is the authority of what was said, and a claim lost to a rename
+  // never invalidates a committed message.
+  const replayAfterRename = await sessioned(record.port, 'POST', unboundToken,
+    `/api/rooms/${roomId}/messages`, { chat_id: 'SOLO', client_message_id: 'u-1', text: 'hello unbound' })
+  assert.equal(replayAfterRename.status, 200, replayAfterRename.text)
+  assert.equal(replayAfterRename.json().result.seq, unboundSeq, 'the pre-rename tuple resolves to its original commit')
+
   // Live-name uniqueness holds: while a FOREIGN key holds the RESOLVED name
   // (Solo2, the key's latest claim), the unbound send cannot speak under it —
   // and the refusal leaks no holder detail.
@@ -579,6 +605,23 @@ test('the unbound send: the server resolves the name from the key\u2019s unique-
     `/api/rooms/${roomId}/messages`, { chat_id: 'SOLO2', client_message_id: 'u-2', text: 'changed text' })
   assert.equal(conflict.status, 409, conflict.text)
   assert.equal(conflict.json().error.code, 'client_message_id_conflict')
+
+  // The round-3 regression, pinned: the LIVE same-key holder and the CLI's
+  // unbound send coexist — the holder's occupancy, presence row and
+  // generation are untouched by the one-shot's commit.
+  const liveSolo = await connectInstallation(record.port, localToken, solo, 'Solo2')
+  const onlineBefore = (await sessioned(record.port, 'GET', peerSession.sessionToken, '/api/presence'))
+    .json().result.online.find(entry => entry.chat_id === 'Solo2')
+  assert.notEqual(onlineBefore, undefined, 'the live holder is present')
+  const concurrent = await sessioned(record.port, 'POST', unboundToken,
+    `/api/rooms/${roomId}/messages`, { chat_id: 'SOLO2', client_message_id: 'u-5', text: 'one-shot alongside the live holder' })
+  assert.equal(concurrent.status, 200, concurrent.text)
+  assert.equal(concurrent.json().result.status, 'committed')
+  const onlineAfter = (await sessioned(record.port, 'GET', peerSession.sessionToken, '/api/presence'))
+    .json().result.online.find(entry => entry.chat_id === 'Solo2')
+  assert.equal(onlineAfter.chat_id, 'Solo2')
+  assert.equal(onlineAfter.connected_since, onlineBefore.connected_since, 'the live holder\u2019s session was never disturbed')
+  await sessioned(record.port, 'DELETE', liveSolo.sessionToken, '/api/session')
 
   await stop()
 })

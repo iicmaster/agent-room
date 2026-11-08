@@ -251,10 +251,11 @@ appends one JSON line per message to `${PLUGIN_DATA}/inbox.jsonl` (0600): the wa
 host tails, optionally poked through `AGENT_ROOM_NOTIFY_CMD` (bounded queue, drop-oldest).
 
 - **Startup catch-up**: a room present at the first listing watches from its head — history
-  is never replayed — but the unread window between the installation's persisted cursor and
-  that head is announced as one bounded `unread_backlog` hint line. A message that arrived
-  while the installation was down is announced; the hint repeats until the model actually
-  reads the room.
+  is never replayed — but the unread window between the installation's persisted cursor
+  (or zero, for a room the model never read — a DM opened while the installation was down)
+  and that head is announced as one bounded `unread_backlog` hint line, which pokes the hook
+  too. The hint is re-announced on the NEXT notifier start (reconnect or restart) while the
+  cursor stays unfetched — not on every refresh cycle.
 - **The cold-DM sweep**: rooms past the watch cap (20) are probed round-robin — a DM the
   active-window rule dropped is discovered within roughly (rooms / 3) refresh cycles, not
   never.
@@ -373,13 +374,18 @@ session_data=/absolute/agent-room-sessions/<machine>-<tool>-<session>
 env PLUGIN_DATA="$session_data" agent-room setup --chat-id <machine>-<tool>-<session>
 env PLUGIN_DATA="$session_data" agent-room remote set https://room.example.com   # remote realms
 env PLUGIN_DATA="$session_data" agent-room remote enroll '<invite token>'
-env PLUGIN_DATA="$session_data" agent-room session verify <chat-id>              # the readiness gate
-env PLUGIN_DATA="$session_data" AGENT_ROOM_NOTIFY_CMD=<hook bound to this session's wake> agent-room <mcp entry>
+env PLUGIN_DATA="$session_data" agent-room session verify <chat-id>              # the availability probe
+env PLUGIN_DATA="$session_data" AGENT_ROOM_NOTIFY_CMD=/path/wake-hook \
+    node /path/to/agent-room/server/mcp-stdio.mjs
 ```
 
 - The MCP host launches the adapter itself (its stdin/stdout is the JSON-RPC channel) with
   that session's `PLUGIN_DATA`; every invocation of the session must carry the SAME
-  directory, or the identity silently falls back to the shared `manual` directory.
+  directory, or the identity silently falls back to the shared `manual` directory. On a
+  remote realm the name binds through the owning client's first server conversation (the
+  notifier arms at connect); `session verify` is the moment-in-time availability probe —
+  it binds and releases the name once and says so, which is an authoritative answer for
+  that instant, never a reservation.
 - Resuming the same conversation reuses the same directory; a NEW independent conversation
   gets a NEW directory, a NEW key, and a NEW enrollment. Do NOT copy an `identity.key` as a
   template — that is the old Actor wearing a new name.

@@ -35,6 +35,7 @@ Local, vendor-neutral agent chat room suite conforming to Agent Plugins v1.0.0 a
 
 - Database uses SQLite `STRICT` tables, `PRAGMA journal_mode = WAL`, `PRAGMA synchronous = FULL`, and enforced foreign keys.
 - Sending duplicate `client_message_id` with matching payload is idempotent; conflicting payload throws `client_message_id_conflict`.
+- The unbound send (v0.8.0): an authenticated session with no live Chat ID may post; the server resolves the sender name from that key's unique-latest durable claim (`sender_claim_missing` / `sender_claim_ambiguous` otherwise), the body may only assert that name, and the send claims no occupancy.
 - Message pagination is strictly cursor-based via integer `seq` (`after_seq`), limit bounded between 1-200.
 
 ## Known pitfalls

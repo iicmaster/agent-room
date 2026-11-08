@@ -160,6 +160,15 @@ export function startNotifier({
   let refreshWake = new AbortController()
   let probeIndex = 0
   const pendingBacklogs = []
+  const queuedBacklogRooms = new Set()
+  const anomalyRooms = new Set()
+  // The catch-up baseline is read once and retried on the next refresh when
+  // it cannot be resolved (no realm yet) — a partial startup must never turn
+  // into a silent skip.
+  let startupCursors = null
+  // Sink-loss accounting: the wake signal is best-effort, and the losses are
+  // counted and reported when the sink recovers — never claimed as zero-loss.
+  let sinkLost = 0
 
   const stop = () => {
     if (signal.aborted) return
@@ -217,6 +226,39 @@ export function startNotifier({
     }
   }
 
+  // One wake line to the sink, with loss accounting: a failed write counts
+  // as lost (it is reported on stderr immediately), and the recovery is
+  // announced with the lost estimate — the sink is best-effort, never
+  // claimed zero-loss.
+  const deliverWakeLine = line => {
+    try {
+      appendInbox(line)
+    } catch (error) {
+      sinkLost += 1
+      errorOutput.write(`agent-room notifier: inbox write failed (${sinkLost} lost since the last success): ${error?.code ?? 'error'}\n`)
+      return false
+    }
+    if (sinkLost > 0) {
+      const lost = sinkLost
+      sinkLost = 0
+      try {
+        appendInbox(`${JSON.stringify({ ts: new Date().toISOString(), kind: STATUS_KIND, event: 'sink_recovered', lost_estimate: lost })}\n`)
+      } catch {
+        sinkLost = lost // the recovery announcement itself failed: keep counting
+      }
+    }
+    return true
+  }
+
+  const messageKeyOf = line => {
+    try {
+      const parsed = JSON.parse(line)
+      return parsed?.room_id !== undefined && parsed?.seq !== undefined ? `${parsed.room_id}:${parsed.seq}` : null
+    } catch {
+      return null
+    }
+  }
+
   // Hooks are bounded, not unbounded: one run in flight, up to
   // NOTIFIER_HOOK_QUEUE_MAX lines queued behind it (drop-oldest). Under
   // normal traffic every line is poked; under a flood the pending work stays
@@ -230,12 +272,8 @@ export function startNotifier({
       if (error && !signal.aborted) {
         errorOutput.write(`agent-room notifier: ${NOTIFY_CMD_ENV} failed: ${error.code ?? error.signal ?? 'error'}\n`)
         // The poke was lost: say so in the inbox (the line itself was already
-        // delivered there), naming the message keys the hook missed.
-        let key = null
-        try {
-          const parsed = JSON.parse(line)
-          key = parsed?.room_id !== undefined && parsed?.seq !== undefined ? `${parsed.room_id}:${parsed.seq}` : null
-        } catch { /* the failed line is not JSON — nothing to name */ }
+        // delivered there), naming the message key the hook missed.
+        const key = messageKeyOf(line)
         appendStatusLine({
           event: 'hook_error',
           error: error.code ?? error.signal ?? 'error',
@@ -250,7 +288,16 @@ export function startNotifier({
 
   const scheduleHook = line => {
     if (hookInFlight) {
-      if (hookQueue.length >= NOTIFIER_HOOK_QUEUE_MAX) hookQueue.shift()
+      if (hookQueue.length >= NOTIFIER_HOOK_QUEUE_MAX) {
+        // Drop-oldest is an intentional, REPORTED loss: the dropped poke is
+        // named where the host looks, and the inbox always carried the line.
+        const dropped = hookQueue.shift()
+        const key = messageKeyOf(dropped)
+        appendStatusLine({
+          event: 'hook_dropped',
+          ...(key === null ? {} : { message_key: key }),
+        })
+      }
       hookQueue.push(line)
       return
     }
@@ -286,11 +333,7 @@ export function startNotifier({
     for (const row of judged) {
       if (row.held === true && decideHeldWake({ ...ledger, fingerprint: row.actor_fingerprint, policy }) === false) continue
       const line = `${JSON.stringify(inboxEntry(roomId, row))}\n`
-      try {
-        appendInbox(line)
-      } catch (error) {
-        errorOutput.write(`agent-room notifier: inbox write failed: ${error?.code ?? 'error'}\n`)
-      }
+      deliverWakeLine(line)
       if (notifyCmd !== null) scheduleHook(line)
     }
   }
@@ -304,15 +347,13 @@ export function startNotifier({
   const emitBacklogHint = async (roomId, storedCursor, head) => {
     const fromSeq = Math.max(storedCursor, head - NOTIFIER_BACKLOG_SCAN_MAX)
     const page = await read(roomId, fromSeq, 0, signal)
-    const fresh = page.messages.filter(row => row?.seq > storedCursor && row?.actor_fingerprint !== client.fingerprint)
-    appendStatusLine({
-      event: 'unread_backlog',
-      room_id: roomId,
-      unread_from: storedCursor,
-      head_seq: head,
-      foreign_in_window: fresh.length,
-      window_from_seq: fromSeq,
-    })
+    // The window is clipped to the CAPTURED head: rows that landed after the
+    // snapshot belong to the live watcher's future, not to this estimate.
+    const fresh = page.messages.filter(row => row?.seq > storedCursor && row?.seq <= head && row?.actor_fingerprint !== client.fingerprint)
+    const line = `${JSON.stringify({ ts: new Date().toISOString(), kind: STATUS_KIND, event: 'unread_backlog', room_id: roomId, unread_from: storedCursor, head_seq: head, foreign_in_window: fresh.length, window_from_seq: fromSeq })}\n`
+    // The hint is a wake, not just a note: a hook-only host must be poked by
+    // the backlog too. The inbox line and the hook share the same payload.
+    if (deliverWakeLine(line) && notifyCmd !== null) scheduleHook(line)
   }
 
   // The unwatched-room probe: one bounded page read for one room past the
@@ -343,6 +384,9 @@ export function startNotifier({
           await deliver(entry.roomId, page.messages)
         }
         entry.cursor = Math.max(entry.cursor, page.next_after_seq)
+        // One observed position per room: the watcher's progress advances the
+        // probe's too, so watch -> evict -> probe never replays delivered rows.
+        entry.probedSeq = Math.max(entry.probedSeq, page.next_after_seq)
       } catch (error) {
         if (roomSignal.aborted) return
         if (STOP_CODES.has(error?.code)) {
@@ -359,20 +403,19 @@ export function startNotifier({
     const listed = (await paced(signal, () => client.listRooms({ signal }))).rooms
     const firstRun = firstListing === null
     firstListing ??= new Set(listed.map(room => room.room_id))
-    let cursors = new Map()
-    if (firstRun) {
-      // The catch-up baseline: what the model has already FETCHED (the MCP
-      // adapter's persisted cursor), read read-only. Unresolvable here (no
-      // realm yet) means "no cursor yet" — a first-installation room starts
-      // at its head with nothing to summarize.
+    // The catch-up baseline: what the model has already FETCHED (the MCP
+    // adapter's persisted cursor), read read-only. Unresolvable here (no
+    // realm yet) leaves the cache empty and RETRIES next refresh — a partial
+    // startup must never silently skip its catch-up.
+    if (startupCursors === null) {
       try {
-        cursors = loadPersistedCursors(pluginDataDir, await realmIdOf())
+        startupCursors = loadPersistedCursors(pluginDataDir, await realmIdOf())
       } catch {
-        cursors = new Map()
+        startupCursors = null
       }
     }
+    const cursors = startupCursors ?? new Map()
     const many = listed.length > NOTIFIER_ROOM_LIMIT
-    const backlogs = []
     for (const { room_id: roomId, kind } of listed) {
       if (rooms.has(roomId)) continue
       const entry = { roomId, kind, cursor: 0, lastActivityMs: Date.now(), watcher: null, probedSeq: 0 }
@@ -387,9 +430,25 @@ export function startNotifier({
           const [last] = (await read(roomId, head - 1, 0, signal, 1)).messages
           entry.lastActivityMs = Date.parse(last?.created_at) || 0
         }
+        // Missing cursor means the room was NEVER read by the model — the
+        // announced unread baseline for it is 0, not read-to-head: a DM a
+        // peer opened while this installation was offline is news.
         const stored = cursors.get(roomId)
-        if (typeof stored === 'number' && stored >= 0 && head > stored) {
-          backlogs.push({ roomId, storedCursor: stored, head })
+        const baseline = typeof stored === 'number' && stored >= 0 ? stored : 0
+        if (typeof stored === 'number' && stored > head && !anomalyRooms.has(roomId)) {
+          anomalyRooms.add(roomId)
+          appendStatusLine({
+            event: 'cursor_ahead',
+            room_id: roomId,
+            stored_cursor: stored,
+            head_seq: head,
+          })
+        }
+        if (head > baseline && !queuedBacklogRooms.has(roomId)) {
+          // Queue immediately, per room: a head-read failure later in the
+          // loop must not lose the candidates already earned.
+          queuedBacklogRooms.add(roomId)
+          pendingBacklogs.push({ roomId, storedCursor: baseline, head })
         }
       }
       rooms.set(roomId, entry)
@@ -429,9 +488,6 @@ export function startNotifier({
       }
       probeIndex = (probeIndex + probed) % unwatched.length
     }
-    for (const backlog of backlogs) {
-      pendingBacklogs.push(backlog)
-    }
     while (pendingBacklogs.length > 0 && !signal.aborted) {
       const backlog = pendingBacklogs[0]
       try {
@@ -450,7 +506,7 @@ export function startNotifier({
         event: 'started',
         watched: [...rooms.values()].filter(entry => entry.watcher !== null).length,
         rooms_total: rooms.size,
-        backlog_hints: backlogs.length,
+        backlog_hints: pendingBacklogs.length,
         hook: notifyCmd === null ? 'none' : 'configured',
       })
       ready = true

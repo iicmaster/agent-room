@@ -54,11 +54,12 @@ const usage = (command, message) => ({
   message,
 })
 
-const refusal = (command, error) => ({
+const refusal = (command, error, extra) => ({
   status: 'refusal',
   command,
   code: error?.code ?? 'request_failed',
   message: error?.message ?? String(error),
+  ...(extra === undefined ? {} : { extra }),
 })
 
 function parseFlags(tokens, spec) {
@@ -109,6 +110,34 @@ async function realmIdOf(target, token) {
   return realmId
 }
 
+// The send failure receipt: a refusal that still names the attempted
+// idempotency key, and — when the outcome is genuinely unknowable (the
+// request timed out, the response aborted, the stream died mid-flight) —
+// the outcome_unknown mark that tells the caller a retry with the SAME id
+// is safe: the server resolves the duplicate.
+function sendFailureReceipt(command, error, { clientMessageId, room, realmId, origin, transport }) {
+  const message = String(error?.message ?? error)
+  const outcomeUnknown = /timed out|aborted|stream failed|hang up|ECONNRESET|EPIPE|request cancelled/.test(message)
+    || error?.outcomeUnknown === true
+    || error?.code === 'ECONNRESET'
+  return {
+    status: 'refusal',
+    command,
+    code: error?.code ?? 'request_failed',
+    message: outcomeUnknown
+      ? `${message}; the outcome is UNKNOWN — the message may have committed. Retry with the SAME --id ${clientMessageId} (the server resolves the duplicate; a changed id would double-post)`
+      : message,
+    extra: {
+      client_message_id: clientMessageId,
+      room_id: room,
+      ...(realmId === undefined ? {} : { realm_id: realmId }),
+      ...(origin === undefined ? {} : { origin }),
+      ...(transport === undefined ? {} : { transport }),
+      outcome_unknown: outcomeUnknown,
+    },
+  }
+}
+
 // `agent-room send --room <room_id> --text <text> [--reply-to <seq>] [--id <client_message_id>]`
 export async function runSendFamilyCommand(tokens, { pluginDataDir, sharedDataDir, env = process.env }) {
   const command = 'send'
@@ -151,19 +180,35 @@ export async function runSendFamilyCommand(tokens, { pluginDataDir, sharedDataDi
     const { target, origin } = await resolveTarget({ pluginDataDir, sharedDataDir, env })
     const { token, transport } = await authenticate(target, { pluginDataDir, sharedDataDir, env })
     const realmId = await realmIdOf(target, token)
-    const response = await roundTrip(
-      target,
-      'POST',
-      `/api/rooms/${encodeURIComponent(flags.room)}/messages`,
-      protocolHeaders(token),
-      {
-        chat_id: config.chatId,
-        client_message_id: clientMessageId,
-        text: flags.text,
-        ...(replyToSeq === undefined ? {} : { reply_to_seq: replyToSeq }),
-      },
-      CLIENT_REQUEST_TIMEOUT_MS,
-    )
+    const sendBody = {
+      chat_id: config.chatId,
+      client_message_id: clientMessageId,
+      text: flags.text,
+      ...(replyToSeq === undefined ? {} : { reply_to_seq: replyToSeq }),
+    }
+    const sendPath = `/api/rooms/${encodeURIComponent(flags.room)}/messages`
+    // The outcome-unknown discipline (the round-4 gate): a transport failure
+    // AFTER the request may have reached the server leaves the outcome
+    // unknowable, so the failure receipt ALWAYS carries the attempted id and
+    // the unknown-outcome mark — a retry is the SAME id, and the server
+    // resolves the duplicate. A connection the server never accepted
+    // (ECONNREFUSED) gets the api-client's one immediate retry with the
+    // identical tuple before surfacing.
+    const sendOnce = () => roundTrip(target, 'POST', sendPath, protocolHeaders(token), sendBody, CLIENT_REQUEST_TIMEOUT_MS)
+    let response
+    try {
+      response = await sendOnce()
+    } catch (error) {
+      if (error?.transportCode === 'ECONNREFUSED' || error?.code === 'ECONNREFUSED') {
+        try {
+          response = await sendOnce()
+        } catch (retryError) {
+          return sendFailureReceipt(command, retryError, { clientMessageId, room: flags.room, realmId, origin, transport })
+        }
+      } else {
+        return sendFailureReceipt(command, error, { clientMessageId, room: flags.room, realmId, origin, transport })
+      }
+    }
     if (response.status !== 200) {
       throw new AgentRoomRuntimeError(
         response.body?.error?.code ?? 'request_failed',
@@ -322,11 +367,16 @@ export async function runReadFamilyCommand(tokens, { pluginDataDir, sharedDataDi
   }
 }
 
-// `agent-room session verify <chat-id>` — the read-only name check against
-// the ACTIVE server (local or remote): is this Chat ID claimed, and by whom?
-// The remote onboarding gap (setup's probe only answers against the LOCAL
-// server) closed with a verdict an operator or launcher can gate on, without
-// binding anything.
+// `agent-room session verify <chat-id>` — the availability PROBE (v0.8.0,
+// the round-4 gate): presence is a transport snapshot, not an occupancy
+// authority — an idle same-key holder drops out of the online group, an
+// offline claim lingers after release, and neither answers "can I bind this
+// name NOW". The probe answers by doing the only authoritative thing: it
+// BINDS the name and, on success, releases it again immediately (the receipt
+// says so — like setup's probe, this is not a side-effect-free read). The
+// refusals carry the verdict: chat_id_taken WITH a conflict ticket is a live
+// same-key holder; chat_id_taken WITHOUT one is a foreign key (whose name is
+// never displacable). This is a moment-in-time answer, never a reservation.
 export async function runSessionVerify(deps, rawChatId) {
   const command = 'session verify'
   try {
@@ -340,49 +390,66 @@ export async function runSessionVerify(deps, rawChatId) {
       pluginDataDir: deps.pluginDataDir, sharedDataDir: deps.sharedDataDir, env: deps.env,
     })
     const realmId = await realmIdOf(target, token)
-    const presence = await roundTrip(target, 'GET', '/api/presence?include_offline=true', protocolHeaders(token), undefined, CLIENT_REQUEST_TIMEOUT_MS)
-    if (presence.status !== 200) {
-      throw new AgentRoomRuntimeError(
-        presence.body?.error?.code ?? 'request_failed',
-        presence.body?.error?.message ?? `the agent-room server answered ${presence.status}`,
-      )
-    }
-    const snapshot = presence.body?.result ?? {}
-    const groups = [['online', snapshot.online], ['offline_recently', snapshot.offline ?? snapshot.offline_recently]]
-    let holder = null
-    let group = null
-    for (const [name, rows] of groups) {
-      if (!Array.isArray(rows)) continue
-      const row = rows.find(entry => typeof entry?.chat_id === 'string' && entry.chat_id.toLowerCase() === forms.normalized)
-      if (row !== undefined) {
-        holder = { chat_id: row.chat_id, fingerprint: row.fingerprint, last_seen: row.last_seen ?? null }
-        group = name
-        break
+    const bound = await roundTrip(target, 'POST', '/api/session', protocolHeaders(token), {
+      chat_id: forms.display,
+    }, CLIENT_REQUEST_TIMEOUT_MS)
+    if (bound.status === 200) {
+      // The name is free: release it again immediately — the probe claims
+      // nothing for longer than the instant of the check.
+      await roundTrip(target, 'DELETE', '/api/session', protocolHeaders(token), undefined, CLIENT_REQUEST_TIMEOUT_MS).catch(() => {})
+      return {
+        status: 'ok',
+        command,
+        lines: [JSON.stringify({
+          ok: true,
+          command,
+          chat_id: forms.display,
+          verdict: 'unclaimed',
+          probe: 'claimed-and-released',
+          realm_id: realmId,
+          origin,
+          message: 'the name bound successfully and was released again — free as of this instant, but this probe is not a reservation: a concurrent bind can still win the race',
+        })],
       }
     }
-    const verdict = holder === null
-      ? 'unclaimed'
-      : holder.fingerprint === fingerprint
-        ? 'claimed_by_self'
-        : 'claimed_by_other'
-    return {
-      status: 'ok',
-      command,
-      lines: [JSON.stringify({
-        ok: true,
+    const code = bound.body?.error?.code
+    if (bound.status === 409 && code === 'chat_id_taken') {
+      const ticket = bound.body?.error?.extra?.conflict_ticket ?? bound.body?.error?.conflict_ticket
+      if (ticket !== undefined && ticket !== null) {
+        return {
+          status: 'ok',
+          command,
+          lines: [JSON.stringify({
+            ok: true,
+            command,
+            chat_id: forms.display,
+            verdict: 'claimed_by_self',
+            probe: 'refused-live-holder',
+            realm_id: realmId,
+            origin,
+            message: 'this installation\u2019s own key holds the name in a live session — reconnect freely, or run "agent-room session replace --yes" if the holding process is dead',
+          })],
+        }
+      }
+      return {
+        status: 'ok',
         command,
-        chat_id: forms.display,
-        verdict,
-        realm_id: realmId,
-        origin,
-        ...(holder === null ? {} : { holder, group }),
-        message: verdict === 'unclaimed'
-          ? 'the name is free on this server as of this check — a concurrent bind can still win it before you do'
-          : verdict === 'claimed_by_self'
-            ? 'this installation\u2019s own key holds the name (a live session or a recent claim)'
-            : 'another key holds the name — binding it needs the holder gone and a session replace, never a guess',
-      })],
+        lines: [JSON.stringify({
+          ok: true,
+          command,
+          chat_id: forms.display,
+          verdict: 'claimed_by_other',
+          probe: 'refused-live-holder',
+          realm_id: realmId,
+          origin,
+          message: 'another key holds the name in a live session — a different key\u2019s name is never displaced by a bind or a replace; choose another name',
+        })],
+      }
     }
+    throw new AgentRoomRuntimeError(
+      code ?? 'request_failed',
+      bound.body?.error?.message ?? `the agent-room server answered ${bound.status}`,
+    )
   } catch (error) {
     return refusal(command, error)
   }

@@ -469,11 +469,14 @@ Commands:
       never needs another invite — reconnecting is automatic.
 
   agent-room session verify <chat-id>
-      Read-only name check against the ACTIVE server (local, or the remote
-      origin when one is configured): is this Chat ID unclaimed, claimed by
-      this installation's own key, or held by another key? One JSON receipt
-      with the verdict — the gate a launcher or operator checks before
-      provisioning a session; it binds nothing and changes nothing.
+      Availability probe against the ACTIVE server (local, or the remote
+      origin when one is configured): binds the name for the instant of the
+      check and releases it again — the receipt says so. verdict:
+      unclaimed (free as of that instant; not a reservation),
+      claimed_by_self (this key holds it live), or claimed_by_other (a
+      different key holds it live — never displacable; choose another
+      name). Presence alone cannot answer this: an idle holder drops out of
+      the online group, an offline claim lingers after release.
 
   agent-room send --room <room_id> --text <text> [--reply-to <seq>] [--id <client_message_id>]
       One-shot send over the same wire the MCP adapter uses (the configured
@@ -797,6 +800,7 @@ export async function main(argv = process.argv.slice(2), {
       command: outcome.command,
       code: outcome.code,
       message: outcome.message,
+      ...(outcome.extra === undefined ? {} : outcome.extra),
     })}\n`)
     process.exitCode = outcome.status === 'usage' ? 2 : 1
     return outcome
