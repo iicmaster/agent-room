@@ -530,7 +530,7 @@ test('the unbound send: the server resolves the name from the key\u2019s unique-
   // presence and NO claim recency \u2014 compare both before and after.
   const presenceBefore = await sessioned(record.port, 'GET', peerSession.sessionToken,
     '/api/presence?include_offline=true')
-  const offlineBefore = (presenceBefore.json().result.offline ?? [])
+  const offlineBefore = (presenceBefore.json().result.offline_recently ?? [])
     .find(entry => entry.chat_id === 'Solo')?.last_seen ?? null
   assert.equal((presenceBefore.json().result.online ?? []).some(entry => entry.chat_id === 'Solo'), false,
     'the released session is not online')
@@ -550,9 +550,12 @@ test('the unbound send: the server resolves the name from the key\u2019s unique-
     '/api/presence?include_offline=true')
   assert.equal((presenceAfter.json().result.online ?? []).some(entry => entry.chat_id === 'Solo'), false,
     'the unbound send never appears in presence')
-  const offlineAfter = (presenceAfter.json().result.offline ?? [])
-    .find(entry => entry.chat_id === 'Solo')?.last_seen ?? null
-  assert.equal(offlineAfter, offlineBefore, 'the unbound send never refreshes the claim\u2019s recency')
+  // The claim row MUST be found before the timestamps are compared — a
+  // null===null comparison proves nothing (the round-5 note).
+  const afterRow = (presenceAfter.json().result.offline_recently ?? [])
+    .find(entry => entry.chat_id === 'Solo')
+  assert.notEqual(afterRow, undefined, 'Solo\u2019s durable claim is visible in the offline-recently group')
+  assert.equal(afterRow.last_seen, offlineBefore, 'the unbound send never refreshes the claim\u2019s recency')
 
   // An idempotent retry with the identical tuple keeps the original
   // attribution even though the name is no longer live-bound.

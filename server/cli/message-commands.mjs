@@ -115,11 +115,13 @@ async function realmIdOf(target, token) {
 // request timed out, the response aborted, the stream died mid-flight) —
 // the outcome_unknown mark that tells the caller a retry with the SAME id
 // is safe: the server resolves the duplicate.
-function sendFailureReceipt(command, error, { clientMessageId, room, realmId, origin, transport }) {
+function sendFailureReceipt(command, error, { clientMessageId, room, realmId, origin, transport, provablyNotSent = false }) {
   const message = String(error?.message ?? error)
-  const outcomeUnknown = /timed out|aborted|stream failed|hang up|ECONNRESET|EPIPE|request cancelled/.test(message)
-    || error?.outcomeUnknown === true
-    || error?.code === 'ECONNRESET'
+  // The round-5 rule: a failure AFTER the request was written is
+  // outcome-unknown UNLESS the transport proves the request never left
+  // (ECONNREFUSED — the connection itself was refused). Shape-regexes are
+  // a hint, never the authority.
+  const outcomeUnknown = provablyNotSent !== true
   return {
     status: 'refusal',
     command,
@@ -141,6 +143,11 @@ function sendFailureReceipt(command, error, { clientMessageId, room, realmId, or
 // `agent-room send --room <room_id> --text <text> [--reply-to <seq>] [--id <client_message_id>]`
 export async function runSendFamilyCommand(tokens, { pluginDataDir, sharedDataDir, env = process.env }) {
   const command = 'send'
+  // The attempt record (the round-5 gate): every failure AFTER the request
+  // was written routes through the failure receipt — the attempted
+  // idempotency key NEVER disappears, whatever threw (non-200, a malformed
+  // 200, a transport death). Pre-send failures have no attempt to name.
+  const attempt = { clientMessageId: null, room: null, realmId: null, origin: null, transport: null, postSend: false, provablyNotSent: false }
   try {
     const parsed = parseFlags(tokens, new Map([
       ['room', 'string'], ['text', 'string'], ['reply-to', 'integer'], ['id', 'string'],
@@ -166,6 +173,8 @@ export async function runSendFamilyCommand(tokens, { pluginDataDir, sharedDataDi
       return usage(command, `--id must contain 1 to ${CLIENT_MESSAGE_ID_MAX} characters`)
     }
     if (clientMessageId === undefined) clientMessageId = randomUUID()
+    attempt.clientMessageId = clientMessageId
+    attempt.room = flags.room
 
     // Identity discipline: the send is this installation's own words — the
     // Chat ID comes from the config file, never from an argument.
@@ -180,6 +189,9 @@ export async function runSendFamilyCommand(tokens, { pluginDataDir, sharedDataDi
     const { target, origin } = await resolveTarget({ pluginDataDir, sharedDataDir, env })
     const { token, transport } = await authenticate(target, { pluginDataDir, sharedDataDir, env })
     const realmId = await realmIdOf(target, token)
+    attempt.origin = origin
+    attempt.transport = transport
+    attempt.realmId = realmId
     const sendBody = {
       chat_id: config.chatId,
       client_message_id: clientMessageId,
@@ -196,17 +208,23 @@ export async function runSendFamilyCommand(tokens, { pluginDataDir, sharedDataDi
     // identical tuple before surfacing.
     const sendOnce = () => roundTrip(target, 'POST', sendPath, protocolHeaders(token), sendBody, CLIENT_REQUEST_TIMEOUT_MS)
     let response
+    attempt.postSend = true
     try {
       response = await sendOnce()
     } catch (error) {
       if (error?.transportCode === 'ECONNREFUSED' || error?.code === 'ECONNREFUSED') {
+        // The connection itself was refused on both attempts: the request
+        // provably never reached a server, so the outcome is KNOWN (nothing
+        // committed) even though the flag rides post-send.
+        attempt.provablyNotSent = true
         try {
           response = await sendOnce()
         } catch (retryError) {
-          return sendFailureReceipt(command, retryError, { clientMessageId, room: flags.room, realmId, origin, transport })
+          return sendFailureReceipt(command, retryError, attempt)
         }
+        attempt.provablyNotSent = false
       } else {
-        return sendFailureReceipt(command, error, { clientMessageId, room: flags.room, realmId, origin, transport })
+        return sendFailureReceipt(command, error, attempt)
       }
     }
     if (response.status !== 200) {
@@ -274,6 +292,9 @@ export async function runSendFamilyCommand(tokens, { pluginDataDir, sharedDataDi
       })],
     }
   } catch (error) {
+    // Post-send failures keep the attempt metadata and the honest unknown
+    // mark; pre-send failures have nothing to name.
+    if (attempt.postSend) return sendFailureReceipt(command, error, attempt)
     return refusal(command, error)
   }
 }
@@ -390,13 +411,27 @@ export async function runSessionVerify(deps, rawChatId) {
       pluginDataDir: deps.pluginDataDir, sharedDataDir: deps.sharedDataDir, env: deps.env,
     })
     const realmId = await realmIdOf(target, token)
-    const bound = await roundTrip(target, 'POST', '/api/session', protocolHeaders(token), {
-      chat_id: forms.display,
-    }, CLIENT_REQUEST_TIMEOUT_MS)
-    if (bound.status === 200) {
-      // The name is free: release it again immediately — the probe claims
-      // nothing for longer than the instant of the check.
-      await roundTrip(target, 'DELETE', '/api/session', protocolHeaders(token), undefined, CLIENT_REQUEST_TIMEOUT_MS).catch(() => {})
+    // The probe's cleanup, bounded and verified (the round-5 gate): a bind
+    // that MAY have succeeded always attempts the release with THIS probe's
+    // own token, and the verdict reports the release OUTCOME — "free" is
+    // said only when the release is confirmed. A probe whose bind reply was
+    // lost, or whose release failed, answers honestly that the name may now
+    // be held by the probe's own session until its lease expires.
+    let bound = null
+    let bindUnknown = false
+    try {
+      bound = await roundTrip(target, 'POST', '/api/session', protocolHeaders(token), {
+        chat_id: forms.display,
+      }, CLIENT_REQUEST_TIMEOUT_MS)
+    } catch (error) {
+      bindUnknown = /timed out|aborted|stream failed|hang up|ECONNRESET|EPIPE/.test(String(error?.message ?? error)) || error?.code === 'ECONNRESET'
+      if (!bindUnknown) throw error
+    }
+    if (bindUnknown) {
+      // The bind may have committed: attempt the bounded cleanup, and report
+      // the release outcome instead of pretending the name is free.
+      const release = await roundTrip(target, 'DELETE', '/api/session', protocolHeaders(token), undefined, CLIENT_REQUEST_TIMEOUT_MS).catch(error => ({ status: 0, error }))
+      const released = release.status === 200
       return {
         status: 'ok',
         command,
@@ -404,11 +439,35 @@ export async function runSessionVerify(deps, rawChatId) {
           ok: true,
           command,
           chat_id: forms.display,
-          verdict: 'unclaimed',
-          probe: 'claimed-and-released',
+          verdict: released ? 'unknown_bind_released' : 'release_failed',
+          probe: released ? 'cleanup-confirmed' : 'cleanup-unconfirmed',
           realm_id: realmId,
           origin,
-          message: 'the name bound successfully and was released again — free as of this instant, but this probe is not a reservation: a concurrent bind can still win the race',
+          message: released
+            ? 'the probe’s bind reply was lost; the cleanup release is confirmed — the name is most likely free, but this check proved nothing about a concurrent binder'
+            : `the probe’s bind reply was lost AND the cleanup release did not confirm (status ${release.status}); the probe’s own session may hold "${forms.display}" until its lease expires — recover with "agent-room session replace --yes"`,
+        })],
+      }
+    }
+    if (bound.status === 200) {
+      // The name is free: release it again immediately — and say "free"
+      // only when that release is confirmed.
+      const release = await roundTrip(target, 'DELETE', '/api/session', protocolHeaders(token), undefined, CLIENT_REQUEST_TIMEOUT_MS).catch(error => ({ status: 0, error }))
+      const released = release.status === 200
+      return {
+        status: 'ok',
+        command,
+        lines: [JSON.stringify({
+          ok: true,
+          command,
+          chat_id: forms.display,
+          verdict: released ? 'unclaimed' : 'release_failed',
+          probe: released ? 'claimed-and-released' : 'claimed-release-failed',
+          realm_id: realmId,
+          origin,
+          message: released
+            ? 'the name bound successfully and was released again — free as of this instant, but this probe is not a reservation: a concurrent bind can still win the race. The probe is not read-only: it bound this name once, so the durable claim’s last_seen advanced'
+            : `the name bound, but the cleanup release did not confirm (status ${release.status}); the probe’s own session may hold "${forms.display}" until its lease expires — recover with "agent-room session replace --yes"`,
         })],
       }
     }
@@ -427,7 +486,7 @@ export async function runSessionVerify(deps, rawChatId) {
             probe: 'refused-live-holder',
             realm_id: realmId,
             origin,
-            message: 'this installation\u2019s own key holds the name in a live session — reconnect freely, or run "agent-room session replace --yes" if the holding process is dead',
+            message: 'this installation\u2019s own key holds the name in a live session — a fresh bound client will collide with it (chat_id_taken): reuse that session, release it first, or run "agent-room session replace --yes" only when the holding process is confirmed dead',
           })],
         }
       }

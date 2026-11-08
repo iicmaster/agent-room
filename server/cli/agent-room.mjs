@@ -528,7 +528,7 @@ Commands:
       command's lease holds the name until it expires. The optional Chat ID
       defaults to the configured one.
 
-  agent-room wait [--room <room_id>]... [--timeout <seconds>]
+  agent-room wait [--room <room_id>]... [--timeout <seconds>] [--reclaim]
       The companion notifier: block until a NEW message lands in any room of
       this Actor (Broadcast and every Direct Room), then print ONE JSON hint
       line — {ok, command, status:"new_messages", room_id, seq (the FIRST
@@ -544,8 +544,11 @@ Commands:
       seconds (max 600): a quiet wait prints {status:"timeout", elapsed_ms,
       watched} and still exits 0 — a clean timeout is a hint, and re-arming
       is the agent's ordinary next action. One wait process per installation
-      (a second refuses with wait_already_active; a crashed one's lock is
-      reclaimed). Creates nothing: setup must be complete first (not_set_up
+      (a second refuses with wait_already_active). A stale lock FAILS CLOSED:
+      the refusal names the lock's path and the recorded pid; when you have
+      confirmed no wait is running, take the fence explicitly with
+      `--reclaim` (it removes the stale lock and starts; a second concurrent
+      reclaim is refused). Creates nothing: setup must be complete first (not_set_up
       otherwise), and the wait never claims the Chat ID, never writes
       cursors, and never changes trust. Honest scope: this wakes a LIVE host
       session; an agent with no live session is woken by nothing — the

@@ -392,12 +392,25 @@ test('wait: the one-per-installation fence — a live waiter refuses, a crashed 
   assert.equal(waiterExit[0], 0, 'a clean timeout exits 0 — a hint, not a failure')
   assert.equal(existsSync(lockPath), false, 'the lock is released on exit')
 
+  // The round-5 gate: a stale lock FAILS CLOSED in the auto path — no
+  // auto-reclaim, because no rename-based take-over can be a
+  // compare-and-swap against a fresh winner — and the refusal names the
+  // explicit take-over.
   const dead = spawn('true')
   await once(dead, 'exit')
   atomicWriteJson(lockPath, { pid: dead.pid, started_at: new Date().toISOString(), timeout_ms: 1000 })
-  const reclaimed = parseHint(await wait(world, ['--timeout', '1']))
-  assert.equal(reclaimed.status, 'timeout', 'a dead waiter\u2019s lock is reclaimed and the wait proceeds')
-  assert.equal(existsSync(lockPath), false)
+  const staleRefusal = await wait(world, ['--timeout', '1'])
+  assert.equal(staleRefusal.status, 'refusal')
+  assert.equal(staleRefusal.code, 'wait_already_active')
+  assert.match(staleRefusal.message, /stale lock whose pid/)
+  assert.match(staleRefusal.message, /--reclaim/, 'the refusal names the explicit take-over')
+
+  // The explicit take-over removes the stale lock and runs; a second
+  // concurrent reclaim of a LIVE lock would take it by force (documented) —
+  // here the fence is free, so the reclaim proceeds normally.
+  const reclaimed = parseHint(await wait(world, ['--reclaim', '--timeout', '1']))
+  assert.equal(reclaimed.status, 'timeout', 'the explicit take-over opens the fence')
+  assert.equal(existsSync(lockPath), false, 'and the lock is released on exit')
 })
 
 // Send as the wait installation itself (its own keypair, a temporary session

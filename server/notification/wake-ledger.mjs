@@ -235,9 +235,10 @@ function verifyPolicyAgreement(db, { policy, explicit, rebaseline }) {
     }
     return { tuple: { ...policy }, storedExplicit: { ...explicit } }
   }
-  // Only the explicit layer conflicts — and only pin against pin, or a NEW
-  // pin against the recorded effective value: a process that pins nothing
-  // never conflicts (it will simply run on the record's authoritative tuple).
+  // Only the explicit layer conflicts, and only three ways: pin against pin
+  // (must agree), a NEW pin against the recorded effective value (refuses —
+  // the operator must re-baseline), or nothing (a process that pins nothing
+  // never conflicts; it runs on the record's authoritative tuple).
   for (const key of POLICY_KEYS) {
     const pinnedNow = explicit[key]
     if (pinnedNow === undefined) continue
@@ -251,17 +252,33 @@ function verifyPolicyAgreement(db, { policy, explicit, rebaseline }) {
       )
     }
   }
-  const pinnedStored = POLICY_KEYS.some(key => storedExplicit[key] !== undefined)
-  const pinnedNow = POLICY_KEYS.some(key => explicit[key] !== undefined)
-  if (pinnedNow) {
-    // A process that pins values re-asserts the record with its own pins
-    // (the conflict check above passed). It becomes the recorded authority.
-    if (JSON.stringify(stored) !== JSON.stringify(policy) || JSON.stringify(storedExplicit) !== JSON.stringify(explicit)) {
-      record(policy, explicit)
+  const pinnedStoredKeys = POLICY_KEYS.filter(key => storedExplicit[key] !== undefined)
+  const pinnedNowKeys = POLICY_KEYS.filter(key => explicit[key] !== undefined)
+  if (pinnedNowKeys.length > 0) {
+    // A process that pins values MERGES its pins with the record's, per key:
+    // a caller that pins a different key must not clear the existing pins,
+    // and a key pinned by the record keeps its recorded effective value when
+    // the caller leaves it unpinned (the round-5 gate: pinning one channel
+    // never rewrites the whole record).
+    const mergedExplicit = {}
+    const mergedPolicy = {}
+    for (const key of POLICY_KEYS) {
+      if (explicit[key] !== undefined) {
+        mergedExplicit[key] = explicit[key]
+        mergedPolicy[key] = policy[key]
+      } else if (storedExplicit[key] !== undefined) {
+        mergedExplicit[key] = storedExplicit[key]
+        mergedPolicy[key] = stored[key]
+      } else {
+        mergedPolicy[key] = stored[key] // unpinned everywhere: the record stays
+      }
     }
-    return { tuple: { ...policy }, storedExplicit: { ...explicit } }
+    if (JSON.stringify(stored) !== JSON.stringify(mergedPolicy) || JSON.stringify(storedExplicit) !== JSON.stringify(mergedExplicit)) {
+      record(mergedPolicy, mergedExplicit)
+    }
+    return { tuple: mergedPolicy, storedExplicit: mergedExplicit }
   }
-  if (!pinnedStored) {
+  if (pinnedStoredKeys.length === 0) {
     // Neither side pins anything: a defaults-only drift is adopted and
     // recorded — an unattended gate that silently stops waking after an
     // upgrade is worse than a recorded adoption.

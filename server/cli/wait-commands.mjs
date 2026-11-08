@@ -233,20 +233,24 @@ function pidAlive(pid) {
   }
 }
 
-// The one-per-installation fence. The lock is the wait's ONLY disk write
-// (plus its removal). Acquisition is the atomic create-only-if-absent
-// link(2) — the loser's link fails EEXIST instead of replacing the winner's
-// file, which closes the exists/read/replace window two concurrent waiters
-// could both win. A crashed waiter's lock is reclaimed by RENAMING it aside
-// — rename(2) is the atomic take-over: two concurrent reclaimers both read
-// the same dead lock, but exactly one of their renames succeeds; the loser's
-// rename hits ENOENT and re-reads the winner's fresh lock instead of ever
-// touching it (the round-4 finding: an unlink-based reclaim let a stale
-// reader delete the winner's lock). A live waiter refuses the newcomer —
-// two waiters on one installation would double the request budget and race
-// each other's hints. Release is owner-checked: a lock whose recorded token
-// is not ours is never removed.
-function acquireWaitLock(pluginDataDir, timeoutMs) {
+// The one-per-installation fence, FAIL-CLOSED on stale locks (the round-5
+// gate): acquisition is the atomic create-only-if-absent link(2) — the
+// loser's link fails EEXIST instead of replacing the winner's file — and a
+// lock whose recorded pid is dead is NOT auto-reclaimed, because no
+// rename-based take-over can be a compare-and-swap: a stale reader's rename
+// would move WHATEVER the path holds by then, including a fresh winner's
+// lock (the interleaving rename(2) cannot prove away). The auto path
+// therefore refuses with the lock's location and the recorded pid; the
+// EXPLICIT `--reclaim` flag is the operator's take-over — it renames the
+// current lock aside and links its own, which is safe precisely because one
+// actor decided to run it (a second concurrent --reclaim loses the link to
+// EEXIST and is refused). A crash between the rename and the cleanup can
+// leave a `.wait.lock.reclaimed.<uuid>` file behind: debris beside the
+// authority path, never re-imported, harmless to delete. A live waiter
+// refuses the newcomer — two waiters on one installation would double the
+// request budget and race each other's hints. Release is owner-checked: a
+// lock whose recorded token is not ours is never removed.
+function acquireWaitLock(pluginDataDir, timeoutMs, { reclaim = false } = {}) {
   const path = join(pluginDataDir, 'wait.lock')
   for (let attempt = 0; attempt < 8; attempt += 1) {
     const token = randomUUID()
@@ -265,22 +269,25 @@ function acquireWaitLock(pluginDataDir, timeoutMs) {
       try { unlinkSync(temporary) } catch { /* nothing to clean */ }
       if (error?.code !== 'EEXIST') throw error
     }
-    // The lock exists: reclaimable only when its recorded owner is dead.
-    let existing = null
-    try {
-      existing = readJsonFile(path)
-    } catch {
-      existing = null
+    if (!reclaim) {
+      // The fail-closed auto path: report what holds the fence and stop.
+      let existing = null
+      try {
+        existing = readJsonFile(path)
+      } catch {
+        existing = null
+      }
+      const pid = typeof existing?.pid === 'number' && Number.isSafeInteger(existing.pid) && existing.pid > 0
+        ? existing.pid
+        : null
+      const holder = pid !== null && pid !== process.pid && pidAlive(pid)
+        ? `a live process (pid ${pid})`
+        : pid !== null
+          ? `a stale lock whose pid ${pid} is no longer running`
+          : 'a lock file this installation cannot read'
+      return { acquired: false, path, token: null, holder, reclaimable: pid === null || !pidAlive(pid) }
     }
-    const pid = typeof existing?.pid === 'number' && Number.isSafeInteger(existing.pid) && existing.pid > 0
-      ? existing.pid
-      : null
-    if (pid !== null && pid !== process.pid && pidAlive(pid)) {
-      return { acquired: false, path, token: null }
-    }
-    // Stale, self-owned, or unreadable: take the file aside ATOMICALLY and
-    // race the link again. A concurrent reclaimer or a fresh owner wins the
-    // rename, and our ENOENT re-enters the loop against THEIR state.
+    // The EXPLICIT take-over: one operator decision, atomic at the link.
     const reclaimed = `${path}.reclaimed.${randomUUID()}`
     try {
       renameSync(path, reclaimed)
@@ -288,9 +295,9 @@ function acquireWaitLock(pluginDataDir, timeoutMs) {
       if (error?.code === 'ENOENT') continue // someone else already took it
       throw error
     }
-    try { unlinkSync(reclaimed) } catch { /* best-effort cleanup */ }
+    try { unlinkSync(reclaimed) } catch { /* debris limitation: see above */ }
   }
-  return { acquired: false, path, token: null }
+  return { acquired: false, path, token: null, holder: 'another process won the take-over race', reclaimable: false }
 }
 
 function releaseWaitLock(path, token) {
@@ -362,6 +369,7 @@ async function enumerateRooms({ target, token }) {
 export async function runWaitFamilyCommand(tokens, { sharedDataDir, pluginDataDir, env = process.env }) {
   const rooms = []
   let timeoutSeconds
+  let reclaim = false
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index]
     if (token === '--room') {
@@ -380,6 +388,10 @@ export async function runWaitFamilyCommand(tokens, { sharedDataDir, pluginDataDi
       }
       timeoutSeconds = Number(value)
       index += 1
+      continue
+    }
+    if (token === '--reclaim') {
+      reclaim = true
       continue
     }
     if (token.startsWith('--')) {
@@ -422,13 +434,16 @@ export async function runWaitFamilyCommand(tokens, { sharedDataDir, pluginDataDi
   const declaredRemote = env[CONNECTION_MODE_ENV] === REMOTE_TRANSPORT
   const startedMs = performance.now()
   const deadlineAt = startedMs + timeoutSeconds * 1000
-  const lock = acquireWaitLock(pluginDataDir, timeoutSeconds * 1000)
+  const lock = acquireWaitLock(pluginDataDir, timeoutSeconds * 1000, { reclaim })
   if (!lock.acquired) {
+    const guidance = lock.reclaimable === true
+      ? ` The lock is held by ${lock.holder}. If you have confirmed no wait is running, take the fence explicitly: agent-room wait --reclaim (it removes the stale lock and starts; a second concurrent reclaim is refused).`
+      : ` The lock is held by ${lock.holder}. One wait process per installation: consume its hint, then start the next wait.`
     return {
       status: 'refusal',
       command: 'wait',
       code: 'wait_already_active',
-      message: `Another agent-room wait is already running for this installation (its pid is recorded in ${lock.path}). One wait process per installation: consume its hint, then start the next wait.`,
+      message: `agent-room wait did not start: the fence at ${lock.path} did not open.${guidance}`,
     }
   }
   try {

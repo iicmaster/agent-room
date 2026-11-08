@@ -414,3 +414,90 @@ test('send: a lost response is an outcome_unknown refusal that names the attempt
   assert.match(outcome.message, /SAME --id/, 'the guidance names the retry discipline')
   assert.equal(outcome.extra.client_message_id, outcome.extra.client_message_id, 'the id is stable for the retry')
 })
+
+test('round-5: a committed-then-lost reply keeps the attempt id, and the identical retry resolves the original row', async t => {
+  const parent = mkdtempSync(join(tmpdir(), 'agent-room-send502-'))
+  t.after(() => rmSync(parent, { recursive: true, force: true }))
+  const pluginData = join(parent, 'plugin-data')
+  const sharedData = join(parent, 'shared')
+  mkdirSync(pluginData, { mode: 0o700 })
+  mkdirSync(sharedData, { mode: 0o700 })
+  writeFileSync(join(pluginData, 'config.json'), `${JSON.stringify({ chat_id: 'sender' })}\n`, { mode: 0o600 })
+
+  // A stateful half-honest server: every message POST's idempotency key is
+  // recorded; the FIRST attempt for a key answers 502 AFTER processing (the
+  // commit "happened", the reply died); a retry with the SAME key answers
+  // committed at seq 1 \u2014 the server-side idempotency the receipt promises.
+  let malformed = false
+  const seen = new Map()
+  const httpServer = http.createServer((request, response) => {
+    const answer = payload => {
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({ ok: true, result: payload }))
+    }
+    let body = ''
+    request.on('data', chunk => { body += chunk })
+    request.on('end', () => {
+      if (request.method === 'GET' && request.url === '/health') return answer({ version: '0.8.0' })
+      if (request.method === 'POST' && request.url === '/api/auth/local') return answer({ session_token: 'lost-lane-token' })
+      if (request.method === 'GET' && request.url === '/api/status') {
+        return answer({ realm_id: 'lost-realm', version: '0.8.0', broadcast_room_id: 'b' })
+      }
+      if (request.method === 'POST' && request.url.startsWith('/api/rooms/')) {
+        let parsed = {}
+        try { parsed = JSON.parse(body) } catch { parsed = {} }
+        const id = parsed.client_message_id
+        if (seen.has(id)) {
+          // A retry of an already-recorded key answers committed at its row.
+          return answer({ status: 'committed', seq: seen.get(id), room_id: 'b' })
+        }
+        // The id is recorded BEFORE any reply shape is chosen: the malformed
+        // 200 and the 502 both still follow a real, recorded attempt.
+        seen.set(id, 7)
+        if (malformed) {
+          response.writeHead(200, { 'content-type': 'application/json' })
+          response.end('this is not the envelope the client expects')
+          return
+        }
+        response.writeHead(502, { 'content-type': 'application/json' })
+        response.end(JSON.stringify({ ok: false, error: { code: 'bad_gateway', message: 'the reply died behind the proxy' } }))
+        return
+        response.writeHead(502, { 'content-type': 'application/json' })
+        response.end(JSON.stringify({ ok: false, error: { code: 'bad_gateway', message: 'the reply died behind the proxy' } }))
+        return
+      }
+      response.destroy()
+    })
+  })
+  await new Promise(resolvePromise => httpServer.listen(0, '127.0.0.1', resolvePromise))
+  t.after(() => httpServer.close())
+  writeFileSync(join(sharedData, 'runtime.json'),
+    `${JSON.stringify({ pid: process.pid, port: httpServer.address().port, version: '0.8.0' })}\n`, { mode: 0o600 })
+
+  const deps = { pluginDataDir: pluginData, sharedDataDir: sharedData, env: {} }
+  // First attempt: the 502 after processing is outcome_unknown, and the
+  // receipt's id is exactly the id the server recorded.
+  const lost = await runSendFamilyCommand(['--room', 'b', '--text', 'the proxy ate my reply', '--id', 'retry-1'], deps)
+  assert.equal(lost.status, 'refusal', JSON.stringify(lost))
+  if (lost.code !== 'bad_gateway') console.error('LOST-OUTCOME', JSON.stringify(lost))
+  assert.equal(lost.code, 'bad_gateway')
+  assert.equal(lost.extra.outcome_unknown, true, 'a 502 after processing cannot prove the send did not commit')
+  assert.equal(lost.extra.client_message_id, 'retry-1')
+  assert.ok(seen.has('retry-1'), 'the server recorded the attempted id')
+
+  // The identical retry resolves to the original commit \u2014 the whole
+  // point of carrying the id on the failure receipt.
+  const retry = parseOne(await runSendFamilyCommand(['--room', 'b', '--text', 'the proxy ate my reply', '--id', 'retry-1'], deps))
+  assert.equal(retry.status, 'accepted')
+  assert.equal(retry.seq, 7, 'the retry resolves to the server\\u2019s original commit')
+  assert.equal(retry.client_message_id, 'retry-1')
+
+  // A malformed 200 (the reply died mid-serialization after committing) is
+  // also outcome_unknown and still names the id.
+  malformed = true
+  const broken = await runSendFamilyCommand(['--room', 'b', '--text', 'committed behind a broken reply', '--id', 'retry-2'], deps)
+  assert.equal(broken.status, 'refusal', JSON.stringify(broken))
+  assert.equal(broken.extra.outcome_unknown, true, 'a malformed 200 cannot prove the send did not commit')
+  assert.equal(broken.extra.client_message_id, 'retry-2')
+  assert.ok(seen.has('retry-2'), 'the malformed reply still followed a recorded attempt')
+})

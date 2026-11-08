@@ -198,6 +198,46 @@ test('round-4: re-running the flagged re-baseline with the same policy is a no-o
   assert.equal(again.decide(FP3, t0 + 2), true)
   assert.equal(metaRows(world).rebaselined_at, first, 'the record was not re-baselined into a new authority')
 })
+// --- The round-5 gate: per-key pin merge ---
+
+test('round-5: pinning a different key never clears the recorded pin of another', t => {
+  const world = ledgerWorld(t)
+  const t0 = 1_700_000_000_000
+  // A pins budget=3 and spends the whole budget.
+  const a = createWakeLedger({ pluginData: world.pluginData, realmId: REALM, policy: { cooldownMs: 300_000, budget: 3, windowMs: 60_000 }, identity: { explicit: { budget: 3 } } })
+  t.after(() => a.close())
+  for (let index = 0; index < 3; index += 1) assert.equal(a.decide([FP, FP2, FP3][index], t0 + index), true)
+  assert.equal(a.decide(FP, t0 + 3), false, 'the budget of 3 is spent')
+
+  // B pins ONLY the cooldown (which agrees with the record): the merge must
+  // keep the recorded budget pin — B cannot mint grants 4+ by washing it.
+  const b = createWakeLedger({ pluginData: world.pluginData, realmId: REALM, policy: { cooldownMs: 300_000, budget: 10, windowMs: 60_000 }, identity: { explicit: { cooldownMs: 300_000 } } })
+  t.after(() => b.close())
+  assert.equal(b.decide(FP, t0 + 4), false, 'the recorded budget of 3 survives the disjoint pin')
+  const rows = metaRows(world)
+  assert.deepEqual(JSON.parse(rows.policy_explicit), { budget: 3, cooldownMs: 300_000 }, 'the pins merged, nothing was cleared')
+  assert.equal(JSON.parse(rows.policy).budget, 3, 'the pinned effective budget stays')
+})
+
+test('round-5: a subset pin merges, and unpinned keys keep the recorded values under a pinned record', t => {
+  const world = ledgerWorld(t)
+  const t0 = 1_700_000_000_000
+  const record = createWakeLedger({ pluginData: world.pluginData, realmId: REALM, policy: { cooldownMs: 123_456, budget: 4, windowMs: 60_000 }, identity: { explicit: { cooldownMs: 123_456 } } })
+  t.after(() => record.close())
+  assert.equal(record.decide(FP, t0), true)
+
+  // A process pinning budget=4 (agreeing) and leaving cooldown unpinned:
+  // the record’s cooldown pin AND its effective cooldown stay.
+  const merger = createWakeLedger({ pluginData: world.pluginData, realmId: REALM, policy: { cooldownMs: 300_000, budget: 4, windowMs: 60_000 }, identity: { explicit: { budget: 4 } } })
+  t.after(() => merger.close())
+  assert.equal(merger.decide(FP2, t0 + 1), true)
+  const rows = metaRows(world)
+  assert.deepEqual(JSON.parse(rows.policy_explicit), { cooldownMs: 123_456, budget: 4 })
+  const merged = JSON.parse(rows.policy)
+  assert.equal(merged.cooldownMs, 123_456, 'the recorded pinned cooldown is kept, not drifted')
+  assert.equal(merged.budget, 4)
+})
+
 // --- The v0.8.0 closures: policy agreement and the restartable migration ---
 
 function metaRows(world) {
