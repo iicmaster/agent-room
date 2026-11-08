@@ -547,7 +547,7 @@ Commands:
       (a second refuses with wait_already_active). A stale lock FAILS CLOSED:
       the refusal names the lock's path and the recorded pid; when you have
       confirmed no wait is running, take the fence explicitly with
-      `--reclaim` (it removes the stale lock and starts; a second concurrent
+      --reclaim (it removes the stale lock and starts; a second concurrent
       reclaim is refused). Creates nothing: setup must be complete first (not_set_up
       otherwise), and the wait never claims the Chat ID, never writes
       cursors, and never changes trust. Honest scope: this wakes a LIVE host
