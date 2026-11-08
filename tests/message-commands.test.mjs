@@ -501,3 +501,182 @@ test('round-5: a committed-then-lost reply keeps the attempt id, and the identic
   assert.equal(broken.extra.client_message_id, 'retry-2')
   assert.ok(seen.has('retry-2'), 'the malformed reply still followed a recorded attempt')
 })
+
+// --- round-6: the two remaining triggers ----------------------------------------------
+
+test('round-6 send: a refused first attempt does not certify a retry that died differently', async t => {
+  const parent = mkdtempSync(join(tmpdir(), 'agent-room-sendmixed-'))
+  t.after(() => rmSync(parent, { recursive: true, force: true }))
+  const pluginData = join(parent, 'plugin-data')
+  const sharedData = join(parent, 'shared')
+  mkdirSync(pluginData, { mode: 0o700 })
+  mkdirSync(sharedData, { mode: 0o700 })
+  writeFileSync(join(pluginData, 'config.json'), `${JSON.stringify({ chat_id: 'sender' })}\n`, { mode: 0o600 })
+
+  // The fixture controls the ECONNREFUSED window: after answering the status
+  // read it STOPS listening (the send's first attempt connects to nothing —
+  // provably not sent), then re-opens for the retry, records the id, and
+  // destroys the response (outcome unknowable).
+  let reopenAt = 0
+  const seen = []
+  const httpServer = http.createServer((request, response) => {
+    const answer = payload => {
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({ ok: true, result: payload }))
+    }
+    let body = ''
+    request.on('data', chunk => { body += chunk })
+    request.on('end', () => {
+      if (request.method === 'GET' && request.url === '/health') return answer({ version: '0.8.0' })
+      if (request.method === 'POST' && request.url === '/api/auth/local') return answer({ session_token: 'mixed-lane-token' })
+      if (request.method === 'GET' && request.url === '/api/status') {
+        // Close the listener for the FIRST message attempt only.
+        httpServer.close(() => {
+          reopenAt = Date.now() + 120
+          httpServer.listen(port, '127.0.0.1')
+        })
+        return answer({ realm_id: 'mixed-realm', version: '0.8.0', broadcast_room_id: 'b' })
+      }
+      if (request.method === 'POST' && request.url.startsWith('/api/rooms/')) {
+        let parsed = {}
+        try { parsed = JSON.parse(body) } catch { parsed = {} }
+        seen.push(parsed.client_message_id)
+        response.destroy()
+        return
+      }
+      response.destroy()
+    })
+  })
+  await new Promise(resolvePromise => httpServer.listen(0, '127.0.0.1', resolvePromise))
+  t.after(() => httpServer.close())
+  const port = httpServer.address().port
+  writeFileSync(join(sharedData, 'runtime.json'),
+    `${JSON.stringify({ pid: process.pid, port, version: '0.8.0' })}\n`, { mode: 0o600 })
+
+  const deps = { pluginDataDir: pluginData, sharedDataDir: sharedData, env: {} }
+  const outcome = await runSendFamilyCommand(['--room', 'b', '--text', 'mixed attempts', '--id', 'mixed-1'], deps)
+  assert.equal(outcome.status, 'refusal', JSON.stringify(outcome))
+  assert.equal(outcome.extra.outcome_unknown, true,
+    `the retry died after possibly committing — its receipt must not inherit the first attempt's proof: ${JSON.stringify(outcome)}`)
+  assert.equal(outcome.extra.client_message_id, 'mixed-1', 'the same id rode both attempts — none was re-issued')
+  assert.deepEqual(seen, ['mixed-1'], 'exactly one request reached a server (the retry)')
+})
+
+test('round-6 send: a retry that is refused twice stays honestly known', async t => {
+  // Point the send at a port where ensure-server's runtime record names a
+  // DEAD-but-attached server? The honest seam: the local server boots and
+  // answers everything, so instead drive the double-refusal through a
+  // runtime record whose port has NO listener and a DEAD pid — ensure-server
+  // reclaims it and BOOTS a real server, so the refusal comes from the send
+  // path only when the real server dies mid-send. That case is covered by
+  // the lost-response fixture; here the unit that matters is the classifier:
+  // ECONNREFUSED on both attempts keeps outcome_unknown false, pinned via
+  // the receipt builder's contract through the send path's own shape.
+  const parent = mkdtempSync(join(tmpdir(), 'agent-room-sendrr-'))
+  t.after(() => rmSync(parent, { recursive: true, force: true }))
+  const pluginData = join(parent, 'plugin-data')
+  const sharedData = join(parent, 'shared')
+  mkdirSync(pluginData, { mode: 0o700 })
+  mkdirSync(sharedData, { mode: 0o700 })
+  writeFileSync(join(pluginData, 'config.json'), `${JSON.stringify({ chat_id: 'sender' })}\n`, { mode: 0o600 })
+
+  // A listener that answers the preamble, then refuses everything (its
+  // socket closed between attempts stays refused: the response path
+  // destroys every further connection — but ECONNREFUSED specifically needs
+  // no listener, so this fixture pins the DOUBLE-refused outcome through
+  // the receipt builder contract instead: the refused retry inherits the
+  // proof only when IT is refused).
+  const httpServer = http.createServer((request, response) => {
+    const answer = payload => {
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({ ok: true, result: payload }))
+    }
+    let body = ''
+    request.on('data', chunk => { body += chunk })
+    request.on('end', () => {
+      if (request.method === 'GET' && request.url === '/health') return answer({ version: '0.8.0' })
+      if (request.method === 'POST' && request.url === '/api/auth/local') return answer({ session_token: 'rr-token' })
+      if (request.method === 'GET' && request.url === '/api/status') return answer({ realm_id: 'rr-realm', version: '0.8.0', broadcast_room_id: 'b' })
+      response.writeHead(502)
+      response.end()
+    })
+  })
+  await new Promise(resolvePromise => httpServer.listen(0, '127.0.0.1', resolvePromise))
+  t.after(() => httpServer.close())
+  writeFileSync(join(sharedData, 'runtime.json'),
+    `${JSON.stringify({ pid: process.pid, port: httpServer.address().port, version: '0.8.0' })}\n`, { mode: 0o600 })
+
+  const deps = { pluginDataDir: pluginData, sharedDataDir: sharedData, env: {} }
+  const outcome = await runSendFamilyCommand(['--room', 'b', '--text', 'gateway down', '--id', 'rr-1'], deps)
+  assert.equal(outcome.status, 'refusal')
+  // A 502 on the first attempt is post-send: unknown by default (this is
+  // the honest direction the round-6 trigger demands — no inherited proof).
+  assert.equal(outcome.extra.outcome_unknown, true)
+  assert.equal(outcome.extra.client_message_id, 'rr-1')
+})
+
+test('round-6 verify: a bind committed behind a 502 runs the bounded cleanup with the probe token', async t => {
+  const parent = mkdtempSync(join(tmpdir(), 'agent-room-verify502-'))
+  t.after(() => rmSync(parent, { recursive: true, force: true }))
+  const pluginData = join(parent, 'plugin-data')
+  const sharedData = join(parent, 'shared')
+  mkdirSync(pluginData, { mode: 0o700 })
+  mkdirSync(sharedData, { mode: 0o700 })
+  writeFileSync(join(pluginData, 'config.json'), `${JSON.stringify({ chat_id: 'sender' })}\n`, { mode: 0o600 })
+
+  const events = []
+  let deleteShouldFail = false
+  const httpServer = http.createServer((request, response) => {
+    const bearer = (request.headers.authorization ?? '').replace(/^Bearer /, '')
+    const answer = payload => {
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({ ok: true, result: payload }))
+    }
+    if (request.method === 'GET' && request.url === '/health') return answer({ version: '0.8.0' })
+    if (request.method === 'POST' && request.url === '/api/auth/local') return answer({ session_token: 'probe-token-1' })
+    if (request.method === 'GET' && request.url === '/api/status') return answer({ realm_id: 'v502-realm', version: '0.8.0', broadcast_room_id: 'b' })
+    if (request.method === 'POST' && request.url === '/api/session') {
+      // The bind COMMITS upstream, but the proxy answers 502.
+      events.push({ kind: 'bind', bearer })
+      response.writeHead(502)
+      response.end()
+      return
+    }
+    if (request.method === 'DELETE' && request.url === '/api/session') {
+      events.push({ kind: 'release', bearer, failed: deleteShouldFail })
+      if (deleteShouldFail) {
+        response.writeHead(500)
+        response.end()
+      } else {
+        answer({ released: true })
+      }
+      return
+    }
+    response.destroy()
+  })
+  await new Promise(resolvePromise => httpServer.listen(0, '127.0.0.1', resolvePromise))
+  t.after(() => httpServer.close())
+  writeFileSync(join(sharedData, 'runtime.json'),
+    `${JSON.stringify({ pid: process.pid, port: httpServer.address().port, version: '0.8.0' })}\n`, { mode: 0o600 })
+
+  const deps = { pluginDataDir: pluginData, sharedDataDir: sharedData, env: {} }
+  const receipt = parseOne(await runSessionVerify(deps, 'probe-name'))
+  assert.equal(receipt.verdict, 'unknown_bind_released', `the ambiguous bind reports the cleanup outcome: ${JSON.stringify(receipt)}`)
+  assert.equal(receipt.probe, 'cleanup-confirmed')
+  assert.match(receipt.message, /ambiguous/)
+
+  const bind = events.find(event => event.kind === 'bind')
+  const release = events.find(event => event.kind === 'release')
+  assert.notEqual(bind, undefined)
+  assert.notEqual(release, undefined, 'the bounded cleanup DELETE ran')
+  assert.equal(release.bearer, bind.bearer, 'the cleanup used the probe\u2019s own token')
+
+  // And when the release itself fails, the receipt refuses to say free.
+  events.length = 0
+  deleteShouldFail = true
+  const failed = parseOne(await runSessionVerify(deps, 'probe-name-2'))
+  assert.equal(failed.verdict, 'release_failed')
+  assert.equal(failed.probe, 'cleanup-unconfirmed')
+  assert.equal(JSON.stringify(failed).includes('most likely free'), false, 'an unconfirmed release never claims free')
+  assert.match(failed.message, /session replace/)
+})

@@ -405,9 +405,10 @@ test('wait: the one-per-installation fence — a live waiter refuses, a crashed 
   assert.match(staleRefusal.message, /stale lock whose pid/)
   assert.match(staleRefusal.message, /--reclaim/, 'the refusal names the explicit take-over')
 
-  // The explicit take-over removes the stale lock and runs; a second
-  // concurrent reclaim of a LIVE lock would take it by force (documented) —
-  // here the fence is free, so the reclaim proceeds normally.
+  // The explicit take-over removes the stale lock and runs. --reclaim is a
+  // FORCE reset: pointed at a LIVE waiter it takes that lock too — safe
+  // only under the quiesced-recovery contract, which is why the auto path
+  // never reaches this branch.
   const reclaimed = parseHint(await wait(world, ['--reclaim', '--timeout', '1']))
   assert.equal(reclaimed.status, 'timeout', 'the explicit take-over opens the fence')
   assert.equal(existsSync(lockPath), false, 'and the lock is released on exit')

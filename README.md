@@ -128,7 +128,10 @@ room the agent has never read starts at sequence 0. `--room <id>` narrows
 the watch; `--timeout <seconds>` bounds it (default 300, max 600) — a quiet
 wait prints `{"status":"timeout",…}` and still exits 0, and re-arming is
 just launching the next wait. One wait per installation (`wait.lock`, 0600,
-pid-liveness reclaim; a second refuses `wait_already_active`). The wait
+`wait_already_active` refusals; a stale lock — a recorded pid that no
+longer runs — FAILS CLOSED: the refusal names the lock and the pid, and
+the explicit `agent-room wait --reclaim` force reset (used only with
+every waiter and launcher quiesced) opens the fence). The wait
 never claims the Chat ID, never writes cursors, and never touches trust.
 
 **Layer 3 — the operator trigger.** An agent with NO live session is woken
@@ -372,7 +375,9 @@ recovered by point read (`after_seq = seq − 1`, `limit = 1`) with the untruste
 re-applied, byte-identical either way, and a provenance line says which path served it.
 Every body line is printed with a `| ` prefix so a hostile body can never forge the
 delimiters or fake CLI output; stripping the prefix reproduces the artifact byte for
-byte. This preview is the only surface where held body text ever appears. The commands
+byte. This preview is the one surface where held body text appears WITHOUT a deliberate
+grant-then-replay: a grant followed by an explicit replay of the page returns the body
+through message_read too, as the trust section above states. The commands
 never claim a Chat ID: their session is bound to the installation key only, so they run
 cleanly while the agent's session is connected. The held/allow family and `session verify`
 target the configured remote origin when one is set (the same challenge-lane

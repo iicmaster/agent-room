@@ -241,10 +241,11 @@ function pidAlive(pid) {
 // would move WHATEVER the path holds by then, including a fresh winner's
 // lock (the interleaving rename(2) cannot prove away). The auto path
 // therefore refuses with the lock's location and the recorded pid; the
-// EXPLICIT `--reclaim` flag is the operator's take-over — it renames the
-// current lock aside and links its own, which is safe precisely because one
-// actor decided to run it (a second concurrent --reclaim loses the link to
-// EEXIST and is refused). A crash between the rename and the cleanup can
+// EXPLICIT `--reclaim` flag is the operator's FORCE RESET \u2014 it takes
+// whatever the path holds, INCLUDING a live waiter's lock, and is safe only
+// when every waiter, launcher and competing reclaim is quiesced. It is a
+// manual recovery contract, not a concurrency-safe protocol: one operator,
+// by decision, after confirming nobody else holds the fence. A crash between the rename and the cleanup can
 // leave a `.wait.lock.reclaimed.<uuid>` file behind: debris beside the
 // authority path, never re-imported, harmless to delete. A live waiter
 // refuses the newcomer — two waiters on one installation would double the
@@ -437,7 +438,7 @@ export async function runWaitFamilyCommand(tokens, { sharedDataDir, pluginDataDi
   const lock = acquireWaitLock(pluginDataDir, timeoutSeconds * 1000, { reclaim })
   if (!lock.acquired) {
     const guidance = lock.reclaimable === true
-      ? ` The lock is held by ${lock.holder}. If you have confirmed no wait is running, take the fence explicitly: agent-room wait --reclaim (it removes the stale lock and starts; a second concurrent reclaim is refused).`
+      ? ` The lock is held by ${lock.holder}. If you have confirmed no wait is running, take the fence with the force reset: agent-room wait --reclaim (it removes whatever holds the fence and starts — run it only with every waiter and competing launcher quiesced).`
       : ` The lock is held by ${lock.holder}. One wait process per installation: consume its hint, then start the next wait.`
     return {
       status: 'refusal',

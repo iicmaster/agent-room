@@ -209,20 +209,23 @@ export async function runSendFamilyCommand(tokens, { pluginDataDir, sharedDataDi
     const sendOnce = () => roundTrip(target, 'POST', sendPath, protocolHeaders(token), sendBody, CLIENT_REQUEST_TIMEOUT_MS)
     let response
     attempt.postSend = true
+    const refused = error => error?.transportCode === 'ECONNREFUSED' || error?.code === 'ECONNREFUSED'
     try {
       response = await sendOnce()
     } catch (error) {
-      if (error?.transportCode === 'ECONNREFUSED' || error?.code === 'ECONNREFUSED') {
-        // The connection itself was refused on both attempts: the request
-        // provably never reached a server, so the outcome is KNOWN (nothing
-        // committed) even though the flag rides post-send.
-        attempt.provablyNotSent = true
+      if (refused(error)) {
+        // The FIRST connection itself was refused: that attempt provably
+        // never reached a server. The retry must prove ITSELF before it
+        // inherits that proof (the round-6 trigger): a retry that is also
+        // refused keeps the known outcome; a retry that died any other way
+        // (reset, timeout, 5xx) may have committed, so its receipt is
+        // outcome_unknown with the same id and the SAME payload.
         try {
           response = await sendOnce()
         } catch (retryError) {
+          attempt.provablyNotSent = refused(retryError)
           return sendFailureReceipt(command, retryError, attempt)
         }
-        attempt.provablyNotSent = false
       } else {
         return sendFailureReceipt(command, error, attempt)
       }
@@ -505,10 +508,39 @@ export async function runSessionVerify(deps, rawChatId) {
         })],
       }
     }
-    throw new AgentRoomRuntimeError(
-      code ?? 'request_failed',
-      bound.body?.error?.message ?? `the agent-room server answered ${bound.status}`,
-    )
+    // The trusted no-bind refusals: these codes answer from admission and
+    // validation gates that run BEFORE the bind mutates anything, so they
+    // prove no bind happened and need no cleanup (the round-6 gate).
+    const TRUSTED_NO_BIND_CODES = new Set(['invalid_request', 'invalid_chat_id', 'banned', 'not_enrolled', 'rate_limited'])
+    if (TRUSTED_NO_BIND_CODES.has(code)) {
+      throw new AgentRoomRuntimeError(
+        code,
+        bound.body?.error?.message ?? `the agent-room server answered ${bound.status}`,
+      )
+    }
+    // An ambiguous bind outcome (a gateway 5xx, an unreadable response —
+    // anything that is neither a confirmed 200 nor a trusted pre-bind
+    // refusal): the bind MAY have committed, so the bounded cleanup runs
+    // with the probe's own token and the receipt reports the release
+    // outcome — never a fabricated "free".
+    const release = await roundTrip(target, 'DELETE', '/api/session', protocolHeaders(token), undefined, CLIENT_REQUEST_TIMEOUT_MS).catch(error => ({ status: 0, error }))
+    const released = release.status === 200
+    return {
+      status: 'ok',
+      command,
+      lines: [JSON.stringify({
+        ok: true,
+        command,
+        chat_id: forms.display,
+        verdict: released ? 'unknown_bind_released' : 'release_failed',
+        probe: released ? 'cleanup-confirmed' : 'cleanup-unconfirmed',
+        realm_id: realmId,
+        origin,
+        message: released
+          ? `the bind's outcome was ambiguous (the server answered ${bound.status}); the cleanup release IS confirmed — the name is most likely free, but this check proved nothing about a concurrent binder`
+          : `the bind's outcome was ambiguous (the server answered ${bound.status}) AND the cleanup release did not confirm (status ${release.status}); the probe\u2019s own session may hold "${forms.display}" until its lease expires — recover with "agent-room session replace --yes"`,
+      })],
+    }
   } catch (error) {
     return refusal(command, error)
   }
