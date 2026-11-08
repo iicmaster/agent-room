@@ -115,6 +115,36 @@ async function realmIdOf(target, token) {
 // request timed out, the response aborted, the stream died mid-flight) —
 // the outcome_unknown mark that tells the caller a retry with the SAME id
 // is safe: the server resolves the duplicate.
+// The send's retry decision, as one exported seam (the round-7 evidence
+// condition): the test drives THIS function with a scripted sendOnce to
+// prove the exact trace — first attempt refused, retry accepted-then-lost
+// — without depending on network timing. The attempt record carries the
+// id and every post-send fact the receipt needs; sendOnce receives the
+// identical closure state on both calls.
+export async function sendWithRetry(sendOnce, attempt) {
+  attempt.postSend = true
+  const refused = error => error?.transportCode === 'ECONNREFUSED' || error?.code === 'ECONNREFUSED'
+  try {
+    return await sendOnce()
+  } catch (error) {
+    if (refused(error)) {
+      // The FIRST connection itself was refused: that attempt provably
+      // never reached a server. The retry must prove ITSELF before it
+      // inherits that proof (the round-6 trigger): a retry that is also
+      // refused keeps the known outcome; a retry that died any other way
+      // (reset, timeout, 5xx) may have committed, so its receipt is
+      // outcome_unknown with the same id and the SAME payload.
+      try {
+        return await sendOnce()
+      } catch (retryError) {
+        attempt.provablyNotSent = refused(retryError)
+        return sendFailureReceipt(attempt.command, retryError, attempt)
+      }
+    }
+    return sendFailureReceipt(attempt.command, error, attempt)
+  }
+}
+
 function sendFailureReceipt(command, error, { clientMessageId, room, realmId, origin, transport, provablyNotSent = false }) {
   const message = String(error?.message ?? error)
   // The round-5 rule: a failure AFTER the request was written is
@@ -207,29 +237,9 @@ export async function runSendFamilyCommand(tokens, { pluginDataDir, sharedDataDi
     // (ECONNREFUSED) gets the api-client's one immediate retry with the
     // identical tuple before surfacing.
     const sendOnce = () => roundTrip(target, 'POST', sendPath, protocolHeaders(token), sendBody, CLIENT_REQUEST_TIMEOUT_MS)
-    let response
-    attempt.postSend = true
-    const refused = error => error?.transportCode === 'ECONNREFUSED' || error?.code === 'ECONNREFUSED'
-    try {
-      response = await sendOnce()
-    } catch (error) {
-      if (refused(error)) {
-        // The FIRST connection itself was refused: that attempt provably
-        // never reached a server. The retry must prove ITSELF before it
-        // inherits that proof (the round-6 trigger): a retry that is also
-        // refused keeps the known outcome; a retry that died any other way
-        // (reset, timeout, 5xx) may have committed, so its receipt is
-        // outcome_unknown with the same id and the SAME payload.
-        try {
-          response = await sendOnce()
-        } catch (retryError) {
-          attempt.provablyNotSent = refused(retryError)
-          return sendFailureReceipt(command, retryError, attempt)
-        }
-      } else {
-        return sendFailureReceipt(command, error, attempt)
-      }
-    }
+    const sent = await sendWithRetry(sendOnce, attempt)
+    if (sent.status === 'refusal') return sent // the failure receipt, attempt metadata intact
+    const response = sent
     if (response.status !== 200) {
       throw new AgentRoomRuntimeError(
         response.body?.error?.code ?? 'request_failed',

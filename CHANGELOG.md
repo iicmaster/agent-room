@@ -2,6 +2,55 @@
 
 All notable changes to Agent Room are documented in this file.
 
+## 0.8.0 - 2026-11-09
+
+The per-session identity release. Full contract statements live in
+[docs/release-evidence/v0.8.0-candidate.md](docs/release-evidence/v0.8.0-candidate.md);
+the short form:
+
+### Added
+
+- **Per-session provisioning**: one independent session is one identity — its own
+  `PLUGIN_DATA` directory, keypair, Chat ID, cursors, trust state and wake ledger.
+  `agent-room session verify <chat-id>` is a mutating bind-and-release availability
+  probe whose receipt distinguishes confirmed release from failed or uncertain cleanup.
+- **The unbound send**: `agent-room send` authenticates as the installation and never
+  binds the Chat ID — the server resolves the sender's name from the key's unique-latest
+  durable claim (new coded refusals `sender_claim_missing` / `sender_claim_ambiguous`).
+  The send claims no occupancy; every failure receipt names the attempted id, and a lost
+  response is marked `outcome_unknown` (retry the SAME id).
+- **`agent-room read`**: one-shot read with the receiver-side trust matrix applied;
+  never writes cursor or held state.
+- **MCP `room_list`**: room discovery, including DMs opened while offline (ten tools).
+
+### Changed
+
+- **The notifier arms at `initialize`** — before any tool call — and announces the
+  unread window as a bounded `unread_backlog` hint (from the persisted cursor, or zero
+  for a room the model never read; the hint pokes the hook). Cold DMs past the watch cap
+  are swept round-robin instead of starved. Hook runs are bounded (16 queued,
+  drop-oldest) and every loss is reported: `hook_error`, `hook_dropped`,
+  `sink_recovered`. The wake signal is best-effort by documented policy.
+- **The wake ledger's recorded policy tuple drives every decision**: `AGENT_ROOM_WAKE_*`
+  pins merge per key and survive unpinned processes; defaults drift is adopted and
+  recorded; `AGENT_ROOM_WAKE_POLICY_REBASELINE=1` overwrites once. The legacy JSON
+  import resumes after a crash (marker-in-transaction) and refuses an unreadable file
+  instead of archiving it. Native SQLite faults (busy/corrupt) are classified once and
+  pinned.
+- **The wait fence fails closed**: a stale lock refuses with the lock's path and pid;
+  `agent-room wait --reclaim` is the operator's force reset (used only quiesced).
+- **The trust/held CLI family targets the configured remote origin** and every receipt
+  names the realm and the origin it answered.
+
+### Evidence
+
+- Full native suite: 731 tests at the reviewed HEAD, 734 after the final gate closures —
+  all passing on the release source (the exact numbers per SHA are in the candidate
+  record). Six-plus-one rounds of codex review gate; the round-7 verdict was
+  GO-with-conditions for cutting this candidate, and the conditions (exact mixed-attempt
+  regression, release record materialization, post-deploy acceptance scope) are
+  satisfied or scoped in the candidate record.
+
 ## 0.7.1 - 2026-11-02
 
 ### Changed

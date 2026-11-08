@@ -41,9 +41,10 @@
 //   allowlist — it may write Notification's shared wake ledger plus wait.lock.
 //   Missing pieces refuse;
 //   they are never silently created by a background process.
-// - One wait process per installation: PLUGIN_DATA/wait.lock (0600,
-//   pid-liveness reclaim — a crashed waiter's lock is reclaimed, a live
-//   one refuses with wait_already_active).
+// - One wait process per installation: PLUGIN_DATA/wait.lock (0600).
+//   The fence FAILS CLOSED on existing and stale locks alike (the auto
+//   path never takes a lock aside); the explicit `--reclaim` force reset
+//   — used only with every waiter/launcher quiesced — is the recovery.
 // - Grammar (the machine-readable families'): success prints the hint on
 //   stdout and exits 0 (a clean timeout is a HINT, not a failure — the
 //   re-arm is the agent's ordinary next action); a refusal prints ONE JSON
@@ -246,7 +247,7 @@ function pidAlive(pid) {
 // when every waiter, launcher and competing reclaim is quiesced. It is a
 // manual recovery contract, not a concurrency-safe protocol: one operator,
 // by decision, after confirming nobody else holds the fence. A crash between the rename and the cleanup can
-// leave a `.wait.lock.reclaimed.<uuid>` file behind: debris beside the
+// leave a `wait.lock.reclaimed.<uuid>` file behind: debris beside the
 // authority path, never re-imported, harmless to delete. A live waiter
 // refuses the newcomer — two waiters on one installation would double the
 // request budget and race each other's hints. Release is owner-checked: a

@@ -27,7 +27,8 @@ import { loadOrCreateLocalToken } from '../server/api/local-token.mjs'
 import { fingerprintFromPublicKey, loadOrCreateKeypair, signWithInstallationKey } from '../server/keys.mjs'
 import { openRoomLog } from '../server/store/room-log.mjs'
 import { main as cliMain } from '../server/cli/agent-room.mjs'
-import { runReadFamilyCommand, runSendFamilyCommand, runSessionVerify } from '../server/cli/message-commands.mjs'
+import { runReadFamilyCommand, runSendFamilyCommand, runSessionVerify, sendWithRetry } from '../server/cli/message-commands.mjs'
+import { AgentRoomRuntimeError } from '../server/runtime.mjs'
 import { authenticate } from '../server/cli/session-commands.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -504,65 +505,65 @@ test('round-5: a committed-then-lost reply keeps the attempt id, and the identic
 
 // --- round-6: the two remaining triggers ----------------------------------------------
 
-test('round-6 send: a refused first attempt does not certify a retry that died differently', async t => {
-  const parent = mkdtempSync(join(tmpdir(), 'agent-room-sendmixed-'))
-  t.after(() => rmSync(parent, { recursive: true, force: true }))
-  const pluginData = join(parent, 'plugin-data')
-  const sharedData = join(parent, 'shared')
-  mkdirSync(pluginData, { mode: 0o700 })
-  mkdirSync(sharedData, { mode: 0o700 })
-  writeFileSync(join(pluginData, 'config.json'), `${JSON.stringify({ chat_id: 'sender' })}\n`, { mode: 0o600 })
-
-  // The fixture controls the ECONNREFUSED window: after answering the status
-  // read it STOPS listening (the send's first attempt connects to nothing —
-  // provably not sent), then re-opens for the retry, records the id, and
-  // destroys the response (outcome unknowable).
-  let reopenAt = 0
-  const seen = []
-  const httpServer = http.createServer((request, response) => {
-    const answer = payload => {
-      response.writeHead(200, { 'content-type': 'application/json' })
-      response.end(JSON.stringify({ ok: true, result: payload }))
+test('round-7 exact trace: first attempt refused, retry accepted-then-lost — the same id rides both, the receipt is unknown', async t => {
+  // The scripted sendOnce FORCES the exact trigger trace (the round-7
+  // evidence condition — no network timing): call 1 refuses the connection
+  // (provably not sent), call 2 is accepted and then loses its response
+  // (outcome unknowable). Both calls receive the IDENTICAL closure state.
+  const seenArgs = []
+  const attempt = {
+    command: 'send',
+    clientMessageId: 'mixed-exact',
+    room: 'b',
+    realmId: 'mixed-realm',
+    origin: 'local:fixture',
+    transport: 'local',
+  }
+  const sendOnce = async () => {
+    seenArgs.push({ calls: seenArgs.length + 1 })
+    if (seenArgs.length === 1) {
+      const refused = new AgentRoomRuntimeError('request_failed', 'connect ECONNREFUSED 127.0.0.1:1')
+      refused.code = 'ECONNREFUSED'
+      throw refused
     }
-    let body = ''
-    request.on('data', chunk => { body += chunk })
-    request.on('end', () => {
-      if (request.method === 'GET' && request.url === '/health') return answer({ version: '0.8.0' })
-      if (request.method === 'POST' && request.url === '/api/auth/local') return answer({ session_token: 'mixed-lane-token' })
-      if (request.method === 'GET' && request.url === '/api/status') {
-        // Close the listener for the FIRST message attempt only.
-        httpServer.close(() => {
-          reopenAt = Date.now() + 120
-          httpServer.listen(port, '127.0.0.1')
-        })
-        return answer({ realm_id: 'mixed-realm', version: '0.8.0', broadcast_room_id: 'b' })
-      }
-      if (request.method === 'POST' && request.url.startsWith('/api/rooms/')) {
-        let parsed = {}
-        try { parsed = JSON.parse(body) } catch { parsed = {} }
-        seen.push(parsed.client_message_id)
-        response.destroy()
-        return
-      }
-      response.destroy()
-    })
-  })
-  await new Promise(resolvePromise => httpServer.listen(0, '127.0.0.1', resolvePromise))
-  t.after(() => httpServer.close())
-  const port = httpServer.address().port
-  writeFileSync(join(sharedData, 'runtime.json'),
-    `${JSON.stringify({ pid: process.pid, port, version: '0.8.0' })}\n`, { mode: 0o600 })
+    const reset = new AgentRoomRuntimeError('request_failed', 'socket hang up (response lost)')
+    reset.code = 'ECONNRESET'
+    throw reset
+  }
 
-  const deps = { pluginDataDir: pluginData, sharedDataDir: sharedData, env: {} }
-  const outcome = await runSendFamilyCommand(['--room', 'b', '--text', 'mixed attempts', '--id', 'mixed-1'], deps)
-  assert.equal(outcome.status, 'refusal', JSON.stringify(outcome))
-  assert.equal(outcome.extra.outcome_unknown, true,
-    `the retry died after possibly committing — its receipt must not inherit the first attempt's proof: ${JSON.stringify(outcome)}`)
-  assert.equal(outcome.extra.client_message_id, 'mixed-1', 'the same id rode both attempts — none was re-issued')
-  assert.deepEqual(seen, ['mixed-1'], 'exactly one request reached a server (the retry)')
+  const receipt = await sendWithRetry(sendOnce, attempt)
+  assert.equal(receipt.status, 'refusal', JSON.stringify(receipt))
+  assert.equal(receipt.extra.outcome_unknown, true,
+    'the retry died after possibly committing — it must not inherit the first attempt\u2019s proof')
+  assert.equal(receipt.extra.client_message_id, 'mixed-exact')
+  assert.deepEqual(seenArgs.map(entry => entry.calls), [1, 2], 'the retry happened: exactly two attempts')
+  assert.equal(attempt.provablyNotSent, false, 'the proof of the first attempt was not inherited by the second')
+  assert.match(receipt.message, /SAME --id mixed-exact/, 'the guidance names the retry discipline')
 })
 
-test('round-6 send: a retry that is refused twice stays honestly known', async t => {
+test('round-7 exact trace: a double-refused attempt keeps the known outcome', async t => {
+  // Both attempts are provably refused: the outcome is KNOWN (nothing
+  // committed) — this pins the honest false on the same seam.
+  const attempt = {
+    command: 'send',
+    clientMessageId: 'double-refused',
+    room: 'b',
+  }
+  let calls = 0
+  const sendOnce = async () => {
+    calls += 1
+    const refused = new AgentRoomRuntimeError('request_failed', `connect ECONNREFUSED (attempt ${calls})`)
+    refused.code = 'ECONNREFUSED'
+    throw refused
+  }
+  const receipt = await sendWithRetry(sendOnce, attempt)
+  assert.equal(receipt.status, 'refusal')
+  assert.equal(receipt.extra.outcome_unknown, false, 'two refused attempts prove nothing was sent')
+  assert.equal(receipt.extra.client_message_id, 'double-refused')
+  assert.equal(calls, 2, 'one immediate retry, same tuple')
+})
+
+test('round-6 send: a 502 on the first attempt is outcome_unknown with the id carried', async t => {
   // Point the send at a port where ensure-server's runtime record names a
   // DEAD-but-attached server? The honest seam: the local server boots and
   // answers everything, so instead drive the double-refusal through a
@@ -580,12 +581,10 @@ test('round-6 send: a retry that is refused twice stays honestly known', async t
   mkdirSync(sharedData, { mode: 0o700 })
   writeFileSync(join(pluginData, 'config.json'), `${JSON.stringify({ chat_id: 'sender' })}\n`, { mode: 0o600 })
 
-  // A listener that answers the preamble, then refuses everything (its
-  // socket closed between attempts stays refused: the response path
-  // destroys every further connection — but ECONNREFUSED specifically needs
-  // no listener, so this fixture pins the DOUBLE-refused outcome through
-  // the receipt builder contract instead: the refused retry inherits the
-  // proof only when IT is refused).
+  // A listener that answers the preamble and answers every message POST
+  // with a 502: the first attempt DIED after the request was written, so
+  // the honest default (unknown) applies — the double-refusal case is
+  // pinned by the scripted sendWithRetry test above.
   const httpServer = http.createServer((request, response) => {
     const answer = payload => {
       response.writeHead(200, { 'content-type': 'application/json' })

@@ -551,7 +551,7 @@ Commands:
       --reclaim: it removes whatever holds the fence (a live waiter
       included) and starts — run it only with every waiter, launcher and
       competing reclaim quiesced; it is a manual recovery contract, not a
-      concurrency-safe protocol. Creates nothing: setup must be complete first (not_set_up
+      concurrency-safe protocol. Creates no setup or identity: setup must be complete first (not_set_up
       otherwise), and the wait never claims the Chat ID, never writes
       cursors, and never changes trust. Honest scope: this wakes a LIVE host
       session; an agent with no live session is woken by nothing — the
