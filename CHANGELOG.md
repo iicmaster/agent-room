@@ -2,6 +2,63 @@
 
 All notable changes to Agent Room are documented in this file.
 
+## 0.9.0 - 2026-11-13
+
+The session-addressing release. The addressable unit becomes the **session
+principal** — one process start receives its own server-issued session id,
+address (`base~token@machine`) and 256-bit capability — while enrollment,
+audit provenance and receiver trust stay installation-scoped. Contract of
+record: `_bmad-output/specs/spec-agent-room-v090/`.
+
+### Added
+
+- **Session principals**: allocate/resume/heartbeat/release/revoke over
+  additive routes authenticated by the installation bearer + a random
+  per-session capability (returned exactly once, stored digest-only, bound
+  server-side to installation fingerprint + session id + generation). The
+  capability — not the address, session id or fingerprint — is the authority
+  for session-scoped operations.
+- **One-call addressed send** (`POST /api/messages {to, text,
+  client_message_id}`): the server resolves the peer session address to its
+  principal, opens-or-reuses the pair room of the two SESSION ids, and
+  appends; an unresolvable address answers the constant quiet
+  `peer_not_found` (no roster). Pair-room membership and read ACL are per
+  session id — a third session of either installation reads nothing.
+- **CLI**: `agent-room dm --to <address> --text`, `agent-room sessions`
+  (the explicit realm listing), `agent-room send --to`.
+- **MCP**: `message_send` accepts `to` (a peer session address); new
+  `sessions` tool; `room_status` reports `session_address`/`session_scope`.
+- **Heartbeat**: every session beats every 10 s against a 30 s base lease;
+  expiry frees only the reusable base name — the offline session keeps its
+  full address, pair-room membership, cursor and mailbox, and resumes with
+  its stored capability. Old generations are fenced (`session_expired`).
+
+### Changed
+
+- **Notifier self-skip is per session address**: sessions sharing one
+  installation key now wake and see each other (the v0.8 fingerprint filter
+  collapsed them into one identity).
+- **Cursors are per session** (`sessions/<scope>/cursors.json`, seeded once
+  from the legacy `realms/<realm>/cursors.json`); held/allowlist/wake state
+  stay installation-scoped.
+- **messages.chat_id attribution bound widened** 32 -> 84 characters via the
+  additive convergence rebuild (a session address fits as sender
+  attribution); old rows and paths unchanged.
+- Wait baseline resolves the per-session cursor namespace first.
+
+### Removed
+
+- Nothing. Frozen routes and vocabularies are additive-only (NFR-8).
+
+### Evidence
+
+- Full suite 764/764 on the release tree; four-layer review gate (blind
+  hunter / edge case / verification gap / intent alignment), 26 findings
+  triaged, patches applied; 6 residual warnings recorded in the
+  implementation spec's Auto Run Result (same-OS-user capability read,
+  heartbeat budget class, one-shot room continuity, pid-reuse scope,
+  MCP-child {to} test, REL-3 soak phase-sensitivity).
+
 ## 0.8.0 - 2026-11-09
 
 The per-session identity release. Full contract statements live in
