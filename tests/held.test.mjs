@@ -34,7 +34,7 @@
 
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { once } from 'node:events'
 import http from 'node:http'
 import { generateKeyPairSync } from 'node:crypto'
@@ -750,6 +750,9 @@ test('cursor independence over the real surface: a held seq is consumed by the c
   const status = structured(await mcp.tool('room_status'))
   const realmId = status.realm_id
   const broadcastId = status.broadcast_room_id
+  // v0.9.0: this child's cursor file lives per session under sessions/<scope>/.
+  const localScopes = () => readdirSync(join(world.pluginData, 'sessions')).filter(name => !name.startsWith('.'))
+  const cursorDocPath = () => join(world.pluginData, 'sessions', localScopes()[0], 'cursors.json')
 
   // A foreign sender's three messages; on a local realm they all deliver.
   const peer = await connectPeer(record.port, world.sharedData, 'Stranger')
@@ -777,7 +780,7 @@ test('cursor independence over the real surface: a held seq is consumed by the c
   const again = structured(await mcp.tool('message_read', { room_id: broadcastId }))
   assert.deepEqual(again.messages, [], 'the consumed page is never re-delivered')
   assert.equal(again.next_after_seq, 3)
-  const cursors = JSON.parse(readFileSync(join(world.pluginData, 'realms', realmId, 'cursors.json'), 'utf8'))
+  const cursors = JSON.parse(readFileSync(cursorDocPath(), 'utf8'))
   assert.equal(cursors.cursors[broadcastId].after_seq, 3, 'the cursor advanced past the held seqs and stays there')
 
   // The held state survived the cursor advance, untouched.
@@ -791,7 +794,7 @@ test('cursor independence over the real surface: a held seq is consumed by the c
   const redelivered = structured(await mcp.tool('message_read', { room_id: broadcastId, after_seq: 0 }))
   assert.deepEqual(redelivered.messages.map(row => row.seq), [1, 2, 3])
   for (const row of redelivered.messages) assert.equal(row.held, undefined)
-  const cursorsAfter = JSON.parse(readFileSync(join(world.pluginData, 'realms', realmId, 'cursors.json'), 'utf8'))
+  const cursorsAfter = JSON.parse(readFileSync(cursorDocPath(), 'utf8'))
   assert.equal(cursorsAfter.cursors[broadcastId].after_seq, 3, 'an explicit low read never regresses the durable cursor')
   assert.deepEqual(
     loadHeldState(world.pluginData, realmId).entries.map(entry => entry.seq),
@@ -895,6 +898,7 @@ test('the held tools over the real surface: room_held_list carries exactly the m
     'room_trust_set',
     'room_held_list',
     'room_held_count',
+    'sessions',
   ])
   const adapterSource = readFileSync(MCP_ENTRY, 'utf8')
   assert.equal(adapterSource.includes('heldBody'), false, 'the adapter must never reference the human-only body reader')

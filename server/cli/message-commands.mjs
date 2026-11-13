@@ -29,10 +29,14 @@ import {
   CHAT_ID_INVALID_MESSAGE,
   CLIENT_MESSAGE_ID_MAX,
   MESSAGE_TEXT_MAX,
+  PROTOCOL_HEADER,
+  PROTOCOL_VERSION,
   READ_HOLD_MAX_MS,
   READ_PAGE_DEFAULT,
   READ_PAGE_MAX,
+  SESSION_ADDRESS_INVALID_MESSAGE,
   chatIdForms,
+  sessionAddressForms,
 } from '../constants.mjs'
 import { AgentRoomRuntimeError } from '../runtime.mjs'
 import {
@@ -40,6 +44,7 @@ import {
   applyUntrustedEnvelope,
   loadChatIdConfig,
 } from '../client/api-client.mjs'
+import { machineLabel } from '../client/session-state.mjs'
 import { REMOTE_TRANSPORT, applyTrustMatrix, loadAllowlist } from '../client/trust.mjs'
 import { ensureServer } from '../client/ensure-server.mjs'
 import { loadRemoteConfig } from '../client/remote-config.mjs'
@@ -171,6 +176,7 @@ function sendFailureReceipt(command, error, { clientMessageId, room, realmId, or
 }
 
 // `agent-room send --room <room_id> --text <text> [--reply-to <seq>] [--id <client_message_id>]`
+// `agent-room send --to <session-address> --text <text> [--reply-to <seq>] [--id <client_message_id>]`
 export async function runSendFamilyCommand(tokens, { pluginDataDir, sharedDataDir, env = process.env }) {
   const command = 'send'
   // The attempt record (the round-5 gate): every failure AFTER the request
@@ -180,11 +186,20 @@ export async function runSendFamilyCommand(tokens, { pluginDataDir, sharedDataDi
   const attempt = { clientMessageId: null, room: null, realmId: null, origin: null, transport: null, postSend: false, provablyNotSent: false }
   try {
     const parsed = parseFlags(tokens, new Map([
-      ['room', 'string'], ['text', 'string'], ['reply-to', 'integer'], ['id', 'string'],
+      ['room', 'string'], ['to', 'string'], ['text', 'string'], ['reply-to', 'integer'], ['id', 'string'],
     ]))
     if (parsed.error !== undefined) return usage(command, parsed.error)
     const { flags } = parsed
     if (parsed.rest.length > 0) return usage(command, `unexpected argument "${parsed.rest[0]}"; agent-room send takes options only`)
+    if (flags.room !== undefined && flags.to !== undefined) {
+      return usage(command, '--room and --to are mutually exclusive: address a room OR a peer session, never both')
+    }
+    if (flags.to !== undefined) {
+      return runAddressedSend({
+        command, to: flags.to, text: flags.text, clientMessageId: flags.id, replyToFlag: flags['reply-to'],
+        attempt, deps: { pluginDataDir, sharedDataDir, env },
+      })
+    }
     if (flags.room === undefined) return usage(command, '--room is required: agent-room send --room <room_id> --text <text>')
     if (flags.text === undefined) return usage(command, '--text is required: agent-room send --room <room_id> --text <text>')
     if (flags.room.length < 1 || flags.room.length > 200) return usage(command, '--room must be 1 to 200 characters')
@@ -549,6 +564,229 @@ export async function runSessionVerify(deps, rawChatId) {
         message: released
           ? `the bind's outcome was ambiguous (the server answered ${bound.status}); the cleanup release IS confirmed — the name is most likely free, but this check proved nothing about a concurrent binder`
           : `the bind's outcome was ambiguous (the server answered ${bound.status}) AND the cleanup release did not confirm (status ${release.status}); the probe\u2019s own session may hold "${forms.display}" until its lease expires — recover with "agent-room session replace --yes"`,
+      })],
+    }
+  } catch (error) {
+    return refusal(command, error)
+  }
+}
+
+// --- v0.9.0: the session-addressed one-shot family ------------------------------
+//
+// `agent-room dm --to <address> --text <text> [--id <cmid>] [--reply-to <seq>]`
+// `agent-room send --to <address> --text <text>` (the same addressed wire,
+// reported under the send command's name) · `agent-room sessions` (the
+// explicit realm listing — CAP-3: enumeration lives here, never piggybacked
+// on a send refusal).
+//
+// The one-shot lifecycle (session-principals.md §1/§4): allocate an EPHEMERAL
+// session principal by the installation bearer, act with its Session
+// capability, then release the base lease best-effort (bounded) so the
+// process does not squat liveness it will never use — the durable principal
+// and its mailbox persist regardless, which is exactly the design: the
+// addressed peer can keep writing to this address while it is offline.
+
+function sessionHeadersOf(capability) {
+  return {
+    [PROTOCOL_HEADER]: PROTOCOL_VERSION,
+    authorization: `Session ${capability}`,
+    'content-type': 'application/json; charset=utf-8',
+  }
+}
+
+function addressedResultReceipt({ command, to, result, clientMessageId, realmId, origin, transport }) {
+  const base = {
+    ok: true,
+    command,
+    to,
+    client_message_id: clientMessageId,
+    room_id: result.room_id,
+    realm_id: realmId,
+    origin,
+    transport,
+    ...(result.route_fallback === true ? { route_fallback: true } : {}),
+    ...(result.peer === undefined ? {} : { peer: result.peer }),
+  }
+  if (result.status === 'storage_low') {
+    return {
+      status: 'ok',
+      command,
+      exitCode: 1,
+      lines: [JSON.stringify({
+        ...base,
+        status: 'storage_low',
+        message: 'the store refused below its free-space reserve; nothing was committed — retry the SAME client_message_id after freeing space',
+      })],
+    }
+  }
+  if (result.status === 'duplicate_dropped') {
+    return {
+      status: 'ok',
+      command,
+      lines: [JSON.stringify({
+        ...base,
+        status: 'duplicate_dropped',
+        original_seq: result.original_seq,
+        message: 'the content duplicate gate dropped this send; the original row is intact — a retry that must post needs a NEW client_message_id AND changed content',
+      })],
+    }
+  }
+  if (result.status !== 'committed') {
+    throw new AgentRoomRuntimeError('request_failed', `the agent-room server answered an unreadable addressed-send result: ${JSON.stringify(result)}`)
+  }
+  const presence = result.peer?.presence
+  return {
+    status: 'ok',
+    command,
+    lines: [JSON.stringify({
+      ...base,
+      status: 'committed',
+      committed_seq: result.seq,
+      peer_presence: presence,
+      message: `committed seq=${result.seq}; the peer's process is ${presence === 'online' ? 'online' : 'offline'} — this is NOT a delivery, read, or wake receipt; the peer learns of it through its own read`,
+    })],
+  }
+}
+
+// The addressed send core, shared by `dm` and `send --to`: allocate the
+// ephemeral principal, POST /api/messages once with the Session capability
+// (the outcome-unknown discipline: one identical-id retry when the FIRST
+// connection itself was refused), then release the base lease.
+async function runAddressedSend({ command, to, text, clientMessageId: clientMessageIdFlag, replyToFlag, deps, attempt }) {
+  const { pluginDataDir, sharedDataDir, env } = deps
+  try {
+    if (to === undefined) return usage(command, '--to is required: the peer session\u0027s full address (base~locator-token@machine); see "agent-room sessions"')
+    const address = sessionAddressForms(to)
+    if (address === null) return usage(command, `"${String(to).slice(0, 96)}" is not a valid session address: ${SESSION_ADDRESS_INVALID_MESSAGE}`)
+    if (text === undefined) return usage(command, '--text is required')
+    if (text.trim().length < 1 || text.length > MESSAGE_TEXT_MAX) {
+      return usage(command, `--text must contain 1 to ${MESSAGE_TEXT_MAX} characters`)
+    }
+    if (clientMessageIdFlag !== undefined && (clientMessageIdFlag.length < 1 || clientMessageIdFlag.length > CLIENT_MESSAGE_ID_MAX)) {
+      return usage(command, `--id must contain 1 to ${CLIENT_MESSAGE_ID_MAX} characters`)
+    }
+    let replyToSeq
+    if (replyToFlag !== undefined) {
+      if (!/^[0-9]+$/.test(replyToFlag) || Number(replyToFlag) < 1) {
+        return usage(command, '--reply-to must be a positive integer sequence number')
+      }
+      replyToSeq = Number(replyToFlag)
+    }
+    const clientMessageId = clientMessageIdFlag ?? randomUUID()
+    attempt.clientMessageId = clientMessageId
+
+    let config
+    try {
+      config = loadChatIdConfig(pluginDataDir)
+    } catch (error) {
+      return refusal(command, error)
+    }
+    const { target, origin } = await resolveTarget({ pluginDataDir, sharedDataDir, env })
+    const { token, transport } = await authenticate(target, { pluginDataDir, sharedDataDir, env })
+    const realmId = await realmIdOf(target, token)
+    attempt.origin = origin
+    attempt.transport = transport
+    attempt.realmId = realmId
+
+    // The ephemeral principal: allocation carries the installation bearer;
+    // everything after carries the Session capability. The base-lease
+    // release in the finally is best-effort and bounded.
+    const allocated = await roundTrip(target, 'POST', '/api/session-principals', protocolHeaders(token), {
+      base_chat_id: config.chatId,
+      machine: machineLabel({ env }),
+      client_type: 'cli',
+    }, CLIENT_REQUEST_TIMEOUT_MS)
+    if (allocated.status !== 200) {
+      throw new AgentRoomRuntimeError(
+        allocated.body?.error?.code ?? 'request_failed',
+        allocated.body?.error?.message ?? `the agent-room server answered ${allocated.status}`,
+      )
+    }
+    const principal = allocated.body.result
+    const capability = principal.session_capability
+    try {
+      const sendBody = {
+        to: address.address,
+        client_message_id: clientMessageId,
+        text,
+        ...(replyToSeq === undefined ? {} : { reply_to_seq: replyToSeq }),
+      }
+      const sendOnce = () => roundTrip(target, 'POST', '/api/messages', sessionHeadersOf(capability), sendBody, CLIENT_REQUEST_TIMEOUT_MS)
+      attempt.postSend = true
+      const sent = await sendWithRetry(sendOnce, attempt)
+      if (sent.status === 'refusal') return sent
+      if (sent.status !== 200) {
+        throw new AgentRoomRuntimeError(
+          sent.body?.error?.code ?? 'request_failed',
+          sent.body?.error?.message ?? `the agent-room server answered ${sent.status}`,
+        )
+      }
+      return addressedResultReceipt({
+        command, to: address.address, result: sent.body.result, clientMessageId, realmId, origin, transport,
+      })
+    } finally {
+      try {
+        await roundTrip(target, 'DELETE', '/api/session-principals/current', sessionHeadersOf(capability), undefined, CLIENT_REQUEST_TIMEOUT_MS)
+      } catch {
+        // The release is best-effort: the durable principal and mailbox
+        // persist; only the 30 s base lease may remain.
+      }
+    }
+  } catch (error) {
+    if (attempt.postSend) return sendFailureReceipt(command, error, attempt)
+    return refusal(command, error)
+  }
+}
+
+// `agent-room dm --to <address> --text <text> [--id <client_message_id>] [--reply-to <seq>]`
+export async function runDmCommand(tokens, deps) {
+  const command = 'dm'
+  const attempt = { clientMessageId: null, room: null, realmId: null, origin: null, transport: null, postSend: false, provablyNotSent: false }
+  try {
+    const parsed = parseFlags(tokens, new Map([
+      ['to', 'string'], ['text', 'string'], ['id', 'string'], ['reply-to', 'integer'],
+    ]))
+    if (parsed.error !== undefined) return usage(command, parsed.error)
+    const { flags } = parsed
+    if (parsed.rest.length > 0) return usage(command, `unexpected argument "${parsed.rest[0]}"; agent-room dm takes options only`)
+    return await runAddressedSend({
+      command, to: flags.to, text: flags.text, clientMessageId: flags.id, replyToFlag: flags['reply-to'],
+      attempt, deps,
+    })
+  } catch (error) {
+    if (attempt.postSend) return sendFailureReceipt(command, error, attempt)
+    return refusal(command, error)
+  }
+}
+
+// `agent-room sessions` — the explicit realm listing (CAP-3). Enumeration is
+// THIS command's job: a send to an unresolvable address refuses quietly and
+// never names anything; this listing is where a caller looks on purpose.
+export async function runSessionsCommand(tokens, deps) {
+  const command = 'sessions'
+  try {
+    if (tokens.length > 0) return usage(command, 'agent-room sessions takes no options')
+    const { pluginDataDir, sharedDataDir, env } = deps
+    const { target, origin } = await resolveTarget({ pluginDataDir, sharedDataDir, env })
+    const { token, transport } = await authenticate(target, { pluginDataDir, sharedDataDir, env })
+    const realmId = await realmIdOf(target, token)
+    const list = await roundTrip(target, 'GET', '/api/session-principals', protocolHeaders(token), undefined, CLIENT_REQUEST_TIMEOUT_MS)
+    if (list.status !== 200) {
+      throw new AgentRoomRuntimeError(
+        list.body?.error?.code ?? 'request_failed',
+        list.body?.error?.message ?? `the agent-room server answered ${list.status}`,
+      )
+    }
+    return {
+      status: 'ok',
+      command,
+      lines: [JSON.stringify({
+        ok: true,
+        command,
+        realm_id: realmId,
+        origin,
+        transport,
+        sessions: list.body.result.sessions,
       })],
     }
   } catch (error) {

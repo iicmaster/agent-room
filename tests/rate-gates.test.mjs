@@ -926,3 +926,49 @@ test('send p95 stays within 150 ms server-side (end-to-end loopback p95 upper-bo
   t.diagnostic(`send latency over ${MEASURED} committed sends: p50=${p50.toFixed(2)}ms p95=${p95.toFixed(2)}ms max=${samples[samples.length - 1].toFixed(2)}ms`)
   assert.ok(p95 <= 150, `send p95 ${p95.toFixed(2)}ms must stay within 150 ms (NFR-5; includes the loopback RTT, so server-side processing is within it a fortiori)`)
 })
+
+test('the addressed send rides the same send bucket: a burst past capacity answers 429 rate_limited with its delay', async t => {
+  const { port, dataDir } = await startTestServer(t, {
+    ...FLOORS_OFF,
+    sendTokenCapacity: 2,
+    sendTokenRefillPerSecond: 0.001,
+  })
+  const session = await connectSession(port, dataDir, 'gatelab-addressed')
+
+  // Two session principals under ONE installation (one bucket key): the
+  // sender and the addressed peer.
+  const allocate = async base => {
+    const response = await sessioned(port, 'POST', session.sessionToken, '/api/session-principals', {
+      base_chat_id: base,
+      machine: 'gatelab',
+    })
+    assert.equal(response.status, 200, response.text)
+    return response.json().result
+  }
+  const sender = await allocate('gatelab-sender')
+  const peer = await allocate('gatelab-peer')
+
+  const addressedSend = (clientMessageId, text) => request(port, 'POST', '/api/messages', {
+    headers: {
+      [PROTOCOL_KEY]: '1',
+      authorization: `Session ${sender.session_capability}`,
+      'content-type': 'application/json; charset=utf-8',
+    },
+    body: JSON.stringify({ to: peer.address, client_message_id: clientMessageId, text }),
+  })
+
+  // The bucket (capacity 2) admits two addressed sends into the pair room...
+  const first = await addressedSend('addr-1', 'one')
+  assert.equal(first.status, 200, first.text)
+  assert.equal(first.json().result.status, 'committed')
+  const second = await addressedSend('addr-2', 'two')
+  assert.equal(second.status, 200, second.text)
+  assert.equal(second.json().result.status, 'committed')
+
+  // ...and the third is refused by the SAME bucket with its declared delay.
+  const refused = await addressedSend('addr-3', 'three')
+  assert.equal(refused.status, 429, refused.text)
+  assert.equal(refused.json().error.code, 'rate_limited')
+  assert.ok(Number.isSafeInteger(refused.json().error.retry_after_ms) && refused.json().error.retry_after_ms >= 1,
+    'the rate_limited envelope carries retry_after_ms')
+})

@@ -274,6 +274,13 @@ export const PUBLIC_ERRORS = Object.freeze({
   message_frame_too_large: 'message cannot fit the daemon frame',
   message_not_found: 'message was not found',
   node_version_unsupported: 'Node runtime is unsupported',
+  // v0.9.0 session addressing: a requested full session address is held by a
+  // live retained principal (refused explicitly — never suffixed, never
+  // merged, never taken from a live holder), and an addressed send to an
+  // unresolvable address refuses quietly — the constant body names no other
+  // session, no count, no hint (CAP-3).
+  name_taken: 'this session address is held by a live principal',
+  peer_not_found: 'no session principal resolves to this address',
   // Story 4.1: the answer route's enrollment gate — a key that holds no
   // durable enrollment record can prove possession and still mint no session.
   not_enrolled: 'this public key is not enrolled on this server',
@@ -297,6 +304,17 @@ export const PUBLIC_ERRORS = Object.freeze({
   // failed — identity binds at challenge time and cannot be substituted.
   signature_invalid: 'signature verification failed',
   sqlite_version_unsupported: 'SQLite runtime is unsupported',
+  // v0.9.0 session credentials: a session-scoped operation presented without
+  // the per-session capability header, with a capability that does not resolve
+  // to a retained principal bound to the presented selectors, or against a
+  // principal an operator revoked. The client-side counterpart — a migration
+  // source the seeder cannot read — refuses loudly rather than resetting a
+  // cursor silently (CAP-7 / failure-modes U2).
+  session_capability_required: 'this operation requires the per-session capability (Authorization: Session <capability>)',
+  session_credential_invalid: 'the session capability is missing, invalid, or does not match this session',
+  session_expired: 'session principal is expired, retention-expired, or fenced by a newer generation',
+  session_revoked: 'session principal was revoked by the operator',
+  migration_source_unreadable: 'the migration source state is unreadable; refusing to seed without it',
   // Story 4.6: the storage admission gate's refusal — free space below the
   // configured refuse reserve, or the disk-full write itself. The send route
   // answers the FR-17 status (a 200 result {status:'storage_low'} naming a
@@ -384,6 +402,15 @@ export const PUBLIC_ERROR_STATUS = Object.freeze({
   message_frame_too_large: 400,
   message_not_found: 404,
   node_version_unsupported: 500,
+  // v0.9.0 additions: a live-address collision is a conflicted state answered
+  // 409 (name_taken — refused explicitly, never suffixed); an addressed send
+  // to an unresolvable address is a quiet 404 miss (peer_not_found); the
+  // session credential family is credential-class (401) except the fenced or
+  // retention-expired principal, which is a conflicted state (409 — the
+  // capability can never become valid again by retrying); and the migration
+  // seeder's refusal is local-state corruption answered 500.
+  name_taken: 409,
+  peer_not_found: 404,
   not_enrolled: 403,
   protocol_required: 400,
   rate_limited: 429,
@@ -398,6 +425,11 @@ export const PUBLIC_ERROR_STATUS = Object.freeze({
   server_start_failed: 500,
   server_start_lock_invalid: 500,
   signature_invalid: 401,
+  session_capability_required: 401,
+  session_credential_invalid: 401,
+  session_expired: 409,
+  session_revoked: 401,
+  migration_source_unreadable: 500,
   sqlite_version_unsupported: 500,
   // Story 4.6: the storage admission gate's coded face, reserved for the
   // store's storage_low refusal should it ever surface outside the send route
@@ -637,3 +669,92 @@ export const UNTRUSTED_ENVELOPE_VERSION = '1'
 // once here (AD-9); every consumer imports them by name.
 export const RECONNECT_BACKOFF_JITTER = 0.1
 export const RECONNECT_RECOVERY_PROBE_MS = 250
+
+// --- v0.9.0: session principals, addresses & the addressed send --------------
+
+// The two lifetimes (session-protocol.md): the heartbeat lease controls only
+// the reusable base name's liveness bookkeeping; the durable principal —
+// session id, full address, pair-room membership, cursor namespace, mailbox —
+// is retained until explicit revoke or the 30-day retention expiry. Heartbeat
+// cadence is 10 s ± jitter; a lease expires after three missed beats (30 s).
+// Declared once here (AD-9); every consumer imports them by name.
+export const SESSION_HEARTBEAT_INTERVAL_MS = 10_000
+export const SESSION_HEARTBEAT_JITTER = 0.1
+export const SESSION_BASE_LEASE_MS = 30_000
+export const SESSION_PRINCIPAL_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
+// The heartbeat traffic class budget (session-protocol.md §3): 20 req/s per
+// realm at the 100-session target. On the wire each beat is one authenticated
+// actor-class request, so the per-installation request budget already bounds
+// a tenant's beats (6/min per session under the declared cadence); this
+// constant names the design envelope the gates must keep serving.
+export const SESSION_HEARTBEAT_REQUEST_BUDGET_PER_SECOND = 20
+
+// The session address grammar: `base~token@machine`. The base is a DR-1 chat
+// id (the installation's configured name); the locator token is exactly
+// SESSION_LOCATOR_TOKEN_CHARS base64url characters (7 random bytes → the
+// canonical unpadded encoding); the machine label is a bounded hostname-like
+// segment. The full address is a public routing locator — it carries no
+// authority and is never a credential. Bound derived (AD-9) from its parts so
+// the maximum is stated once: 32 + 1 + 10 + 1 + 40 = 84 characters.
+export const SESSION_LOCATOR_TOKEN_CHARS = 10
+export const SESSION_LOCATOR_TOKEN_PATTERN = new RegExp(
+  `^[A-Za-z0-9_-]{${SESSION_LOCATOR_TOKEN_CHARS}}$`,
+)
+export const SESSION_MACHINE_MAX = 40
+export const SESSION_MACHINE_PATTERN = new RegExp(
+  `^[A-Za-z0-9][A-Za-z0-9_.-]{0,${SESSION_MACHINE_MAX - 1}}$`,
+)
+export const SESSION_ADDRESS_MAX_CHARS
+  = CHAT_ID_MAX + 1 + SESSION_LOCATOR_TOKEN_CHARS + 1 + SESSION_MACHINE_MAX
+export const SESSION_ADDRESS_PATTERN = new RegExp(
+  // The base and machine sub-grammars match what allocation mints (leading
+  // alphanumeric, then letters/numbers/dot/underscore/hyphen), so an inbound
+  // address no principal could ever carry refuses at the grammar gate instead
+  // of resolving to nothing.
+  `^[A-Za-z0-9][A-Za-z0-9_.-]{0,${CHAT_ID_MAX - 1}}~[A-Za-z0-9_-]{${SESSION_LOCATOR_TOKEN_CHARS}}@[A-Za-z0-9][A-Za-z0-9_.-]{0,${SESSION_MACHINE_MAX - 1}}$`,
+)
+export const SESSION_ADDRESS_INVALID_MESSAGE
+  = `session address must be <base>~<${SESSION_LOCATOR_TOKEN_CHARS}-character locator token>@<machine> (each segment 1-${SESSION_MACHINE_MAX} characters of letters, numbers, dot, underscore, or hyphen; base at most ${CHAT_ID_MAX})`
+
+// Canonical gate beside chatIdForms: the addressed send's `to` field and the
+// notifier's self-skip comparison share this one validation point. Non-strings
+// are invalid; the gate never coerces.
+export function sessionAddressForms(value) {
+  if (typeof value !== 'string' || !SESSION_ADDRESS_PATTERN.test(value)) return null
+  return Object.freeze({ address: value })
+}
+
+// The widest attribution chat_id a message row may carry: a DR-1 chat id
+// (1-32) or a full session address (up to SESSION_ADDRESS_MAX_CHARS) — the
+// messages table's length CHECK derives from this, so a session-pair room's
+// sender attribution fits without touching the DR-1 grammar (the grammar
+// gates stay per-path; only the storage bound widens).
+export const MESSAGE_CHAT_ID_MAX = SESSION_ADDRESS_MAX_CHARS
+
+// The per-session capability (session-principals.md): 256 bits of random
+// bearer, issued once at allocation, stored server-side as a SHA-256 digest
+// only. The canonical wire form is the 43-character unpadded base64url
+// encoding of 32 bytes — the same shape discipline as the challenge
+// signature: a presented credential outside the canonical form is refused
+// before any digest work, because the base64url decoder silently skips
+// interspersed invalid characters.
+export const SESSION_CAPABILITY_BYTES = 32
+export const SESSION_CAPABILITY_CHARS = 43
+export const SESSION_CAPABILITY_PATTERN = new RegExp(
+  `^[A-Za-z0-9_-]{${SESSION_CAPABILITY_CHARS}}$`,
+)
+
+// The client-side session scope key (sessions/<scope>/ under PLUGIN_DATA): a
+// harness-provided stable conversation scope (AGENT_ROOM_SESSION_SCOPE) or the
+// derived per-process key. The shape is the safe-key grammar every path
+// segment under the private state tree uses.
+export const SESSION_SCOPE_MAX = 64
+export const SESSION_SCOPE_PATTERN = new RegExp(
+  `^[A-Za-z0-9_.-]{1,${SESSION_SCOPE_MAX}}$`,
+)
+
+// The v0.8 → v0.9 cursor migration seed marker filename: one per
+// installation, recording that the first v0.9 session already seeded from the
+// legacy realms/<realm>/cursors.json. Later sessions start at 0; re-runs are
+// no-ops.
+export const SESSION_CURSOR_SEED_MARKER_FILENAME = '.cursor_seed_done'

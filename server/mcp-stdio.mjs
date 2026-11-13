@@ -75,6 +75,8 @@ import {
   READ_PAGE_DEFAULT,
   READ_PAGE_MAX,
   REALM_KEY_PATTERN,
+  SESSION_ADDRESS_INVALID_MESSAGE,
+  SESSION_ADDRESS_PATTERN,
 } from './constants.mjs'
 import {
   APP_VERSION,
@@ -86,6 +88,7 @@ import {
   sharedDataDirectory,
 } from './runtime.mjs'
 import { createAgentRoomClient } from './client/api-client.mjs'
+import { sessionCursorSeedState, sessionScopeKey } from './client/session-state.mjs'
 import { CLIENT_RELEASE_TIMEOUT_MS } from './constants.mjs'
 
 // One wall-clock pause (the shutdown budget's timer).
@@ -156,13 +159,14 @@ const TOOL_DESCRIPTORS = Object.freeze([
   },
   {
     name: 'message_send',
-    description: 'Send one plain-text message to an Agent Room you are a member of (the Broadcast Room, or a pair room room_direct_open returned). Retries with the identical client_message_id when the outcome is unknown, so a lost reply can never duplicate the message. Your identity comes from this installation\'s session — never from arguments.',
+    description: 'Send one plain-text message in the Agent Room: EITHER by a peer session\'s full address (to, e.g. peer~a1b2c3d4e5@macbook — one call resolves the pair room between the two session principals; list sessions with room_presence or the sessions command) OR to a room you are a member of (room_id, the Broadcast Room or a pair room room_direct_open returned). Exactly one of to / room_id. Retries with the identical client_message_id when the outcome is unknown, so a lost reply can never duplicate the message. Your identity comes from this installation\'s session principal — never from arguments; `to` is a routing locator, not a credential.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
-      required: ['room_id', 'client_message_id', 'text'],
+      required: ['client_message_id', 'text'],
       properties: {
         room_id: { type: 'string', minLength: 1, maxLength: IDENTIFIER_MAX },
+        to: { type: 'string', pattern: SESSION_ADDRESS_PATTERN.source, description: 'The peer session\'s full address (base~locator-token@machine). Exactly one of to / room_id.' },
         client_message_id: { type: 'string', minLength: 1, maxLength: CLIENT_MESSAGE_ID_MAX },
         text: { type: 'string', minLength: 1, maxLength: MESSAGE_TEXT_MAX },
         reply_to_seq: { type: 'integer', minimum: 1 },
@@ -244,6 +248,15 @@ const TOOL_DESCRIPTORS = Object.freeze([
       properties: {},
     },
   },
+  {
+    name: 'sessions',
+    description: 'List the session principals of the current Agent Room realm: one row per server-issued session — session_id, full address (base~locator-token@machine), machine, generation, presence (online iff its 30 s base lease is occupied and unexpired), and lease/retention dispositions. Enumeration is THIS tool\'s job in the Agent Room: use an address from this listing as message_send to. A send to an unresolvable address refuses quietly and names no peers.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {},
+    },
+  },
 ])
 const TOOL_NAMES = new Set(TOOL_DESCRIPTORS.map(tool => tool.name))
 
@@ -253,7 +266,7 @@ const TOOL_NAMES = new Set(TOOL_DESCRIPTORS.map(tool => tool.name))
 export const TOOL_ARGUMENT_FIELDS = Object.freeze(new Map([
   ['room_presence', Object.freeze(new Set(['include_offline']))],
   ['room_direct_open', Object.freeze(new Set(['chat_id', 'target_fingerprint']))],
-  ['message_send', Object.freeze(new Set(['room_id', 'client_message_id', 'text', 'reply_to_seq']))],
+  ['message_send', Object.freeze(new Set(['room_id', 'to', 'client_message_id', 'text', 'reply_to_seq']))],
   ['message_read', Object.freeze(new Set(['room_id', 'after_seq', 'limit', 'wait_ms']))],
   ['room_status', Object.freeze(new Set([]))],
   ['room_trust_list', Object.freeze(new Set([]))],
@@ -261,6 +274,7 @@ export const TOOL_ARGUMENT_FIELDS = Object.freeze(new Map([
   ['room_held_list', Object.freeze(new Set(['room_id']))],
   ['room_held_count', Object.freeze(new Set([]))],
   ['room_list', Object.freeze(new Set([]))],
+  ['sessions', Object.freeze(new Set([]))],
 ]))
 
 function rpcError(id, code, message, data) {
@@ -314,14 +328,23 @@ function validateArguments(name, args) {
       if (!FINGERPRINT_PATTERN.test(args.target_fingerprint)) return 'target_fingerprint must be sha256: followed by 64 lowercase hex characters'
     }
   }
-  if (['message_send', 'message_read'].includes(name) && typeof args.room_id !== 'string') return 'room_id must be a string'
   if (name === 'message_send') {
+    // Exactly one destination: `to` (a full session address) or `room_id`.
+    if (args.to !== undefined && args.room_id !== undefined) {
+      return 'message_send takes exactly one destination: to (a session address) or room_id, never both'
+    }
+    if (args.to === undefined && typeof args.room_id !== 'string') return 'room_id is required when to is absent (or pass the peer session\'s full address as to)'
+    if (args.to !== undefined) {
+      if (typeof args.to !== 'string') return 'to must be a string'
+      if (!SESSION_ADDRESS_PATTERN.test(args.to)) return `to must be a full session address: ${SESSION_ADDRESS_INVALID_MESSAGE}`
+    }
     if (typeof args.client_message_id !== 'string') return 'client_message_id must be a string'
     if (typeof args.text !== 'string') return 'text must be a string'
     if (args.client_message_id.length < 1 || args.client_message_id.length > CLIENT_MESSAGE_ID_MAX) return `client_message_id must contain 1 to ${CLIENT_MESSAGE_ID_MAX} characters`
     if (args.text.trim().length < 1 || args.text.length > MESSAGE_TEXT_MAX) return `text must contain 1 to ${MESSAGE_TEXT_MAX} characters`
     if (args.reply_to_seq !== undefined && (!Number.isSafeInteger(args.reply_to_seq) || args.reply_to_seq < 1)) return 'reply_to_seq must be a positive integer'
   }
+  if (name === 'message_read' && typeof args.room_id !== 'string') return 'room_id must be a string'
   if (name === 'message_read') {
     if (args.after_seq !== undefined && (!Number.isSafeInteger(args.after_seq) || args.after_seq < 0)) return 'after_seq must be a non-negative integer'
     if (args.limit !== undefined && (!Number.isSafeInteger(args.limit) || args.limit < 1 || args.limit > READ_PAGE_MAX)) return `limit must be between 1 and ${READ_PAGE_MAX}`
@@ -448,6 +471,100 @@ function queueCursorPersist(pluginData, realmId, roomId, afterSeq) {
   return next
 }
 
+// --- v0.9.0: per-session cursors ---------------------------------------------
+//
+// When this process holds a session principal, message_read's cursor lives
+// in PLUGIN_DATA/sessions/<scope>/cursors.json — one cursor namespace per
+// session principal, so ten processes of one installation never advance each
+// other's read positions (CAP-6). The FIRST v0.9 session of an installation
+// seeds from the legacy realms/<realm>/cursors.json (CAP-7's cursor-only
+// migration: identical position, originals untouched); every later session
+// starts at 0; a re-run is a no-op. A legacy file that exists but cannot be
+// read refuses LOUDLY with the coded migration_source_unreadable — a corrupt
+// position is never silently reset. A process without a session principal
+// keeps the legacy paths below, byte-for-byte.
+
+function sessionCursorFilePath(pluginData, scope) {
+  return join(pluginData, 'sessions', assertCursorKeyRealm(scope), 'cursors.json')
+}
+
+const sessionCursorMemory = new Map()
+const sessionCursorChains = new Map()
+
+function loadSessionCursors(pluginData, realmId, scope) {
+  const path = sessionCursorFilePath(pluginData, scope)
+  let stored = {}
+  if (existsSync(path)) {
+    try {
+      const value = readJsonFile(path)
+      if (plainObject(value) && value.realm_id === realmId && plainObject(value.cursors)) {
+        stored = value.cursors
+      }
+    } catch {
+      stored = {}
+    }
+  } else {
+    // First use for this scope: run the seed (marker semantics live there —
+    // the first session copies the legacy position, later sessions start at
+    // 0, re-runs are no-ops, and an unreadable legacy file throws the coded
+    // migration_source_unreadable instead of resetting anything). The seed
+    // materializes a file ONLY when a legacy position actually existed: a
+    // fresh installation writes nothing here, so a session whose reads all
+    // fail (an ACL denial, a crash) persists no cursor at all — the old
+    // discipline that a cursor file appears only through a consumed page.
+    const seed = sessionCursorSeedState({ pluginDataDir: pluginData, realmId, scope })
+    if (seed.seeded) {
+      atomicWriteJson(seed.cursorPath, {
+        version: 1,
+        realm_id: realmId,
+        seeded_at: new Date().toISOString(),
+        cursors: seed.cursors,
+      })
+    }
+    stored = seed.cursors
+  }
+  const merged = { ...stored }
+  const prefix = `${scope}\u0000${realmId}\u0000`
+  for (const [key, entry] of sessionCursorMemory) {
+    if (key.startsWith(prefix) && plainObject(entry) && typeof entry.after_seq === 'number') {
+      merged[key.slice(prefix.length)] = entry
+    }
+  }
+  return merged
+}
+
+function writeSessionCursors(pluginData, realmId, scope, roomId, afterSeq) {
+  const cursors = loadSessionCursors(pluginData, realmId, scope)
+  const previous = cursors[roomId]?.after_seq
+  const next = typeof previous === 'number'
+    && Number.isSafeInteger(previous)
+    && previous >= 0
+    && previous > afterSeq
+    ? previous
+    : afterSeq
+  const entry = { after_seq: next, updated_at: new Date().toISOString() }
+  cursors[roomId] = entry
+  sessionCursorMemory.set(`${scope}\u0000${realmId}\u0000${roomId}`, entry)
+  atomicWriteJson(sessionCursorFilePath(pluginData, scope), {
+    version: 1,
+    realm_id: realmId,
+    cursors,
+  })
+  return next
+}
+
+function queueSessionCursorPersist(pluginData, realmId, scope, roomId, afterSeq) {
+  assertCursorKeyRealm(realmId)
+  assertCursorKeyRealm(scope)
+  const chainKey = `${scope}\u0000${realmId}`
+  const previous = sessionCursorChains.get(chainKey) ?? Promise.resolve()
+  const next = previous
+    .catch(() => { /* a failed write must not poison the chain */ })
+    .then(() => writeSessionCursors(pluginData, realmId, scope, roomId, afterSeq))
+  sessionCursorChains.set(chainKey, next)
+  return next
+}
+
 // --- The MCP server -------------------------------------------------------------
 
 export function createMcpServer({
@@ -461,6 +578,10 @@ export function createMcpServer({
   const dataDir = sharedDataDirectory(env)
   const pluginData = instanceDataDirectory(env, cwd)
   let negotiatedProtocol = DEFAULT_PROTOCOL
+  // The v0.9.0 session scope: one process start = one addressable session.
+  // The SAME key selects the client's credential file and this adapter's
+  // per-session cursor file, so the pair never disagree.
+  const sessionScope = sessionScopeKey({ env })
 
   const write = message => output.write(`${JSON.stringify(message)}\n`)
   // In-flight tool calls, keyed by their MCP request id: a cancelled
@@ -482,7 +603,7 @@ export function createMcpServer({
   // starts a fresh one.
   let notifier = null
   function getClient() {
-    clientPromise ??= createAgentRoomClient({ dataDir, pluginDataDir: pluginData })
+    clientPromise ??= createAgentRoomClient({ dataDir, pluginDataDir: pluginData, sessionScope })
     return clientPromise
   }
 
@@ -511,7 +632,12 @@ export function createMcpServer({
         try {
           const readyClient = await clientPromise
           outcome = await Promise.race([
-            readyClient.release().then(result => {
+            readyClient.release().then(async result => {
+              // v0.9.0: hand the session principal's base lease back too
+              // (best-effort, inside the same budget — a missed release
+              // costs only the 30 s lease; the retained principal and its
+              // mailbox persist regardless).
+              await readyClient.releaseSessionBase().catch(() => {})
               if (result.released === true) return result.rolled_back === true ? 'released' : 'released'
               return result.reason ?? 'unknown'
             }),
@@ -574,7 +700,7 @@ export function createMcpServer({
       // run yet: construction reads local state only. A construction failure
       // (nothing configured) leaves receive-ready off — the next tool call
       // surfaces the reason to the caller, where it belongs.
-      clientPromise ??= createAgentRoomClient({ dataDir, pluginDataDir: pluginData })
+      clientPromise ??= createAgentRoomClient({ dataDir, pluginDataDir: pluginData, sessionScope })
       const started = startNotifier({
         client: clientPromise,
         pluginDataDir: pluginData,
@@ -587,6 +713,29 @@ export function createMcpServer({
     } catch {
       // Receive-ready stays off; nothing poisoned the adapter.
     }
+  }
+
+  // The session principal lifecycle (v0.9.0, CAP-1): armed at `initialize`
+  // like the notifier, and retried after every successful tool call. The
+  // first arm allocates (or resumes, when this scope's credential file
+  // holds a resumable principal) and starts the 10 s ± jitter heartbeat; a
+  // failure here leaves the adapter unarmed and silent — the next trigger
+  // retries, and an addressed send without a principal answers the coded
+  // session_capability_required at its own call, where it belongs.
+  let sessionPrincipalArmed = false
+  const startSessionPrincipalOnce = () => {
+    if (sessionPrincipalArmed || shutdownPromise !== null) return
+    sessionPrincipalArmed = true
+    void (async () => {
+      try {
+        clientPromise ??= createAgentRoomClient({ dataDir, pluginDataDir: pluginData, sessionScope })
+        const readyClient = clientPromise
+        await readyClient.ensureSessionPrincipal()
+        readyClient.startSessionHeartbeat()
+      } catch {
+        sessionPrincipalArmed = false
+      }
+    })()
   }
 
   const callTool = async (name, args, signal) => {
@@ -607,6 +756,18 @@ export function createMcpServer({
         return toolResult(opened)
       }
       if (name === 'message_send') {
+        // The addressed destination (v0.9.0): one call from `to` to the
+        // committed seq — the sender is this process's session principal,
+        // never derived from the address. The room path is unchanged.
+        if (args.to !== undefined) {
+          return toolResult(await readyClient.sendToAddress({
+            to: args.to,
+            clientMessageId: args.client_message_id,
+            text: args.text,
+            ...(args.reply_to_seq === undefined ? {} : { replyToSeq: args.reply_to_seq }),
+            signal,
+          }))
+        }
         return toolResult(await readyClient.sendMessage({
           roomId: args.room_id,
           clientMessageId: args.client_message_id,
@@ -620,9 +781,29 @@ export function createMcpServer({
         // cursor (0 on first read); the durable cursor is advanced to
         // max(existing, next_after_seq) — monotonic, serialized per realm —
         // and a failed write is reported on the result instead of discarding
-        // the consumed page.
+        // the consumed page. v0.9.0: when this process holds a session
+        // principal the cursor namespace is PER SESSION
+        // (sessions/<scope>/cursors.json, seeded once from the legacy
+        // realms/<realm>/ file); otherwise the legacy realm file is used,
+        // byte-for-byte as before.
         const realm = await realmIdOf()
-        const stored = loadCursors(pluginData, realm)[args.room_id]?.after_seq
+        // The cursor namespace is chosen DETERMINISTICALLY: when this
+        // installation can hold a session principal, the per-session file is
+        // the namespace (the single-flight ensure resolves instantly once
+        // armed); when it definitively cannot (nothing set up, an old
+        // server), the legacy realm file is used, byte-for-byte as before.
+        let sessionActive = false
+        try {
+          if (shutdownPromise === null) {
+            await readyClient.ensureSessionPrincipal()
+            sessionActive = true
+          }
+        } catch {
+          sessionActive = false
+        }
+        const stored = sessionActive
+          ? loadSessionCursors(pluginData, realm, sessionScope)[args.room_id]?.after_seq
+          : loadCursors(pluginData, realm)[args.room_id]?.after_seq
         const afterSeq = args.after_seq !== undefined
           ? args.after_seq
           : (typeof stored === 'number' && Number.isSafeInteger(stored) && stored >= 0 ? stored : 0)
@@ -677,7 +858,11 @@ export function createMcpServer({
         let cursorPersisted = true
         const notes = []
         try {
-          await queueCursorPersist(pluginData, realm, args.room_id, result.next_after_seq)
+          if (sessionActive) {
+            await queueSessionCursorPersist(pluginData, realm, sessionScope, args.room_id, result.next_after_seq)
+          } else {
+            await queueCursorPersist(pluginData, realm, args.room_id, result.next_after_seq)
+          }
         } catch (error) {
           cursorPersisted = false
           notes.push(`cursor not persisted: ${error?.code ?? 'write_failed'}`)
@@ -717,6 +902,12 @@ export function createMcpServer({
           version: status.version,
           chat_id: readyClient.chatId,
           fingerprint: readyClient.fingerprint,
+          // v0.9.0: this process's server-issued session address once its
+          // principal exists (null before allocation) — the value peers use
+          // as this session's `to` — and the local scope key that selects
+          // this process's credential and cursor files under PLUGIN_DATA.
+          session_address: readyClient.sessionAddress,
+          session_scope: sessionScope,
         })
       }
       if (name === 'room_trust_list') {
@@ -768,6 +959,18 @@ export function createMcpServer({
           held_count: heldCount(pluginData, realm),
         })
       }
+      if (name === 'sessions') {
+        // The explicit realm listing (CAP-3): full addresses, machine,
+        // generation and computed presence per session principal — the
+        // enumeration a `to` address is chosen from. A send to an
+        // unresolvable address refuses quietly and never names any of these.
+        const realm = await realmIdOf()
+        const listing = await readyClient.listSessions({ signal })
+        return toolResult({
+          realm_id: realm,
+          sessions: listing.sessions,
+        })
+      }
       return toolResult({ code: 'tool_not_found', message: 'tool was not found' }, true)
     } catch (error) {
       const code = typeof error?.code === 'string' ? error.code : 'tool_failed'
@@ -806,8 +1009,12 @@ export function createMcpServer({
       }))
       // Receive-ready at connect: the notifier arms here (catching up the
       // unread backlog, opening the inbox a host tails) instead of waiting
-      // for the model's first tool call.
+      // for the model's first tool call — and the session principal arms
+      // beside it (allocate-or-resume plus the 10 s heartbeat), so this
+      // process is addressable and lease-alive without waiting for a tool
+      // call either.
       startNotifierOnce()
+      startSessionPrincipalOnce()
       return
     }
     if (message.method === 'ping') {
@@ -832,6 +1039,7 @@ export function createMcpServer({
       try {
         const result = await callTool(message.params.name, message.params.arguments ?? {}, controller.signal)
         if (result.isError !== true) startNotifierOnce()
+        if (result.isError !== true) startSessionPrincipalOnce()
         write(rpcResult(id, result))
       } finally {
         pending.delete(String(id))

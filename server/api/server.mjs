@@ -120,6 +120,7 @@
 import { createServer as createHttpServer } from 'node:http'
 import { createServer as createHttpsServer } from 'node:https'
 import {
+  createHash,
   createPrivateKey,
   createPublicKey,
   timingSafeEqual,
@@ -162,9 +163,16 @@ import {
   REQUEST_BUDGET_PER_MINUTE,
   SEND_TOKEN_CAPACITY,
   SEND_TOKEN_REFILL_PER_SECOND,
+  SESSION_ADDRESS_INVALID_MESSAGE,
+  SESSION_CAPABILITY_CHARS,
+  SESSION_CAPABILITY_PATTERN,
+  SESSION_MACHINE_MAX,
+  SESSION_MACHINE_PATTERN,
   STORAGE_REFUSE_FREE_BYTES,
   STORAGE_WARN_FREE_BYTES,
+  TITLE_MAX,
   chatIdForms,
+  sessionAddressForms,
 } from '../constants.mjs'
 import { openRoomLog } from '../store/room-log.mjs'
 import { resolveStorageThresholds, storageThresholdsFromEnv } from '../store/storage-gate.mjs'
@@ -795,6 +803,22 @@ registerHandler('GET /api/rooms/:id/messages', async function readMessages(conte
   const waitMs = waitMsQuery.value ?? 0
   const deadline = Date.now() + waitMs
 
+  // v0.9.0: the session-pair ACL branch. A room whose pair key carries the
+  // `ssession:` prefix is governed by per-SESSION membership (a dedicated
+  // table keyed by the two principals' session ids), never the fingerprint
+  // membership table — so a third session of EITHER installation reads
+  // nothing, and a caller with no session capability at all reads nothing.
+  // The branch is chosen by the room's OWN routing shape (which membership
+  // table governs it), so every existing read — broadcast and fingerprint
+  // pair rooms alike, for capability-less old clients included — takes
+  // exactly the old path below, unchanged.
+  const routing = context.store.roomRouting({ roomId })
+  const sessionPairRoom = routing !== null
+    && typeof routing.pair_key === 'string'
+    && routing.pair_key.startsWith('ssession:')
+  const readerSession = sessionPairRoom ? sessionCapabilityPrincipalOf(context) : null
+  if (readerSession !== null && readerSession.ok === false) return readerSession
+
   for (;;) {
     // Story 4.5: the per-iteration ban re-check (see the route comment). A
     // ban committed while this poll holds — by the operator CLI process,
@@ -809,15 +833,34 @@ registerHandler('GET /api/rooms/:id/messages', async function readMessages(conte
     if (context.store.isActorBanned(principal.actorFingerprint)) {
       return reject('banned')
     }
-    const messages = context.store.readPage({
-      roomId,
-      actorFingerprint: principal.actorFingerprint,
-      afterSeq,
-      limit,
-    })
+    // v0.9.0: the session-pair hold's per-wake capability re-check (the
+    // session analogue of the ban re-check above): a principal revoked or
+    // retention-expired while this poll held stops serving pages on the very
+    // next wake, within the hold window. One indexed primary-key lookup per
+    // wake; the Bearer path runs no such check (its liveness mechanism is
+    // the session-token fence, unchanged).
+    if (sessionPairRoom) {
+      const status = context.store.getSessionPrincipalStatus(readerSession.session_id)
+      if (status === null || status.principal_status === 'revoked') {
+        return reject('session_revoked')
+      }
+      if (status.principal_status !== 'retained') {
+        return reject('session_expired')
+      }
+    }
+    const messages = sessionPairRoom
+      ? context.store.readSessionPairPage({ roomId, sessionId: readerSession.session_id, afterSeq, limit })
+      : context.store.readPage({
+        roomId,
+        actorFingerprint: principal.actorFingerprint,
+        afterSeq,
+        limit,
+      })
     const remainingMs = deadline - Date.now()
     if (messages.length > 0 || remainingMs <= 0) {
-      const headSeq = context.store.headSeq(roomId, { actorFingerprint: principal.actorFingerprint })
+      const headSeq = sessionPairRoom
+        ? context.store.sessionPairHeadSeq({ roomId, sessionId: readerSession.session_id })
+        : context.store.headSeq(roomId, { actorFingerprint: principal.actorFingerprint })
       return {
         messages,
         next_after_seq: messages.length > 0 ? messages[messages.length - 1].seq : afterSeq,
@@ -975,6 +1018,330 @@ registerHandler('POST /api/rooms/:id/messages', function appendMessageRoute(cont
     }
   }
   return { status: 'committed', seq: outcome.message.seq, room_id: outcome.message.room_id }
+}, 'actor')
+
+// --- v0.9.0: session principals & the addressed send -----------------------------
+//
+// Session addressing (spec session-principals.md / session-protocol.md): each
+// process start receives a server-issued SESSION principal beneath the
+// installation key — session id, generation, a full `base~token@machine`
+// address (a public locator, never a credential), a 30 s base lease renewed
+// by 10 s capability heartbeats, 30-day retention, and a 256-bit capability
+// whose SHA-256 digest is the only server-side trace.
+//
+// AUTHORITY DISCIPLINE (the increment's spine): the installation bearer
+// authenticates allocation, the operator revoke, and the listing; the
+// session-scoped operations (resume, heartbeat, base-lease release, the
+// addressed send, and session-pair reads) authenticate by the per-session
+// capability — `Authorization: Session <capability>`, resolved to its bound
+// principal by the pipeline's Session-scheme branch BEFORE the handler runs
+// (the digest lookup yields the installation fingerprint, so the ban gate and
+// the request budget apply unchanged). Session id, generation and address in
+// a request body are SELECTORS: presented without the matching capability
+// they authorize nothing. The raw capability appears on the wire exactly
+// once — the allocation response — and never in a log, listing, or receipt.
+
+// The Session-scheme credential extraction. A missing header on a
+// session-scoped route is session_capability_required; a present-but-
+// non-canonical value is refused before any digest work (the challenge
+// signature's canonical-form lesson: the base64url decoder silently skips
+// interspersed invalid characters).
+function sessionCapabilityFromHeaders(headers) {
+  const raw = headers?.authorization ?? headers?.['Authorization']
+  const value = Array.isArray(raw) ? raw[0] : raw
+  if (typeof value !== 'string') return { error: reject('session_capability_required') }
+  const match = /^Session\s+(\S+)\s*$/i.exec(value)
+  if (!match) return { error: reject('session_capability_required') }
+  if (match[1].length > SESSION_CAPABILITY_CHARS || !SESSION_CAPABILITY_PATTERN.test(match[1])) {
+    return { error: reject('session_credential_invalid') }
+  }
+  return { capability: match[1] }
+}
+
+// SHA-256 of the presented capability — the digest the store keyed the
+// principal under. The raw value never crosses this function's return.
+function capabilityDigestOf(capability) {
+  return createHash('sha256').update(capability, 'utf8').digest('hex')
+}
+
+// The handler-side principal read: on a session-scoped route the pipeline's
+// Session-scheme branch has already resolved the capability to its principal
+// and attached the row. A Bearer-authenticated caller (installation token,
+// no capability) reaches this handler with no sessionPrincipal and answers
+// session_capability_required — the protocol's "installation bearer without
+// the per-session capability" refusal.
+function sessionCapabilityPrincipalOf(context) {
+  const principal = context.session
+  const row = principal && typeof principal === 'object' ? principal.sessionPrincipal : null
+  if (
+    row
+    && typeof row === 'object'
+    && typeof row.session_id === 'string'
+    && Number.isSafeInteger(row.generation)
+  ) {
+    return row
+  }
+  return reject('session_capability_required')
+}
+
+// The two selectors every session-scoped body carries. The SESSION ID decides
+// the credential question: a capability that does not belong to the presented
+// session id is session_credential_invalid (401 — the CAPABILITY_MISMATCH
+// refusal, never a fallback to installation identity). The GENERATION decides
+// the liveness question: a correct capability presenting a stale generation
+// hits the fence — session_expired (409, the OLD_GEN_HEARTBEAT refusal).
+// Success is `{ok:true, sessionId, generation}`; rejections are the standard
+// pipeline shape (`ok:false`), returned verbatim by the handlers.
+function requireSessionSelectors(body, principal) {
+  const sessionIdField = requiredString(body?.session_id, 'session_id')
+  if (sessionIdField.error) return sessionIdField.error
+  const generationField = body?.generation
+  if (!Number.isSafeInteger(generationField) || generationField < 1) {
+    return reject('invalid_request', 'generation is required: the principal generation as issued')
+  }
+  if (sessionIdField.value !== principal.session_id) {
+    return reject('session_credential_invalid', 'the session capability does not match the presented session_id selector')
+  }
+  if (generationField !== principal.generation) {
+    return reject('session_expired', `session generation ${generationField} is fenced; the current generation is ${principal.generation}`)
+  }
+  return { ok: true, sessionId: sessionIdField.value, generation: generationField }
+}
+
+// POST /api/session-principals — allocate (installation bearer alone). The
+// server derives the fingerprint from the token and mints session id,
+// generation 1, locator token, capability and the address atomically. Base
+// occupancy is never exclusive: a second process allocating the same base
+// receives its own locator token and both succeed; a full address held by a
+// LIVE retained principal refuses name_taken with the holder's machine —
+// never suffixed, never merged, never displaced. The capability rides the
+// response exactly once; nothing here logs it.
+registerHandler('POST /api/session-principals', function allocateSessionPrincipalRoute(context) {
+  const principal = sessionPrincipalOf(context)
+  if (principal.ok === false) return principal
+  const baseChatId = context.body?.base_chat_id
+  if (baseChatId === undefined || baseChatId === null || baseChatId === '') {
+    return reject('invalid_request', 'base_chat_id is required: the DR-1 chat id the address\u0027s base segment is shaped from')
+  }
+  const forms = chatIdForms(baseChatId)
+  if (forms === null) return reject('invalid_chat_id', CHAT_ID_INVALID_MESSAGE)
+  const machine = context.body?.machine
+  if (machine === undefined || machine === null || machine === '') {
+    return reject('invalid_request', 'machine is required: the bounded machine label the address captures once (hostname changes mid-session never relocate an address)')
+  }
+  if (typeof machine !== 'string' || machine.length > SESSION_MACHINE_MAX || !SESSION_MACHINE_PATTERN.test(machine)) {
+    return reject('invalid_request', `machine must be 1-${SESSION_MACHINE_MAX} characters starting with a letter or number, using letters, numbers, dot, underscore, or hyphen`)
+  }
+  const declaredRaw = context.body?.client_type
+  const declaredType = declaredRaw === null ? undefined : declaredRaw
+  if (declaredType !== undefined
+    && (typeof declaredType !== 'string' || !CLIENT_TYPES.includes(declaredType))) {
+    return reject('invalid_request', `client_type must be one of: ${CLIENT_TYPES.join(', ')}`)
+  }
+  const allocated = context.store.allocateSessionPrincipal({
+    installationFingerprint: principal.actorFingerprint,
+    baseName: forms.display,
+    machine,
+    clientType: declaredType === undefined ? null : declaredType,
+  })
+  return {
+    session_id: allocated.session_id,
+    generation: allocated.generation,
+    address: allocated.address,
+    base_name: allocated.base_name,
+    machine: allocated.machine,
+    base_lease_expires_at: allocated.base_lease_expires_at,
+    principal_retention_expires_at: allocated.principal_retention_expires_at,
+    // The one wire appearance of the raw capability. Never logged, never
+    // echoed by any other surface; the client stores it at 0600.
+    session_capability: allocated.session_capability,
+  }
+}, 'actor')
+
+// POST /api/session-principals/resume — an offline-but-retained principal
+// presents its stored capability; the body's session_id/generation are
+// selectors. Success increments the generation (fencing every older beat),
+// refreshes the base lease, and returns the SAME session id and full
+// address — never taking a base another live principal holds. Revoked or
+// retention-expired principals answer session_revoked / session_expired and
+// mutate nothing; the caller allocates a new principal.
+registerHandler('POST /api/session-principals/resume', function resumeSessionPrincipalRoute(context) {
+  const principal = sessionCapabilityPrincipalOf(context)
+  if (principal.ok === false) return principal
+  const selectors = requireSessionSelectors(context.body, principal)
+  if (selectors.ok !== true) return selectors
+  const resumed = context.store.resumeSessionPrincipal({
+    sessionId: selectors.sessionId,
+    generation: selectors.generation,
+  })
+  return {
+    session_id: resumed.session_id,
+    generation: resumed.generation,
+    address: resumed.address,
+    base_lease_expires_at: resumed.base_lease_expires_at,
+    principal_retention_expires_at: resumed.principal_retention_expires_at,
+    last_heartbeat_at: resumed.last_heartbeat_at,
+  }
+}, 'actor')
+
+// POST /api/session-principals/heartbeat — the 10 s beat against the 30 s
+// lease. A valid beat renews ONLY this principal's lease; a fenced
+// generation answers session_expired and renews nothing (an old generation
+// can never displace the new holder of anything). Heartbeat traffic rides
+// the same per-installation request budget as every actor request; its
+// declared traffic class (20 req/s per realm at the 100-session target) is
+// SESSION_HEARTBEAT_REQUEST_BUDGET_PER_SECOND in the constants module.
+registerHandler('POST /api/session-principals/heartbeat', function heartbeatSessionPrincipalRoute(context) {
+  const principal = sessionCapabilityPrincipalOf(context)
+  if (principal.ok === false) return principal
+  const selectors = requireSessionSelectors(context.body, principal)
+  if (selectors.ok !== true) return selectors
+  const beaten = context.store.heartbeatSessionPrincipal({
+    sessionId: selectors.sessionId,
+    generation: selectors.generation,
+  })
+  return {
+    session_id: beaten.session_id,
+    generation: beaten.generation,
+    address: beaten.address,
+    base_lease_expires_at: beaten.base_lease_expires_at,
+    principal_retention_expires_at: beaten.principal_retention_expires_at,
+    last_heartbeat_at: beaten.last_heartbeat_at,
+  }
+}, 'actor')
+
+// DELETE /api/session-principals/current — release the base lease only
+// (orderly exit). Idempotent: releasing a released or expired lease is a
+// success. The durable principal, full address, pair-room membership, cursor
+// and mailbox all persist; the principal may resume with its capability.
+registerHandler('DELETE /api/session-principals/current', function releaseSessionBaseRoute(context) {
+  const principal = sessionCapabilityPrincipalOf(context)
+  if (principal.ok === false) return principal
+  context.store.releaseSessionBaseLease({ sessionId: principal.session_id })
+  return null
+}, 'actor')
+
+// POST /api/session-principals/revoke — the operator action (installation
+// bearer). The principal must belong to the caller's installation; the
+// refusal is zero-state and reveals nothing. Marks the principal revoked,
+// frees its base lease, and ends retention: future capability use answers
+// session_revoked. Room-log messages are never deleted. Idempotent.
+registerHandler('POST /api/session-principals/revoke', function revokeSessionPrincipalRoute(context) {
+  const principal = sessionPrincipalOf(context)
+  if (principal.ok === false) return principal
+  const sessionIdField = requiredString(context.body?.session_id, 'session_id')
+  if (sessionIdField.error) return sessionIdField.error
+  const reason = context.body?.reason
+  if (reason !== undefined && reason !== null
+    && (typeof reason !== 'string' || reason.length > TITLE_MAX)) {
+    return reject('invalid_request', `reason must be a string of at most ${TITLE_MAX} characters when provided`)
+  }
+  context.store.revokeSessionPrincipal({
+    sessionId: sessionIdField.value,
+    installationFingerprint: principal.actorFingerprint,
+  })
+  return null
+}, 'actor')
+
+// GET /api/session-principals — the explicit realm listing (CAP-3:
+// enumeration is this command's job, never a piggyback on a send refusal).
+// Every principal with its computed presence: online iff its own base lease
+// is occupied and unexpired. The projection carries no credential material
+// and no digest.
+registerHandler('GET /api/session-principals', function listSessionPrincipalsRoute(context) {
+  const principal = sessionPrincipalOf(context)
+  if (principal.ok === false) return principal
+  const rows = context.store.listSessionPrincipals({})
+  return {
+    sessions: rows.map(row => ({
+      session_id: row.session_id,
+      generation: row.generation,
+      address: row.address,
+      base_name: row.base_name,
+      machine: row.machine,
+      client_type: row.client_type,
+      created_at: row.created_at,
+      last_heartbeat_at: row.last_heartbeat_at,
+      base_lease_expires_at: row.base_lease_expires_at,
+      base_lease_status: row.base_lease_status,
+      principal_retention_expires_at: row.principal_retention_expires_at,
+      principal_status: row.principal_status,
+      presence: row.presence,
+    })),
+  }
+}, 'actor')
+
+// POST /api/messages — the addressed send (CAP-2): one call from `to` (a full
+// session address) to the committed seq. The sender is the capability's
+// bound principal — never derived from `to`, which is a routing locator and
+// could not change the sender even if it wanted to. The server resolves the
+// peer, opens-or-reuses the pair room of the two SESSION principals, and
+// appends with the sender's full address as attribution and the INSTALLATION
+// fingerprint as provenance (trust stays installation-scoped; the receiver
+// trust policy applies to this body exactly as to every body-returning
+// path). The receipt speaks only what is proven: committed seq=N (or the
+// FR-17 statuses the shared append machinery produces) and the peer's
+// process presence — never delivered, read, handled, or awakened. An
+// unresolvable address answers the CONSTANT quiet peer_not_found: no names,
+// no counts, no hints, byte-identical whether the realm holds one session or
+// one hundred.
+registerHandler('POST /api/messages', function addressedSendRoute(context) {
+  const principal = sessionCapabilityPrincipalOf(context)
+  if (principal.ok === false) return principal
+  const to = context.body?.to
+  if (to === undefined || to === null || to === '') {
+    return reject('invalid_request', 'to is required: the peer session\u0027s full address (base~token@machine)')
+  }
+  const addressForms = sessionAddressForms(to)
+  if (addressForms === null) return reject('invalid_chat_id', SESSION_ADDRESS_INVALID_MESSAGE)
+  const clientMessageIdField = requiredString(context.body?.client_message_id, 'client_message_id')
+  if (clientMessageIdField.error) return clientMessageIdField.error
+  const textField = requiredString(context.body?.text, 'text')
+  if (textField.error) return textField.error
+  const replyToSeq = context.body?.reply_to_seq
+
+  const peer = context.store.resolveSessionPrincipalByAddress(addressForms.address)
+  if (peer === null) return reject('peer_not_found')
+  const room = context.store.openSessionPairRoom({
+    sessionIds: [principal.session_id, peer.session_id],
+  })
+  const nowMs = Date.now()
+  const peerPresence = peer.base_lease_status === 'occupied'
+    && Date.parse(peer.base_lease_expires_at) > nowMs
+    ? 'online'
+    : 'offline'
+  let outcome
+  try {
+    outcome = context.store.appendSessionPairMessage({
+      roomId: room.id,
+      sessionId: principal.session_id,
+      installationFingerprint: principal.installation_fingerprint,
+      chatId: principal.address,
+      clientMessageId: clientMessageIdField.value,
+      text: textField.value,
+      replyToSeq,
+    })
+  } catch (error) {
+    if (error?.code === 'storage_low') {
+      return { status: 'storage_low' }
+    }
+    throw error
+  }
+  const peerFacts = { session_id: peer.session_id, address: peer.address, presence: peerPresence }
+  if (outcome.duplicateDropped) {
+    return {
+      status: 'duplicate_dropped',
+      original_seq: outcome.original.seq,
+      room_id: outcome.original.room_id,
+      peer: peerFacts,
+    }
+  }
+  return {
+    status: 'committed',
+    seq: outcome.message.seq,
+    room_id: outcome.message.room_id,
+    peer: peerFacts,
+  }
 }, 'actor')
 
 // --- Story 5.1 + 5.2: the viewer surface (FR-18/HCI-5) --------------------------
@@ -1489,7 +1856,53 @@ export async function startServer({
   // the server's own state, and a failed liveness write must not silently
   // masquerade as freshness.
   const baseSessionVerifier = sessionVerifier ?? createSessionVerifier({ registry: effectiveRegistry })
+  // v0.9.0: the Session-scheme branch of the actor auth slot. On EXACTLY the
+  // (path, method) pairs below, an `Authorization: Session <capability>`
+  // credential resolves — via the digest lookup the store keys its principals
+  // under — to the one principal the capability was minted for, carrying the
+  // installation fingerprint (so the pipeline's ban gate and request budget
+  // apply unchanged) and the principal row (so the handler checks its
+  // selectors against it). The frozen read route takes BOTH credential kinds
+  // additively but only on its READ verb: a Bearer keeps the exact frozen
+  // behavior everywhere, and a Session header on ANY old route or verb — the
+  // per-room send included — answers the canonical unauthorized, byte-for-
+  // byte as before this branch existed.
+  const SESSION_CAPABILITY_ROUTES = new Map([
+    ['/api/session-principals/resume', new Set(['POST'])],
+    ['/api/session-principals/heartbeat', new Set(['POST'])],
+    ['/api/session-principals/current', new Set(['DELETE'])],
+    ['/api/messages', new Set(['POST'])],
+    ['/api/rooms/:id/messages', new Set(['GET'])],
+  ])
+  const sessionCapabilityVerifier = context => {
+    const presented = sessionCapabilityFromHeaders(context.headers)
+    if (presented.error) return presented.error
+    const row = store.findSessionPrincipalByCapabilityDigest(capabilityDigestOf(presented.capability))
+    if (row === null) return reject('session_credential_invalid')
+    if (row.principal_status === 'revoked') return reject('session_revoked')
+    if (row.principal_status !== 'retained') return reject('session_expired')
+    return {
+      actorFingerprint: row.installation_fingerprint,
+      // The capability principal's pipeline key: a stable digest-derived
+      // name in the SAME namespace the fence and the in-flight pins use.
+      // Capability principals are never displaced by the takeover fence, so
+      // this key never enters its superseded set — the capability's own
+      // revocation discipline (revoke / retention / generation fencing) is
+      // the authority that ends it.
+      sessionKey: `scap:${capabilityDigestOf(presented.capability)}`,
+      sessionPrincipal: row,
+    }
+  }
   const effectiveSessionVerifier = context => {
+    const authHeader = context.headers?.authorization ?? context.headers?.['Authorization']
+    const authValue = Array.isArray(authHeader) ? authHeader[0] : authHeader
+    if (
+      typeof authValue === 'string'
+      && /^Session\s+/i.test(authValue)
+      && SESSION_CAPABILITY_ROUTES.get(context.route?.path)?.has(context.method) === true
+    ) {
+      return sessionCapabilityVerifier(context)
+    }
     const outcome = baseSessionVerifier(context)
     if (
       outcome

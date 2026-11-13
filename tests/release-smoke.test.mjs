@@ -732,7 +732,7 @@ async function driveDmRoundTrip(left, right, { clientMessageId }) {
   // the chosen one).
   const leftStatus = (await left.client.tool('room_status')).structuredContent
   const rightStatus = (await right.client.tool('room_status')).structuredContent
-  assert.deepEqual(keysOf(leftStatus), ['broadcast_room_id', 'chat_id', 'fingerprint', 'realm_id', 'version'])
+  assert.deepEqual(keysOf(leftStatus), ['broadcast_room_id', 'chat_id', 'fingerprint', 'realm_id', 'session_address', 'session_scope', 'version'])
   assert.equal(leftStatus.chat_id, left.chatId)
   assert.equal(rightStatus.chat_id, right.chatId)
   assert.notEqual(

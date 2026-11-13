@@ -7,6 +7,7 @@
 // proof and before invite use is consumed).
 
 import { createIdentityClaimOperations } from './claims.mjs'
+import { createSessionPrincipalOperations } from './session-principals.mjs'
 import { createBanOperations } from '../store/bans.mjs'
 import { createInviteOperations } from '../store/invites.mjs'
 
@@ -18,10 +19,16 @@ export function createIdentityRepository({ database, withImmediateTransaction, v
     isBanned: fingerprint => bans.isActorBanned(fingerprint),
   })
   const claims = createIdentityClaimOperations({ database, withImmediateTransaction, validate })
+  // v0.9.0: the durable session principals (allocate/heartbeat/resume/
+  // release/revoke/resolve/list) compose here like every other identity
+  // operation — their table DDL is the store's open-path convergence; the
+  // ops receive the shared connection and transaction runner.
+  const sessionPrincipals = createSessionPrincipalOperations({ database, withImmediateTransaction, validate })
 
   return Object.freeze({
     ...claims,
     ...bans,
     ...invites,
+    ...sessionPrincipals,
   })
 }

@@ -68,6 +68,7 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -855,9 +856,24 @@ const utf8Bytes = text => Buffer.from(text, 'utf8')
 
 function readCursorDoc(label, path) {
   const doc = JSON.parse(readFileSync(path, 'utf8'))
-  assert.deepEqual(keysOf(doc), ['cursors', 'version'], `${label}: the cursor document carries exactly version and cursors`)
+  // v0.9.0: the per-session cursor document carries version, realm_id and
+  // cursors (plus a seed stamp when a legacy file existed).
+  assert.deepEqual(
+    keysOf(doc).filter(name => name !== 'seeded_at').sort(),
+    ['cursors', 'realm_id', 'version'],
+    `${label}: the cursor document carries exactly version, realm_id and cursors`,
+  )
   assert.equal(doc.version, 1, `${label}: the cursor document version is 1`)
   return doc
+}
+
+// The per-session cursor path (v0.9.0): one MCP child per installation here,
+// so exactly one scope directory exists per installation.
+function sessionCursorPathOf(world, label) {
+  const sessionsDir = join(world.installations[label].pluginData, 'sessions')
+  const scopes = readdirSync(sessionsDir).filter(name => !name.startsWith('.'))
+  assert.equal(scopes.length, 1, `${label}: exactly one session scope directory`)
+  return join(sessionsDir, scopes[0], 'cursors.json')
 }
 
 // --- The drill ---------------------------------------------------------------------------
@@ -904,8 +920,8 @@ test('REL-2 continuity drill: randomized SIGKILL/restore cycles under continuous
     const status = result.structuredContent
     assert.deepEqual(
       keysOf(status),
-      ['broadcast_room_id', 'chat_id', 'fingerprint', 'realm_id', 'version'],
-      `${phaseLabel}: room_status returns exactly the frozen five keys`,
+      ['broadcast_room_id', 'chat_id', 'fingerprint', 'realm_id', 'session_address', 'session_scope', 'version'],
+      `${phaseLabel}: room_status returns exactly the frozen key set (v0.9.0 adds session_address + session_scope)`,
     )
     return status
   }
@@ -1153,7 +1169,7 @@ async function waitUntilRssSettled(serverPid, { tolerancePct, maxWaitMs = 45_000
   for (const [label, participant] of [['alice', alice], ['bob', bob]]) {
     const cursorBeforeHold = readCursorDoc(
       label,
-      join(world.installations[label].pluginData, 'realms', realmId, 'cursors.json'),
+      sessionCursorPathOf(world, label),
     ).cursors[broadcastRoomId].after_seq
     const held = await participant.tool('message_read', { room_id: broadcastRoomId, wait_ms: FINAL_LONGPOLL_WAIT_MS })
     assert.equal(held.isError, undefined, `${label}: the held long-poll answered ${JSON.stringify(held.structuredContent)}`)
@@ -1194,11 +1210,10 @@ async function waitUntilRssSettled(serverPid, { tolerancePct, maxWaitMs = 45_000
   // client's own, written under PLUGIN_DATA during the drill's reads. Capture
   // them now; everything at or below them was already delivered.
 
-  const cursorPathOf = label => join(world.installations[label].pluginData, 'realms', realmId, 'cursors.json')
+  const cursorPathOf = label => sessionCursorPathOf(world, label)
   const capturedCursors = new Map()
   for (const label of ['alice', 'bob']) {
-    assert.equal(modeOf(join(world.installations[label].pluginData, 'realms'), 'directory'), 0o700, `${label}: the realms directory is 0700`)
-    assert.equal(modeOf(join(world.installations[label].pluginData, 'realms', realmId), 'directory'), 0o700, `${label}: the realm directory is 0700`)
+    assert.equal(modeOf(join(world.installations[label].pluginData, 'sessions'), 'directory'), 0o700, `${label}: the sessions directory is 0700`)
     assert.equal(modeOf(cursorPathOf(label), 'file'), 0o600, `${label}: cursors.json is 0600`)
     const doc = readCursorDoc(label, cursorPathOf(label))
     for (const roomId of trafficRooms) {

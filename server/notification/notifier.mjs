@@ -81,6 +81,7 @@ import {
   NOTIFY_CMD_TIMEOUT_MS,
   READ_HOLD_MAX_MS,
   READ_PAGE_MAX,
+  SESSION_ADDRESS_PATTERN,
 } from '../constants.mjs'
 import { reconnectDelayMs } from '../client/api-client.mjs'
 import { loadPersistedCursors } from '../client/cursors.mjs'
@@ -310,8 +311,31 @@ export function startNotifier({
     })
   }
 
+  // The self-skip identity (v0.9.0, CAP-4): in a session-pair room the
+  // delivery unit is the SESSION, so this watcher skips exactly one row —
+  // the one whose attribution chat_id is THIS session's own full address,
+  // read from the client's CURRENT getter per delivery (the principal arms
+  // asynchronously after the notifier starts, so a snapshot taken at start
+  // would be null forever). Rows from a sibling session of the same
+  // installation carry that sibling's address and are DELIVERED (this is the
+  // v0.8 fix: two sessions on one key wake each other), and a foreign
+  // installation's rows keep the fingerprint filter and the trust matrix
+  // below. An old-style row (chat id without the session-address shape) from
+  // this installation is this installation's own words in an old-style room
+  // — skipped as before. A client without a session principal (the v0.8
+  // shape) keeps the pure fingerprint filter, byte-for-byte.
+  const isForeignRow = row => {
+    if (row?.actor_fingerprint !== client.fingerprint) return true
+    const ownSessionAddress = typeof client.sessionAddress === 'string' ? client.sessionAddress : null
+    if (ownSessionAddress !== null && typeof row.chat_id === 'string'
+      && SESSION_ADDRESS_PATTERN.test(row.chat_id)) {
+      return row.chat_id !== ownSessionAddress
+    }
+    return false
+  }
+
   const deliver = async (roomId, messages) => {
-    const foreign = messages.filter(row => row?.actor_fingerprint !== client.fingerprint)
+    const foreign = messages.filter(isForeignRow)
     if (foreign.length === 0) return
     const realmId = await realmIdOf()
     const delivery = createDeliveryClassifier({
@@ -349,7 +373,7 @@ export function startNotifier({
     const page = await read(roomId, fromSeq, 0, signal)
     // The window is clipped to the CAPTURED head: rows that landed after the
     // snapshot belong to the live watcher's future, not to this estimate.
-    const fresh = page.messages.filter(row => row?.seq > storedCursor && row?.seq <= head && row?.actor_fingerprint !== client.fingerprint)
+    const fresh = page.messages.filter(row => row?.seq > storedCursor && row?.seq <= head && isForeignRow(row))
     const line = `${JSON.stringify({ ts: new Date().toISOString(), kind: STATUS_KIND, event: 'unread_backlog', room_id: roomId, unread_from: storedCursor, head_seq: head, foreign_in_window: fresh.length, window_from_seq: fromSeq })}\n`
     // The hint is a wake, not just a note: a hook-only host must be poked by
     // the backlog too. The inbox line and the hook share the same payload.
@@ -409,7 +433,10 @@ export function startNotifier({
     // startup must never silently skip its catch-up.
     if (startupCursors === null) {
       try {
-        startupCursors = loadPersistedCursors(pluginDataDir, await realmIdOf())
+        // The env rides through: the per-session cursor namespace derives
+        // AGENT_ROOM_SESSION_SCOPE from the same env the adapter used, so a
+        // declared scope reads its own position, never a stale derivation.
+        startupCursors = loadPersistedCursors(pluginDataDir, await realmIdOf(), { env })
       } catch {
         startupCursors = null
       }

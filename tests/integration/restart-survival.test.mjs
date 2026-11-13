@@ -928,7 +928,7 @@ test('restart survival: acknowledged traffic, sequences, reply links, claims, ro
     const status = result.structuredContent
     assert.deepEqual(
       keysOf(status),
-      ['broadcast_room_id', 'chat_id', 'fingerprint', 'realm_id', 'version'],
+      ['broadcast_room_id', 'chat_id', 'fingerprint', 'realm_id', 'session_address', 'session_scope', 'version'],
       `${phaseLabel}: room_status returns exactly the frozen five keys`,
     )
     assert.equal(status.chat_id, participant.label, `${phaseLabel}: ${participant.label} is bound as "${participant.label}"`)
@@ -1028,20 +1028,37 @@ test('restart survival: acknowledged traffic, sequences, reply links, claims, ro
   assert.equal(bobDmPage.next_after_seq, 1, "bob's DM cursor is 1 — the final send has not run yet")
 
   // --- Pre-kill cursor state --------------------------------------------------------
+  //
+  // v0.9.0: the cursor namespace is PER SESSION — sessions/<scope>/ under
+  // each installation's PLUGIN_DATA. The children persist across the SERVER
+  // kill/restart below (only the server dies), so scopes — and cursor file
+  // identities — are stable for the whole test.
 
-  const realmsDirOf = installation => join(installation.pluginData, 'realms')
-  const realmDirOf = installation => join(realmsDirOf(installation), realmId)
-  const cursorPathOf = installation => join(realmDirOf(installation), 'cursors.json')
+  const sessionsDirOf = installation => join(installation.pluginData, 'sessions')
+  const scopeNameOf = installation => {
+    const scopes = readdirSync(sessionsDirOf(installation)).filter(name => !name.startsWith('.'))
+    assert.equal(scopes.length, 1, 'exactly one session scope directory')
+    return scopes[0]
+  }
+  const scopeDirOf = installation => join(sessionsDirOf(installation), scopeNameOf(installation))
+  const cursorPathOf = installation => join(scopeDirOf(installation), 'cursors.json')
   const readCursorDoc = path => JSON.parse(readFileSync(path, 'utf8'))
   const captureCursor = path => ({ bytes: readFileSync(path), identity: fileIdentity(path) })
+  // The surviving scope NAMES, pinned pre-kill: the MCP children persist
+  // across the SERVER's kill/restart, so the same scope directories must be
+  // the only ones after the restart — no new scope, no rename.
+  const survivingScopeNames = new Map([
+    ['alice', scopeNameOf(world.installations.alice)],
+    ['bob', scopeNameOf(world.installations.bob)],
+  ])
 
   for (const [label, installation] of [['alice', world.installations.alice], ['bob', world.installations.bob]]) {
-    assert.equal(modeOf(realmsDirOf(installation), 'directory'), 0o700, `${label}: the realms directory is 0700`)
-    assert.equal(modeOf(realmDirOf(installation), 'directory'), 0o700, `${label}: the realm directory R is 0700`)
+    assert.equal(modeOf(sessionsDirOf(installation), 'directory'), 0o700, `${label}: the sessions directory is 0700`)
+    assert.equal(modeOf(scopeDirOf(installation), 'directory'), 0o700, `${label}: the session scope directory is 0700`)
     assert.equal(modeOf(cursorPathOf(installation), 'file'), 0o600, `${label}: cursors.json is 0600`)
   }
   const aliceCursorsPre = readCursorDoc(cursorPathOf(world.installations.alice))
-  assert.deepEqual(keysOf(aliceCursorsPre), ['cursors', 'version'], 'alice: the cursor document carries exactly version and cursors')
+  assert.deepEqual(keysOf(aliceCursorsPre).filter(name => name !== 'seeded_at').sort(), ['cursors', 'realm_id', 'version'], 'alice: the cursor document carries exactly version, realm_id and cursors (plus a seed stamp when present)')
   assert.equal(aliceCursorsPre.version, 1, 'alice: the cursor document version is 1')
   assert.deepEqual(keysOf(aliceCursorsPre.cursors), [broadcastRoomId, pairRoomId].sort(), 'alice holds exactly the two room entries')
   for (const roomId of [broadcastRoomId, pairRoomId]) {
@@ -1462,14 +1479,16 @@ test('restart survival: acknowledged traffic, sequences, reply links, claims, ro
 
     // --- Cursor files after the reads -------------------------------------------------
 
-    const assertRealmDirectorySingular = (label, installation) => {
-      assert.deepEqual(readdirSync(realmsDirOf(installation)), [realmId], `${label}: exactly the realm directory R remains — no new or renamed realm directory`)
+    const assertSessionDirectorySingular = (label, installation) => {
+      const scopes = readdirSync(sessionsDirOf(installation)).filter(name => !name.startsWith('.'))
+      assert.deepEqual(scopes, [survivingScopeNames.get(label)], `${label}: exactly the PRE-KILL session scope survives — no new or renamed scope`)
+      assert.deepEqual(readCursorDoc(cursorPathOf(installation)).realm_id, realmId, `${label}: the cursor document still names realm R`)
     }
     for (const [label, installation] of [['alice', world.installations.alice], ['bob', world.installations.bob]]) {
-      assert.equal(modeOf(realmsDirOf(installation), 'directory'), 0o700, `${label}: the realms directory is still 0700`)
-      assert.equal(modeOf(realmDirOf(installation), 'directory'), 0o700, `${label}: the realm directory R is still 0700`)
+      assert.equal(modeOf(sessionsDirOf(installation), 'directory'), 0o700, `${label}: the sessions directory is still 0700`)
+      assert.equal(modeOf(scopeDirOf(installation), 'directory'), 0o700, `${label}: the session scope directory is still 0700`)
       assert.equal(modeOf(cursorPathOf(installation), 'file'), 0o600, `${label}: cursors.json is still 0600`)
-      assertRealmDirectorySingular(label, installation)
+      assertSessionDirectorySingular(label, installation)
     }
     const aliceCursorsPost = readCursorDoc(cursorPathOf(world.installations.alice))
     assert.deepEqual(keysOf(aliceCursorsPost.cursors), [broadcastRoomId, pairRoomId].sort(), 'alice still holds exactly the two room entries')

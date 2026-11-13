@@ -380,7 +380,7 @@ test('the gate warn rate limit is one line per interval on the injected clock', 
 // code a genuinely full filesystem produces — while the injected free-space
 // source stays far above the refuse reserve. The mapping under test is the
 // race case: the gate passed, and the WRITE hit the full disk.
-const DISK_FULL_PAGES = 28
+const DISK_FULL_PAGES = 36
 
 function largeText(seed, size = 3000) {
   return `${seed}-`.padEnd(size, seed)
@@ -507,6 +507,50 @@ test('a disk-full send over the wire answers 200 {status:storage_low}, never a r
     text: 'commits once the disk has room again',
   })
   assert.equal(back.message.seq, committedCount + 1)
+})
+
+test('the ADDRESSED send under a full disk answers the same 200 {status:storage_low} result', async t => {
+  // v0.9.0: the addressed append rides the SAME storage admission gate inside
+  // the same append transaction, so the sender's receipt is the identical
+  // explicit, never-acknowledged 200 result — never an error envelope.
+  const dataDir = makeDataDir(t)
+  const server = await startTestServer(t, dataDir, {
+    storageFreeBytesFn: () => 2 * GIB,
+    maxPageCount: 40,
+  })
+  const alice = await connectSession(server.port, dataDir, 'Alice')
+
+  const allocate = async base => {
+    const response = await request(server.port, 'POST', '/api/session-principals', {
+      headers: { ...jsonHeaders, authorization: `Bearer ${alice.sessionToken}` },
+      body: JSON.stringify({ base_chat_id: base, machine: 'soakbox' }),
+    })
+    assert.equal(response.status, 200, response.text)
+    return response.json().result
+  }
+  const sender = await allocate('addr-sender')
+  const peer = await allocate('addr-peer')
+
+  let refused = null
+  let committed = 0
+  for (let attempt = 0; attempt < 64; attempt++) {
+    const sent = await request(server.port, 'POST', '/api/messages', {
+      headers: { ...jsonHeaders, authorization: `Session ${sender.session_capability}` },
+      body: JSON.stringify({ to: peer.address, client_message_id: `addr-full-${attempt}`, text: largeText(`addr-filler-${attempt}`) }),
+    })
+    if (sent.status === 200 && sent.json().result?.status === 'storage_low') {
+      refused = sent
+      break
+    }
+    assert.equal(sent.status, 200, sent.text)
+    assert.equal(sent.json().result.status, 'committed')
+    committed += 1
+  }
+  assert.ok(refused, 'the ceiling must fill within the bounded loop')
+  assert.equal(committed >= 1, true, 'at least one addressed send committed before the ceiling')
+  assert.deepEqual(refused.json().result, { status: 'storage_low' })
+
+  await server.close()
 })
 
 test('a warn line captured for an append that then rolls back is dropped: the emit happens only after a commit', t => {

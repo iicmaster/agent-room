@@ -66,7 +66,13 @@ export function createMessagingRoomOperations({ database, withImmediateTransacti
     listRoomsForActor(actorFingerprint) {
       assertOpen()
       const validFingerprint = requireFingerprint(actorFingerprint)
-      const rows = database.prepare(`SELECT id, kind, title, pair_key, created_by_fingerprint, created_at FROM rooms WHERE kind = 'broadcast' OR id IN (SELECT room_id FROM direct_members WHERE actor_fingerprint = ?) ORDER BY created_at ASC, id ASC`).all(validFingerprint)
+      // v0.9.0 (additive): session-pair rooms join the enumeration through
+      // their principals' installation fingerprint — the reading installation
+      // discovers rooms its own sessions belong to (so a peer's addressed
+      // message is watchable without prior knowledge). Membership truth for
+      // READING such a room stays per session id (session_pair_members); the
+      // fingerprint here only WIDENS discovery, never the ACL.
+      const rows = database.prepare(`SELECT id, kind, title, pair_key, created_by_fingerprint, created_at FROM rooms WHERE kind = 'broadcast' OR id IN (SELECT room_id FROM direct_members WHERE actor_fingerprint = ?) OR id IN (SELECT m.room_id FROM session_pair_members m JOIN session_principals p ON p.session_id = m.session_id WHERE p.installation_fingerprint = ?) ORDER BY created_at ASC, id ASC`).all(validFingerprint, validFingerprint)
       return rows.map(plainRoom)
     },
 

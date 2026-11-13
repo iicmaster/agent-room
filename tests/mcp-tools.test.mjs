@@ -406,7 +406,7 @@ function startDropProxy(t, targetPort, { drop = 'response', matches } = {}) {
 
 // --- Matrix rows ---------------------------------------------------------------
 
-test('tools list: exactly the ten tools (five conversation tools plus room_list, the Story 3.2 trust pair and the Story 3.3 held pair), "list agents" phrasing, no native-named aliases, closed schemas', async t => {
+test('tools list: exactly the eleven tools (five conversation tools plus room_list, the v0.9.0 sessions enumeration, the Story 3.2 trust pair and the Story 3.3 held pair), "list agents" phrasing, no native-named aliases, closed schemas', async t => {
   const world = makeWorld(t)
   await world.waitReady()
   const mcp = startMcpChild(t, world)
@@ -426,6 +426,7 @@ test('tools list: exactly the ten tools (five conversation tools plus room_list,
     'room_trust_set',
     'room_held_list',
     'room_held_count',
+    'sessions',
   ])
   // No native-named aliases and no join verbs: the retired surface is gone.
   for (const name of names) {
@@ -664,7 +665,7 @@ test('ambiguity round-trips through the tool: candidates ride the error, target_
   await mcp.close()
 })
 
-test('client cursors: persisted per (installation, realm, room) at 0600, resumed, and surviving restart', async t => {
+test('client cursors: persisted per session at 0600, seeded per the migration rule, and independent across sessions', async t => {
   const world = makeWorld(t)
   const record = await world.waitReady()
   const mcp = startMcpChild(t, world)
@@ -676,7 +677,13 @@ test('client cursors: persisted per (installation, realm, room) at 0600, resumed
   const peer = await connectPeer(record.port, world.sharedData, 'Peer', peerInstall)
   const opened = structured(await mcp.tool('room_direct_open', { chat_id: 'Peer' }))
   const roomId = opened.room_id
-  const realmId = structured(await mcp.tool('room_status')).realm_id
+  const status = structured(await mcp.tool('room_status'))
+  const realmId = status.realm_id
+  // v0.9.0: the cursor namespace is PER SESSION (sessions/<scope>/), seeded
+  // once from the legacy realms/<realm>/ file — this child is a fresh
+  // installation, so the seed copies the (absent) legacy position.
+  const scope = status.session_scope
+  assert.match(scope, /^p\d+\.\d+$/, 'the default session scope derives from the parent pid + own pid')
 
   // First read (no after_seq): the full page, and the cursor lands on disk.
   await peerSend(record.port, peer.sessionToken, roomId, 'p-1', 'one', 'Peer')
@@ -685,12 +692,23 @@ test('client cursors: persisted per (installation, realm, room) at 0600, resumed
   assert.deepEqual(first.messages.map(message => message.seq), [1, 2])
   assert.equal(first.next_after_seq, 2)
 
-  const cursorPath = join(world.pluginData, 'realms', realmId, 'cursors.json')
-  assert.ok(existsSync(cursorPath), 'the cursor file exists under PLUGIN_DATA/realms/<realm_id>/')
+  // v0.9.0: the session principal armed (message_read ensures it), so
+  // room_status answers this process's own full session address — the value
+  // peers use as their message_send `to`.
+  const armedStatus = structured(await mcp.tool('room_status'))
+  assert.match(
+    armedStatus.session_address,
+    new RegExp(`^${armedStatus.chat_id}~[A-Za-z0-9_-]{10}@`),
+    'the armed session address is <chat_id>~<10-char locator>@<machine>',
+  )
+  assert.notEqual(armedStatus.session_address, null)
+
+  const cursorPath = join(world.pluginData, 'sessions', scope, 'cursors.json')
+  assert.ok(existsSync(cursorPath), 'the cursor file exists under PLUGIN_DATA/sessions/<scope>/')
   const cursorFile = statSync(cursorPath)
   assert.equal(cursorFile.mode & 0o777, 0o600, 'the cursor file is 0600')
-  const realmDir = statSync(join(world.pluginData, 'realms', realmId))
-  assert.equal(realmDir.mode & 0o777, 0o700, 'the realm state directory is 0700')
+  const scopeDir = statSync(join(world.pluginData, 'sessions', scope))
+  assert.equal(scopeDir.mode & 0o777, 0o700, 'the session scope directory is 0700')
   const cursorJson = JSON.parse(readFileSync(cursorPath, 'utf8'))
   assert.equal(cursorJson.version, 1)
   assert.equal(cursorJson.cursors[roomId].after_seq, 2)
@@ -701,11 +719,13 @@ test('client cursors: persisted per (installation, realm, room) at 0600, resumed
   assert.deepEqual(resumed.messages.map(message => message.seq), [3])
   assert.equal(resumed.next_after_seq, 3)
 
-  // The cursor is client-owned per installation: a restart resumes exactly
-  // where the previous process stopped. The server restarts too — a crashed
-  // client's live Chat ID stays lease-held until then (the documented 1.5
-  // lease; Epic 2 owns same-name continuity across client-only restarts) —
-  // and the cursor file must outlive BOTH processes.
+  // v0.9.0: cursors are PER SESSION (CAP-6), so a restarted process is a NEW
+  // session with its own namespace. The migration rule (CAP-7) decides its
+  // starting position: the FIRST-ever v0.9 session of the installation seeds
+  // from the legacy realms/<realm>/ file — none existed here, so this second
+  // session starts at 0 and its default read replays the room — while the
+  // FIRST session's file stays untouched at its own position (independent
+  // namespaces, never advanced by anyone else).
   await mcp.close()
   await world.stopServer()
   world.startServerChild()
@@ -715,15 +735,23 @@ test('client cursors: persisted per (installation, realm, room) at 0600, resumed
   await second.initialize()
   const fourth = await peerSend(restartedRecord.port, restartedPeer.sessionToken, roomId, 'p-4', 'four', 'Peer')
   assert.equal(fourth.status, 200, fourth.text)
+  const secondStatus = structured(await second.tool('room_status'))
+  const secondScope = secondStatus.session_scope
+  assert.notEqual(secondScope, scope, 'the restarted process is a new session scope')
   const afterRestart = structured(await second.tool('message_read', { room_id: roomId, wait_ms: 1000 }))
-  assert.deepEqual(afterRestart.messages.map(message => message.seq), [4])
+  assert.deepEqual(afterRestart.messages.map(message => message.seq), [1, 2, 3, 4])
   assert.equal(afterRestart.next_after_seq, 4)
 
-  // An explicit after_seq still works alongside the cursor and advances it.
+  // An explicit after_seq still works alongside the cursor and advances it —
+  // in the SECOND session's file only.
   const explicit = structured(await second.tool('message_read', { room_id: roomId, after_seq: 0 }))
   assert.deepEqual(explicit.messages.map(message => message.seq), [1, 2, 3, 4])
-  const cursorAfter = JSON.parse(readFileSync(cursorPath, 'utf8'))
+  const cursorAfter = JSON.parse(readFileSync(join(world.pluginData, 'sessions', secondScope, 'cursors.json'), 'utf8'))
   assert.equal(cursorAfter.cursors[roomId].after_seq, 4)
+  // The first session's cursor file is untouched by the new session's reads:
+  // it stays exactly where that session stopped (seq 3).
+  const firstSessionJson = JSON.parse(readFileSync(cursorPath, 'utf8'))
+  assert.equal(firstSessionJson.cursors[roomId].after_seq, 3)
 
   await second.close()
   void record
@@ -808,7 +836,7 @@ test('stdin purity: JSON-RPC only, parse errors and oversized frames answered, n
 
   // The channel still works: a follow-up tools/list answers normally.
   const listed = await mcp.request('tools/list')
-  assert.equal(listed.result.tools.length, 10)
+  assert.equal(listed.result.tools.length, 11)
 
   assert.equal(mcp.stderr, '')
   await mcp.close()
@@ -829,7 +857,7 @@ test('first run: no configured Chat ID fails with coded guidance and the process
 
   // The process stays alive and answers JSON-RPC afterwards.
   const listed = await mcp.request('tools/list')
-  assert.equal(listed.result.tools.length, 10)
+  assert.equal(listed.result.tools.length, 11)
 
   await mcp.close()
 })
@@ -960,7 +988,7 @@ test('NFR-3 schema-level negatives: every schema is closed, carries no identity-
   const denyList = [
     'actor_id', 'actor', 'display_name', 'fingerprint', 'sender', 'sender_fingerprint', 'sender_chat_id', 'client_type',
   ]
-  assert.equal(TOOL_DESCRIPTORS.length, 10)
+  assert.equal(TOOL_DESCRIPTORS.length, 11)
   for (const tool of TOOL_DESCRIPTORS) {
     assert.equal(tool.inputSchema.additionalProperties, false, `${tool.name} must close its argument set`)
     const properties = Object.keys(tool.inputSchema.properties ?? {})
@@ -1546,8 +1574,8 @@ test('cursor discipline: an explicit low after_seq read never moves the durable 
 
   const peer = await connectPeer(record.port, world.sharedData, 'Peer')
   const roomId = structured(await mcp.tool('room_direct_open', { chat_id: 'Peer' })).room_id
-  const realmId = structured(await mcp.tool('room_status')).realm_id
-  const cursorPath = join(world.pluginData, 'realms', realmId, 'cursors.json')
+  structured(await mcp.tool('room_status')).realm_id
+  const cursorPath = join(world.pluginData, 'sessions', structured(await mcp.tool('room_status')).session_scope, 'cursors.json')
   const cursorValue = () => JSON.parse(readFileSync(cursorPath, 'utf8')).cursors[roomId].after_seq
 
   for (const id of ['p-1', 'p-2', 'p-3', 'p-4']) {
@@ -1578,8 +1606,10 @@ test('cursor discipline: concurrent reads of two rooms serialize and both cursor
 
   const peer = await connectPeer(record.port, world.sharedData, 'Peer')
   const pairRoom = structured(await mcp.tool('room_direct_open', { chat_id: 'Peer' })).room_id
-  const realmId = structured(await mcp.tool('room_status')).realm_id
-  const broadcastRoom = structured(await mcp.tool('room_status')).broadcast_room_id
+  const status = structured(await mcp.tool('room_status'))
+  const realmId = status.realm_id
+  const broadcastRoom = status.broadcast_room_id
+  const cursorPath = join(world.pluginData, 'sessions', status.session_scope, 'cursors.json')
 
   const peerToken = peer.sessionToken
   const toPair = await peerSend(record.port, peerToken, pairRoom, 'p-1', 'pair message', 'Peer')
@@ -1596,7 +1626,8 @@ test('cursor discipline: concurrent reads of two rooms serialize and both cursor
   assert.equal(structured(pairRead).next_after_seq, 1)
   assert.equal(structured(broadcastRead).next_after_seq, 1)
 
-  const cursors = JSON.parse(readFileSync(join(world.pluginData, 'realms', realmId, 'cursors.json'), 'utf8'))
+  const cursors = JSON.parse(readFileSync(cursorPath, 'utf8'))
+  assert.equal(cursors.realm_id, realmId)
   assert.equal(cursors.cursors[pairRoom].after_seq, 1)
   assert.equal(cursors.cursors[broadcastRoom].after_seq, 1)
 
@@ -1611,8 +1642,8 @@ test('cursor discipline: a failed cursor write returns the consumed page with cu
 
   const peer = await connectPeer(record.port, world.sharedData, 'Peer')
   const roomId = structured(await mcp.tool('room_direct_open', { chat_id: 'Peer' })).room_id
-  const realmId = structured(await mcp.tool('room_status')).realm_id
-  const cursorPath = join(world.pluginData, 'realms', realmId, 'cursors.json')
+  const status = structured(await mcp.tool('room_status'))
+  const cursorPath = join(world.pluginData, 'sessions', status.session_scope, 'cursors.json')
 
   const sent = await peerSend(record.port, peer.sessionToken, roomId, 'p-1', 'one', 'Peer')
   assert.equal(sent.status, 200, sent.text)
@@ -1653,9 +1684,12 @@ test('cursor discipline: cursors are isolated per installation AND per realm AND
 
   const roomOne = structured(await childOne.tool('room_direct_open', { chat_id: 'PeerOne' })).room_id
   const roomTwo = structured(await childTwo.tool('room_direct_open', { chat_id: 'PeerTwo' })).room_id
-  const realmOne = structured(await childOne.tool('room_status')).realm_id
-  const realmTwo = structured(await childTwo.tool('room_status')).realm_id
+  const statusOne = structured(await childOne.tool('room_status'))
+  const statusTwo = structured(await childTwo.tool('room_status'))
+  const realmOne = statusOne.realm_id
+  const realmTwo = statusTwo.realm_id
   assert.notEqual(realmOne, realmTwo, 'the two shared data dirs are two realms')
+  assert.notEqual(statusOne.session_scope, statusTwo.session_scope, 'two processes hold two session scopes')
 
   const sentOne = await peerSend(recordOne.port, peerOne.sessionToken, roomOne, 'p-1', 'one', 'PeerOne')
   const sentTwo = await peerSend(recordTwo.port, peerTwo.sessionToken, roomTwo, 'p-1', 'two', 'PeerTwo')
@@ -1665,14 +1699,16 @@ test('cursor discipline: cursors are isolated per installation AND per realm AND
   assert.equal(structured(await childOne.tool('message_read', { room_id: roomOne })).next_after_seq, 1)
   assert.equal(structured(await childTwo.tool('message_read', { room_id: roomTwo })).next_after_seq, 1)
 
-  // Each installation holds exactly one realm directory with exactly one
-  // room cursor for its own realm and room — no cross-tuple leakage.
-  const cursorsOne = JSON.parse(readFileSync(join(worldOne.pluginData, 'realms', realmOne, 'cursors.json'), 'utf8'))
-  const cursorsTwo = JSON.parse(readFileSync(join(worldTwo.pluginData, 'realms', realmTwo, 'cursors.json'), 'utf8'))
+  // Each installation holds exactly one per-session cursor file with exactly
+  // one room cursor for its own realm and room — no cross-tuple leakage.
+  const cursorsOne = JSON.parse(readFileSync(join(worldOne.pluginData, 'sessions', statusOne.session_scope, 'cursors.json'), 'utf8'))
+  const cursorsTwo = JSON.parse(readFileSync(join(worldTwo.pluginData, 'sessions', statusTwo.session_scope, 'cursors.json'), 'utf8'))
+  assert.equal(cursorsOne.realm_id, realmOne)
+  assert.equal(cursorsTwo.realm_id, realmTwo)
   assert.deepEqual(Object.keys(cursorsOne.cursors), [roomOne])
   assert.deepEqual(Object.keys(cursorsTwo.cursors), [roomTwo])
-  assert.deepEqual(await readdirSync(join(worldOne.pluginData, 'realms')).sort(), [realmOne])
-  assert.deepEqual(await readdirSync(join(worldTwo.pluginData, 'realms')).sort(), [realmTwo])
+  assert.deepEqual(await readdirSync(join(worldOne.pluginData, 'sessions')).sort(), [statusOne.session_scope])
+  assert.deepEqual(await readdirSync(join(worldTwo.pluginData, 'sessions')).sort(), [statusTwo.session_scope])
 
   await childOne.close()
   await childTwo.close()

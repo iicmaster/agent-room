@@ -64,6 +64,15 @@ export const ERROR_ENVELOPE_EXTRAS = Object.freeze({
 
 const ENVELOPE_FIXED_FIELDS = new Set(['ok', 'code', 'message', 'status'])
 
+// The send routes the send-bucket gate covers: the frozen per-room send
+// route, and — v0.9.0 (additive) — the addressed send, which spends from the
+// same per-Actor bucket so a sender's burst rate is bounded identically
+// whichever way it addresses a peer. (The bucket's idempotency probe needs
+// the room, which the addressed send resolves inside its handler, so the
+// probe never short-circuits there: every addressed attempt consumes one
+// token, exactly like a new send.)
+const SEND_BUCKET_ROUTE_PATHS = new Set(['/api/rooms/:id/messages', '/api/messages'])
+
 for (const [code, names] of Object.entries(ERROR_ENVELOPE_EXTRAS)) {
   for (const name of names) {
     if (ENVELOPE_FIXED_FIELDS.has(name)) {
@@ -372,7 +381,7 @@ export class BudgetStage {
     if (
       this.sendBucketGate !== null
       && context.method === 'POST'
-      && context.route?.path === '/api/rooms/:id/messages'
+      && SEND_BUCKET_ROUTE_PATHS.has(context.route?.path)
     ) {
       // The probe reads the body's client_message_id, so the send route's
       // one field read happens here (re-entrant; runPipeline will not

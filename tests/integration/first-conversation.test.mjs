@@ -1075,8 +1075,8 @@ test('first conversation: two real MCP children converse through one real WAL se
 
   assert.deepEqual(
     keysOf(aliceStatus),
-    ['broadcast_room_id', 'chat_id', 'fingerprint', 'realm_id', 'version'],
-    'room_status returns exactly the frozen five keys',
+    ['broadcast_room_id', 'chat_id', 'fingerprint', 'realm_id', 'session_address', 'session_scope', 'version'],
+    'room_status returns exactly the frozen key set (v0.9.0 adds session_address + session_scope)',
   )
   assert.deepEqual(keysOf(bobStatus), keysOf(aliceStatus), 'room_status key set is the same for both children')
   assert.equal(aliceStatus.chat_id, 'alice', 'alice is bound as "alice"')
@@ -1388,26 +1388,34 @@ test('first conversation: two real MCP children converse through one real WAL se
   assert.equal(BOB_TEXT.includes('cafe\u0301'), true, 'Bob fixture contains a decomposed combining sequence')
   assert.equal([...BOB_TEXT].some(character => character.codePointAt(0) > 0xffff), true, 'Bob fixture contains an astral character')
 
-  // Durable client cursors: each participant's own 0700 realm directory and
-  // 0600 cursors.json hold its own direct-room cursor — Bob 1, Alice 2.
+  // Durable client cursors (v0.9.0): each participant's own 0700
+  // sessions/<scope> directory and 0600 cursors.json hold its own pair-room
+  // cursor — Bob 1, Alice 2. The scope is per process; each child holds
+  // exactly one.
   const cursorIdentities = {}
   for (const [label, expectedCursor] of [
     ['alice', 2],
     ['bob', 1],
   ]) {
-    const realmsDir = join(world.installations[label].pluginData, 'realms')
-    const realmDir = join(realmsDir, aliceStatus.realm_id)
-    const cursorPath = join(realmDir, 'cursors.json')
-    assert.equal(modeOf(realmsDir, 'directory'), 0o700, `${label}: the realms directory is 0700`)
-    assert.equal(existsSync(realmDir), true, `${label}: the realm state directory exists under its own PLUGIN_DATA`)
-    assert.equal(modeOf(realmDir, 'directory'), 0o700, `${label}: the realm state directory is 0700`)
+    const sessionsDir = join(world.installations[label].pluginData, 'sessions')
+    assert.equal(modeOf(sessionsDir, 'directory'), 0o700, `${label}: the sessions directory is 0700`)
+    const scopeDirs = readdirSync(sessionsDir).filter(name => !name.startsWith('.'))
+    assert.equal(scopeDirs.length, 1, `${label}: exactly one session scope directory exists under its own PLUGIN_DATA`)
+    const scopeDir = join(sessionsDir, scopeDirs[0])
+    assert.equal(modeOf(scopeDir, 'directory'), 0o700, `${label}: the session scope directory is 0700`)
+    const cursorPath = join(scopeDir, 'cursors.json')
     assert.equal(existsSync(cursorPath), true, `${label}: cursors.json exists`)
     assert.equal(modeOf(cursorPath, 'file'), 0o600, `${label}: cursors.json is 0600`)
     const cursorIdentity = fileIdentity(cursorPath)
     cursorIdentities[label] = { path: cursorPath, identity: cursorIdentity }
     const cursors = JSON.parse(readFileSync(cursorPath, 'utf8'))
     assert.equal(cursors.version, 1, `${label}: cursor document version is 1`)
-    assert.deepEqual(keysOf(cursors), ['cursors', 'version'], `${label}: cursor document carries exactly version and cursors`)
+    assert.equal(cursors.realm_id, aliceStatus.realm_id, `${label}: the cursor document names its realm`)
+    assert.deepEqual(
+      keysOf(cursors).filter(name => name !== 'seeded_at').sort(),
+      ['cursors', 'realm_id', 'version'],
+      `${label}: cursor document carries exactly version, realm_id and cursors (plus the seed stamp when a legacy file existed)`,
+    )
     assert.deepEqual(keysOf(cursors.cursors), [aliceOpen.room_id], `${label}: exactly the direct room is in the cursor document`)
     assert.deepEqual(keysOf(cursors.cursors[aliceOpen.room_id]), ['after_seq', 'updated_at'], `${label}: the cursor entry carries exactly after_seq and updated_at`)
     assert.equal(cursors.cursors[aliceOpen.room_id].after_seq, expectedCursor, `${label}: the durable direct-room cursor is ${expectedCursor}`)

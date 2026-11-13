@@ -458,7 +458,7 @@ test('trust chain end-to-end: stranger hold with zero body bytes, cursor persist
 
   const localStatus = structured(await local.tool('room_status'))
   const foreignStatus = structured(await foreign.tool('room_status'))
-  assert.deepEqual(keysOf(localStatus), ['broadcast_room_id', 'chat_id', 'fingerprint', 'realm_id', 'version'])
+  assert.deepEqual(keysOf(localStatus), ['broadcast_room_id', 'chat_id', 'fingerprint', 'realm_id', 'session_address', 'session_scope', 'version'])
   assert.equal(localStatus.chat_id, 'Local')
   assert.equal(foreignStatus.chat_id, 'Stranger')
   assert.equal(localStatus.realm_id, foreignStatus.realm_id, 'both installations joined the same realm')
@@ -491,9 +491,15 @@ test('trust chain end-to-end: stranger hold with zero body bytes, cursor persist
   const dmId = structured(await foreign.tool('room_direct_open', { chat_id: 'Local' })).room_id
   assert.equal(structured(await local.tool('room_direct_open', { chat_id: 'Stranger' })).room_id, dmId, 'both sides converge on one pair room')
 
-  // The local installation's state directory: nothing written until a read.
+  // The local installation's state directories (v0.9.0 layout): per-session
+  // cursors under sessions/<scope>/, held/allowlist state still per realm
+  // under realms/<realmId>/. The session credential file exists from
+  // adapter start; no realm state exists until a read.
   const realmDir = join(world.installations.local.pluginData, 'realms', realmId)
-  const cursorsPath = join(realmDir, 'cursors.json')
+  const sessionsDir = join(world.installations.local.pluginData, 'sessions')
+  const localScopes = () => readdirSync(sessionsDir).filter(name => !name.startsWith('.'))
+  assert.equal(localScopes().length, 1, 'exactly one session scope directory')
+  const cursorsPath = join(sessionsDir, localScopes()[0], 'cursors.json')
   const heldPath = join(realmDir, 'held.json')
   const allowlistPath = join(realmDir, 'allowlist.json')
   assert.equal(existsSync(realmDir), false, 'no realm state exists before the first read')
@@ -585,7 +591,8 @@ test('trust chain end-to-end: stranger hold with zero body bytes, cursor persist
   // --- Link 2: the cursor advanced and persisted; ingestion stays separate -----
 
   const cursorsAfterHold = assertCursorsFile('after the held read')
-  assert.deepEqual(keysOf(cursorsAfterHold), ['cursors', 'version'])
+  assert.deepEqual(keysOf(cursorsAfterHold).filter(name => name !== 'seeded_at').sort(), ['cursors', 'realm_id', 'version'])
+  assert.equal(cursorsAfterHold.realm_id, realmId)
   assert.equal(cursorsAfterHold.version, 1)
   assert.deepEqual(keysOf(cursorsAfterHold.cursors), [dmId], 'exactly the pair room entry')
   assert.deepEqual(keysOf(cursorsAfterHold.cursors[dmId]), ['after_seq', 'updated_at'])
@@ -593,7 +600,10 @@ test('trust chain end-to-end: stranger hold with zero body bytes, cursor persist
   assert.equal(Number.isFinite(Date.parse(cursorsAfterHold.cursors[dmId].updated_at)), true)
   assert.equal(existsSync(heldPath), true, 'held ingestion state exists')
   assert.notEqual(cursorsPath, heldPath)
-  assert.deepEqual(readdirSync(realmDir).sort(), ['cursors.json', 'held.json'], 'cursors and held state are separate files beside each other')
+  // v0.9.0: cursors live per session (sessions/<scope>/cursors.json); held
+  // ingestion stays per realm (realms/<realm>/held.json) — separate files,
+  // separate lifetimes.
+  assert.deepEqual(readdirSync(realmDir).sort(), ['held.json'], 'held state is the only realm file so far')
   assert.equal(statSync(heldPath).mode & 0o777, 0o600, 'held.json is 0600')
   assertMonotonic('after the held read', cursorsAfterHold)
 

@@ -339,8 +339,11 @@ test('every v0.1 public error code has an HTTP status declared once', () => {
     'local_token_invalid',
     'message_frame_too_large',
     'message_not_found',
+    'migration_source_unreadable',
+    'name_taken',
     'node_version_unsupported',
     'not_enrolled',
+    'peer_not_found',
     'protocol_required',
     'rate_limited',
     'reply_room_mismatch',
@@ -355,6 +358,10 @@ test('every v0.1 public error code has an HTTP status declared once', () => {
     'server_start_busy',
     'server_start_failed',
     'server_start_lock_invalid',
+    'session_capability_required',
+    'session_credential_invalid',
+    'session_expired',
+    'session_revoked',
     'signature_invalid',
     'sqlite_version_unsupported',
     'storage_low',
@@ -426,8 +433,19 @@ test('every v0.1 public error code has an HTTP status declared once', () => {
     invite_not_found: 404,
     rate_limited: 429,
     // Story 4.5: the operator ban's refusal — every send, read, or re-enroll
-    // from a banned key answers 403 (the send-status code's HTTP face).
+    // from the banned key is refused 403 (the send-status code's HTTP face).
     banned: 403,
+    // v0.9.0 session addressing: live-address collision 409, the quiet
+    // addressed-send miss 404, the session credential family 401 (the fenced
+    // / retention-expired principal 409 — retrying a capability can never
+    // make it valid again), and the migration seeder's loud refusal 500.
+    name_taken: 409,
+    peer_not_found: 404,
+    session_capability_required: 401,
+    session_credential_invalid: 401,
+    session_expired: 409,
+    session_revoked: 401,
+    migration_source_unreadable: 500,
     // Story 4.6: the storage admission gate's coded face (507 — the
     // Insufficient Storage class). The send route answers the FR-17 status
     // as a 200 result {status:'storage_low'}; this is the coded face for

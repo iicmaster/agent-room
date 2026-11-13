@@ -83,6 +83,8 @@ import {
   RECONNECT_BACKOFF_MIN_SECONDS,
   RECONNECT_RECOVERY_PROBE_MS,
   SERVER_HEALTH_PROBE_TIMEOUT_MS,
+  SESSION_HEARTBEAT_INTERVAL_MS,
+  SESSION_HEARTBEAT_JITTER,
   UNTRUSTED_ENVELOPE_VERSION,
 } from '../constants.mjs'
 import {
@@ -97,6 +99,13 @@ import { loadOrCreateLocalToken } from '../api/local-token.mjs'
 import { ensureServer, probeHealth } from './ensure-server.mjs'
 import { loadRemoteConfig, validateRemoteServerUrl } from './remote-config.mjs'
 import { REMOTE_TRANSPORT } from './trust.mjs'
+import {
+  clearSessionState,
+  loadSessionState,
+  machineLabel,
+  saveSessionState,
+  sessionScopeKey,
+} from './session-state.mjs'
 
 const OK_STATUS = 200
 
@@ -355,6 +364,11 @@ export function createAgentRoomClient({
   reconnectRandom = Math.random,
   reconnectProbe,
   connectionMode = declaredConnectionMode(),
+  env = process.env,
+  // The v0.9.0 session scope (sessions/<scope>/ under PLUGIN_DATA): a stable
+  // harness scope by default derives per-process (parent pid + pid). Tests
+  // and embedding hosts may pin it explicitly.
+  sessionScope: declaredSessionScope,
 } = {}) {
   if (!Number.isInteger(requestTimeoutMs) || requestTimeoutMs <= 0) {
     throw new AgentRoomRuntimeError('invalid_argument', 'requestTimeoutMs must be a positive integer')
@@ -436,10 +450,12 @@ export function createAgentRoomClient({
     return remoteBase === null ? { port } : { url: new URL(path, remoteBase) }
   }
 
-  function protocolHeaders(bearer) {
+  function protocolHeaders(bearer, sessionCredential) {
     return {
       [PROTOCOL_HEADER]: PROTOCOL_VERSION,
-      ...(bearer === undefined ? {} : { authorization: `Bearer ${bearer}` }),
+      ...(sessionCredential !== undefined
+        ? { authorization: `Session ${sessionCredential}` }
+        : bearer === undefined ? {} : { authorization: `Bearer ${bearer}` }),
       'content-type': 'application/json; charset=utf-8',
     }
   }
@@ -540,6 +556,163 @@ export function createAgentRoomClient({
     sessionToken = null
     try {
       await rawRequest('DELETE', '/api/session', { bearer: token, timeoutMs })
+      return { released: true }
+    } catch {
+      return { released: false, reason: 'release_failed' }
+    }
+  }
+
+  // --- v0.9.0: the session principal lifecycle -------------------------------
+  //
+  // One process start = one addressable session (the default scope derives
+  // from the parent pid + this pid; a stable harness scope resumes). The
+  // stored capability is the ONLY session credential: resume first, and on a
+  // fenced/revoked/expired answer fall through to a fresh authenticated
+  // allocation — never a guess that a stale credential still works. The
+  // heartbeat keeps the 30 s base lease alive; a beat that answers a coded
+  // end (session_expired / session_revoked / session_credential_invalid)
+  // re-allocates so the process stays addressable, while a transport failure
+  // leaves local belief untouched (an unacknowledged beat never extends the
+  // lease, so at worst the principal drops to offline and resumes later).
+  const sessionScope = declaredSessionScope ?? sessionScopeKey({ env })
+  let sessionPrincipal = null
+  let sessionEnsurePromise = null
+  let heartbeatTimer = null
+
+  async function ensureSessionPrincipal() {
+    if (sessionPrincipal !== null) return sessionPrincipal
+    if (sessionEnsurePromise === null) {
+      // The single-flight promise clears itself in an INTERNAL finally (never
+      // a chained .finally — that would mint a second, unhandled rejection
+      // whenever the ensure refuses, exactly what the A9 shutdown audit
+      // forbids), and a consumed catch branch keeps the rejection handled for
+      // callers that merely triggered the arm.
+      const inFlight = (async () => {
+        try {
+          // The actor session token must exist first: allocation authenticates
+          // by the installation bearer, never by anything in its body.
+          await ensure()
+          const stored = loadSessionState(pluginDataDir, sessionScope)
+          if (stored !== null) {
+            try {
+              const resumed = await rawRequest('POST', '/api/session-principals/resume', {
+                body: { session_id: stored.sessionId, generation: stored.generation },
+                sessionCredential: stored.capability,
+              })
+              sessionPrincipal = { ...stored, generation: resumed.generation }
+              saveSessionState(pluginDataDir, sessionScope, sessionPrincipal)
+              return sessionPrincipal
+            } catch (error) {
+              // session_expired / session_revoked / session_credential_invalid:
+              // the stored principal is done — clear the local credential and
+              // allocate fresh. The old address stays retained (or freed, if
+              // revoked) exactly as the server decided; nothing here retries
+              // a fenced generation.
+              if (error instanceof AgentRoomRuntimeError
+                && ['session_expired', 'session_revoked', 'session_credential_invalid'].includes(error.code)) {
+                clearSessionState(pluginDataDir, sessionScope)
+              } else {
+                throw error
+              }
+            }
+          }
+          const allocated = await rawRequest('POST', '/api/session-principals', {
+            body: {
+              base_chat_id: config.chatId,
+              machine: machineLabel({ env }),
+              client_type: MCP_CLIENT_TYPE,
+            },
+          })
+          sessionPrincipal = {
+            sessionId: allocated.session_id,
+            generation: allocated.generation,
+            address: allocated.address,
+            baseName: allocated.base_name,
+            machine: allocated.machine,
+            capability: allocated.session_capability,
+          }
+          // The capability lands on disk (0600, atomic) before the address is
+          // reported anywhere; a failed save surfaces — an unrecorded
+          // capability would silently orphan the principal.
+          saveSessionState(pluginDataDir, sessionScope, sessionPrincipal)
+          return sessionPrincipal
+        } finally {
+          sessionEnsurePromise = null
+        }
+      })()
+      inFlight.catch(() => { /* the joining await surfaces it */ })
+      sessionEnsurePromise = inFlight
+    }
+    return sessionEnsurePromise
+  }
+
+  // One heartbeat round trip. Resolves the principal on success; throws the
+  // coded refusal on a definitive end.
+  async function heartbeatSession() {
+    const principal = await ensureSessionPrincipal()
+    const beaten = await rawRequest('POST', '/api/session-principals/heartbeat', {
+      body: { session_id: principal.sessionId, generation: principal.generation },
+      sessionCredential: principal.capability,
+    })
+    if (beaten.generation !== principal.generation) {
+      sessionPrincipal = { ...principal, generation: beaten.generation }
+      saveSessionState(pluginDataDir, sessionScope, sessionPrincipal)
+    }
+    return beaten
+  }
+
+  function heartbeatDelayMs() {
+    const jitter = 1 - SESSION_HEARTBEAT_JITTER + Math.random() * 2 * SESSION_HEARTBEAT_JITTER
+    return Math.round(SESSION_HEARTBEAT_INTERVAL_MS * jitter)
+  }
+
+  // Start the 10 s ± jitter beat loop (one per client; the timer never holds
+  // the process open). A definitive coded end clears the credential and
+  // re-ensures — a fresh allocation — so the process keeps an addressable
+  // principal; a transport failure waits for the next beat without touching
+  // local belief.
+  function startSessionHeartbeat() {
+    if (heartbeatTimer !== null || shuttingDown) return
+    const tick = async () => {
+      try {
+        await heartbeatSession()
+      } catch (error) {
+        if (error instanceof AgentRoomRuntimeError
+          && ['session_expired', 'session_revoked', 'session_credential_invalid'].includes(error.code)) {
+          clearSessionState(pluginDataDir, sessionScope)
+          sessionPrincipal = null
+          try {
+            await ensureSessionPrincipal()
+          } catch {
+            // The next beat retries the allocation; nothing here blocks exit.
+          }
+        }
+        // Any other failure (transport, rate limit): the lease is simply not
+        // renewed by THIS beat — local belief unchanged, next beat retries.
+      }
+      if (!shuttingDown && heartbeatTimer !== null) {
+        heartbeatTimer = setTimeout(tick, heartbeatDelayMs())
+        heartbeatTimer.unref?.()
+      }
+    }
+    heartbeatTimer = setTimeout(tick, heartbeatDelayMs())
+    heartbeatTimer.unref?.()
+  }
+
+  // Orderly-exit release of the session principal's base lease (DELETE
+  // .../current): best-effort and bounded — a failed release costs only the
+  // 30 s lease, the retained principal and mailbox persist regardless.
+  async function releaseSessionBase({ timeoutMs = CLIENT_RELEASE_TIMEOUT_MS } = {}) {
+    heartbeatTimer !== null && clearTimeout(heartbeatTimer)
+    heartbeatTimer = null
+    const principal = sessionPrincipal
+    if (principal === null) return { released: false, reason: 'no_session_principal' }
+    sessionPrincipal = null
+    try {
+      await rawRequest('DELETE', '/api/session-principals/current', {
+        sessionCredential: principal.capability,
+        timeoutMs,
+      })
       return { released: true }
     } catch {
       return { released: false, reason: 'release_failed' }
@@ -701,13 +874,19 @@ export function createAgentRoomClient({
 
   // One bearer round trip: parse the frozen envelope, surface coded errors.
   // The request timeout defaults to the client's bound, so every round trip
-  // is bounded even when the caller passes only a signal.
-  async function rawRequest(method, path, { body, timeoutMs = requestTimeoutMs, signal, bearer } = {}) {
+  // is bounded even when the caller passes only a signal. `sessionCredential`
+  // (v0.9.0) swaps the Authorization scheme to `Session <capability>` for the
+  // session-scoped routes — the two credential kinds are mutually exclusive
+  // on one request by construction, mirroring the server's pipeline: a
+  // Session header on an old path refuses exactly as it did before.
+  async function rawRequest(method, path, { body, timeoutMs = requestTimeoutMs, signal, bearer, sessionCredential } = {}) {
     const response = await httpRequest({
       ...wireTarget(path),
       method,
       path,
-      headers: protocolHeaders(bearer === undefined ? sessionToken : bearer),
+      headers: sessionCredential === undefined
+        ? protocolHeaders(bearer === undefined ? sessionToken : bearer)
+        : protocolHeaders(undefined, sessionCredential),
       body: body === undefined ? undefined : JSON.stringify(body),
       timeoutMs,
       signal,
@@ -994,18 +1173,32 @@ export function createAgentRoomClient({
     // GET /api/rooms/:id/messages — one page, long-polling up to waitMs
     // server-side; the client timeout is the wait plus the margin so the
     // server's hold always wins the race. Foreign bodies are wrapped in the
-    // static untrusted envelope before the caller sees them.
+    // static untrusted envelope before the caller sees them. v0.9.0: the
+    // Bearer credential stays THE read credential (its authenticated-request
+    // touch is the claim-liveness mechanism — old behavior byte-for-byte);
+    // only when the server answers session_capability_required — a
+    // session-pair room, whose membership is per SESSION id — does this read
+    // retry once with the process's Session capability.
     async readMessage({ roomId, afterSeq, limit, waitMs = 0, signal } = {}) {
       const params = new URLSearchParams()
       if (afterSeq !== undefined) params.set('after_seq', String(afterSeq))
       if (limit !== undefined) params.set('limit', String(limit))
       if (waitMs !== undefined) params.set('wait_ms', String(waitMs))
       const query = params.toString()
-      const page = await request(
-        'GET',
-        `/api/rooms/${encodeURIComponent(String(roomId))}/messages${query === '' ? '' : `?${query}`}`,
-        { timeoutMs: waitMs + CLIENT_LONGPOLL_MARGIN_MS, signal },
-      )
+      const path = `/api/rooms/${encodeURIComponent(String(roomId))}/messages${query === '' ? '' : `?${query}`}`
+      const options = { timeoutMs: waitMs + CLIENT_LONGPOLL_MARGIN_MS, signal }
+      let page
+      try {
+        page = await request('GET', path, options)
+      } catch (error) {
+        if (!(error instanceof AgentRoomRuntimeError)
+          || error.code !== 'session_capability_required'
+          || signal?.aborted) {
+          throw error
+        }
+        const principal = await ensureSessionPrincipal()
+        page = await request('GET', path, { ...options, sessionCredential: principal.capability, reconnect: false })
+      }
       return applyUntrustedEnvelope(page, keypair.fingerprint)
     },
 
@@ -1021,5 +1214,82 @@ export function createAgentRoomClient({
     // never bootstraps a session to close one, and it never carries the
     // takeover intent — releasing is not taking.
     release,
+
+    // --- v0.9.0 session addressing -------------------------------------------
+
+    // This process's full session address (null until the principal exists).
+    get sessionAddress() { return sessionPrincipal === null ? null : sessionPrincipal.address },
+    get sessionPrincipalId() { return sessionPrincipal === null ? null : sessionPrincipal.sessionId },
+
+    // Allocate-or-resume this process's session principal (single-flight).
+    ensureSessionPrincipal,
+
+    // The 10 s ± jitter beat loop. Stopped by releaseSessionBase().
+    startSessionHeartbeat,
+
+    // Orderly-exit base-lease release: the durable principal and mailbox
+    // persist either way; a failed release costs only the 30 s lease.
+    releaseSessionBase,
+
+    // The addressed send (CAP-2): one call from `to` to the committed seq.
+    // The sender is this process's session principal — never derived from
+    // `to`. On a v0.8 server (no addressed route) the fallback is the
+    // two-step composition — direct-open by the address's base name, then
+    // the ordinary per-room send — marked route_fallback: true, and ONLY
+    // when the base name resolves unambiguously: an ambiguous or missing
+    // resolution refuses as-is, never guesses (failure-modes U5). The
+    // principal ensure runs INSIDE the fallback discrimination: on a v0.8
+    // server the route itself is missing, so the caller gets the advertised
+    // fallback rather than a session-arming error hiding it. A `to` without
+    // the address separator refuses — the fallback never chops a non-address.
+    async sendToAddress({ to, clientMessageId, text, replyToSeq, signal } = {}) {
+      const attempt = Object.freeze({
+        body: Object.freeze({
+          to: String(to),
+          client_message_id: String(clientMessageId),
+          text: String(text),
+          ...(replyToSeq === undefined ? {} : { reply_to_seq: replyToSeq }),
+        }),
+      })
+      try {
+        const principal = await ensureSessionPrincipal()
+        return await request('POST', '/api/messages', {
+          body: attempt.body,
+          signal,
+          sessionCredential: principal.capability,
+        })
+      } catch (error) {
+        if (!(error instanceof AgentRoomRuntimeError) || error.code !== 'route_not_found') throw error
+        const separatorAt = attempt.body.to.indexOf('~')
+        if (separatorAt <= 0) {
+          throw new AgentRoomRuntimeError(
+            'invalid_chat_id',
+            `the fallback needs a full session address (base~locator-token@machine); "${attempt.body.to.slice(0, 96)}" carries no base~ separator`,
+          )
+        }
+        const base = attempt.body.to.slice(0, separatorAt)
+        const opened = await this.directOpen({ chatId: base, signal })
+        const sent = await this.sendMessage({ roomId: opened.room_id, clientMessageId, text, replyToSeq, signal })
+        return {
+          ...sent,
+          route_fallback: true,
+          peer: { session_id: null, address: attempt.body.to, presence: 'unknown' },
+        }
+      }
+    },
+
+    // GET /api/session-principals — the explicit realm listing (CAP-3).
+    listSessions({ signal } = {}) {
+      return request('GET', '/api/session-principals', { signal })
+    },
+
+    // POST /api/session-principals/revoke — the operator action (installation
+    // bearer). Never called automatically.
+    revokeSessionPrincipal({ sessionId, reason, signal } = {}) {
+      return request('POST', '/api/session-principals/revoke', {
+        body: { session_id: String(sessionId), ...(reason === undefined ? {} : { reason: String(reason) }) },
+        signal,
+      })
+    },
   }
 }

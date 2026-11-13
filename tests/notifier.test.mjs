@@ -355,18 +355,22 @@ test('catch-up: a message that arrived while the installation was down is announ
   structured(await bob.tool('message_send', { room_id: broadcast, client_message_id: 'b-3', text: 'arrived in the dark two' }))
 
   // alice reconnects and NEVER calls a tool — receive-ready at initialize.
+  // v0.9.0: cursors are PER SESSION (sessions/<scope>/), and a restarted
+  // process is a NEW session: no legacy cursor file exists to seed from and
+  // the prior session's file is not inherited, so this session's unread
+  // window starts at 0 and the hint honestly announces all three rows.
   const alice2 = startMcpChild(t, { pluginData: alicePlugin, sharedData: world.sharedData })
   t.after(() => alice2.close())
   await alice2.initialize()
   await waitFor(() => statusLines(alicePlugin).some(line => line.event === 'unread_backlog'), 'the backlog hint')
   const hint = statusLines(alicePlugin).find(line => line.event === 'unread_backlog')
   assert.equal(hint.room_id, broadcast)
-  assert.equal(hint.unread_from, readPage.next_after_seq, 'the hint names the fetched cursor it measured from')
+  assert.equal(hint.unread_from, 0, 'the new session measures from its own empty cursor, never a prior session\u2019s')
   assert.equal(hint.head_seq, 3, 'the hint names the head it measured to')
-  assert.equal(hint.foreign_in_window, 2, 'only the two unseen foreign rows count')
+  assert.equal(hint.foreign_in_window, 3, 'every foreign row in the window counts for the new session')
   // The dark messages are NOT replayed as message lines: message_read stays
   // the authoritative read path; the hint is the wake.
-  assert.deepEqual(messageLines(alicePlugin).filter(entry => entry.seq > readPage.next_after_seq && entry.seq < 4), [],
+  assert.deepEqual(messageLines(alicePlugin).filter(entry => entry.seq > 0 && entry.seq < 4), [],
     'the backlog is summarized, never replayed')
 
   // A NEW message after the restart arrives through the watcher as usual.
@@ -728,4 +732,76 @@ test('round-4: sink failures are counted and the recovery is announced with the 
   const recovered = statusLines(pluginData).find(line => line.event === 'sink_recovered')
   assert.ok(Number.isInteger(recovered.lost_estimate) && recovered.lost_estimate >= 3,
     `the lost estimate names the unreadable window: ${JSON.stringify(recovered)}`)
+})
+
+test('the session-pair self-skip: attribution is per SESSION address, read per delivery — own address skipped, sibling address delivered', async t => {
+  const parent = mkdtempSync(join(tmpdir(), 'agent-room-notifier-sessions-'))
+  t.after(() => rmSync(parent, { recursive: true, force: true }))
+  const pluginData = join(parent, 'plugin-data')
+  mkdirSync(pluginData, { mode: 0o700 })
+
+  // Two sibling sessions of ONE installation share the fingerprint; their
+  // rows are told apart by the session address in chat_id — CAP-4's fix.
+  const own = 'sha256:' + 'a'.repeat(64)
+  const rooms = [{ room_id: 'pair', kind: 'direct' }]
+  const mail = new Map([['pair', []]])
+  // The principal arms AFTER the notifier starts (initialize arms both), so
+  // the address exists only later — the self-skip must read the client's
+  // CURRENT address per delivery, never a start-time snapshot.
+  let sessionAddress = null
+  const client = {
+    transport: 'local',
+    fingerprint: own,
+    get sessionAddress() { return sessionAddress },
+    async listRooms() { return { rooms: rooms.map(room => ({ ...room })) } },
+    async readMessage({ roomId, afterSeq = 0, limit = READ_PAGE_MAX } = {}) {
+      const box = mail.get(roomId) ?? []
+      const rows = box.filter(row => row.seq > afterSeq).slice(0, limit)
+      const head = box.reduce((max, row) => Math.max(max, row.seq), 0)
+      return {
+        messages: rows,
+        next_after_seq: rows.length > 0 ? rows[rows.length - 1].seq : afterSeq,
+        head_seq: head,
+      }
+    },
+  }
+  const notifier = startNotifier({
+    client,
+    pluginDataDir: pluginData,
+    realmIdOf: async () => 'sessions-realm',
+    env: {},
+    refreshMs: 60,
+    spacingMs: 2,
+  })
+  t.after(() => notifier.stop())
+
+  await waitFor(() => statusLines(pluginData).some(line => line.event === 'started'), 'the watcher armed')
+  sessionAddress = 'self~token00001@macbook'
+
+  const ownRow = {
+    seq: 1,
+    chat_id: 'self~token00001@macbook',
+    actor_fingerprint: own,
+    created_at: new Date().toISOString(),
+    text: 'this session\u2019s own words',
+  }
+  const siblingRow = {
+    seq: 2,
+    chat_id: 'sibling~token00002@macbook',
+    actor_fingerprint: own,
+    created_at: new Date().toISOString(),
+    text: 'the sibling session\u2019s words wake this host',
+  }
+  mail.get('pair').push(ownRow, siblingRow)
+
+  await waitFor(() => messageLines(pluginData).some(entry => entry.room_id === 'pair' && entry.seq === 2),
+    'the sibling row delivered', 15_000)
+  const delivered = messageLines(pluginData).find(entry => entry.room_id === 'pair' && entry.seq === 2)
+  assert.equal(delivered.chat_id, 'sibling~token00002@macbook', 'the SIBLING session\u2019s row delivered under its own address')
+  assert.equal(delivered.preview, 'the sibling session\u2019s words wake this host')
+  assert.equal(
+    messageLines(pluginData).some(entry => entry.room_id === 'pair' && entry.seq === 1),
+    false,
+    'this session\u2019s OWN address row is skipped as self',
+  )
 })

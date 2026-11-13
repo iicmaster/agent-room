@@ -17,7 +17,7 @@
 // literals in this file.
 
 import assert from 'node:assert/strict'
-import { existsSync, lstatSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, lstatSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { once } from 'node:events'
 import http from 'node:http'
 import { generateKeyPairSync } from 'node:crypto'
@@ -273,10 +273,16 @@ const directMemberRows = dataDir => sqlRows(
   'SELECT room_id, actor_fingerprint, joined_at FROM direct_members ORDER BY room_id, actor_fingerprint',
 )
 
+// v0.9.0: the adapter's cursor file lives PER SESSION under
+// sessions/<scope>/; this harness runs exactly one in-process adapter per
+// installation, so exactly one scope directory exists.
 function cursorValue(pluginData, realmId, roomId) {
-  return JSON.parse(
-    readFileSync(join(pluginData, 'realms', realmId, 'cursors.json'), 'utf8'),
-  ).cursors[roomId].after_seq
+  const sessionsDir = join(pluginData, 'sessions')
+  const scopes = readdirSync(sessionsDir).filter(name => !name.startsWith('.'))
+  assert.equal(scopes.length, 1, 'exactly one session scope directory')
+  const doc = JSON.parse(readFileSync(join(sessionsDir, scopes[0], 'cursors.json'), 'utf8'))
+  assert.equal(doc.realm_id, realmId, 'the cursor document names its realm')
+  return doc.cursors[roomId].after_seq
 }
 
 // The real MCP adapter, driven in-process over real JSON-RPC streams: the

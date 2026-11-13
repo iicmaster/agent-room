@@ -40,15 +40,18 @@ import {
   FINGERPRINT_PATTERN,
   FINGERPRINT_PREFIX,
   IDENTIFIER_MAX,
+  MESSAGE_CHAT_ID_MAX,
   MESSAGE_TEXT_MAX,
   READ_PAGE_MAX,
   ROOM_ID_ENTROPY_BYTES,
+  SESSION_ADDRESS_PATTERN,
   STORE_OPEN_BUSY_BACKOFF_MS,
   STORE_OPEN_BUSY_RETRY_LIMIT,
   STORAGE_REFUSE_FREE_BYTES,
   STORAGE_WARN_FREE_BYTES,
   TITLE_MAX,
   chatIdForms,
+  sessionAddressForms,
 } from '../constants.mjs'
 import {
   AgentRoomRuntimeError,
@@ -56,8 +59,21 @@ import {
   ensurePrivateDirectory,
 } from '../runtime.mjs'
 import { createIdentityRepository } from '../identity/repository.mjs'
+import {
+  SESSION_PRINCIPALS_ADDRESS_INDEX_NAME,
+  SESSION_PRINCIPALS_COLUMNS,
+  createSessionPrincipalOperations,
+  sessionPrincipalsAddressIndexDdl,
+  sessionPrincipalsTableDdl,
+} from '../identity/session-principals.mjs'
 import { createMessagingRoomOperations } from '../messaging/rooms.mjs'
 import { createMessagingMessageOperations } from '../messaging/messages.mjs'
+import {
+  SESSION_PAIR_MEMBERS_COLUMNS,
+  SESSION_PAIR_KEY_PREFIX,
+  createSessionPairOperations,
+  sessionPairMembersTableDdl,
+} from '../messaging/session-pairs.mjs'
 import {
   BANNED_ACTORS_COLUMNS,
   bannedActorsTableDdl,
@@ -157,6 +173,22 @@ function requireChatId(value) {
   const forms = chatIdForms(value)
   if (forms === null) fail('invalid_chat_id', CHAT_ID_INVALID_MESSAGE)
   return forms.display
+}
+
+// The addressed append's attribution gate (v0.9.0): a message row's chat_id
+// may be a DR-1 chat id OR a full session address — the sender's locator,
+// stored verbatim and never rewritten. The DR-1 grammar itself is untouched:
+// every other path keeps requiring the strict chat id form; only this gate
+// (used by appendSessionPairMessage) admits the wider shape.
+function requireChatIdOrSessionAddress(value) {
+  const chat = chatIdForms(value)
+  if (chat !== null) return chat.display
+  const address = sessionAddressForms(value)
+  if (address !== null) return address.address
+  fail(
+    'invalid_chat_id',
+    `${CHAT_ID_INVALID_MESSAGE}, or a full session address (base~locator-token@machine)`,
+  )
 }
 
 function requireClientMessageId(value) {
@@ -326,9 +358,14 @@ function configureConnection(database, { maxPageCount } = {}) {
   // commit — so tests drive the append path's SQLITE_FULL → storage_low
   // mapping without filling a real disk. Per-connection by SQLite's own
   // semantics (it constrains this connection's writes and no other
-  // connection), applied last among the pragmas and asserted after setting,
-  // never assumed. A test seam beside the storage free-space source, never an
-  // operator surface: no server flag or env knob reads it.
+  // connection), applied last among the pragmas — BEFORE the schema
+  // convergence, deliberately: schema work is unbounded write work, and the
+  // upgrade doctrine is that a full disk fails the OPEN raw (the operator
+  // frees space and reopens; tests/rate-gates.test.mjs's upgrade-time rebuild
+  // row pins both halves). Only APPENDS see the ceiling as storage_low.
+  // Asserted after setting, never assumed. A test seam beside the storage
+  // free-space source, never an operator surface: no server flag or env knob
+  // reads it.
   if (maxPageCount !== undefined) {
     database.exec(`PRAGMA max_page_count = ${maxPageCount};`)
     if (Number(pragmaValue(database, 'PRAGMA max_page_count')) !== maxPageCount) {
@@ -434,18 +471,39 @@ export function messagesTableDdl(tableName) {
       reply_to_seq INTEGER,
       created_at TEXT NOT NULL,
       PRIMARY KEY (room_id, seq),
-      UNIQUE (room_id, actor_fingerprint, client_message_id),
+      UNIQUE (room_id, chat_id, client_message_id),
       FOREIGN KEY (room_id, reply_to_seq)
         REFERENCES messages(room_id, seq) ON DELETE RESTRICT,
       CHECK (seq >= 1),
       CHECK (reply_to_seq IS NULL OR reply_to_seq >= 1),
       ${fingerprintCheck('actor_fingerprint')},
-      CHECK (length(chat_id) BETWEEN 1 AND ${CHAT_ID_MAX}),
+      -- The attribution bound carries BOTH attribution shapes: a DR-1 chat id
+      -- (1-${CHAT_ID_MAX}) or a full session address (up to
+      -- ${MESSAGE_CHAT_ID_MAX}, v0.9.0's session-pair sender locator). The
+      -- grammar gates stay per-path; only this storage bound widened, so old
+      -- rows and old paths behave exactly as before.
+      CHECK (length(chat_id) BETWEEN 1 AND ${MESSAGE_CHAT_ID_MAX}),
       CHECK (length(client_message_id) BETWEEN 1 AND ${CLIENT_MESSAGE_ID_MAX}),
       CHECK (length(text) BETWEEN 1 AND ${MESSAGE_TEXT_MAX})
     ) STRICT;
   `
 }
+
+// The messages idempotency key (v0.9.0): UNIQUE (room_id, chat_id,
+// client_message_id). chat_id is the row's DELIVERY identity — a DR-1 name
+// that was 1:1 with the installation's live bind on the frozen send path,
+// the sender's unique session address on the addressed path — so two sibling
+// sessions of one installation (one actor_fingerprint) can never collide on
+// a shared client_message_id. LOOSENING NOTE, deliberate and documented: the
+// previous key (room_id, actor_fingerprint, client_message_id) coded-conflic
+// ted a same-id resend after a RENAME (the name moved, the fingerprint did
+// not); the name-keyed tuple now treats the renamed resend as a new row.
+// The frozen send route never relied on the constraint for its semantics —
+// its fingerprint-keyed probe resolves an exact retry (original or conflict)
+// before any insert — so old behavior is preserved by the probe, and the one
+// shape the constraint swap makes possible (a different installation reusing
+// a historical name + id in one room) maps to the coded
+// client_message_id_conflict in the append's catch, never a raw SQLite error.
 
 // Broadcast membership is implicit (AD-14), so this table holds rows ONLY for
 // direct rooms; broadcast append/read needs no membership row.
@@ -634,10 +692,10 @@ function verifyStrictTables(database) {
     SELECT name, strict
     FROM pragma_table_list
     WHERE schema = 'main'
-      AND name IN ('rooms', 'direct_members', 'messages', 'realms', 'chat_id_claims', 'enrolled_actors', 'invites', 'invite_consumptions', 'banned_actors')
+      AND name IN ('rooms', 'direct_members', 'messages', 'realms', 'chat_id_claims', 'enrolled_actors', 'invites', 'invite_consumptions', 'banned_actors', 'session_principals', 'session_pair_members')
   `).all()
   const strictByName = new Map(strictTables.map(row => [row.name, Number(row.strict)]))
-  for (const name of ['rooms', 'direct_members', 'messages', 'realms', 'chat_id_claims', 'enrolled_actors', 'invites', 'invite_consumptions', 'banned_actors']) {
+  for (const name of ['rooms', 'direct_members', 'messages', 'realms', 'chat_id_claims', 'enrolled_actors', 'invites', 'invite_consumptions', 'banned_actors', 'session_principals', 'session_pair_members']) {
     if (strictByName.get(name) !== 1) {
       fail('database_schema_invalid', `database table ${name} is missing or is not STRICT`)
     }
@@ -830,7 +888,122 @@ function verifyBannedActorsColumns(database) {
     columns.length !== BANNED_ACTORS_COLUMNS.length
     || BANNED_ACTORS_COLUMNS.some((name, index) => columns[index] !== name)
   ) {
-    fail('database_schema_invalid', 'database table banned_actors has a divergent column set')
+    fail('database_schema_invalid', `database table banned_actors has a divergent column set`)
+  }
+}
+
+// v0.9.0 (additive, no schema-version bump): the durable session principal
+// registry joins the schema through the same convergence pattern — CREATE
+// TABLE IF NOT EXISTS on every open, then the column-set verification, so a
+// foreign or drifted table is a coded schema failure at open. The DDL and
+// operations live in ../identity/session-principals.mjs; this store owns the
+// wiring and contributes its one transaction runner. The partial UNIQUE index
+// makes the full address unique among RETAINED principals (a revoked or
+// retention-expired principal frees its address); a base name is deliberately
+// NOT unique — two live principals may share one base+machine under distinct
+// locator tokens (DUP_BASE_SAME_INSTALL), so `chat_id_taken` never arises
+// from a same-base allocation race.
+function ensureSessionPrincipalTable(database) {
+  database.exec(sessionPrincipalsTableDdl({ ifNotExists: true }))
+  database.exec(sessionPrincipalsAddressIndexDdl())
+}
+
+function verifySessionPrincipalColumns(database) {
+  const columns = database
+    .prepare(`SELECT name FROM pragma_table_info('session_principals') ORDER BY cid`)
+    .all()
+    .map(row => row.name)
+  if (
+    columns.length !== SESSION_PRINCIPALS_COLUMNS.length
+    || SESSION_PRINCIPALS_COLUMNS.some((name, index) => columns[index] !== name)
+  ) {
+    fail('database_schema_invalid', 'database table session_principals has a divergent column set')
+  }
+}
+
+function verifySessionPrincipalAddressIndex(database) {
+  const indexes = database
+    .prepare(`SELECT name FROM pragma_index_list('session_principals')`)
+    .all()
+    .map(row => row.name)
+  if (!indexes.includes(SESSION_PRINCIPALS_ADDRESS_INDEX_NAME)) {
+    fail('database_schema_invalid', 'database table session_principals is missing the retained-address unique index')
+  }
+  const columns = database
+    .prepare(`SELECT name FROM pragma_index_info('${SESSION_PRINCIPALS_ADDRESS_INDEX_NAME}') ORDER BY seqno`)
+    .all()
+    .map(row => row.name)
+  if (columns.length !== 1 || columns[0] !== 'address') {
+    fail('database_schema_invalid', `database index ${SESSION_PRINCIPALS_ADDRESS_INDEX_NAME} has a divergent column set`)
+  }
+}
+
+// v0.9.0 (additive, no schema-version bump): the session-pair membership
+// table. The pair ROOMS themselves are rows of the existing rooms table under
+// the `ssession:` pair-key prefix (same substrate, same durable log — the
+// rooms table's UNIQUE(pair_key) already makes the canonical session pair
+// idempotent); only membership needed a new table, keyed by session id.
+function ensureSessionPairMembersTable(database) {
+  database.exec(sessionPairMembersTableDdl({ ifNotExists: true }))
+}
+
+function verifySessionPairMembersColumns(database) {
+  const columns = database
+    .prepare(`SELECT name FROM pragma_table_info('session_pair_members') ORDER BY cid`)
+    .all()
+    .map(row => row.name)
+  if (
+    columns.length !== SESSION_PAIR_MEMBERS_COLUMNS.length
+    || SESSION_PAIR_MEMBERS_COLUMNS.some((name, index) => columns[index] !== name)
+  ) {
+    fail('database_schema_invalid', 'database table session_pair_members has a divergent column set')
+  }
+}
+
+// v0.9.0: the messages table converges twice-over — the chat_id length CHECK
+// widened from 1..CHAT_ID_MAX to 1..MESSAGE_CHAT_ID_MAX so a session-pair
+// sender's full address fits as attribution, and the idempotency UNIQUE moved
+// from (room_id, actor_fingerprint, client_message_id) to the delivery
+// identity (room_id, chat_id, client_message_id). Widening/key-move only —
+// the DR-1 grammar gates stay per-path and the frozen route's probe owns its
+// idempotency semantics (see the comment above messagesTableDdl's key note).
+// Fresh files build the converged shape directly; files created before this
+// change converge on open via the standard SQLite table-rebuild recipe
+// (foreign keys off, create-copy-drop-rename inside one write transaction,
+// foreign keys restored), preserving every row. Detection reads the table's
+// stored CREATE statement: a file already carrying BOTH the widened bound and
+// the name-keyed unique is left untouched.
+function messagesShapeConverged(database) {
+  const row = database
+    .prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'messages'`)
+    .get()
+  if (!row || typeof row.sql !== 'string') return false
+  return row.sql.includes(`BETWEEN 1 AND ${MESSAGE_CHAT_ID_MAX}`)
+    && row.sql.includes('UNIQUE (room_id, chat_id, client_message_id)')
+}
+
+function ensureMessagesChatIdAddressBound(database) {
+  if (messagesShapeConverged(database)) return
+  database.exec('PRAGMA foreign_keys = OFF;')
+  try {
+    withImmediateTransaction(database, () => {
+      database.exec(messagesTableDdl('messages_new'))
+      database.exec(`
+        INSERT INTO messages_new (
+          room_id, seq, actor_fingerprint, chat_id, client_message_id, text, reply_to_seq, created_at
+        )
+        SELECT room_id, seq, actor_fingerprint, chat_id, client_message_id, text, reply_to_seq, created_at
+        FROM messages;
+      `)
+      database.exec('DROP TABLE messages;')
+      database.exec('ALTER TABLE messages_new RENAME TO messages;')
+    })
+  } finally {
+    database.exec('PRAGMA foreign_keys = ON;')
+  }
+
+  if (!messagesShapeConverged(database)) {
+    fail('database_schema_invalid', 'messages table did not converge to the session-address attribution shape')
   }
 }
 
@@ -1057,8 +1230,14 @@ export function openRoomLog({
       verifyInvitesColumns(database, 'invite_consumptions', INVITE_CONSUMPTIONS_COLUMNS)
       ensureBannedActorsTable(database)
       verifyBannedActorsColumns(database)
+      ensureMessagesChatIdAddressBound(database)
       ensureMessagesDuplicateGateIndex(database)
       verifyMessagesDuplicateGateIndex(database)
+      ensureSessionPrincipalTable(database)
+      verifySessionPrincipalColumns(database)
+      verifySessionPrincipalAddressIndex(database)
+      ensureSessionPairMembersTable(database)
+      verifySessionPairMembersColumns(database)
       verifyStrictTables(database)
 
       // Report the file's actual version, never the compiled constant.
@@ -1118,6 +1297,20 @@ export function openRoomLog({
       withImmediateTransaction,
       validate: { assertOpen, fail, requireObject, requireChatId, requireFingerprint, requireClaimTimestamp },
     })
+    // v0.9.0: the session-pair operations share this connection, transaction
+    // runner and helper set. Created before the message operations so the
+    // addressed append's membership helper can consult their read.
+    const sessionPairOperations = createSessionPairOperations({
+      database,
+      withImmediateTransaction,
+      validate: { assertOpen, fail, requireObject, requireRoomId, requireAfterSeq, requireReadLimit, requireNowMs },
+      helpers: { requireRoom, plainRoom, plainMessage, messageProjection: MESSAGE_PROJECTION, roomIdentity: () => randomBytes(ROOM_ID_ENTROPY_BYTES).toString('base64url') },
+    })
+    const requireSessionPairMembership = (room, sessionId) => {
+      if (!sessionPairOperations.sessionPairMembership({ roomId: room.id, sessionId })) {
+        fail('actor_not_member', `session is not a member of room ${room.id}`)
+      }
+    }
     const messagingRoomOperations = createMessagingRoomOperations({
       database,
       withImmediateTransaction,
@@ -1153,7 +1346,7 @@ export function openRoomLog({
       database,
       withImmediateTransaction,
       validate: { assertOpen, fail, requireObject, requireRoomId, requireFingerprint, requireChatId, requireClientMessageId, requireMessageText, requireReplyToSeq, requireNowMs },
-      helpers: { requireRoom, requireDirectMembership, selectMessage, plainMessage, messageProjection: MESSAGE_PROJECTION },
+      helpers: { requireRoom, requireDirectMembership, requireSessionPairMembership, requireChatIdOrSessionAddress, selectMessage, plainMessage, messageProjection: MESSAGE_PROJECTION },
       storageGate,
       duplicateWindowMs: validDuplicateWindowMs,
       storageNowMs,
@@ -1404,6 +1597,95 @@ export function openRoomLog({
       isActorBanned(...args) {
         assertOpen()
         return identityOperations.isActorBanned(...args)
+      },
+
+      // --- v0.9.0: session principals & session-pair rooms ------------------
+      //
+      // Identity-context operations delegated to the same-connection
+      // repository composition (session-principals.mjs owns the domain SQL;
+      // this module remains schema and connection owner). The raw session
+      // capability exists only inside allocateSessionPrincipal's return value
+      // — exactly once; every other surface sees rows, digests and coded
+      // refusals.
+      allocateSessionPrincipal(...args) {
+        assertOpen()
+        return identityOperations.allocateSessionPrincipal(...args)
+      },
+
+      heartbeatSessionPrincipal(...args) {
+        assertOpen()
+        return identityOperations.heartbeatSessionPrincipal(...args)
+      },
+
+      resumeSessionPrincipal(...args) {
+        assertOpen()
+        return identityOperations.resumeSessionPrincipal(...args)
+      },
+
+      releaseSessionBaseLease(...args) {
+        assertOpen()
+        return identityOperations.releaseSessionBaseLease(...args)
+      },
+
+      revokeSessionPrincipal(...args) {
+        assertOpen()
+        return identityOperations.revokeSessionPrincipal(...args)
+      },
+
+      findSessionPrincipalByCapabilityDigest(...args) {
+        assertOpen()
+        return identityOperations.findSessionPrincipalByCapabilityDigest(...args)
+      },
+
+      resolveSessionPrincipalByAddress(...args) {
+        assertOpen()
+        return identityOperations.resolveSessionPrincipalByAddress(...args)
+      },
+
+      getSessionPrincipalStatus(...args) {
+        assertOpen()
+        return identityOperations.getSessionPrincipalStatus(...args)
+      },
+
+      listSessionPrincipals(...args) {
+        assertOpen()
+        return identityOperations.listSessionPrincipals(...args)
+      },
+
+      // Messaging-context session-pair operations: open-or-reuse the pair
+      // room between two retained principals, per-session membership, the
+      // routing read the read-route's ACL branch selects on, and the page /
+      // head reads with session ACL. The addressed append rides the message
+      // operations above (appendSessionPairMessage) so the idempotency,
+      // duplicate and storage gates stay one implementation.
+      openSessionPairRoom(...args) {
+        assertOpen()
+        return sessionPairOperations.openSessionPairRoom(...args)
+      },
+
+      sessionPairMembership(...args) {
+        assertOpen()
+        return sessionPairOperations.sessionPairMembership(...args)
+      },
+
+      roomRouting(...args) {
+        assertOpen()
+        return sessionPairOperations.roomRouting(...args)
+      },
+
+      readSessionPairPage(...args) {
+        assertOpen()
+        return sessionPairOperations.readSessionPairPage(...args)
+      },
+
+      sessionPairHeadSeq(...args) {
+        assertOpen()
+        return sessionPairOperations.sessionPairHeadSeq(...args)
+      },
+
+      appendSessionPairMessage(...args) {
+        assertOpen()
+        return messagingMessageOperations.appendSessionPairMessage(...args)
       },
     }
     return Object.freeze(api)

@@ -136,7 +136,7 @@ import { runViewerFamilyCommand } from './viewer-commands.mjs'
 import { runSessionFamilyCommand } from './session-commands.mjs'
 import { runWaitFamilyCommand } from './wait-commands.mjs'
 import { loadRemoteConfig } from '../client/remote-config.mjs'
-import { runReadFamilyCommand, runSendFamilyCommand, runSessionVerify } from './message-commands.mjs'
+import { runDmCommand, runReadFamilyCommand, runSendFamilyCommand, runSessionVerify, runSessionsCommand } from './message-commands.mjs'
 
 const OK_STATUS = 200
 // The collision status is owned by the constants table (chat_id_taken), never restated.
@@ -492,6 +492,32 @@ Commands:
       the target realm; sender_claim_ambiguous means two names tie — bind
       or re-assert exactly one).
 
+  agent-room send --to <session-address> --text <text> [--id <client_message_id>] [--reply-to <seq>]
+      The same one-shot send, addressed to a peer SESSION by its full address
+      (base~locator-token@machine — as "agent-room sessions" lists them).
+      One wire call resolves the pair room between the two session
+      principals and commits; the receipt says committed seq=N and the
+      peer's process presence (online/offline) — never delivered or read.
+      --room and --to are mutually exclusive.
+
+  agent-room dm --to <session-address> --text <text> [--id <client_message_id>] [--reply-to <seq>]
+      Direct-message a peer session by address — the four-step operator
+      model in one command. Allocates an ephemeral session principal for
+      this invocation (the server issues session id, address and capability),
+      sends, and releases the base lease; the durable principal and the
+      message persist, so the peer reads it whenever it next reads. Receipt
+      vocabulary: committed seq=N, peer presence online|offline — never
+      delivered, read, handled, or awakened. A peer address that resolves to
+      nothing refuses quietly (peer_not_found, no names, no hints).
+
+  agent-room sessions
+      List every session principal in the realm (the explicit enumeration —
+      a refused send never names anything, this command does): session_id,
+      full address (base~locator-token@machine), machine, generation,
+      presence (online iff its 30 s base lease is occupied and unexpired),
+      and the lease/retention dispositions. Use an address from this listing
+      as dm --to / send --to / message_send to.
+
   agent-room read --room <room_id> [--after-seq <n>] [--limit <n>] [--wait-ms <ms>]
       One-shot read: the receiver-side trust matrix applies exactly as in
       message_read (foreign bodies wrapped, held rows metadata-only), and the
@@ -776,7 +802,7 @@ export async function main(argv = process.argv.slice(2), {
   // this printer. (Capacity's refuse state keeps its report on stdout and
   // exits 1 through the outcome's exitCode — the report IS the answer, and
   // the exit code is the severity a script keys on.)
-  if (command === 'invite' || command === 'remote' || command === 'ban' || command === 'unban' || command === 'capacity' || command === 'viewer' || command === 'session' || command === 'wait' || command === 'send' || command === 'read') {
+  if (command === 'invite' || command === 'remote' || command === 'ban' || command === 'unban' || command === 'capacity' || command === 'viewer' || command === 'session' || command === 'wait' || command === 'send' || command === 'read' || command === 'dm' || command === 'sessions') {
     const outcome = command === 'invite'
       ? await runInviteFamilyCommand(subcommand, argv.slice(2), deps)
       : command === 'remote'
@@ -795,7 +821,11 @@ export async function main(argv = process.argv.slice(2), {
                   ? await runSendFamilyCommand(argv.slice(1), deps)
                   : command === 'read'
                     ? await runReadFamilyCommand(argv.slice(1), deps)
-                    : await runBanFamilyCommand(command, argv.slice(1), deps)
+                    : command === 'dm'
+                      ? await runDmCommand(argv.slice(1), deps)
+                      : command === 'sessions'
+                        ? await runSessionsCommand(argv.slice(1), deps)
+                        : await runBanFamilyCommand(command, argv.slice(1), deps)
     if (outcome.status === 'ok') {
       for (const line of outcome.lines) output.write(`${line}\n`)
       if (outcome.exitCode === 1) process.exitCode = 1

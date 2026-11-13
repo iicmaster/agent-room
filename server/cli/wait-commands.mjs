@@ -50,7 +50,7 @@
 //   re-arm is the agent's ordinary next action); a refusal prints ONE JSON
 //   object on stderr and exits 1; usage exits 2.
 
-import { existsSync, linkSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, linkSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { performance } from 'node:perf_hooks'
@@ -321,6 +321,14 @@ function releaseWaitLock(path, token) {
 // advances it — message_read stays the single writer). A missing or unusable
 // file means "no cursor yet": the room starts at 0, so an unread room —
 // including a brand-new DM — hints immediately.
+//
+// v0.9.0 namespace resolution: the adapter writes per-session cursor files
+// under sessions/<scope>/, and the wait process cannot know which scope is
+// the live adapter's (scopes are per process), so the baseline resolves the
+// NEWEST cursor file across namespaces — the per-session files first, the
+// legacy realms/<realm>/ file as a candidate too. The most recently written
+// position is the one actually consumed, so already-read history stays quiet
+// instead of re-hinting forever.
 function loadBaselineCursors(pluginDataDir, realmId) {
   if (typeof realmId !== 'string' || !REALM_KEY_PATTERN.test(realmId)) {
     throw new AgentRoomRuntimeError(
@@ -328,24 +336,44 @@ function loadBaselineCursors(pluginDataDir, realmId) {
       'the agent-room realm id is not a safe cursor key; refusing to build a cursor path from it',
     )
   }
-  const path = join(pluginDataDir, 'realms', realmId, 'cursors.json')
-  if (!existsSync(path)) return new Map()
-  try {
-    const value = readJsonFile(path)
-    const cursors = value && typeof value === 'object' && value.cursors && typeof value.cursors === 'object'
-      ? value.cursors
-      : {}
-    const baselines = new Map()
-    for (const [roomId, entry] of Object.entries(cursors)) {
-      const afterSeq = entry?.after_seq
-      if (typeof afterSeq === 'number' && Number.isSafeInteger(afterSeq) && afterSeq >= 0) {
-        baselines.set(roomId, afterSeq)
-      }
+  const candidates = []
+  const sessionsDir = join(pluginDataDir, 'sessions')
+  if (existsSync(sessionsDir)) {
+    for (const scope of readdirSync(sessionsDir)) {
+      if (scope.startsWith('.') || !REALM_KEY_PATTERN.test(scope)) continue
+      const path = join(sessionsDir, scope, 'cursors.json')
+      if (existsSync(path)) candidates.push({ path, mtimeMs: statSync(path).mtimeMs, sessionScoped: true })
     }
-    return baselines
-  } catch {
-    return new Map()
   }
+  const legacyPath = join(pluginDataDir, 'realms', realmId, 'cursors.json')
+  if (existsSync(legacyPath)) candidates.push({ path: legacyPath, mtimeMs: statSync(legacyPath).mtimeMs, sessionScoped: false })
+  candidates.sort((left, right) => right.mtimeMs - left.mtimeMs)
+  for (const candidate of candidates) {
+    try {
+      const value = readJsonFile(candidate.path)
+      // A session-scoped document records its realm: a foreign realm's file
+      // is not this realm's position — skip to the next candidate.
+      if (candidate.sessionScoped
+        && value && typeof value === 'object'
+        && value.realm_id !== undefined && value.realm_id !== realmId) {
+        continue
+      }
+      const cursors = value && typeof value === 'object' && value.cursors && typeof value.cursors === 'object'
+        ? value.cursors
+        : {}
+      const baselines = new Map()
+      for (const [roomId, entry] of Object.entries(cursors)) {
+        const afterSeq = entry?.after_seq
+        if (typeof afterSeq === 'number' && Number.isSafeInteger(afterSeq) && afterSeq >= 0) {
+          baselines.set(roomId, afterSeq)
+        }
+      }
+      return baselines
+    } catch {
+      continue
+    }
+  }
+  return new Map()
 }
 
 async function enumerateRooms({ target, token }) {

@@ -77,6 +77,28 @@ export const ROUTE_TABLE = Object.freeze([
   // response vocabulary by the dated 2026-09-25 spine amendment).
   Object.freeze({ method: 'GET', path: '/api/status', class: 'actor', implemented: true, requestFields: Object.freeze([]) }),
 
+  // v0.9.0 session addressing (additive spine amendment, dated 2026-11-13):
+  // the session-principal lifecycle and the addressed send — every entry
+  // class `actor`. Allocation and the operator revoke authenticate by the
+  // installation bearer alone (identity always from the token); the
+  // session-scoped operations (resume, heartbeat, base-lease release, the
+  // addressed send) additionally present the per-session capability, which
+  // the pipeline's Session-scheme branch resolves to its bound principal
+  // before the handler runs. Session id / generation / address in a body are
+  // SELECTORS — never authority (NFR-3: no identity travels in a body).
+  Object.freeze({ method: 'POST', path: '/api/session-principals', class: 'actor', implemented: true, requestFields: Object.freeze(['base_chat_id', 'client_type', 'machine']) }),
+  Object.freeze({ method: 'POST', path: '/api/session-principals/resume', class: 'actor', implemented: true, requestFields: Object.freeze(['generation', 'session_id']) }),
+  Object.freeze({ method: 'POST', path: '/api/session-principals/heartbeat', class: 'actor', implemented: true, requestFields: Object.freeze(['generation', 'session_id']) }),
+  Object.freeze({ method: 'DELETE', path: '/api/session-principals/current', class: 'actor', implemented: true, requestFields: Object.freeze([]) }),
+  Object.freeze({ method: 'POST', path: '/api/session-principals/revoke', class: 'actor', implemented: true, requestFields: Object.freeze(['reason', 'session_id']) }),
+  Object.freeze({ method: 'GET', path: '/api/session-principals', class: 'actor', implemented: true, requestFields: Object.freeze([]) }),
+  // The addressed send: one call from `to` (a full session address) to the
+  // committed seq — the server resolves the pair room of the two SESSION
+  // principals and appends with the sender's address as attribution. An
+  // unresolvable address answers the constant quiet peer_not_found; the
+  // receipt speaks only committed + peer presence (never delivered/read).
+  Object.freeze({ method: 'POST', path: '/api/messages', class: 'actor', implemented: true, requestFields: Object.freeze(['client_message_id', 'reply_to_seq', 'text', 'to']) }),
+
   // pre-auth (AD-8): POST /api/auth/enroll · POST /api/auth/challenge ·
   // POST /api/auth/answer · POST /api/auth/local
   //
@@ -183,6 +205,19 @@ export const REQUEST_FIELD_VOCABULARY = Object.freeze([
   // operator observed. POST only — PATCH never takes a name, and a ticket
   // without the intent is a request-shape refusal.
   'conflict_ticket',
+  // v0.9.0 session addressing (additive, dated spine amendment): the
+  // session-principal lifecycle's request fields. base_chat_id and machine
+  // shape the address at allocation; session_id and generation are the
+  // SELECTORS the session-scoped operations carry beside their capability
+  // credential (never authority); reason documents an operator revoke; to is
+  // the addressed send's full session address — a routing locator, never a
+  // credential and never a sender identity.
+  'to',
+  'base_chat_id',
+  'machine',
+  'session_id',
+  'generation',
+  'reason',
 ])
 
 export const RESPONSE_FIELD_VOCABULARY = Object.freeze([
@@ -224,6 +259,28 @@ export const RESPONSE_FIELD_VOCABULARY = Object.freeze([
   // (declared in the pipeline's ERROR_ENVELOPE_EXTRAS) for same-Actor
   // collisions only.
   'conflict_ticket',
+  // v0.9.0 session addressing (additive, dated spine amendment): the
+  // session-principal surface's response fields. session_capability is the
+  // raw per-session capability, returned EXACTLY ONCE by a successful
+  // allocation and never by any other surface; the receipt fields carry the
+  // two independent lifetimes (base lease + principal retention) and the
+  // addressed send's peer facts (peer.presence — online|offline|unknown,
+  // never a delivery claim).
+  'sessions',
+  'session_id',
+  'generation',
+  'address',
+  'base_name',
+  'machine',
+  'presence',
+  'base_lease_expires_at',
+  'principal_retention_expires_at',
+  'session_capability',
+  'last_heartbeat_at',
+  'base_lease_status',
+  'principal_status',
+  'created_at',
+  'peer',
 ])
 
 // Matching: specific patterns first, wildcard (`/viewer/` + static assets)
