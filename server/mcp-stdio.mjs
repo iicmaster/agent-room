@@ -88,7 +88,7 @@ import {
   sharedDataDirectory,
 } from './runtime.mjs'
 import { createAgentRoomClient } from './client/api-client.mjs'
-import { sessionCursorSeedState, sessionScopeKey } from './client/session-state.mjs'
+import { sessionCursorSeedState, sessionPrincipalEnabled, sessionScopeKey } from './client/session-state.mjs'
 import { CLIENT_RELEASE_TIMEOUT_MS } from './constants.mjs'
 
 // One wall-clock pause (the shutdown budget's timer).
@@ -723,8 +723,9 @@ export function createMcpServer({
   // retries, and an addressed send without a principal answers the coded
   // session_capability_required at its own call, where it belongs.
   let sessionPrincipalArmed = false
+  const sessionPrincipalOn = sessionPrincipalEnabled(env)
   const startSessionPrincipalOnce = () => {
-    if (sessionPrincipalArmed || shutdownPromise !== null) return
+    if (!sessionPrincipalOn || sessionPrincipalArmed || shutdownPromise !== null) return
     sessionPrincipalArmed = true
     void (async () => {
       try {
@@ -792,9 +793,9 @@ export function createMcpServer({
         // the namespace (the single-flight ensure resolves instantly once
         // armed); when it definitively cannot (nothing set up, an old
         // server), the legacy realm file is used, byte-for-byte as before.
-        let sessionActive = false
+        let sessionActive = sessionPrincipalOn
         try {
-          if (shutdownPromise === null) {
+          if (sessionPrincipalOn && shutdownPromise === null) {
             await readyClient.ensureSessionPrincipal()
             sessionActive = true
           }

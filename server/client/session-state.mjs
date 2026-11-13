@@ -46,6 +46,17 @@ import {
 
 export const SESSIONS_DIRECTORY_NAME = 'sessions'
 export const SESSION_STATE_FILENAME = 'session.json'
+export const SESSION_PRINCIPAL_ENV = 'AGENT_ROOM_SESSION_PRINCIPAL'
+
+// The adapter's session-principal arming gate (CAP-1 receive-ready). Default
+// ON: one process start = one addressable session. `AGENT_ROOM_SESSION_
+// PRINCIPAL=off` restores the pull-only profile for measurement corridors
+// calibrated without the session machinery (the REL-3 soak children) — an
+// honest opt-out, not a silent downgrade: the addressed send answers
+// session_capability_required while disabled.
+export function sessionPrincipalEnabled(env = process.env) {
+  return env?.[SESSION_PRINCIPAL_ENV] !== 'off'
+}
 
 // The derived per-process scope key: parent pid + own pid. Both are plain
 // integers, so the key always satisfies the safe-key grammar; the harness

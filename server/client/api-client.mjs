@@ -104,6 +104,7 @@ import {
   loadSessionState,
   machineLabel,
   saveSessionState,
+  sessionPrincipalEnabled,
   sessionScopeKey,
 } from './session-state.mjs'
 
@@ -581,6 +582,12 @@ export function createAgentRoomClient({
 
   async function ensureSessionPrincipal() {
     if (sessionPrincipal !== null) return sessionPrincipal
+    if (!sessionPrincipalEnabled(env)) {
+      throw new AgentRoomRuntimeError(
+        'session_capability_required',
+        'session principals are disabled (AGENT_ROOM_SESSION_PRINCIPAL=off): session addressing is unavailable in this mode',
+      )
+    }
     if (sessionEnsurePromise === null) {
       // The single-flight promise clears itself in an INTERNAL finally (never
       // a chained .finally — that would mint a second, unhandled rejection
