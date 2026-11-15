@@ -139,3 +139,18 @@ test('Notification never reaches server API/store/core; the ratchet rejects a fo
   // The same rule set still accepts a legitimate intra-context import.
   assert.deepEqual(findingsForSource(file, "import { loadWakePolicy } from './wake-policy.mjs'\n"), [])
 })
+
+test('WriteQueuePort depends only on constants (and node:* built-ins) and store delegates queue ops', () => {
+  const queueFile = join(SERVER, 'store', 'write-queue.mjs')
+  const queueSource = readFileSync(queueFile, 'utf8')
+  const specs = imports(queueSource)
+  assert.ok(specs.length > 0, 'write-queue.mjs must import constants by name')
+  for (const specifier of specs) {
+    if (specifier.startsWith('node:')) continue
+    assert.equal(specifier, '../constants.mjs', `write-queue.mjs must import only ../constants.mjs or node:*, found ${specifier}`)
+  }
+  const store = readFileSync(join(SERVER, 'store', 'room-log.mjs'), 'utf8')
+  for (const method of ['enqueueWrite', 'getWriteQueueMetrics', 'drainWriteQueue', 'appendMessageInTx', 'openSessionPairRoomInTx', 'appendSessionPairMessageInTx', 'heartbeatSessionPrincipalInTx']) {
+    assert.match(store, new RegExp(`\\b${method}\\(`), `store facade must expose ${method}`)
+  }
+})

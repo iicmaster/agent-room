@@ -85,5 +85,14 @@ export function createEnrollRateLimiter({
     return true
   }
 
-  return { check }
+  function retryAfterMs(identity) {
+    if (typeof identity !== 'string' || identity.length === 0) {
+      throw new AgentRoomRuntimeError('invalid_argument', 'enroll rate check requires a non-empty identity key')
+    }
+    const timestamp = now()
+    const windowOffset = ((timestamp % windowMs) + windowMs) % windowMs
+    return Math.max(1, windowMs - windowOffset)
+  }
+
+  return { check, retryAfterMs }
 }

@@ -55,12 +55,8 @@ import {
   RECONNECT_BACKOFF_MAX_SECONDS,
   RECONNECT_BACKOFF_MIN_SECONDS,
   RECONNECT_RECOVERY_PROBE_MS,
-  REQUEST_BUDGET_BURST,
-  REQUEST_BUDGET_PER_MINUTE,
   ROOM_ID_ENTROPY_BYTES,
   SEND_STATUSES,
-  SEND_TOKEN_CAPACITY,
-  SEND_TOKEN_REFILL_PER_SECOND,
   SERVER_ATTACH_POLL_MS,
   SERVER_CHILD_REAP_TIMEOUT_MS,
   SERVER_HEALTH_PROBE_MAX_BYTES,
@@ -69,6 +65,8 @@ import {
   SERVER_STARTUP_LOCK_STALE_MS,
   SERVER_STARTUP_WAIT_MS,
   SESSIONS_MAX,
+  SESSION_BASE_LEASE_MS,
+  SESSION_HEARTBEAT_INTERVAL_MS,
   SESSION_TOKEN_BYTES,
   SESSION_TOKEN_MAX_CHARS,
   SESSION_TTL_MS,
@@ -85,6 +83,16 @@ import {
   TITLE_MAX,
   VIEWER_FRESHNESS_SECONDS,
   WEB_ASSET_MAX_BYTES,
+  WRITE_QUEUE_BATCH_MAX,
+  WRITE_QUEUE_BUSY_BUDGET_MS,
+  WRITE_QUEUE_BUSY_TIMEOUT_MS,
+  WRITE_QUEUE_DRAIN_MS,
+  WRITE_QUEUE_FLUSH_MS,
+  WRITE_QUEUE_MAX_BYTES,
+  WRITE_QUEUE_MAX_OPS,
+  WRITE_QUEUE_PER_SESSION_MAX,
+  WRITE_QUEUE_RETRY_BASE_MS,
+  WRITE_QUEUE_RETRY_MAX_MS,
 } from '../server/constants.mjs'
 import { DATABASE_LIMITS } from '../server/database.mjs'
 
@@ -137,10 +145,18 @@ test('AD-9 limits are owned once with their ratified values', () => {
   assert.equal(FRAME_MAX_BYTES, 1024 * 1024)
   assert.equal(READ_PAGE_MAX, 200)
   assert.equal(READ_HOLD_MAX_MS, 20_000)
-  assert.equal(SEND_TOKEN_REFILL_PER_SECOND, 0.5)
-  assert.equal(SEND_TOKEN_CAPACITY, 10)
-  assert.equal(REQUEST_BUDGET_PER_MINUTE, 120)
-  assert.equal(REQUEST_BUDGET_BURST, 30)
+  assert.equal(SESSION_HEARTBEAT_INTERVAL_MS, 15_000)
+  assert.equal(SESSION_BASE_LEASE_MS, 45_000)
+  assert.equal(WRITE_QUEUE_FLUSH_MS, 25)
+  assert.equal(WRITE_QUEUE_BATCH_MAX, 64)
+  assert.equal(WRITE_QUEUE_MAX_OPS, 2048)
+  assert.equal(WRITE_QUEUE_MAX_BYTES, 32 * 1024 * 1024)
+  assert.equal(WRITE_QUEUE_PER_SESSION_MAX, 16)
+  assert.equal(WRITE_QUEUE_BUSY_TIMEOUT_MS, 50)
+  assert.equal(WRITE_QUEUE_RETRY_BASE_MS, 25)
+  assert.equal(WRITE_QUEUE_RETRY_MAX_MS, 200)
+  assert.equal(WRITE_QUEUE_BUSY_BUDGET_MS, 1_500)
+  assert.equal(WRITE_QUEUE_DRAIN_MS, 2_000)
   assert.equal(ENROLLMENT_PER_MINUTE, 5)
   assert.equal(ENROLLMENT_BURST, 5)
   // Story 4.2: the enroll route's fixed window and the invite token's shape
@@ -345,6 +361,7 @@ test('every v0.1 public error code has an HTTP status declared once', () => {
     'not_enrolled',
     'peer_not_found',
     'protocol_required',
+    'queue_full',
     'rate_limited',
     'reply_room_mismatch',
     'request_cancelled',
@@ -431,6 +448,7 @@ test('every v0.1 public error code has an HTTP status declared once', () => {
     invite_invalid: 403,
     invite_exhausted: 409,
     invite_not_found: 404,
+    queue_full: 503,
     rate_limited: 429,
     // Story 4.5: the operator ban's refusal — every send, read, or re-enroll
     // from the banned key is refused 403 (the send-status code's HTTP face).

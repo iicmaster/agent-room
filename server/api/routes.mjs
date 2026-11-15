@@ -281,6 +281,7 @@ export const RESPONSE_FIELD_VOCABULARY = Object.freeze([
   'principal_status',
   'created_at',
   'peer',
+  'write_queue',
 ])
 
 // Matching: specific patterns first, wildcard (`/viewer/` + static assets)

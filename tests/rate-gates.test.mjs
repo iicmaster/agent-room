@@ -45,18 +45,19 @@ import { DatabaseSync } from 'node:sqlite'
 
 import {
   DUPLICATE_WINDOW_MS,
-  REQUEST_BUDGET_BURST,
-  REQUEST_BUDGET_PER_MINUTE,
-  SEND_TOKEN_CAPACITY,
-  SEND_TOKEN_REFILL_PER_SECOND,
+  ENROLLMENT_PER_MINUTE,
 } from '../server/constants.mjs'
 import { openRoomLog } from '../server/store/room-log.mjs'
-import { startServer } from '../server/api/server.mjs'
+import {
+  gateLimitsFromEnv,
+  startServer,
+  trustedProxyFromEnv,
+} from '../server/api/server.mjs'
+import { createEnrollRateLimiter } from '../server/api/enroll-rate-limit.mjs'
 import { createTokenBucketGate } from '../server/api/rate-gates.mjs'
 import { BudgetStage } from '../server/api/pipeline.mjs'
 import { loadOrCreateLocalToken } from '../server/api/local-token.mjs'
 import { fingerprintFromPublicKey } from '../server/keys.mjs'
-import { gateLimitsFromEnv } from '../server/api/server.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const PROTOCOL_KEY = 'agent-room-protocol'
@@ -65,15 +66,7 @@ const FINGERPRINT_A = `sha256:${'a'.repeat(64)}`
 const FINGERPRINT_B = `sha256:${'b'.repeat(64)}`
 const FINGERPRINT_C = `sha256:${'c'.repeat(64)}`
 
-// Operator floors for wire tests that need throughput instead of throttling
-// (deliberately far above the declared defaults — the gates still run, they
-// just never refuse these workloads).
-const FLOORS_OFF = Object.freeze({
-  sendTokenRefillPerSecond: 1000,
-  sendTokenCapacity: 1000,
-  requestBudgetPerMinute: 60000,
-  requestBudgetBurst: 1000,
-})
+const FLOORS_OFF = Object.freeze({})
 
 const sleep = ms => new Promise(resolvePromise => { setTimeout(resolvePromise, ms) })
 
@@ -170,14 +163,15 @@ async function send(port, sessionToken, roomId, clientMessageId, text, extra = {
 
 // --- Isolated gate units (injectable clock) -----------------------------------------
 
-test('the send bucket admits capacity 10 instantly, refuses the 11th with a delay, and refills at 0.5/s on the injected clock', () => {
+test('the token bucket utility admits capacity 10 instantly, refuses the 11th with a delay, and refills at 0.5/s on the injected clock', () => {
   const now = { value: 0 }
+  const capacity = 10
   const gate = createTokenBucketGate({
-    refillPerSecond: SEND_TOKEN_REFILL_PER_SECOND,
-    capacity: SEND_TOKEN_CAPACITY,
+    refillPerSecond: 0.5,
+    capacity,
     now: () => now.value,
   })
-  for (let index = 0; index < SEND_TOKEN_CAPACITY; index += 1) {
+  for (let index = 0; index < capacity; index += 1) {
     assert.deepEqual(gate.check('actor'), { ok: true }, `token ${index + 1} of the burst admits`)
   }
   const refusal = gate.check('actor')
@@ -196,14 +190,15 @@ test('the send bucket admits capacity 10 instantly, refuses the 11th with a dela
   assert.equal(gate.check('actor').ok, false, 'and the bucket is empty again immediately after')
 })
 
-test('the request budget is the same mechanism at 120/min burst 30, and keys never share buckets', () => {
+test('the token bucket utility enforces per-key isolation and 500 ms refill at 2 tokens/s', () => {
   const now = { value: 0 }
+  const burst = 30
   const gate = createTokenBucketGate({
-    refillPerSecond: REQUEST_BUDGET_PER_MINUTE / 60,
-    capacity: REQUEST_BUDGET_BURST,
+    refillPerSecond: 2,
+    capacity: burst,
     now: () => now.value,
   })
-  for (let index = 0; index < REQUEST_BUDGET_BURST; index += 1) {
+  for (let index = 0; index < burst; index += 1) {
     assert.deepEqual(gate.check('actor-a'), { ok: true }, `request ${index + 1} of the burst admits`)
   }
   const refusal = gate.check('actor-a')
@@ -599,98 +594,85 @@ function stageContext(overrides = {}) {
   }
 }
 
-test('the budgets stage counts every actor request at admission and answers refusals with the retry delay', async () => {
+test('the budgets stage enforces pre-auth enroll rate limiting and admits post-auth sends without 429', async () => {
   const now = { value: 0 }
-  const stage = new BudgetStage({
-    requestBudgetGate: createTokenBucketGate({ refillPerSecond: 0.001, capacity: 2, now: () => now.value }),
+  const untrustedStage = new BudgetStage({
+    enrollRateLimiter: createEnrollRateLimiter({ now: () => now.value }),
+    trustedProxy: false,
   })
-  assert.equal(await stage.process(stageContext()), undefined, 'request 1 admits')
-  assert.equal(await stage.process(stageContext()), undefined, 'request 2 admits')
-  const refusal = await stage.process(stageContext())
-  assert.equal(refusal.ok, false)
-  assert.equal(refusal.code, 'rate_limited')
-  assert.equal(refusal.status, 429)
-  assert.ok(refusal.retry_after_ms >= 1, 'the refusal carries its retry delay for the envelope')
-  // Pre-auth and unkeyed contexts are not the request budget's concern.
-  assert.equal(await stage.process(stageContext({ route: { path: '/api/auth/challenge', class: 'pre-auth' }, session: undefined })), undefined)
-  assert.equal(await stage.process(stageContext({ session: undefined })), undefined)
-})
-
-test('the send-bucket gate probes the idempotency tuple before consuming: an existing tuple is admitted free from an empty bucket', async () => {
-  const now = { value: 0 }
-  const sendRoute = { path: '/api/rooms/:id/messages', class: 'actor', requestFields: ['chat_id', 'client_message_id', 'text', 'reply_to_seq'] }
-  const bucket = createTokenBucketGate({ refillPerSecond: 0.001, capacity: 1, now: () => now.value })
-  const stage = new BudgetStage({ sendBucketGate: bucket })
-  // A real body stream: the send route's field read runs inside the stage,
-  // exactly as it does on the wire.
-  const sendContext = body => stageContext({
-    method: 'POST',
-    route: sendRoute,
-    params: { id: 'room-1' },
-    bodyStream: Readable.from([JSON.stringify(body)]),
-    headers: { 'content-length': String(Buffer.byteLength(JSON.stringify(body))) },
-  })
-
-  // The one token goes to a new send.
-  assert.equal(await stage.process(sendContext({ client_message_id: 'm-1' })), undefined)
-  const refused = await stage.process(sendContext({ client_message_id: 'm-2' }))
-  assert.equal(refused?.code, 'rate_limited', 'a new send finds the bucket empty')
-
-  // A tuple the store already holds is a retry: admitted free, consuming
-  // nothing — the next new send is refused exactly as before.
-  const retryContext = sendContext({ client_message_id: 'm-1' })
-  retryContext.store = {
-    findIdempotentSend: ({ roomId, actorFingerprint, clientMessageId }) => {
-      assert.equal(roomId, 'room-1')
-      assert.equal(actorFingerprint, FINGERPRINT_A)
-      assert.equal(clientMessageId, 'm-1')
-      return { seq: 7 }
-    },
+  for (let attempt = 1; attempt <= ENROLLMENT_PER_MINUTE; attempt += 1) {
+    assert.equal(
+      await untrustedStage.process(stageContext({
+        route: { path: '/api/auth/enroll', class: 'pre-auth', requestFields: ['invite_token', 'public_key', 'signature'] },
+        session: undefined,
+        remoteAddress: '10.0.0.5',
+        headers: { 'x-forwarded-for': `198.51.100.${attempt}` },
+      })),
+      undefined,
+      `enroll attempt ${attempt} passes admission`,
+    )
   }
-  assert.equal(await stage.process(retryContext), undefined, 'the retry passes free')
-  assert.equal((await stage.process(sendContext({ client_message_id: 'm-3' })))?.code, 'rate_limited',
-    'the retry consumed nothing — the bucket is still empty')
+  const enrollRefusal = await untrustedStage.process(stageContext({
+    route: { path: '/api/auth/enroll', class: 'pre-auth', requestFields: ['invite_token', 'public_key', 'signature'] },
+    session: undefined,
+    remoteAddress: '10.0.0.5',
+    headers: { 'x-forwarded-for': '198.51.100.99' },
+  }))
+  assert.equal(enrollRefusal?.code, 'rate_limited')
+  assert.equal(enrollRefusal?.status, 429)
 
-  // A missing client_message_id is not probeable: it consumes like any new
-  // admission (and fails shape validation later, counted).
-  assert.equal((await stage.process(sendContext({})))?.code, 'rate_limited')
+  // With trustedProxy: leftmost X-Forwarded-For keys each client bucket separately.
+  const trustedStage = new BudgetStage({
+    enrollRateLimiter: createEnrollRateLimiter({ now: () => now.value }),
+    trustedProxy: true,
+  })
+  for (let attempt = 1; attempt <= ENROLLMENT_PER_MINUTE + 1; attempt += 1) {
+    const res = await trustedStage.process(stageContext({
+      route: { path: '/api/auth/enroll', class: 'pre-auth', requestFields: ['invite_token', 'public_key', 'signature'] },
+      session: undefined,
+      remoteAddress: '127.0.0.1',
+      headers: { 'x-forwarded-for': `203.0.113.${attempt}, 10.0.0.1` },
+    }))
+    assert.equal(res, undefined, `distinct trusted proxy client ${attempt} has its own bucket`)
+  }
+
+  // Post-auth actor routes pass BudgetStage cleanly with zero 429 rejections.
+  for (let i = 0; i < 100; i += 1) {
+    assert.equal(
+      await untrustedStage.process(stageContext({
+        method: 'POST',
+        route: { path: '/api/rooms/:id/messages', class: 'actor', requestFields: ['chat_id', 'client_message_id', 'text', 'reply_to_seq'] },
+      })),
+      undefined,
+    )
+    assert.equal(
+      await untrustedStage.process(stageContext({
+        method: 'POST',
+        route: { path: '/api/messages', class: 'actor', requestFields: ['to', 'client_message_id', 'text', 'reply_to_seq'] },
+      })),
+      undefined,
+    )
+  }
 })
 
-// --- Over the wire: gate ordering, statuses, counting --------------------------------
+// --- Over the wire: duplicate gate, no post-auth 429, env parsing ---------------------
 
-test('ordering over the wire: an exact retry during a rate-limited period returns the original and consumes nothing; new sends stay refused with their delay', async t => {
-  const { port, dataDir } = await startTestServer(t, {
-    ...FLOORS_OFF,
-    sendTokenCapacity: 2,
-    sendTokenRefillPerSecond: 0.001,
-  })
+test('over the wire: sequential and burst sends commit cleanly with zero 429 and idempotent retries return original seq', async t => {
+  const { port, dataDir } = await startTestServer(t, {})
   const session = await connectSession(port, dataDir, 'gatelab-order')
   const roomId = session.broadcastRoomId
 
-  const first = await session.send(roomId, 'ord-1', 'retry me')
-  assert.equal(first.status, 200, first.text)
-  const second = await session.send(roomId, 'ord-2', 'second send')
-  assert.equal(second.status, 200, second.text)
-  assert.equal(second.json().result.seq, 2)
+  for (let index = 1; index <= 20; index += 1) {
+    const res = await session.send(roomId, `ord-${index}`, `message ${index}`)
+    assert.equal(res.status, 200, res.text)
+    assert.equal(res.json().result.status, 'committed')
+    assert.equal(res.json().result.seq, index)
+  }
 
-  // The bucket (capacity 2) is empty: a NEW send is refused with its delay.
-  const refused = await session.send(roomId, 'ord-3', 'third send')
-  assert.equal(refused.status, 429, refused.text)
-  assert.equal(refused.json().error.code, 'rate_limited')
-  assert.ok(Number.isSafeInteger(refused.json().error.retry_after_ms) && refused.json().error.retry_after_ms >= 1,
-    'the rate_limited envelope carries retry_after_ms')
-
-  // The exact retry of the FIRST send rides the idempotency probe past the
-  // empty bucket and returns the original, committed.
-  const retry = await session.send(roomId, 'ord-1', 'retry me')
+  const retry = await session.send(roomId, 'ord-1', 'message 1')
   assert.equal(retry.status, 200, retry.text)
   assert.equal(retry.json().result.status, 'committed')
-  assert.equal(retry.json().result.seq, 1, 'the original sequence comes back')
-
-  // The retry consumed nothing: a new send is STILL refused.
-  const stillRefused = await session.send(roomId, 'ord-4', 'fourth send')
-  assert.equal(stillRefused.status, 429, stillRefused.text)
-  assert.equal(stillRefused.json().error.code, 'rate_limited')
+  assert.equal(retry.json().result.seq, 1, 'idempotent retry answers original sequence')
 })
 
 test('duplicate_dropped over the wire: a 200 result naming original_seq, the store untouched, and different-room or different-reply sends commit', async t => {
@@ -737,68 +719,10 @@ test('duplicate_dropped over the wire: a 200 result naming original_seq, the sto
   assert.deepEqual(otherRoom.json().result, { status: 'committed', seq: 1, room_id: pairRoomId })
 })
 
-test('the request budget counts failed and replayed attempts, and a long-poll counts once at admission', async t => {
-  const budgetTuned = Object.freeze({
-    ...FLOORS_OFF,
-    // The burst admits: bind, status, two failing sends, one read — and the
-    // next request is over the burst (refill 1/min is zero at test pace).
-    requestBudgetBurst: 5,
-    requestBudgetPerMinute: 1,
-  })
-  const { port, dataDir } = await startTestServer(t, budgetTuned)
-  const session = await connectSession(port, dataDir, 'gatelab-budget')
-  const roomId = session.broadcastRoomId
-
-  // Two FAILING sends (unknown room — 404s) and one good read exhaust the
-  // burst: failures count at admission like everything else.
-  const failed = await session.send('nosuchroom', 'fail-1', 'counts anyway')
-  assert.equal(failed.status, 404, failed.text)
-  const failedAgain = await session.send('nosuchroom', 'fail-1', 'counts anyway')
-  assert.equal(failedAgain.status, 404, failedAgain.text)
-  const read = await sessioned(port, 'GET', session.sessionToken, `/api/rooms/${roomId}/messages`)
-  assert.equal(read.status, 200, read.text)
-
-  const refused = await sessioned(port, 'GET', session.sessionToken, '/api/presence')
-  assert.equal(refused.status, 429, refused.text)
-  assert.equal(refused.json().error.code, 'rate_limited')
-  assert.ok(refused.json().error.retry_after_ms >= 1)
-
-  // A long-poll counts ONCE at admission, never per poll iteration: on a
-  // fresh server with the same burst of 5, two 300 ms holds plus one read
-  // consume exactly 5 tokens — per-iteration counting would demand more.
-  const fresh = await startTestServer(t, budgetTuned)
-  const freshSession = await connectSession(fresh.port, fresh.dataDir, 'gatelab-longpoll')
-  for (let index = 0; index < 2; index += 1) {
-    const held = await sessioned(fresh.port, 'GET', freshSession.sessionToken,
-      `/api/rooms/${freshSession.broadcastRoomId}/messages?wait_ms=300`)
-    assert.equal(held.status, 200, held.text)
-  }
-  const third = await sessioned(fresh.port, 'GET', freshSession.sessionToken, '/api/presence')
-  assert.equal(third.status, 200, third.text)
-  const fourth = await sessioned(fresh.port, 'GET', freshSession.sessionToken, '/api/presence')
-  assert.equal(fourth.status, 429, 'the next request is over the burst — the holds counted once each')
-})
-
-test('the operator floors are honored: a tuned send capacity refuses, a tuned duplicate window rolls, and malformed overrides fail startup', async t => {
-  // Send capacity 1 with a negligible refill: the second distinct send
-  // within the window is refused — the tuned floor is the gate's law.
-  const tuned = await startTestServer(t, {
-    ...FLOORS_OFF,
-    sendTokenCapacity: 1,
-    sendTokenRefillPerSecond: 0.001,
-  })
-  const session = await connectSession(tuned.port, tuned.dataDir, 'gatelab-tuned')
-  const roomId = session.broadcastRoomId
-  const first = await session.send(roomId, 't-1', 'one')
-  assert.equal(first.status, 200, first.text)
-  const second = await session.send(roomId, 't-2', 'two')
-  assert.equal(second.status, 429, second.text)
-  assert.equal(second.json().error.code, 'rate_limited')
-
+test('the duplicate window operator floor rolls as configured and malformed duplicateWindowMs or trustedProxy fail startup', async t => {
   // The tuned duplicate window (60 ms) rolls quickly: after it passes, the
-  // same text under a new id commits (on a server whose send bucket is not
-  // the knob under test).
-  const windowTuned = await startTestServer(t, { ...FLOORS_OFF, duplicateWindowMs: 60 })
+  // same text under a new id commits cleanly.
+  const windowTuned = await startTestServer(t, { duplicateWindowMs: 60 })
   const windowSession = await connectSession(windowTuned.port, windowTuned.dataDir, 'gatelab-window')
   const windowRoomId = windowSession.broadcastRoomId
   const inside = await windowSession.send(windowRoomId, 'w-1', 'one')
@@ -810,13 +734,9 @@ test('the operator floors are honored: a tuned send capacity refuses, a tuned du
   assert.equal(rolled.json().result.seq, 2)
 
   for (const bad of [
-    { sendTokenRefillPerSecond: 0 },
-    { sendTokenRefillPerSecond: 'fast' },
-    { sendTokenCapacity: 0 },
-    { sendTokenCapacity: 2.5 },
-    { requestBudgetPerMinute: 0 },
-    { requestBudgetBurst: -1 },
     { duplicateWindowMs: 0 },
+    { duplicateWindowMs: -5 },
+    { trustedProxy: 'yes' },
   ]) {
     const dataDir = mkdtempSync(join(tmpdir(), 'agent-room-rate-gates-invalid-'))
     try {
@@ -831,44 +751,36 @@ test('the operator floors are honored: a tuned send capacity refuses, a tuned du
   }
 })
 
-test('the env surface parses the five operator floors strictly and falls back with a warning per junk value', () => {
+test('the env surface parses duplicateWindowMs and AGENT_ROOM_TRUSTED_PROXY strictly with warning fallbacks', () => {
   const parsed = gateLimitsFromEnv({
-    AGENT_ROOM_SEND_TOKEN_REFILL_PER_SECOND: '25.5',
-    AGENT_ROOM_SEND_TOKEN_CAPACITY: '40',
-    AGENT_ROOM_REQUEST_BUDGET_PER_MINUTE: '240',
-    AGENT_ROOM_REQUEST_BUDGET_BURST: '60',
     AGENT_ROOM_DUPLICATE_WINDOW_MS: '1000',
   })
   assert.deepEqual(parsed, {
     gateLimits: {
-      sendTokenRefillPerSecond: 25.5,
-      sendTokenCapacity: 40,
-      requestBudgetPerMinute: 240,
-      requestBudgetBurst: 60,
       duplicateWindowMs: 1000,
     },
     warnings: [],
   })
 
   const fallback = gateLimitsFromEnv({
-    AGENT_ROOM_SEND_TOKEN_REFILL_PER_SECOND: 'fast',
-    AGENT_ROOM_SEND_TOKEN_CAPACITY: '0',
-    AGENT_ROOM_REQUEST_BUDGET_PER_MINUTE: '1.5',
-    AGENT_ROOM_REQUEST_BUDGET_BURST: '-3',
     AGENT_ROOM_DUPLICATE_WINDOW_MS: 'soon',
   })
   assert.deepEqual(fallback.gateLimits, {
-    sendTokenRefillPerSecond: SEND_TOKEN_REFILL_PER_SECOND,
-    sendTokenCapacity: SEND_TOKEN_CAPACITY,
-    requestBudgetPerMinute: REQUEST_BUDGET_PER_MINUTE,
-    requestBudgetBurst: REQUEST_BUDGET_BURST,
     duplicateWindowMs: DUPLICATE_WINDOW_MS,
   })
-  assert.equal(fallback.warnings.length, 5, 'each junk value warns once and falls back to its default')
+  assert.equal(fallback.warnings.length, 1, 'junk duplicateWindowMs warns once and falls back to default')
 
   const silent = gateLimitsFromEnv({})
   assert.deepEqual(silent.warnings, [])
-  assert.equal(silent.gateLimits.sendTokenRefillPerSecond, SEND_TOKEN_REFILL_PER_SECOND)
+  assert.equal(silent.gateLimits.duplicateWindowMs, DUPLICATE_WINDOW_MS)
+
+  assert.deepEqual(trustedProxyFromEnv({}), { trustedProxy: false })
+  assert.deepEqual(trustedProxyFromEnv({ AGENT_ROOM_TRUSTED_PROXY: 'true' }), { trustedProxy: true })
+  assert.deepEqual(trustedProxyFromEnv({ AGENT_ROOM_TRUSTED_PROXY: '1' }), { trustedProxy: true })
+  assert.deepEqual(trustedProxyFromEnv({ AGENT_ROOM_TRUSTED_PROXY: 'false' }), { trustedProxy: false })
+  const badProxy = trustedProxyFromEnv({ AGENT_ROOM_TRUSTED_PROXY: 'maybe' })
+  assert.equal(badProxy.trustedProxy, false)
+  assert.match(badProxy.warning, /AGENT_ROOM_TRUSTED_PROXY/)
 })
 
 // --- NFR-5 executable: send p95 -------------------------------------------------------
@@ -927,16 +839,11 @@ test('send p95 stays within 150 ms server-side (end-to-end loopback p95 upper-bo
   assert.ok(p95 <= 150, `send p95 ${p95.toFixed(2)}ms must stay within 150 ms (NFR-5; includes the loopback RTT, so server-side processing is within it a fortiori)`)
 })
 
-test('the addressed send rides the same send bucket: a burst past capacity answers 429 rate_limited with its delay', async t => {
-  const { port, dataDir } = await startTestServer(t, {
-    ...FLOORS_OFF,
-    sendTokenCapacity: 2,
-    sendTokenRefillPerSecond: 0.001,
-  })
+test('the addressed send commits across bursts past old bucket limits with zero 429', async t => {
+  const { port, dataDir } = await startTestServer(t, FLOORS_OFF)
   const session = await connectSession(port, dataDir, 'gatelab-addressed')
 
-  // Two session principals under ONE installation (one bucket key): the
-  // sender and the addressed peer.
+  // Two session principals under ONE installation: the sender and peer.
   const allocate = async base => {
     const response = await sessioned(port, 'POST', session.sessionToken, '/api/session-principals', {
       base_chat_id: base,
@@ -957,18 +864,9 @@ test('the addressed send rides the same send bucket: a burst past capacity answe
     body: JSON.stringify({ to: peer.address, client_message_id: clientMessageId, text }),
   })
 
-  // The bucket (capacity 2) admits two addressed sends into the pair room...
-  const first = await addressedSend('addr-1', 'one')
-  assert.equal(first.status, 200, first.text)
-  assert.equal(first.json().result.status, 'committed')
-  const second = await addressedSend('addr-2', 'two')
-  assert.equal(second.status, 200, second.text)
-  assert.equal(second.json().result.status, 'committed')
-
-  // ...and the third is refused by the SAME bucket with its declared delay.
-  const refused = await addressedSend('addr-3', 'three')
-  assert.equal(refused.status, 429, refused.text)
-  assert.equal(refused.json().error.code, 'rate_limited')
-  assert.ok(Number.isSafeInteger(refused.json().error.retry_after_ms) && refused.json().error.retry_after_ms >= 1,
-    'the rate_limited envelope carries retry_after_ms')
+  for (let i = 1; i <= 16; i += 1) {
+    const sent = await addressedSend(`addr-${i}`, `burst message ${i}`)
+    assert.equal(sent.status, 200, sent.text)
+    assert.equal(sent.json().result.status, 'committed')
+  }
 })

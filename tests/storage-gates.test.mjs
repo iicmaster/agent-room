@@ -1363,3 +1363,329 @@ test('the backup/restore + disk-expansion guide exists and names its required se
 test('the canonical fingerprint shape stays the constants pattern (harness sanity)', () => {
   assert.match(FOREIGN_FINGERPRINT, FINGERPRINT_PATTERN)
 })
+
+test('POST /api/messages under warn-zone HALF_GIB emits deferred storageWarn post-COMMIT and respects storageNowMs interval', async t => {
+  const dataDir = makeDataDir(t)
+  let freeBytes = HALF_GIB
+  const warnings = []
+  const server = await startTestServer(t, dataDir, {
+    storageFreeBytesFn: () => freeBytes,
+    storageWarn: line => warnings.push(line),
+  })
+
+  const localToken = loadOrCreateLocalToken(dataDir)
+  const alice = installation()
+  const bob = installation()
+
+  const authAlice = await request(server.port, 'POST', '/api/auth/local', {
+    headers: { ...jsonHeaders, authorization: `Bearer ${localToken}` },
+    body: JSON.stringify({ public_key: alice.publicKey }),
+  })
+  assert.equal(authAlice.status, 200, authAlice.text)
+  const aliceToken = authAlice.json().result.session_token
+
+  const authBob = await request(server.port, 'POST', '/api/auth/local', {
+    headers: { ...jsonHeaders, authorization: `Bearer ${localToken}` },
+    body: JSON.stringify({ public_key: bob.publicKey }),
+  })
+  assert.equal(authBob.status, 200, authBob.text)
+  const bobToken = authBob.json().result.session_token
+
+  const aliceAlloc = await request(server.port, 'POST', '/api/session-principals', {
+    headers: { ...jsonHeaders, authorization: `Bearer ${aliceToken}` },
+    body: JSON.stringify({ base_chat_id: 'warn-alice', client_type: 'cli', machine: 'box-warn-a' }),
+  })
+  assert.equal(aliceAlloc.status, 200, aliceAlloc.text)
+  const alicePrincipal = aliceAlloc.json().result
+
+  const bobAlloc = await request(server.port, 'POST', '/api/session-principals', {
+    headers: { ...jsonHeaders, authorization: `Bearer ${bobToken}` },
+    body: JSON.stringify({ base_chat_id: 'warn-bob', client_type: 'cli', machine: 'box-warn-b' }),
+  })
+  assert.equal(bobAlloc.status, 200, bobAlloc.text)
+  const bobPrincipal = bobAlloc.json().result
+
+  const firstSend = await request(server.port, 'POST', '/api/messages', {
+    headers: { ...jsonHeaders, authorization: `Session ${alicePrincipal.session_capability}` },
+    body: JSON.stringify({
+      to: bobPrincipal.address,
+      client_message_id: 'warn-addressed-1',
+      text: 'warn zone addressed message',
+    }),
+  })
+  assert.equal(firstSend.status, 200, firstSend.text)
+  assert.equal(firstSend.json().result.status, 'committed')
+  assert.equal(warnings.length, 1, 'addressed send must emit deferred storageWarn post-COMMIT under HALF_GIB')
+  assert.match(warnings[0], /free/)
+
+  // A second send inside the same 60 s warn interval stays rate-limited to 1 warn line.
+  const secondSend = await request(server.port, 'POST', '/api/messages', {
+    headers: { ...jsonHeaders, authorization: `Session ${alicePrincipal.session_capability}` },
+    body: JSON.stringify({
+      to: bobPrincipal.address,
+      client_message_id: 'warn-addressed-2',
+      text: 'second warn zone addressed message',
+    }),
+  })
+  assert.equal(secondSend.status, 200, secondSend.text)
+  assert.equal(secondSend.json().result.status, 'committed')
+  assert.equal(warnings.length, 1)
+
+  // Dropping below refuse reserve answers 200 { status: 'storage_low' } without emitting warn.
+  freeBytes = REFUSE - 1
+  const refusedSend = await request(server.port, 'POST', '/api/messages', {
+    headers: { ...jsonHeaders, authorization: `Session ${alicePrincipal.session_capability}` },
+    body: JSON.stringify({
+      to: bobPrincipal.address,
+      client_message_id: 'warn-addressed-refused',
+      text: 'refused below reserve',
+    }),
+  })
+  assert.equal(refusedSend.status, 200, refusedSend.text)
+  assert.equal(refusedSend.json().result.status, 'storage_low')
+  assert.equal(warnings.length, 1)
+
+  // Store-level storageNowMs seam applies when addressed send calls appendSessionPairMessageInTx without nowMs.
+  const customDir = makeDataDir(t)
+  let customClock = 5_000
+  const customWarnings = []
+  const customStore = openRoomLog({
+    dataDir: customDir,
+    storageFreeBytesFn: () => HALF_GIB,
+    storageWarn: line => customWarnings.push(line),
+    storageNowMs: () => customClock,
+  })
+  t.after(() => customStore.close())
+  const p1 = customStore.allocateSessionPrincipal({
+    installationFingerprint: alice.fingerprint,
+    baseName: 'clock-a',
+    machine: 'm-a',
+  })
+  const p2 = customStore.allocateSessionPrincipal({
+    installationFingerprint: bob.fingerprint,
+    baseName: 'clock-b',
+    machine: 'm-b',
+  })
+  const pair = customStore.openSessionPairRoom({ sessionIds: [p1.session_id, p2.session_id] })
+  customStore.appendSessionPairMessage({
+    roomId: pair.id,
+    sessionId: p1.session_id,
+    installationFingerprint: alice.fingerprint,
+    chatId: p1.address,
+    clientMessageId: 'clock-1',
+    text: 'first interval',
+  })
+  assert.equal(customWarnings.length, 1)
+  customClock += STORAGE_WARN_INTERVAL_MS
+  customStore.appendSessionPairMessage({
+    roomId: pair.id,
+    sessionId: p1.session_id,
+    installationFingerprint: alice.fingerprint,
+    chatId: p1.address,
+    clientMessageId: 'clock-2',
+    text: 'next interval',
+  })
+  assert.equal(customWarnings.length, 2, 'omitting nowMs uses store storageNowMs interval clock')
+})
+
+test('multi-op executeWriteBatch handles raw SQLITE_FULL inside openSessionPairRoomInTx, intact-tx SQLITE_FULL, !database.isTransaction rollback, and *InTx guards', async t => {
+  // 1) Real PRAGMA max_page_count SQLITE_FULL inside openSessionPairRoomInTx rolls back outer tx (!database.isTransaction) and maps batch cleanly to storage_low without false-committing op1.
+  const fullDir = makeDataDir(t)
+  const setupStore = openRoomLog({ dataDir: fullDir, role: 'server' })
+  const room = setupStore.ensureBroadcastRoom()
+  const seedActor = installation()
+  const anchor = setupStore.allocateSessionPrincipal({
+    installationFingerprint: seedActor.fingerprint,
+    baseName: 'anchor',
+    machine: 'm-anchor',
+  })
+  const peers = Array.from({ length: 100 }, (_, index) =>
+    setupStore.allocateSessionPrincipal({
+      installationFingerprint: seedActor.fingerprint,
+      baseName: `peer-${index}`,
+      machine: 'm-peer',
+    }),
+  )
+  append(setupStore, room.id, 'seed-room-page', 'seed')
+  setupStore.close()
+
+  const inspector = new DatabaseSync(join(fullDir, ROOM_LOG_DATABASE_FILENAME), { readOnly: true })
+  const currentPages = Number(inspector.prepare('PRAGMA page_count').get().page_count)
+  inspector.close()
+
+  const cappedStore = openRoomLog({
+    dataDir: fullDir,
+    role: 'server',
+    maxPageCount: currentPages + 1,
+  })
+  t.after(() => cappedStore.close())
+
+  const op1Promise = cappedStore.enqueueWrite({
+    sessionKey: 's-sibling',
+    bytes: 16,
+    execute(tx) {
+      return tx.appendMessageInTx({
+        roomId: room.id,
+        actorFingerprint: BROADCAST.fingerprint,
+        chatId: BROADCAST.chatId,
+        clientMessageId: 'sibling-rolled-back-with-sqlite-full',
+        text: 'sibling-rolled-back',
+      })
+    },
+  })
+  const op2Promise = cappedStore.enqueueWrite({
+    sessionKey: 's-pair-full',
+    bytes: 16,
+    execute(tx) {
+      for (const peer of peers) {
+        tx.openSessionPairRoomInTx({
+          sessionIds: [anchor.session_id, peer.session_id],
+        })
+      }
+      return 'unexpected-success'
+    },
+  })
+
+  const [res1, res2] = await Promise.allSettled([op1Promise, op2Promise])
+  assert.equal(res1.status, 'rejected', 'outer rollback must reject sibling op rather than falsely claiming commit')
+  assert.equal(res1.reason?.code, 'storage_low')
+  assert.equal(res2.status, 'rejected')
+  assert.equal(res2.reason?.code, 'storage_low')
+  assert.equal(
+    messageRows(fullDir).some(row => row.client_message_id === 'sibling-rolled-back-with-sqlite-full'),
+    false,
+    'aborted batch must leave zero rows from sibling op on disk',
+  )
+
+  // 2) When op2 surfaces raw SQLITE_FULL while outer transaction remains intact, only sp_1 rolls back to storage_low and sibling op1 commits.
+  const intactDir = makeDataDir(t)
+  const intactStore = openRoomLog({ dataDir: intactDir, role: 'server' })
+  t.after(() => intactStore.close())
+  const intactRoom = intactStore.ensureBroadcastRoom()
+
+  const intactOp1 = intactStore.enqueueWrite({
+    sessionKey: 'intact-1',
+    bytes: 16,
+    execute(tx) {
+      return tx.appendMessageInTx({
+        roomId: intactRoom.id,
+        actorFingerprint: BROADCAST.fingerprint,
+        chatId: BROADCAST.chatId,
+        clientMessageId: 'intact-sibling-commits',
+        text: 'sibling-ok',
+      })
+    },
+  })
+  const intactOp2 = intactStore.enqueueWrite({
+    sessionKey: 'intact-2',
+    bytes: 16,
+    execute() {
+      throw Object.assign(new Error('database or disk is full'), { errcode: 13 })
+    },
+  })
+
+  const [intactRes1, intactRes2] = await Promise.allSettled([intactOp1, intactOp2])
+  assert.equal(intactRes1.status, 'fulfilled', `intact sibling op must commit: ${intactRes1.reason}`)
+  assert.equal(intactRes1.value.message.client_message_id, 'intact-sibling-commits')
+  assert.equal(intactRes2.status, 'rejected')
+  assert.equal(intactRes2.reason?.code, 'storage_low')
+  assert.ok(
+    messageRows(intactDir).some(row => row.client_message_id === 'intact-sibling-commits'),
+    'sibling op must remain committed on disk when outer tx stays intact',
+  )
+
+  // 3) Forced outer-transaction rollback (!database.isTransaction) on non-SQLITE_FULL error also aborts batch safely.
+  const rollbackDir = makeDataDir(t)
+  const rbSetup = openRoomLog({ dataDir: rollbackDir, role: 'server' })
+  const rbRoom = rbSetup.ensureBroadcastRoom()
+  const rbA = rbSetup.allocateSessionPrincipal({
+    installationFingerprint: seedActor.fingerprint,
+    baseName: 'rb-a',
+    machine: 'm-rb-a',
+  })
+  const rbB = rbSetup.allocateSessionPrincipal({
+    installationFingerprint: seedActor.fingerprint,
+    baseName: 'rb-b',
+    machine: 'm-rb-b',
+  })
+  rbSetup.close()
+
+  const triggerDb = new DatabaseSync(join(rollbackDir, ROOM_LOG_DATABASE_FILENAME))
+  triggerDb.exec(`
+    CREATE TRIGGER test_force_outer_rollback
+    BEFORE INSERT ON session_pair_members
+    BEGIN
+      SELECT RAISE(ROLLBACK, 'forced outer rollback');
+    END;
+  `)
+  triggerDb.close()
+
+  const rbStore = openRoomLog({ dataDir: rollbackDir, role: 'server' })
+  t.after(() => rbStore.close())
+
+  const rbOp1 = rbStore.enqueueWrite({
+    sessionKey: 'rb-1',
+    bytes: 16,
+    execute(tx) {
+      return tx.appendMessageInTx({
+        roomId: rbRoom.id,
+        actorFingerprint: BROADCAST.fingerprint,
+        chatId: BROADCAST.chatId,
+        clientMessageId: 'must-not-commit-on-outer-rollback',
+        text: 'rolled-back',
+      })
+    },
+  })
+  const rbOp2 = rbStore.enqueueWrite({
+    sessionKey: 'rb-2',
+    bytes: 16,
+    execute(tx) {
+      return tx.openSessionPairRoomInTx({ sessionIds: [rbA.session_id, rbB.session_id] })
+    },
+  })
+
+  const [rbRes1, rbRes2] = await Promise.allSettled([rbOp1, rbOp2])
+  assert.equal(rbRes1.status, 'rejected', 'batch abort must reject earlier op when outer tx rolls back')
+  assert.equal(rbRes2.status, 'rejected')
+  assert.equal(messageRows(rollbackDir).length, 0, 'rolled-back batch must commit zero messages')
+
+  // 3) *InTx helpers refuse calls outside an active transaction.
+  let leakedTx = null
+  await rbStore.enqueueWrite({
+    sessionKey: 'leak-tx',
+    bytes: 0,
+    execute(tx) {
+      leakedTx = tx
+      return 'captured'
+    },
+  })
+  assert.throws(
+    () => leakedTx.appendMessageInTx({
+      roomId: rbRoom.id,
+      actorFingerprint: BROADCAST.fingerprint,
+      chatId: BROADCAST.chatId,
+      clientMessageId: 'outside-tx-1',
+      text: 'nope',
+    }),
+    err => err?.code === 'invalid_argument',
+  )
+  assert.throws(
+    () => leakedTx.openSessionPairRoomInTx({ sessionIds: [rbA.session_id, rbB.session_id] }),
+    err => err?.code === 'invalid_argument',
+  )
+  assert.throws(
+    () => leakedTx.appendSessionPairMessageInTx({
+      roomId: rbRoom.id,
+      sessionId: rbA.session_id,
+      installationFingerprint: seedActor.fingerprint,
+      chatId: rbA.address,
+      clientMessageId: 'outside-tx-2',
+      text: 'nope',
+    }),
+    err => err?.code === 'invalid_argument',
+  )
+  assert.throws(
+    () => leakedTx.heartbeatSessionPrincipalInTx({ sessionId: rbA.session_id, generation: 1 }),
+    err => err?.code === 'invalid_argument',
+  )
+})

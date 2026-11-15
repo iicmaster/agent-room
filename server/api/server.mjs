@@ -74,29 +74,15 @@
 // without consuming). The budgets stage paces the route at 5/min per client
 // identity (burst 5) through the minimal fixed-window limiter; forwarded
 // addresses are trusted only when the operator configured trustedProxy.
-// Story 4.4 completes the budget stage with the four rate gates (FR-16/
-// FR-17): the per-Actor request budget (every authenticated request counts
-// at admission — failed, replayed, and long-polls once) and the per-Actor
-// send bucket on the send route (idempotency-aware: an exact retry — an
-// existing (room, actor, client_message_id) tuple — is admitted free and
-// consumes nothing, even from an empty bucket), both token buckets over
-// operator-tunable floors (startServer overrides; the direct launch reads
-// the AGENT_ROOM_SEND_TOKEN_* / AGENT_ROOM_REQUEST_BUDGET_* /
-// AGENT_ROOM_DUPLICATE_WINDOW_MS env knobs), and the store's duplicate gate
-// ordered after the idempotency lookup inside the same append transaction.
-// Send answers now carry the full FR-17 status vocabulary: committed,
-// duplicate_dropped (a 200 result naming original_seq), rate_limited (429 +
-// retry_after_ms), client_message_id_conflict (the coded 409), with banned
-// landed by Story 4.5 (the authz stage's per-request refusal of every
-// session-authenticated request from a banned key, plus the enroll route's
-// post-proof store gate; the long-poll loop re-checks the ban each poll
-// iteration so an in-flight hold terminates within its window) and
-// storage_low landed by Story 4.6 (the store's append-path admission gate —
-// free space below the refuse reserve, or the disk-full write itself —
-// answered by the send route as the 200 result {status:'storage_low'},
-// never an acknowledgment; the operator reserves are startServer overrides
-// plus the AGENT_ROOM_STORAGE_* env knobs for the direct launch, and the
-// `agent-room capacity` command reports the filesystem against them).
+// Story 4.4's post-auth token buckets were retired in Story 1.1 in favor of
+// the bounded write queue (`queue_full` backpressure), while
+// `enrollRateLimiter` still enforces 429 `rate_limited` (with `retry_after_ms`)
+// on `POST /api/auth/enroll` and `duplicateWindowMs` paces the store's
+// duplicate gate ordered after the idempotency lookup inside the same append
+// transaction. Send answers carry committed, duplicate_dropped (200 naming
+// original_seq), client_message_id_conflict (409), queue_full (503 +
+// retry_after_ms), banned (403, Story 4.5), and storage_low (200 result
+// {status:'storage_low'}, Story 4.6).
 // Story 4.7 completes FR-4's standalone transport half: startServer accepts
 // tls: { cert, key } — the operator's PEM certificate chain and key as
 // CONTENT strings, validated at startup (the certificate parses, the key
@@ -144,25 +130,26 @@ import {
   CHALLENGE_SIGNATURE_PATTERN,
   CHAT_ID_INVALID_MESSAGE,
   CLAIMS_TTL_MS,
+  CLIENT_MESSAGE_ID_MAX,
   CLIENT_TYPES,
   DUPLICATE_WINDOW_MS,
+  ENROLLMENT_WINDOW_MS,
   FINGERPRINT_PATTERN,
+  IDENTIFIER_MAX,
   INVITE_TOKEN_CHARS,
   INVITE_TOKEN_PREFIX,
   INVITE_TOKEN_PATTERN,
   LONGPOLL_POLL_INTERVAL_MS,
+  MESSAGE_TEXT_MAX,
   PRESENCE_TTL_MS,
   PRUNE_INTERVAL_MS,
   PROTOCOL_HEADER,
   PROTOCOL_VERSION,
+  PUBLIC_ERRORS,
   PUBLIC_ERROR_STATUS,
   READ_HOLD_MAX_MS,
   READ_PAGE_DEFAULT,
   READ_PAGE_MAX,
-  REQUEST_BUDGET_BURST,
-  REQUEST_BUDGET_PER_MINUTE,
-  SEND_TOKEN_CAPACITY,
-  SEND_TOKEN_REFILL_PER_SECOND,
   SESSION_ADDRESS_INVALID_MESSAGE,
   SESSION_CAPABILITY_CHARS,
   SESSION_CAPABILITY_PATTERN,
@@ -196,7 +183,6 @@ import { bearerTokenFromHeaders, createSessionRegistry, createSessionVerifier } 
 import { createChallengeRegistry } from './challenge.mjs'
 import { createConflictTicketStore } from './conflict-tickets.mjs'
 import { createEnrollRateLimiter } from './enroll-rate-limit.mjs'
-import { createRateGates } from './rate-gates.mjs'
 import { readLocalToken } from './local-token.mjs'
 import {
   applyViewerSecurityHeaders,
@@ -657,6 +643,7 @@ registerHandler('GET /api/status', function status(context) {
     realm_id: context.store.getRealmId(),
     version: APP_VERSION,
     broadcast_room_id: broadcastRoom.id,
+    write_queue: context.store.getWriteQueueMetrics(),
   }
 }, 'actor')
 
@@ -911,98 +898,160 @@ function requiredString(value, name, detail) {
   return { value }
 }
 
-registerHandler('POST /api/rooms/:id/messages', function appendMessageRoute(context) {
+const ROOM_ID_PATTERN = new RegExp(`^[A-Za-z0-9_-]{1,${IDENTIFIER_MAX}}$`)
+const CLIENT_MESSAGE_ID_PATTERN = new RegExp(
+  `^[A-Za-z0-9][A-Za-z0-9_.:-]{0,${CLIENT_MESSAGE_ID_MAX - 1}}$`,
+)
+
+function containsUnpairedSurrogate(value) {
+  return !value.isWellFormed()
+}
+
+function validateMessageFields({ roomId, clientMessageId, text, replyToSeq }) {
+  if (roomId !== undefined && (typeof roomId !== 'string' || !ROOM_ID_PATTERN.test(roomId))) {
+    return reject('invalid_room_id', 'roomId must be an opaque base64url identifier')
+  }
+  if (!CLIENT_MESSAGE_ID_PATTERN.test(clientMessageId)) {
+    return reject(
+      'invalid_client_message_id',
+      `clientMessageId must be 1-${CLIENT_MESSAGE_ID_MAX} characters using letters, numbers, dot, underscore, colon, or hyphen`,
+    )
+  }
+  if (
+    !/\S/.test(text)
+    || text.length > MESSAGE_TEXT_MAX
+    || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(text)
+    || containsUnpairedSurrogate(text)
+  ) {
+    return reject(
+      'invalid_text',
+      `text must contain 1-${MESSAGE_TEXT_MAX} characters with no unsupported control bytes or lone surrogates`,
+    )
+  }
+  if (replyToSeq !== null && replyToSeq !== undefined && (!Number.isSafeInteger(replyToSeq) || replyToSeq < 1)) {
+    return reject('invalid_reply_to_seq', 'replyToSeq must be null or a positive safe integer')
+  }
+  return null
+}
+
+registerHandler('POST /api/rooms/:id/messages', async function appendMessageRoute(context) {
   const principal = sessionPrincipalOf(context)
   if (principal.ok === false) return principal
 
   const chatIdField = requiredString(context.body?.chat_id, 'chat_id',
     'chat_id is required: this session\u0027s connected Chat ID')
   if (chatIdField.error) return chatIdField.error
-  const liveRegistry = context.liveSessionRegistry ?? LIVE_SESSION_REGISTRY
-  const live = liveRegistry.lookup(principal.sessionKey)
-  let senderChatId
-  if (live !== null) {
-    // The bound path, unchanged: the name comes from the session's live row
-    // and the request body may only assert it.
-    const forms = chatIdForms(chatIdField.value)
-    if (forms === null) return reject('invalid_chat_id', CHAT_ID_INVALID_MESSAGE)
-    if (forms.normalized !== live.chatIdNormalized) {
-      return reject('invalid_request', 'chat_id does not match this session\u0027s connected Chat ID; the sender identity always comes from the session token')
-    }
-    senderChatId = live.chatId
-  } else {
-    // The UNBOUND-SEND branch (v0.8.0, the codex round-3 decision B): an
-    // authenticated key may send without holding a live session, and the
-    // SERVER — never this request body — picks the name it speaks as: the
-    // key's most recent durable claim. An idempotent retry of an
-    // already-committed tuple keeps the ORIGINAL message row's name as the
-    // attribution authority (a claim lost to rename, prune, or takeover
-    // never invalidates a committed row), and it goes through the same
-    // append operation — membership is re-checked there, never short-circuited.
-    const clientMessageIdFieldEarly = requiredString(context.body?.client_message_id, 'client_message_id')
-    if (clientMessageIdFieldEarly.error) return clientMessageIdFieldEarly.error
-    const asserted = chatIdForms(chatIdField.value)
-    if (asserted === null) return reject('invalid_chat_id', CHAT_ID_INVALID_MESSAGE)
-    const committed = context.store.findIdempotentSend({
-      roomId: context.params?.id,
-      actorFingerprint: principal.actorFingerprint,
-      clientMessageId: clientMessageIdFieldEarly.value,
-    })
-    if (committed !== null) {
-      if (committed.chat_id.toLowerCase() !== asserted.normalized) {
-        return reject('invalid_request', 'chat_id does not match the name this message was committed under; a retry asserts the original attribution, never a new one')
-      }
-      senderChatId = committed.chat_id
-    } else {
-      const resolved = context.store.latestClaimForActor(principal.actorFingerprint)
-      if (resolved === null) {
-        return reject('sender_claim_missing', 'this installation\u0027s key has no Chat ID claim on this server: bind a name once (setup locally, or a first connect in the target realm) before sending unbound')
-      }
-      if (resolved.tie === true) {
-        return reject('sender_claim_ambiguous', `this key\u0027s most recent claims tie across several names at ${resolved.claim.last_seen_at}; bind or re-assert exactly one name, then send again`)
-      }
-      if (asserted.normalized !== resolved.claim.chat_id_normalized) {
-        return reject('invalid_request', `chat_id does not match the name this key last bound ("${resolved.claim.chat_id}"); the sender name is resolved server-side, never chosen by the caller`)
-      }
-      // Live-name uniqueness holds even for an unbound send: a foreign key
-      // holding the resolved name right now refuses the send (no holder
-      // details leak), while an empty name or this same key passes. The
-      // send claims NO occupancy — it never refreshes the claim's recency
-      // and never appears in presence.
-      const holder = liveRegistry.holderOf(resolved.claim.chat_id)
-      if (holder !== null && holder.actorFingerprint !== principal.actorFingerprint) {
-        return reject('chat_id_taken', 'the resolved name is held by another key right now; the unbound send cannot speak under it')
-      }
-      senderChatId = resolved.claim.chat_id
-    }
-  }
+  const asserted = chatIdForms(chatIdField.value)
+  if (asserted === null) return reject('invalid_chat_id', CHAT_ID_INVALID_MESSAGE)
 
   const clientMessageIdField = requiredString(context.body?.client_message_id, 'client_message_id')
   if (clientMessageIdField.error) return clientMessageIdField.error
   const textField = requiredString(context.body?.text, 'text')
   if (textField.error) return textField.error
   const replyToSeq = context.body?.reply_to_seq
+  const validationError = validateMessageFields({
+    roomId: context.params?.id ?? '',
+    clientMessageId: clientMessageIdField.value,
+    text: textField.value,
+    replyToSeq,
+  })
+  if (validationError) return validationError
 
+  const roomId = context.params?.id
+  const store = context.store
+  const sessionRegistry = context.sessionRegistry
+  const sessionKey = principal.sessionKey
+  const actorFingerprint = principal.actorFingerprint
+  const clientMessageId = clientMessageIdField.value
+  const text = textField.value
 
-  // Story 4.6: the store's storage admission gate refuses below the refuse
-  // reserve with the coded storage_low (or the disk-full write maps to the
-  // same code). The route answers the FR-17 status as a 200 RESULT —
-  // {status:'storage_low'} — never an error envelope and never an
-  // acknowledgment: the store rolled back having written nothing, so there
-  // is no seq to name and no commit to claim. The sender learns explicitly
-  // that this exact attempt did not happen; a retry of the SAME
-  // client_message_id after space returns commits normally, and a retry of
-  // an ALREADY-committed message keeps resolving to its original below the
-  // reserve (the store's idempotency lookup precedes the gate).
+  const liveRegistry = context.liveSessionRegistry ?? LIVE_SESSION_REGISTRY
+  const live = liveRegistry.lookup(sessionKey)
+  const wasBound = live !== null
+  if (wasBound && asserted.normalized !== live.chatIdNormalized) {
+    return reject('invalid_request', 'chat_id does not match this session\u0027s connected Chat ID; the sender identity always comes from the session token')
+  }
+
   let outcome
   try {
-    outcome = context.store.appendMessage({
-      roomId: context.params?.id,
-      actorFingerprint: principal.actorFingerprint,
-      chatId: senderChatId,
-      clientMessageId: clientMessageIdField.value,
-      text: textField.value,
-      replyToSeq,
+    outcome = await store.enqueueWrite({
+      sessionKey,
+      bytes: Buffer.byteLength(text, 'utf8'),
+      validateFence(tx) {
+        if (tx.isActorBanned(actorFingerprint)) {
+          throw new AgentRoomRuntimeError('banned', PUBLIC_ERRORS.banned)
+        }
+        if (sessionRegistry?.isSuperseded?.(sessionKey)) {
+          throw new AgentRoomRuntimeError('unauthorized', PUBLIC_ERRORS.unauthorized)
+        }
+      },
+      execute(tx) {
+        const currentLive = liveRegistry.lookup(sessionKey)
+        if (wasBound && currentLive === null) {
+          throw new AgentRoomRuntimeError('unauthorized', PUBLIC_ERRORS.unauthorized)
+        }
+        let senderChatId
+        if (currentLive !== null) {
+          if (asserted.normalized !== currentLive.chatIdNormalized) {
+            throw new AgentRoomRuntimeError(
+              'invalid_request',
+              'chat_id does not match this session\u0027s connected Chat ID; the sender identity always comes from the session token',
+            )
+          }
+          senderChatId = currentLive.chatId
+        } else {
+          const committed = tx.findIdempotentSend({
+            roomId,
+            actorFingerprint,
+            clientMessageId,
+          })
+          if (committed !== null) {
+            if (committed.chat_id.toLowerCase() !== asserted.normalized) {
+              throw new AgentRoomRuntimeError(
+                'invalid_request',
+                'chat_id does not match the name this message was committed under; a retry asserts the original attribution, never a new one',
+              )
+            }
+            senderChatId = committed.chat_id
+          } else {
+            const resolved = tx.latestClaimForActor(actorFingerprint)
+            if (resolved === null) {
+              throw new AgentRoomRuntimeError(
+                'sender_claim_missing',
+                'this installation\u0027s key has no Chat ID claim on this server: bind a name once (setup locally, or a first connect in the target realm) before sending unbound',
+              )
+            }
+            if (resolved.tie === true) {
+              throw new AgentRoomRuntimeError(
+                'sender_claim_ambiguous',
+                `this key\u0027s most recent claims tie across several names at ${resolved.claim.last_seen_at}; bind or re-assert exactly one name, then send again`,
+              )
+            }
+            if (asserted.normalized !== resolved.claim.chat_id_normalized) {
+              throw new AgentRoomRuntimeError(
+                'invalid_request',
+                `chat_id does not match the name this key last bound ("${resolved.claim.chat_id}"); the sender name is resolved server-side, never chosen by the caller`,
+              )
+            }
+            const holder = liveRegistry.holderOf(resolved.claim.chat_id)
+            if (holder !== null && holder.actorFingerprint !== actorFingerprint) {
+              throw new AgentRoomRuntimeError(
+                'chat_id_taken',
+                'the resolved name is held by another key right now; the unbound send cannot speak under it',
+              )
+            }
+            senderChatId = resolved.claim.chat_id
+          }
+        }
+        return tx.appendMessageInTx({
+          roomId,
+          actorFingerprint,
+          chatId: senderChatId,
+          clientMessageId,
+          text,
+          replyToSeq,
+        })
+      },
     })
   } catch (error) {
     if (error?.code === 'storage_low') {
@@ -1025,8 +1074,8 @@ registerHandler('POST /api/rooms/:id/messages', function appendMessageRoute(cont
 // Session addressing (spec session-principals.md / session-protocol.md): each
 // process start receives a server-issued SESSION principal beneath the
 // installation key — session id, generation, a full `base~token@machine`
-// address (a public locator, never a credential), a 30 s base lease renewed
-// by 10 s capability heartbeats, 30-day retention, and a 256-bit capability
+// address (a public locator, never a credential), a 45 s base lease renewed
+// by 15 s capability heartbeats, 30-day retention, and a 256-bit capability
 // whose SHA-256 digest is the only server-side trace.
 //
 // AUTHORITY DISCIPLINE (the increment's spine): the installation bearer
@@ -1184,21 +1233,37 @@ registerHandler('POST /api/session-principals/resume', function resumeSessionPri
   }
 }, 'actor')
 
-// POST /api/session-principals/heartbeat — the 10 s beat against the 30 s
+// POST /api/session-principals/heartbeat — the 15 s beat against the 45 s
 // lease. A valid beat renews ONLY this principal's lease; a fenced
 // generation answers session_expired and renews nothing (an old generation
-// can never displace the new holder of anything). Heartbeat traffic rides
-// the same per-installation request budget as every actor request; its
-// declared traffic class (20 req/s per realm at the 100-session target) is
-// SESSION_HEARTBEAT_REQUEST_BUDGET_PER_SECOND in the constants module.
-registerHandler('POST /api/session-principals/heartbeat', function heartbeatSessionPrincipalRoute(context) {
+// can never displace the new holder of anything).
+registerHandler('POST /api/session-principals/heartbeat', async function heartbeatSessionPrincipalRoute(context) {
   const principal = sessionCapabilityPrincipalOf(context)
   if (principal.ok === false) return principal
   const selectors = requireSessionSelectors(context.body, principal)
   if (selectors.ok !== true) return selectors
-  const beaten = context.store.heartbeatSessionPrincipal({
-    sessionId: selectors.sessionId,
-    generation: selectors.generation,
+  const store = context.store
+  const principalSessionId = principal.session_id
+  const installationFingerprint = principal.installation_fingerprint
+  const sessionId = selectors.sessionId
+  const generation = selectors.generation
+  const beaten = await store.enqueueWrite({
+    sessionKey: principalSessionId,
+    coalesceKey: `hb:${principalSessionId}:${generation}`,
+    bytes: 0,
+    payload: { sessionId, generation },
+    validateFence(tx) {
+      if (tx.isActorBanned(installationFingerprint)) {
+        throw new AgentRoomRuntimeError('banned', PUBLIC_ERRORS.banned)
+      }
+    },
+    execute(tx) {
+      return tx.heartbeatSessionPrincipalInTx({
+        sessionId,
+        generation,
+        nowMs: Date.now(),
+      })
+    },
   })
   return {
     session_id: beaten.session_id,
@@ -1285,7 +1350,7 @@ registerHandler('GET /api/session-principals', function listSessionPrincipalsRou
 // unresolvable address answers the CONSTANT quiet peer_not_found: no names,
 // no counts, no hints, byte-identical whether the realm holds one session or
 // one hundred.
-registerHandler('POST /api/messages', function addressedSendRoute(context) {
+registerHandler('POST /api/messages', async function addressedSendRoute(context) {
   const principal = sessionCapabilityPrincipalOf(context)
   if (principal.ok === false) return principal
   const to = context.body?.to
@@ -1299,27 +1364,91 @@ registerHandler('POST /api/messages', function addressedSendRoute(context) {
   const textField = requiredString(context.body?.text, 'text')
   if (textField.error) return textField.error
   const replyToSeq = context.body?.reply_to_seq
-
-  const peer = context.store.resolveSessionPrincipalByAddress(addressForms.address)
-  if (peer === null) return reject('peer_not_found')
-  const room = context.store.openSessionPairRoom({
-    sessionIds: [principal.session_id, peer.session_id],
+  const validationError = validateMessageFields({
+    clientMessageId: clientMessageIdField.value,
+    text: textField.value,
+    replyToSeq,
   })
-  const nowMs = Date.now()
-  const peerPresence = peer.base_lease_status === 'occupied'
-    && Date.parse(peer.base_lease_expires_at) > nowMs
-    ? 'online'
-    : 'offline'
-  let outcome
+  if (validationError) return validationError
+
+  const store = context.store
+  const contextSessionKey = context.session?.sessionKey
+  const senderSessionId = principal.session_id
+  const senderFingerprint = principal.installation_fingerprint
+  const senderAddress = principal.address
+  const targetAddress = addressForms.address
+  const clientMessageId = clientMessageIdField.value
+  const text = textField.value
+
+  let committedBatchResult
   try {
-    outcome = context.store.appendSessionPairMessage({
-      roomId: room.id,
-      sessionId: principal.session_id,
-      installationFingerprint: principal.installation_fingerprint,
-      chatId: principal.address,
-      clientMessageId: clientMessageIdField.value,
-      text: textField.value,
-      replyToSeq,
+    committedBatchResult = await store.enqueueWrite({
+      sessionKey: senderSessionId,
+      bytes: Buffer.byteLength(text, 'utf8'),
+      validateFence(tx) {
+        if (tx.isActorBanned(senderFingerprint)) {
+          throw new AgentRoomRuntimeError('banned', PUBLIC_ERRORS.banned)
+        }
+        if (typeof contextSessionKey === 'string' && contextSessionKey.startsWith('scap:')) {
+          const digest = contextSessionKey.slice('scap:'.length)
+          const latest = tx.findSessionPrincipalByCapabilityDigest(digest)
+          if (latest === null) {
+            throw new AgentRoomRuntimeError('session_credential_invalid', PUBLIC_ERRORS.session_credential_invalid)
+          }
+          if (latest.principal_status === 'revoked') {
+            throw new AgentRoomRuntimeError('session_revoked', PUBLIC_ERRORS.session_revoked)
+          }
+          if (
+            latest.principal_status !== 'retained'
+            || Date.parse(latest.principal_retention_expires_at) <= Date.now()
+          ) {
+            throw new AgentRoomRuntimeError('session_expired', PUBLIC_ERRORS.session_expired)
+          }
+          return
+        }
+        const status = tx.getSessionPrincipalStatus(senderSessionId)
+        if (!status) {
+          throw new AgentRoomRuntimeError('session_credential_invalid', PUBLIC_ERRORS.session_credential_invalid)
+        }
+        if (status.principal_status === 'revoked') {
+          throw new AgentRoomRuntimeError('session_revoked', PUBLIC_ERRORS.session_revoked)
+        }
+        if (
+          status.principal_status !== 'retained'
+          || Date.parse(status.principal_retention_expires_at) <= Date.now()
+        ) {
+          throw new AgentRoomRuntimeError('session_expired', PUBLIC_ERRORS.session_expired)
+        }
+      },
+      execute(tx) {
+        const peer = tx.resolveSessionPrincipalByAddress(targetAddress)
+        if (peer === null) {
+          throw new AgentRoomRuntimeError('peer_not_found', PUBLIC_ERRORS.peer_not_found)
+        }
+        const nowMs = Date.now()
+        const room = tx.openSessionPairRoomInTx({
+          sessionIds: [senderSessionId, peer.session_id],
+          nowMs,
+        })
+        const peerPresence = peer.base_lease_status === 'occupied'
+          && Date.parse(peer.base_lease_expires_at) > nowMs
+          ? 'online'
+          : 'offline'
+        const { warnLine, ...cleanOutcome } = tx.appendSessionPairMessageInTx({
+          roomId: room.id,
+          sessionId: senderSessionId,
+          installationFingerprint: senderFingerprint,
+          chatId: senderAddress,
+          clientMessageId,
+          text,
+          replyToSeq,
+        })
+        return {
+          outcome: cleanOutcome,
+          peerFacts: { session_id: peer.session_id, address: peer.address, presence: peerPresence },
+          ...(warnLine === undefined ? {} : { warnLine }),
+        }
+      },
     })
   } catch (error) {
     if (error?.code === 'storage_low') {
@@ -1327,7 +1456,8 @@ registerHandler('POST /api/messages', function addressedSendRoute(context) {
     }
     throw error
   }
-  const peerFacts = { session_id: peer.session_id, address: peer.address, presence: peerPresence }
+
+  const { outcome, peerFacts } = committedBatchResult
   if (outcome.duplicateDropped) {
     return {
       status: 'duplicate_dropped',
@@ -1438,7 +1568,13 @@ function respondFailure(response, failure, echo) {
       : 'unclassified internal failure'
     process.stderr.write(`agent-room-server: ${detail}\n`)
   }
-  respondJson(response, failure.status, errorEnvelope(failure), echo)
+  const headers = { ...echo }
+  if (Number.isFinite(failure?.retry_after_ms) && failure.retry_after_ms > 0) {
+    headers['Retry-After'] = String(Math.max(1, Math.ceil(failure.retry_after_ms / 1000)))
+  } else if (failure?.code === 'rate_limited') {
+    headers['Retry-After'] = String(Math.max(1, Math.ceil(ENROLLMENT_WINDOW_MS / 1000)))
+  }
+  respondJson(response, failure.status, errorEnvelope(failure), headers)
 }
 
 async function handleRequest(request, response, options) {  let pathname = null
@@ -1512,8 +1648,6 @@ async function handleRequest(request, response, options) {  let pathname = null
       viewerVerifier: options.viewerVerifier,
       enrollRateLimiter: options.enrollRateLimiter,
       trustedProxy: options.trustedProxy,
-      requestBudgetGate: options.requestBudgetGate,
-      sendBucketGate: options.sendBucketGate,
     })
     const handler = REGISTERED_HANDLERS.get(routeKeyOf(route)) ?? UNREGISTERED_ROUTE_HANDLER
     const outcome = await runPipeline(stages, context, handler)
@@ -1542,7 +1676,7 @@ async function handleRequest(request, response, options) {  let pathname = null
     // Internal fallback: undeclared error codes and handler crashes surface
     // as request_failed (500) with one diagnosable stderr line — the /api/*
     // echo and the canonical wire message survive every failure path.
-    const failure = reject(error?.code, error?.message)
+    const failure = reject(error?.code, error?.message, error)
     failure.internalDetail = internalDetailOf(error)
     try {
       respondFailure(response, failure, echo)
@@ -1611,10 +1745,6 @@ export async function startServer({
   presenceTtlMs = PRESENCE_TTL_MS,
   trustedProxy = false,
   enrollRateLimiter,
-  sendTokenRefillPerSecond = SEND_TOKEN_REFILL_PER_SECOND,
-  sendTokenCapacity = SEND_TOKEN_CAPACITY,
-  requestBudgetPerMinute = REQUEST_BUDGET_PER_MINUTE,
-  requestBudgetBurst = REQUEST_BUDGET_BURST,
   duplicateWindowMs = DUPLICATE_WINDOW_MS,
   storageWarnFreeBytes = STORAGE_WARN_FREE_BYTES,
   storageRefuseFreeBytes = STORAGE_REFUSE_FREE_BYTES,
@@ -1734,25 +1864,6 @@ export async function startServer({
       'enrollRateLimiter must be an enroll rate limiter (check) when provided',
     )
   }
-  // Story 4.4: the four gates' operator floors. All five tunables accept
-  // startServer overrides — abuse floors for an invite-only realm (FR-16's
-  // own qualification), never a volumetric-DoS guarantee; an operator raises
-  // them for churn-like legitimate load or tightens them within what their
-  // realm can bear. Malformed wiring fails at startup, never per-request.
-  if (typeof sendTokenRefillPerSecond !== 'number'
-    || !Number.isFinite(sendTokenRefillPerSecond)
-    || sendTokenRefillPerSecond <= 0) {
-    throw new AgentRoomRuntimeError('invalid_argument', 'sendTokenRefillPerSecond must be a positive finite number')
-  }
-  if (!Number.isSafeInteger(sendTokenCapacity) || sendTokenCapacity < 1) {
-    throw new AgentRoomRuntimeError('invalid_argument', 'sendTokenCapacity must be a positive safe integer')
-  }
-  if (!Number.isSafeInteger(requestBudgetPerMinute) || requestBudgetPerMinute < 1) {
-    throw new AgentRoomRuntimeError('invalid_argument', 'requestBudgetPerMinute must be a positive safe integer')
-  }
-  if (!Number.isSafeInteger(requestBudgetBurst) || requestBudgetBurst < 1) {
-    throw new AgentRoomRuntimeError('invalid_argument', 'requestBudgetBurst must be a positive safe integer')
-  }
   if (!Number.isSafeInteger(duplicateWindowMs) || duplicateWindowMs <= 0) {
     throw new AgentRoomRuntimeError('invalid_argument', 'duplicateWindowMs must be a positive safe integer')
   }
@@ -1782,18 +1893,6 @@ export async function startServer({
     throw new AgentRoomRuntimeError('invalid_argument', 'storageNowMs must be a function when provided')
   }
   const effectiveEnrollRateLimiter = enrollRateLimiter ?? createEnrollRateLimiter()
-  // Story 4.4: the two per-Actor token buckets (request budget + send
-  // bucket), one pair per server instance — per-realm admission state is
-  // never shared across instances (the 4.2 limiter's default-plus-override
-  // reasoning; here both gates are constructed fresh per server, and tests
-  // inject clocks through createRateGates when they must drive them
-  // directly).
-  const rateGates = createRateGates({
-    sendTokenRefillPerSecond,
-    sendTokenCapacity,
-    requestBudgetPerMinute,
-    requestBudgetBurst,
-  })
   // implemented-flag enforcement: every frozen route marked implemented must
   // have a registered handler, and every registered handler must belong to a
   // marked route — a mismatch fails startup instead of silently 404ing a
@@ -1828,6 +1927,7 @@ export async function startServer({
 
   const store = openRoomLog({
     dataDir,
+    role: 'server',
     duplicateWindowMs,
     // Story 4.6: the storage admission reserves and their seams ride through
     // (undefined triggers openRoomLog's declared defaults for the two
@@ -1873,14 +1973,21 @@ export async function startServer({
     ['/api/session-principals/current', new Set(['DELETE'])],
     ['/api/messages', new Set(['POST'])],
     ['/api/rooms/:id/messages', new Set(['GET'])],
+    ['/api/status', new Set(['GET'])],
   ])
   const sessionCapabilityVerifier = context => {
     const presented = sessionCapabilityFromHeaders(context.headers)
     if (presented.error) return presented.error
-    const row = store.findSessionPrincipalByCapabilityDigest(capabilityDigestOf(presented.capability))
+    const digest = capabilityDigestOf(presented.capability)
+    const row = store.findSessionPrincipalByCapabilityDigest(digest)
     if (row === null) return reject('session_credential_invalid')
     if (row.principal_status === 'revoked') return reject('session_revoked')
-    if (row.principal_status !== 'retained') return reject('session_expired')
+    if (
+      row.principal_status !== 'retained'
+      || Date.parse(row.principal_retention_expires_at) <= Date.now()
+    ) {
+      return reject('session_expired')
+    }
     return {
       actorFingerprint: row.installation_fingerprint,
       // The capability principal's pipeline key: a stable digest-derived
@@ -1889,7 +1996,7 @@ export async function startServer({
       // this key never enters its superseded set — the capability's own
       // revocation discipline (revoke / retention / generation fencing) is
       // the authority that ends it.
-      sessionKey: `scap:${capabilityDigestOf(presented.capability)}`,
+      sessionKey: `scap:${digest}`,
       sessionPrincipal: row,
     }
   }
@@ -1981,8 +2088,6 @@ export async function startServer({
         viewerSessions: effectiveViewerSessions,
         enrollRateLimiter: effectiveEnrollRateLimiter,
         trustedProxy,
-        requestBudgetGate: rateGates.requestBudgetGate,
-        sendBucketGate: rateGates.sendBucketGate,
         store,
       }).catch(() => {
         response.destroy()
@@ -2017,14 +2122,35 @@ export async function startServer({
     let closePromise = null
     const closeServerAndStore = async () => {
       if (pruneTimer !== null) clearInterval(pruneTimer)
+      const httpClosed = new Promise(resolvePromise => {
+        httpServer.close(() => resolvePromise())
+      })
+      // Drain queued writes before cutting sockets so committed results finish
+      // flushing to callers; late enqueues fail fast with 503 queue_full.
+      await store.drainWriteQueue()
+      await new Promise(resolvePromise => setImmediate(resolvePromise))
+      httpServer.closeIdleConnections?.()
+      await new Promise(resolvePromise => {
+        let done = false
+        let reapTimer = null
+        const finish = () => {
+          if (done) return
+          done = true
+          if (reapTimer !== null) clearTimeout(reapTimer)
+          resolvePromise()
+        }
+        httpClosed.then(finish)
+        reapTimer = setTimeout(() => {
+          httpServer.closeAllConnections?.()
+          httpClosed.then(finish)
+        }, 100)
+        reapTimer.unref?.()
+      })
+      await httpClosed
       // A restart-within-process must find no stale names: when this server
       // owns the process-default live registry, its close drops every live
       // row (an injected registry is the caller's to manage).
       if (effectiveLiveRegistry === LIVE_SESSION_REGISTRY) LIVE_SESSION_REGISTRY.clear()
-      await new Promise(resolvePromise => {
-        httpServer.close(() => resolvePromise())
-        httpServer.closeAllConnections?.()
-      })
       store.close()
     }
 
@@ -2141,23 +2267,31 @@ export function presenceTtlMsFromEnv(env = process.env) {
   return { presenceTtlMs: value }
 }
 
-// Story 4.4 review of the direct-launch surface: the four gates' operator
-// floors ride the same env convention as the claim and presence TTLs — five
-// strictly-validated knobs, each falling back to its declared default with
-// one warning line when its value is junk. A present-but-invalid value never
-// blocks a boot.
+// Operator-configurable direct-launch env knobs (trustedProxy and
+// duplicateWindowMs; invalid values warn and fall back to declared defaults
+// without blocking boot).
+export function trustedProxyFromEnv(env = process.env) {
+  const raw = env?.AGENT_ROOM_TRUSTED_PROXY
+  if (raw === undefined || String(raw).trim() === '') {
+    return { trustedProxy: false }
+  }
+  const normalized = String(raw).trim().toLowerCase()
+  if (normalized === '1' || normalized === 'true') {
+    return { trustedProxy: true }
+  }
+  if (normalized === '0' || normalized === 'false') {
+    return { trustedProxy: false }
+  }
+  return {
+    trustedProxy: false,
+    warning: `ignoring invalid AGENT_ROOM_TRUSTED_PROXY "${raw}": must be "true"/"1" or "false"/"0"; using the default false`,
+  }
+}
+
+// Story 1.1: post-auth token buckets were retired; duplicateWindowMs remains
+// the operator-tunable server floor on the direct-launch env surface.
 export function gateLimitsFromEnv(env = process.env) {
   const warnings = []
-  const readFraction = (key, fallback) => {
-    const raw = env?.[key]
-    if (raw === undefined || String(raw).trim() === '') return fallback
-    const value = Number(String(raw).trim())
-    if (!Number.isFinite(value) || value <= 0) {
-      warnings.push(`ignoring invalid ${key} "${raw}": must be a positive finite number; using the default ${fallback}`)
-      return fallback
-    }
-    return value
-  }
   const readInteger = (key, fallback) => {
     const raw = env?.[key]
     if (raw === undefined || String(raw).trim() === '') return fallback
@@ -2170,10 +2304,6 @@ export function gateLimitsFromEnv(env = process.env) {
   }
   return {
     gateLimits: {
-      sendTokenRefillPerSecond: readFraction('AGENT_ROOM_SEND_TOKEN_REFILL_PER_SECOND', SEND_TOKEN_REFILL_PER_SECOND),
-      sendTokenCapacity: readInteger('AGENT_ROOM_SEND_TOKEN_CAPACITY', SEND_TOKEN_CAPACITY),
-      requestBudgetPerMinute: readInteger('AGENT_ROOM_REQUEST_BUDGET_PER_MINUTE', REQUEST_BUDGET_PER_MINUTE),
-      requestBudgetBurst: readInteger('AGENT_ROOM_REQUEST_BUDGET_BURST', REQUEST_BUDGET_BURST),
       duplicateWindowMs: readInteger('AGENT_ROOM_DUPLICATE_WINDOW_MS', DUPLICATE_WINDOW_MS),
     },
     warnings,
@@ -2305,6 +2435,8 @@ if (launchedDirectly()) {
   if (warning) process.stderr.write(`agent-room-server: ${warning}\n`)
   const { presenceTtlMs, warning: presenceWarning } = presenceTtlMsFromEnv()
   if (presenceWarning) process.stderr.write(`agent-room-server: ${presenceWarning}\n`)
+  const { trustedProxy, warning: trustedProxyWarning } = trustedProxyFromEnv()
+  if (trustedProxyWarning) process.stderr.write(`agent-room-server: ${trustedProxyWarning}\n`)
   const { gateLimits, warnings: gateWarnings } = gateLimitsFromEnv()
   for (const gateWarning of gateWarnings) {
     process.stderr.write(`agent-room-server: ${gateWarning}\n`)
@@ -2351,6 +2483,7 @@ if (launchedDirectly()) {
     ...(tlsMaterial === undefined ? {} : { tls: tlsMaterial }),
     claimsTtlMs,
     presenceTtlMs,
+    trustedProxy,
     ...gateLimits,
     storageWarnFreeBytes,
     storageRefuseFreeBytes,

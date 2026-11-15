@@ -494,13 +494,13 @@ export function createAgentRoomClient({
         rollbackPromise = rawRequest('DELETE', '/api/session', { bearer: token, timeoutMs: CLIENT_RELEASE_TIMEOUT_MS })
           .then(() => true)
           .catch(() => false)
-        sessionToken = null
+        if (sessionToken === token) sessionToken = null
         throw new AgentRoomRuntimeError('shutdown', 'this client is shutting down; the just-bound session is being released again')
       }
       sessionToken = token
       return bind
     } catch (error) {
-      sessionToken = null
+      if (sessionToken === token) sessionToken = null
       throw explainBindFailure(error)
     }
   }
@@ -570,7 +570,7 @@ export function createAgentRoomClient({
   // stored capability is the ONLY session credential: resume first, and on a
   // fenced/revoked/expired answer fall through to a fresh authenticated
   // allocation — never a guess that a stale credential still works. The
-  // heartbeat keeps the 30 s base lease alive; a beat that answers a coded
+  // heartbeat keeps the 45 s base lease alive; a beat that answers a coded
   // end (session_expired / session_revoked / session_credential_invalid)
   // re-allocates so the process stays addressable, while a transport failure
   // leaves local belief untouched (an unacknowledged beat never extends the
@@ -673,7 +673,7 @@ export function createAgentRoomClient({
     return Math.round(SESSION_HEARTBEAT_INTERVAL_MS * jitter)
   }
 
-  // Start the 10 s ± jitter beat loop (one per client; the timer never holds
+  // Start the 15 s ± jitter beat loop (one per client; the timer never holds
   // the process open). A definitive coded end clears the credential and
   // re-ensures — a fresh allocation — so the process keeps an addressable
   // principal; a transport failure waits for the next beat without touching
@@ -708,7 +708,7 @@ export function createAgentRoomClient({
 
   // Orderly-exit release of the session principal's base lease (DELETE
   // .../current): best-effort and bounded — a failed release costs only the
-  // 30 s lease, the retained principal and mailbox persist regardless.
+  // 45 s lease, the retained principal and mailbox persist regardless.
   async function releaseSessionBase({ timeoutMs = CLIENT_RELEASE_TIMEOUT_MS } = {}) {
     heartbeatTimer !== null && clearTimeout(heartbeatTimer)
     heartbeatTimer = null
@@ -874,6 +874,8 @@ export function createAgentRoomClient({
       const error = new AgentRoomRuntimeError(code, typeof message === 'string' ? message : 'agent-room request failed')
       const candidates = response.body?.error?.candidates
       if (candidates !== undefined) error.candidates = candidates
+      const retryAfterMs = response.body?.error?.retry_after_ms
+      if (retryAfterMs !== undefined) error.retry_after_ms = retryAfterMs
       throw error
     }
     throw new AgentRoomRuntimeError('request_failed', `agent-room server answered ${response.status}`)
@@ -996,18 +998,19 @@ export function createAgentRoomClient({
         options.signal,
       )
       if (options.signal?.aborted) throw unknownOutcomeError('request cancelled')
-      if (recovered && attachEpoch === epochAtStart) {
+      if (recovered && attachEpoch === epochAtStart && (ensurePromise === null || ensureSettled)) {
         // This call is the one that owns the recovery: drop the stale attach
         // so the ensure below re-resolves runtime.json and re-authenticates.
-        // A concurrent call that recovers first bumps attachEpoch; this call
-        // then skips the reset and simply retries on the fresh attach —
-        // never re-running the bind that the live first session already won.
+        // A concurrent call that recovers first bumps attachEpoch (or already
+        // holds an in-flight ensurePromise); this call then skips the reset and
+        // joins the active recovery — never re-dirtying needsReresolve or
+        // re-running the bind that the live first session already won.
         needsReresolve = true
         sessionToken = null
         if (ensureSettled) ensurePromise = null
       }
       try {
-        await ensure()
+        epochAtStart = await ensure()
         return await rawRequest(method, path, options)
       } catch (error) {
         lastError = error
@@ -1034,6 +1037,7 @@ export function createAgentRoomClient({
   // already been paid once for this call.
   async function request(method, path, options = {}) {
     const epochAtStart = await ensure()
+    const usedBearer = options.bearer === undefined && options.sessionCredential === undefined ? sessionToken : undefined
     try {
       return await rawRequest(method, path, options)
     } catch (error) {
@@ -1046,7 +1050,11 @@ export function createAgentRoomClient({
         return reconnect(method, path, options, error, epochAtStart)
       }
       if (error.code !== 'unauthorized') throw error
-      await authenticateOnce()
+      if (usedBearer === undefined) throw error
+      if (sessionToken === usedBearer) sessionToken = null
+      if (sessionToken === null) {
+        await (ensurePromise !== null && !ensureSettled ? ensure() : authenticateOnce())
+      }
       return await rawRequest(method, path, options)
     }
   }
@@ -1071,6 +1079,8 @@ export function createAgentRoomClient({
       ensureSettled = false
       const inFlight = (async () => {
         try {
+          const prevPort = port
+          const reresolving = needsReresolve
           if (remoteBase !== null) {
             needsReresolve = false
           } else if (port === null || needsReresolve) {
@@ -1087,7 +1097,9 @@ export function createAgentRoomClient({
             port = server.port
             needsReresolve = false
           }
-          await authenticateOnce()
+          if (sessionToken === null || (remoteBase === null ? port !== prevPort : reresolving)) {
+            await authenticateOnce()
+          }
           attachEpoch += 1
         } finally {
           ensureSettled = true
@@ -1096,10 +1108,11 @@ export function createAgentRoomClient({
       inFlight.catch(() => { /* the joining await below surfaces it */ })
       ensurePromise = inFlight
     }
+    const currentEnsure = ensurePromise
     try {
-      await ensurePromise
+      await currentEnsure
     } finally {
-      if (ensureSettled) ensurePromise = null
+      if (ensurePromise === currentEnsure && ensureSettled) ensurePromise = null
     }
     return attachEpoch
   }
@@ -1231,11 +1244,11 @@ export function createAgentRoomClient({
     // Allocate-or-resume this process's session principal (single-flight).
     ensureSessionPrincipal,
 
-    // The 10 s ± jitter beat loop. Stopped by releaseSessionBase().
+    // The 15 s ± jitter beat loop. Stopped by releaseSessionBase().
     startSessionHeartbeat,
 
     // Orderly-exit base-lease release: the durable principal and mailbox
-    // persist either way; a failed release costs only the 30 s lease.
+    // persist either way; a failed release costs only the 45 s lease.
     releaseSessionBase,
 
     // The addressed send (CAP-2): one call from `to` to the committed seq.

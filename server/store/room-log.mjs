@@ -50,6 +50,8 @@ import {
   STORAGE_REFUSE_FREE_BYTES,
   STORAGE_WARN_FREE_BYTES,
   TITLE_MAX,
+  WRITE_QUEUE_BUSY_TIMEOUT_MS,
+  WRITE_QUEUE_DRAIN_MS,
   chatIdForms,
   sessionAddressForms,
 } from '../constants.mjs'
@@ -90,6 +92,7 @@ import {
   resolveStorageThresholds,
   statfsFreeBytes,
 } from './storage-gate.mjs'
+import { createWriteQueue } from './write-queue.mjs'
 
 export const ROOM_LOG_DATABASE_FILENAME = 'agent-room.sqlite'
 export const ROOM_LOG_SCHEMA_VERSION = 2
@@ -206,17 +209,13 @@ function requireClientMessageId(value) {
 // exact idempotent resend would report a payload conflict. Such text is
 // rejected outright; paired surrogates (astral code points) are fine.
 function containsUnpairedSurrogate(value) {
-  for (const char of value) {
-    const code = char.codePointAt(0)
-    if (code >= 0xd800 && code <= 0xdfff) return true
-  }
-  return false
+  return !value.isWellFormed()
 }
 
 function requireMessageText(value) {
   if (
     typeof value !== 'string'
-    || value.trim().length === 0
+    || !/\S/.test(value)
     || value.length > MESSAGE_TEXT_MAX
     || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(value)
     || containsUnpairedSurrogate(value)
@@ -397,7 +396,7 @@ function withImmediateTransaction(database, operation) {
     // Under contention the connection waits busy_timeout, then surfaces
     // SQLITE_BUSY: the write never started, so it maps to a coded internal
     // error instead of a raw SqliteError.
-    if (error?.errcode === SQLITE_BUSY) {
+    if ((Number(error?.errcode) & 0xff) === SQLITE_BUSY) {
       fail('database_busy', 'agent-room database write lock stayed busy; the operation never started')
     }
     throw error
@@ -1109,6 +1108,7 @@ function plainRoom(row) {
 
 export function openRoomLog({
   dataDir,
+  role = 'cli',
   duplicateWindowMs = DUPLICATE_WINDOW_MS,
   storageWarnFreeBytes = STORAGE_WARN_FREE_BYTES,
   storageRefuseFreeBytes = STORAGE_REFUSE_FREE_BYTES,
@@ -1119,6 +1119,9 @@ export function openRoomLog({
 } = {}) {
   if (typeof dataDir !== 'string' || dataDir.trim().length === 0) {
     fail('data_directory_invalid', 'dataDir must be a non-empty path')
+  }
+  if (role !== 'cli' && role !== 'server') {
+    fail('invalid_argument', 'role must be "cli" or "server" when provided')
   }
   // Story 4.4: the duplicate gate's window (the operator-tunable floor) is
   // validated at open, never per append.
@@ -1248,13 +1251,44 @@ export function openRoomLog({
       return { ...connection, reportedVersion }
     })
     const { sqliteVersion, journalMode, pragmas, reportedVersion } = opened
+    let runtimePragmas = pragmas
+    if (role === 'server') {
+      database.exec(`PRAGMA busy_timeout = ${WRITE_QUEUE_BUSY_TIMEOUT_MS};`)
+      const runtimeBusyTimeout = Number(pragmaValue(database, 'PRAGMA busy_timeout'))
+      if (runtimeBusyTimeout !== WRITE_QUEUE_BUSY_TIMEOUT_MS) {
+        fail('database_configuration_failed', 'SQLite runtime server busy_timeout pragma was not applied')
+      }
+      runtimePragmas = Object.freeze({ ...pragmas, busyTimeout: runtimeBusyTimeout })
+    }
 
     // WAL sidecars are recreated on every open; keep them owner-only too.
     for (const sidecar of [`${databasePath}-wal`, `${databasePath}-shm`]) {
       if (existsSync(sidecar)) chmodSync(sidecar, 0o600)
     }
 
-    const selectRoom = roomId => database
+    const STATEMENT_CACHE_MAX = 128
+    const statementCache = new Map()
+    const cachedDatabase = Object.freeze({
+      prepare(sql) {
+        const cached = statementCache.get(sql)
+        if (cached !== undefined) return cached
+        const statement = database.prepare(sql)
+        if (statementCache.size >= STATEMENT_CACHE_MAX) {
+          const oldestKey = statementCache.keys().next().value
+          statementCache.delete(oldestKey)
+        }
+        statementCache.set(sql, statement)
+        return statement
+      },
+      exec(sql) {
+        return database.exec(sql)
+      },
+      get isTransaction() {
+        return database.isTransaction
+      },
+    })
+
+    const selectRoom = roomId => cachedDatabase
       .prepare('SELECT id, kind, title, pair_key, created_by_fingerprint, created_at FROM rooms WHERE id = ?')
       .get(roomId)
 
@@ -1268,7 +1302,7 @@ export function openRoomLog({
     // consult membership; broadcast rooms are open to every Actor (AD-14).
     const requireDirectMembership = (room, actorFingerprint) => {
       if (room.kind !== DIRECT_KIND) return
-      const member = database.prepare(`
+      const member = cachedDatabase.prepare(`
         SELECT 1 AS found
         FROM direct_members
         WHERE room_id = ? AND actor_fingerprint = ?
@@ -1279,7 +1313,7 @@ export function openRoomLog({
     }
 
     const selectMessage = (roomId, seq) => {
-      const row = database.prepare(`${MESSAGE_PROJECTION} WHERE room_id = ? AND seq = ?`)
+      const row = cachedDatabase.prepare(`${MESSAGE_PROJECTION} WHERE room_id = ? AND seq = ?`)
         .get(roomId, seq)
       return row ? plainMessage(row) : null
     }
@@ -1293,7 +1327,7 @@ export function openRoomLog({
     // DatabaseSync and transaction runner. Identity owns the domain SQL;
     // this module remains the only runtime connection/schema/migration owner.
     const identityOperations = createIdentityRepository({
-      database,
+      database: cachedDatabase,
       withImmediateTransaction,
       validate: { assertOpen, fail, requireObject, requireChatId, requireFingerprint, requireClaimTimestamp },
     })
@@ -1301,7 +1335,7 @@ export function openRoomLog({
     // runner and helper set. Created before the message operations so the
     // addressed append's membership helper can consult their read.
     const sessionPairOperations = createSessionPairOperations({
-      database,
+      database: cachedDatabase,
       withImmediateTransaction,
       validate: { assertOpen, fail, requireObject, requireRoomId, requireAfterSeq, requireReadLimit, requireNowMs },
       helpers: { requireRoom, plainRoom, plainMessage, messageProjection: MESSAGE_PROJECTION, roomIdentity: () => randomBytes(ROOM_ID_ENTROPY_BYTES).toString('base64url') },
@@ -1312,7 +1346,7 @@ export function openRoomLog({
       }
     }
     const messagingRoomOperations = createMessagingRoomOperations({
-      database,
+      database: cachedDatabase,
       withImmediateTransaction,
       validate: { assertOpen, fail, requireObject, requireFingerprint, requireRoomId, requireAfterSeq, requireReadLimit, requireTitle },
       helpers: { selectRoom, requireRoom, requireDirectMembership, canonicalDirectPair, plainRoom, plainMessage, messageProjection: MESSAGE_PROJECTION },
@@ -1343,7 +1377,7 @@ export function openRoomLog({
       warn: line => { deferredStorageWarn = line },
     })
     const messagingMessageOperations = createMessagingMessageOperations({
-      database,
+      database: cachedDatabase,
       withImmediateTransaction,
       validate: { assertOpen, fail, requireObject, requireRoomId, requireFingerprint, requireChatId, requireClientMessageId, requireMessageText, requireReplyToSeq, requireNowMs },
       helpers: { requireRoom, requireDirectMembership, requireSessionPairMembership, requireChatIdOrSessionAddress, selectMessage, plainMessage, messageProjection: MESSAGE_PROJECTION },
@@ -1355,17 +1389,119 @@ export function openRoomLog({
       storageWarn,
     })
 
+    function executeWriteBatch(batch) {
+      assertOpen()
+      try {
+        database.exec('BEGIN IMMEDIATE')
+      } catch (error) {
+        if ((Number(error?.errcode) & 0xff) === SQLITE_BUSY) {
+          fail('database_busy', 'agent-room database write lock stayed busy; the batch never started')
+        }
+        throw error
+      }
+
+      const outcomes = new Array(batch.length)
+      const deferredWarnLines = []
+      try {
+        for (let index = 0; index < batch.length; index += 1) {
+          const entry = batch[index]
+          const savepoint = `sp_${index}`
+          database.exec(`SAVEPOINT ${savepoint}`)
+          try {
+            if (typeof entry.validateFence === 'function') {
+              entry.validateFence(api)
+            }
+            const rawResult = entry.execute(api)
+            database.exec(`RELEASE ${savepoint}`)
+            if (rawResult && typeof rawResult === 'object' && typeof rawResult.warnLine === 'string') {
+              deferredWarnLines.push(rawResult.warnLine)
+            }
+            if (rawResult && typeof rawResult === 'object' && 'warnLine' in rawResult) {
+              const { warnLine: _ignored, ...cleanResult } = rawResult
+              outcomes[index] = { ok: true, result: cleanResult }
+            } else {
+              outcomes[index] = { ok: true, result: rawResult }
+            }
+          } catch (opError) {
+            if ((Number(opError?.errcode) & 0xff) === SQLITE_BUSY) {
+              fail('database_busy', 'agent-room database write lock became busy inside batch')
+            }
+            const isSqliteFull = (Number(opError?.errcode) & 0xff) === SQLITE_FULL
+            if (!database.isTransaction) {
+              // SQLite auto-rolls back the outer transaction on errors like
+              // SQLITE_FULL (destroying active savepoints). Abort the batch so
+              // earlier ops in the same transaction are never misreported as
+              // committed.
+              if (isSqliteFull) {
+                fail('storage_low', 'the disk holding the agent-room data directory is full; the message was not committed')
+              }
+              throw opError
+            }
+            database.exec(`ROLLBACK TO ${savepoint}`)
+            database.exec(`RELEASE ${savepoint}`)
+            const recordedError = isSqliteFull
+              ? new AgentRoomRuntimeError('storage_low', 'the disk holding the agent-room data directory is full; the message was not committed')
+              : opError
+            outcomes[index] = { ok: false, error: recordedError }
+          }
+        }
+        database.exec('COMMIT')
+      } catch (batchError) {
+        try {
+          if (database.isTransaction) database.exec('ROLLBACK')
+        } catch {
+          // Preserve batchError below.
+        }
+        if ((Number(batchError?.errcode) & 0xff) === SQLITE_BUSY) {
+          fail('database_busy', 'agent-room database write lock stayed busy during commit')
+        }
+        if ((Number(batchError?.errcode) & 0xff) === SQLITE_FULL) {
+          fail('storage_low', 'the disk holding the agent-room data directory is full; the batch was not committed')
+        }
+        throw batchError
+      }
+
+      for (const warnLine of deferredWarnLines) {
+        try { storageWarn(warnLine) } catch { /* committed batch remains committed */ }
+      }
+      return outcomes
+    }
+
+    const writeQueue = createWriteQueue({ runBatch: executeWriteBatch })
+
     const api = {
       databasePath,
       schemaVersion: reportedVersion,
       sqliteVersion,
       journalMode,
-      pragmas,
+      pragmas: runtimePragmas,
 
       close() {
         if (closed) return
+        writeQueue.abort()
+        statementCache.clear()
+        try {
+          database.exec('PRAGMA wal_checkpoint(TRUNCATE);')
+        } catch {
+          // Best-effort WAL truncate checkpoint at shutdown; never fail close.
+        }
         database.close()
         closed = true
+      },
+
+      enqueueWrite(op) {
+        assertOpen()
+        return writeQueue.enqueue(op)
+      },
+
+      getWriteQueueMetrics() {
+        assertOpen()
+        return writeQueue.getMetrics()
+      },
+
+      drainWriteQueue(timeoutMs = WRITE_QUEUE_DRAIN_MS) {
+        if (closed) return Promise.resolve({ drained: true, timedOut: false, remaining: 0 })
+        return writeQueue.drain(timeoutMs)
       },
 
       // Broadcast rooms are open by design: created with an optional title
@@ -1476,7 +1612,7 @@ export function openRoomLog({
       // null. Pure store operations — orchestration lives in core/realm.mjs.
       getRealmId() {
         assertOpen()
-        const row = database
+        const row = cachedDatabase
           .prepare('SELECT realm_id FROM realms WHERE singleton = 1')
           .get()
         return row ? String(row.realm_id) : null
@@ -1489,14 +1625,14 @@ export function openRoomLog({
         }
         const createdAt = new Date().toISOString()
         try {
-          return withImmediateTransaction(database, () => {
-            const existing = database
+          return withImmediateTransaction(cachedDatabase, () => {
+            const existing = cachedDatabase
               .prepare('SELECT realm_id FROM realms WHERE singleton = 1')
               .get()
             if (existing) {
               fail('realm_already_minted', 'a realm is already minted for this data directory')
             }
-            database
+            cachedDatabase
               .prepare('INSERT INTO realms (singleton, realm_id, created_at) VALUES (1, ?, ?)')
               .run(realmId, createdAt)
             return realmId
@@ -1507,7 +1643,7 @@ export function openRoomLog({
           // instead of failing, so every bootstrapper agrees on one realm.
           const raced = error instanceof AgentRoomRuntimeError && error.code === 'realm_already_minted'
           if (raced || error?.errcode === SQLITE_CONSTRAINT) {
-            const existing = database
+            const existing = cachedDatabase
               .prepare('SELECT realm_id FROM realms WHERE singleton = 1')
               .get()
             if (existing) return String(existing.realm_id)
@@ -1518,7 +1654,7 @@ export function openRoomLog({
 
       findBroadcastRoom() {
         assertOpen()
-        const row = database.prepare(`
+        const row = cachedDatabase.prepare(`
           SELECT id, kind, title, pair_key, created_by_fingerprint, created_at
           FROM rooms
           WHERE kind = 'broadcast'
@@ -1686,6 +1822,26 @@ export function openRoomLog({
       appendSessionPairMessage(...args) {
         assertOpen()
         return messagingMessageOperations.appendSessionPairMessage(...args)
+      },
+
+      appendMessageInTx(...args) {
+        assertOpen()
+        return messagingMessageOperations.appendMessageInTx(...args)
+      },
+
+      openSessionPairRoomInTx(...args) {
+        assertOpen()
+        return sessionPairOperations.openSessionPairRoomInTx(...args)
+      },
+
+      appendSessionPairMessageInTx(...args) {
+        assertOpen()
+        return messagingMessageOperations.appendSessionPairMessageInTx(...args)
+      },
+
+      heartbeatSessionPrincipalInTx(...args) {
+        assertOpen()
+        return identityOperations.heartbeatSessionPrincipalInTx(...args)
       },
     }
     return Object.freeze(api)

@@ -20,6 +20,7 @@ import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
 import { loadOrCreateLocalToken } from '../server/api/local-token.mjs'
+import { SESSION_HEARTBEAT_INTERVAL_MS } from '../server/constants.mjs'
 import { fingerprintFromPublicKey } from '../server/keys.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -597,11 +598,11 @@ test('the client lifecycle end to end: ensure, addressed send, offline peer resu
   assert.equal(resumed.address, peer.address)
   assert.equal(resumed.generation, peer.generation + 1, 'resume increments the generation')
 
-  // The sender's heartbeat loop renews its lease across the 10 s cadence:
-  // after one beat interval its own listing row still reads ONLINE (an
+  // The sender's heartbeat loop renews its lease across the declared cadence:
+  // after one full beat interval its own listing row still reads ONLINE (an
   // unacknowledged beat would let the lease lapse to offline).
   sender.startSessionHeartbeat()
-  await sleep(11_500)
+  await sleep(Math.ceil(SESSION_HEARTBEAT_INTERVAL_MS * 1.15))
   const senderRows = (await sender.listSessions()).sessions
   const senderRow = senderRows.find(row => row.session_id === principal.sessionId)
   assert.ok(senderRow, 'the sender’s principal appears in the listing')

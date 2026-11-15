@@ -1,35 +1,7 @@
-// The per-key rate gates (Story 4.4, FR-16): one token-bucket mechanism, two
-// declared budgets. The send bucket (SEND_TOKEN_REFILL_PER_SECOND refill,
-// SEND_TOKEN_CAPACITY capacity, per Actor, on the send route) and the request
-// budget (REQUEST_BUDGET_PER_MINUTE sustained, REQUEST_BUDGET_BURST burst, per
-// Actor, on every authenticated request — failed, replayed, and long-polls
-// counted once at admission) are the same arithmetic over different constants,
-// all imported by name from the constants module (AD-9 — no restated numbers
-// anywhere in this module).
-//
-// In-process by design, like every other admission gate in this server (the
-// 4.2 enroll limiter precedent): one server process owns one realm's budget
-// state. State is per-key lazily-created buckets, swept lazily on each check —
-// a bucket idle for a full refill horizon is provably full again, so dropping
-// it is exactly equivalent to refilling it, and the map never holds more than
-// the keys active within one horizon.
-//
-// The values are operator-tunable abuse FLOORS (startServer overrides, env
-// surface for the direct launch), never a volumetric-DoS guarantee — FR-16's
-// own words for an invite-only realm.
-//
-// `now` is injectable so tests can roll time without waiting on the wall
-// clock. A refusal verdict carries retryAfterMs — the ceil of the time one
-// token needs to refill — which the budgets stage answers as the rate_limited
-// envelope's retry_after_ms extra (the rate_limited refusal always names its
-// delay, FR-17).
+// Generic in-process token-bucket utility retained for unit testing and custom
+// gates. Post-auth per-Actor request/send token buckets were retired in Story 1.1
+// in favor of the bounded write queue and pre-auth enrollment limiter.
 
-import {
-  REQUEST_BUDGET_BURST,
-  REQUEST_BUDGET_PER_MINUTE,
-  SEND_TOKEN_CAPACITY,
-  SEND_TOKEN_REFILL_PER_SECOND,
-} from '../constants.mjs'
 import { AgentRoomRuntimeError } from '../runtime.mjs'
 
 function requirePositiveNumber(value, name) {
@@ -46,14 +18,9 @@ function requirePositiveInteger(value, name) {
   return value
 }
 
-// One token bucket per key. A verdict is {ok: true} or
-// {ok: false, retryAfterMs}: the caller answers refusals as the coded
-// rate_limited with the delay attached, and consumed tokens stay consumed —
-// the gate counts admitted attempts, whatever the handler later answers
-// (FR-16: failed and replayed attempts count).
 export function createTokenBucketGate({
-  refillPerSecond = SEND_TOKEN_REFILL_PER_SECOND,
-  capacity = SEND_TOKEN_CAPACITY,
+  refillPerSecond = 0.5,
+  capacity = 10,
   now = Date.now,
 } = {}) {
   requirePositiveNumber(refillPerSecond, 'refillPerSecond')
@@ -96,31 +63,4 @@ export function createTokenBucketGate({
   }
 
   return { check }
-}
-
-// The named pair the budgets stage consumes (Story 4.4): the send bucket on
-// the send route and the request budget over every authenticated request.
-// Both default to the declared constants; startServer passes operator floors
-// through. `now` threads to both gates so a test drives them on one clock.
-export function createRateGates({
-  sendTokenRefillPerSecond = SEND_TOKEN_REFILL_PER_SECOND,
-  sendTokenCapacity = SEND_TOKEN_CAPACITY,
-  requestBudgetPerMinute = REQUEST_BUDGET_PER_MINUTE,
-  requestBudgetBurst = REQUEST_BUDGET_BURST,
-  now = Date.now,
-} = {}) {
-  return {
-    sendBucketGate: createTokenBucketGate({
-      refillPerSecond: sendTokenRefillPerSecond,
-      capacity: sendTokenCapacity,
-      now,
-    }),
-    // The sustained rate is declared per minute; the bucket consumes per
-    // request, so the refill converts exactly once, here.
-    requestBudgetGate: createTokenBucketGate({
-      refillPerSecond: requestBudgetPerMinute / 60,
-      capacity: requestBudgetBurst,
-      now,
-    }),
-  }
 }

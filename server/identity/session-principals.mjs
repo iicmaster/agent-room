@@ -13,7 +13,7 @@
 //     after the installation authenticates, plus a full address
 //     `base~token@machine` (a public locator, never a credential) and a
 //     256-bit capability whose SHA-256 DIGEST is the only server-side trace.
-//   - Two independent lifetimes: the base lease (30 s since the last valid
+//   - Two independent lifetimes: the base lease (45 s since the last valid
 //     heartbeat) is liveness bookkeeping only — its expiry never deletes the
 //     principal, the address, pair-room membership or the mailbox — and
 //     principal retention (30 days after the last heartbeat, or until an
@@ -189,10 +189,27 @@ export function createSessionPrincipalOperations({ database, withImmediateTransa
     return row
   }
 
+  function heartbeatSessionPrincipalInTxImpl({ sessionId, generation, now }) {
+    sweepRetention(now)
+    const row = selectBySessionId(sessionId)
+    requireRetainedLive(row)
+    if (Number(row.generation) !== generation) {
+      fail('session_expired', `session generation ${generation} is fenced; the current generation is ${Number(row.generation)}`)
+    }
+    const beatAt = new Date(now).toISOString()
+    const leaseExpiresAt = new Date(now + SESSION_BASE_LEASE_MS).toISOString()
+    database.prepare(`
+      UPDATE session_principals
+      SET last_heartbeat_at = ?, base_lease_expires_at = ?, base_lease_status = 'occupied'
+      WHERE session_id = ?
+    `).run(beatAt, leaseExpiresAt, sessionId)
+    return plainPrincipal(selectBySessionId(sessionId))
+  }
+
   return Object.freeze({
     // Allocate one session principal under an authenticated installation.
     // One BEGIN IMMEDIATE: retention sweep → address mint → uniqueness check
-    // → insert with an occupied 30 s base lease and a 30-day retention
+    // → insert with an occupied 45 s base lease and a 30-day retention
     // window. The raw capability is generated here, returned in the result
     // ONCE, and only its digest is persisted. `locatorTokenFn` and
     // `capabilityBytesFn` are test seams (defaulting to the real random
@@ -259,26 +276,23 @@ export function createSessionPrincipalOperations({ database, withImmediateTransa
     // fenced generation, a revoked or retention-expired principal, or an
     // unknown session answers coded refusals and mutates nothing. A valid
     // beat renews ONLY this principal's lease.
+    heartbeatSessionPrincipalInTx(options) {
+      assertOpen()
+      if (!database.isTransaction) {
+        fail('invalid_argument', 'heartbeatSessionPrincipalInTx requires an active transaction')
+      }
+      const { sessionId, generation, nowMs } = requireObject(options)
+      const now = requireNow(nowMs)
+      return heartbeatSessionPrincipalInTxImpl({ sessionId, generation, now })
+    },
+
     heartbeatSessionPrincipal(options) {
       assertOpen()
       const { sessionId, generation, nowMs } = requireObject(options)
       const now = requireNow(nowMs)
-      return withImmediateTransaction(database, () => {
-        sweepRetention(now)
-        const row = selectBySessionId(sessionId)
-        requireRetainedLive(row)
-        if (Number(row.generation) !== generation) {
-          fail('session_expired', `session generation ${generation} is fenced; the current generation is ${Number(row.generation)}`)
-        }
-        const beatAt = new Date(now).toISOString()
-        const leaseExpiresAt = new Date(now + SESSION_BASE_LEASE_MS).toISOString()
-        database.prepare(`
-          UPDATE session_principals
-          SET last_heartbeat_at = ?, base_lease_expires_at = ?, base_lease_status = 'occupied'
-          WHERE session_id = ?
-        `).run(beatAt, leaseExpiresAt, sessionId)
-        return plainPrincipal(selectBySessionId(sessionId))
-      })
+      return withImmediateTransaction(database, () =>
+        heartbeatSessionPrincipalInTxImpl({ sessionId, generation, now }),
+      )
     },
 
     // Resume an offline-but-retained principal: the capability's generation
@@ -396,10 +410,14 @@ export function createSessionPrincipalOperations({ database, withImmediateTransa
         fail('invalid_argument', 'sessionId must be a non-empty string')
       }
       const row = database
-        .prepare(`SELECT principal_status, generation FROM session_principals WHERE session_id = ?`)
+        .prepare(`SELECT principal_status, generation, principal_retention_expires_at FROM session_principals WHERE session_id = ?`)
         .get(sessionId)
       return row
-        ? { principal_status: row.principal_status, generation: Number(row.generation) }
+        ? {
+            principal_status: row.principal_status,
+            generation: Number(row.generation),
+            principal_retention_expires_at: row.principal_retention_expires_at,
+          }
         : null
     },
 

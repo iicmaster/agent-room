@@ -98,29 +98,10 @@ const DM_COUNT_PER_SIDE = 5
 const BROADCAST_COUNT_PER_SIDE = 4
 const PHASE_SETTLE_MS = 4_000
 
-// The rate-gate probe: settle the bucket back toward capacity, then fire a
-// burst larger than the declared capacity 10. The wall bound is what makes
-// the refusal floor arithmetic, not hope: within 4 s at most 2 tokens refill
-// (0.5/s), so at least 14 - 10 - 2 = 2 of the burst's sends are refused.
-// PROBE_BACKOFF_MS exceeds one full token's refill (2000 ms), so the backoff
-// send succeeds.
-const PROBE_SETTLE_MS = 10_000
+// Story 1.1: post-auth rate buckets are retired; burst sends commit with zero 429.
 const PROBE_BURST = 14
 const PROBE_BURST_WALL_LIMIT_MS = 4_000
-const PROBE_BACKOFF_MS = 2_600
 
-// The pipeline order is Transport → Auth → Budget → Authz: an empty send
-// bucket answers rate_limited BEFORE the ban check is ever reached (the
-// Story 4.5 wire test's post-ban send rode a non-empty bucket). The drill's
-// probe empties B's bucket by design, so the post-ban send waits out one
-// full token refill (2000 ms at the declared 0.5/s) first — then the send
-// reaches the authz stage and answers the coded `banned` the criterion
-// demands. A settle, never a weakened oracle.
-const BUCKET_REFILL_SETTLE_MS = 2_400
-
-// The ban row: the ban lands mid-hold; the poll must answer `banned` at its
-// NEXT WAKE — within the 20 s window it was held under, and well before it
-// (the ban-at-next-request precedent answers in single-digit seconds).
 const BAN_MIDHOLD_DELAY_MS = 300
 const LONGPOLL_WINDOW_MS = READ_HOLD_MAX_MS
 const NEXT_WAKE_BOUND_MS = 10_000
@@ -146,15 +127,6 @@ const RUNTIME_RECORD_FILENAME = 'runtime.json'
 // values are built here, never imported).
 const PROTOCOL_KEY = 'agent-room-protocol'
 const PROTOCOL_VERSION = '1'
-
-// The harness-operator's floor raise, limited to the ONE gate whose declared
-// default would throttle the drill itself (the request budget counts every
-// authenticated request, including every churn bind and release). The send
-// bucket and duplicate gate stay at their declared defaults on purpose.
-const OPERATOR_REQUEST_BUDGET_FLOOR_ENV = Object.freeze({
-  AGENT_ROOM_REQUEST_BUDGET_PER_MINUTE: '120000',
-  AGENT_ROOM_REQUEST_BUDGET_BURST: '100000',
-})
 
 const sleep = ms => new Promise(resolvePromise => { setTimeout(resolvePromise, ms) })
 
@@ -335,7 +307,6 @@ function spawnServerChild(dataDir) {
       PATH: process.env.PATH ?? '',
       LANG: process.env.LANG ?? 'C.UTF-8',
       AGENT_ROOM_DATA_DIR: dataDir,
-      ...OPERATOR_REQUEST_BUDGET_FLOOR_ENV,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
@@ -733,43 +704,31 @@ async function governanceJourney({ rootDir, dataDir, origin, installations }) {
   const dmDrain = await clientA.readMessage({ roomId: dmRoomIdA, afterSeq: 0 })
   assert.equal(dmDrain.messages.length, DM_COUNT_PER_SIDE * 2, 'the DM exchange is fully committed')
 
-  // --- The explicit rate-gate probe: a burst > capacity trips rate_limited ------
-  await sleep(PROBE_SETTLE_MS)
+  // --- Burst-send stability probe: all 14 sends commit with 0 HTTP 429 ---
   const probeStartedAt = Date.now()
-  const probeResults = []
-  for (let index = 0; index < PROBE_BURST; index += 1) {
-    try {
-      const sent = await clientB.sendMessage({
-        roomId: broadcastRoomId,
-        clientMessageId: `dress-probe-b-${index}`,
-        text: `dress rehearsal probe send ${index}`,
-      })
-      probeResults.push({ ok: true, seq: sent.seq })
-    } catch (error) {
-      probeResults.push({ ok: false, code: error?.code ?? String(error) })
-    }
-  }
+  const probeResults = await Promise.all(
+    Array.from({ length: PROBE_BURST }, (_, index) => clientB.sendMessage({
+      roomId: broadcastRoomId,
+      clientMessageId: `dress-probe-b-${index}`,
+      text: `dress rehearsal probe send ${index}`,
+    }).then(
+      sent => ({ ok: true, seq: sent.seq }),
+      error => ({ ok: false, code: error?.code ?? String(error) }),
+    )),
+  )
   const probeWallMs = Date.now() - probeStartedAt
   const probeCommitted = probeResults.filter(result => result.ok).length
-  const probeRefusedResults = probeResults.filter(result => !result.ok)
-  const probeRefused = probeRefusedResults.length
+  const probeRefused = probeResults.filter(result => !result.ok).length
   assert.ok(probeWallMs < PROBE_BURST_WALL_LIMIT_MS, `the probe burst was rapid (${probeWallMs} ms, bound ${PROBE_BURST_WALL_LIMIT_MS} ms)`)
-  assert.ok(probeCommitted >= 8, `the burst committed against a settled bucket (committed ${probeCommitted})`)
-  assert.ok(probeRefused >= 2, `the burst tripped the send bucket (refused ${probeRefused} of ${PROBE_BURST})`)
-  assert.equal(
-    probeRefusedResults.every(result => result.code === 'rate_limited'),
-    true,
-    `every refusal is the coded rate_limited: ${JSON.stringify(probeRefusedResults)}`,
-  )
+  assert.equal(probeCommitted, PROBE_BURST, `every burst send committed (${probeCommitted}/${PROBE_BURST})`)
+  assert.equal(probeRefused, 0, `zero sends rejected during burst (${probeRefused})`)
 
-  // Back off past one full token refill, then succeed.
-  await sleep(PROBE_BACKOFF_MS)
   const backoff = await clientB.sendMessage({
     roomId: broadcastRoomId,
     clientMessageId: 'dress-backoff-b',
-    text: 'dress rehearsal: after the backoff',
+    text: 'dress rehearsal: after the burst',
   })
-  assert.equal(backoff.status, 'committed', 'the backoff send succeeds')
+  assert.equal(backoff.status, 'committed', 'post-burst send succeeds')
 
   // --- The operator bans B (by fingerprint, via the CLI host) --------------------
   const headBeforeHold = (await clientB.readMessage({ roomId: broadcastRoomId, afterSeq: 0 })).head_seq
@@ -793,10 +752,7 @@ async function governanceJourney({ rootDir, dataDir, origin, installations }) {
   assert.ok(holdElapsedMs < LONGPOLL_WINDOW_MS, `the poll terminated within its ${LONGPOLL_WINDOW_MS} ms window (${holdElapsedMs} ms)`)
   assert.ok(holdElapsedMs < NEXT_WAKE_BOUND_MS, `the poll terminated at the next wake, not the deadline (${holdElapsedMs} ms)`)
 
-  // B's send is refused banned at next request (after one token refills, so
-  // the send reaches the authz stage — see BUCKET_REFILL_SETTLE_MS); so is a
-  // fresh long-poll, at admission, immediately.
-  await sleep(BUCKET_REFILL_SETTLE_MS)
+  // B's send is refused banned at next request; so is a fresh long-poll.
   await refusedCoded(
     clientB.sendMessage({ roomId: broadcastRoomId, clientMessageId: 'dress-banned-b', text: 'this must never commit' }),
     'banned',
@@ -1005,8 +961,7 @@ function wireScan({ dataDir, inviteTokens, probeRefused }) {
   assert.equal(bindHttps, 223, `exactly 223 binds rode the https legs, received ${bindHttps}`)
   assert.equal(releaseHttps, 221, `exactly 221 releases rode the https legs, received ${releaseHttps}`)
 
-  // Every rate_limited response on the wire — both legs see each refusal —
-  // carries its retry delay, and there are exactly the probe's refusals.
+  // Zero rate_limited responses appear during post-auth send bursts.
   const rateLimitedResponses = captures.filter(entry => {
     try {
       return JSON.parse(entry.responseBody)?.error?.code === 'rate_limited'
@@ -1014,11 +969,7 @@ function wireScan({ dataDir, inviteTokens, probeRefused }) {
       return false
     }
   })
-  assert.equal(rateLimitedResponses.length, probeRefused * 2, `every probe refusal appears on both legs: ${rateLimitedResponses.length} responses for ${probeRefused} refusals`)
-  for (const entry of rateLimitedResponses) {
-    const extra = JSON.parse(entry.responseBody)?.error?.retry_after_ms
-    assert.equal(Number.isSafeInteger(extra) && extra >= 1, true, `the rate_limited refusal carries a positive retry_after_ms: ${entry.responseBody}`)
-  }
+  assert.equal(rateLimitedResponses.length, probeRefused * 2, `expected ${probeRefused * 2} rate_limited responses, got ${rateLimitedResponses.length}`)
 
   const httpsHops = captures.filter(entry => entry.proto === 'https').length
   const httpHops = captures.filter(entry => entry.proto === 'http').length

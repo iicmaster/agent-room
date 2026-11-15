@@ -100,27 +100,28 @@ test('DUP_FULL_ADDRESS: a pinned token collision refuses name_taken with the hol
   store.close()
 })
 
-// --- Heartbeat: the 30 s lease, per principal ---------------------------------
+// --- Heartbeat: the base lease, per principal ---------------------------------
 
-test('HEARTBEAT_RENEW: a beat at 29,999 ms renews only its own lease', t => {
+test('HEARTBEAT_RENEW: a beat 1 ms before lease expiry renews only its own lease', t => {
   const store = makeStore(t)
   const a = store.allocateSessionPrincipal({ installationFingerprint: FINGERPRINT_A, baseName: 'a-base', machine: 'macbook', nowMs: T0 })
   const b = store.allocateSessionPrincipal({ installationFingerprint: FINGERPRINT_A, baseName: 'b-base', machine: 'macbook', nowMs: T0 })
-  const beaten = store.heartbeatSessionPrincipal({ sessionId: a.session_id, generation: 1, nowMs: T0 + 29_999 })
-  assert.equal(beaten.base_lease_expires_at, iso(T0 + 29_999 + SESSION_BASE_LEASE_MS))
-  assert.equal(beaten.last_heartbeat_at, iso(T0 + 29_999))
+  const almostExpired = SESSION_BASE_LEASE_MS - 1
+  const beaten = store.heartbeatSessionPrincipal({ sessionId: a.session_id, generation: 1, nowMs: T0 + almostExpired })
+  assert.equal(beaten.base_lease_expires_at, iso(T0 + almostExpired + SESSION_BASE_LEASE_MS))
+  assert.equal(beaten.last_heartbeat_at, iso(T0 + almostExpired))
   // B's lease is untouched: A's beat renews A alone.
-  const listed = store.listSessionPrincipals({ nowMs: T0 + 29_999 + 1 })
+  const listed = store.listSessionPrincipals({ nowMs: T0 + almostExpired + 1 })
   const byId = new Map(listed.map(row => [row.session_id, row]))
   assert.equal(byId.get(a.session_id).presence, 'online')
   assert.equal(byId.get(b.session_id).presence, 'offline', 'B missed its beats and reads offline')
   store.close()
 })
 
-test('LEASE_EXPIRE_RECLAIM: after 30 s without a beat, a new principal claims the base; the old one persists offline', t => {
+test('LEASE_EXPIRE_RECLAIM: after SESSION_BASE_LEASE_MS without a beat, a new principal claims the base; the old one persists offline', t => {
   const store = makeStore(t)
   const old = store.allocateSessionPrincipal({ installationFingerprint: FINGERPRINT_A, baseName: 'zcode', machine: 'macbook', nowMs: T0 })
-  const now = T0 + 30_000
+  const now = T0 + SESSION_BASE_LEASE_MS
   const fresh = store.allocateSessionPrincipal({ installationFingerprint: FINGERPRINT_A, baseName: 'zcode', machine: 'macbook', nowMs: now })
   assert.notEqual(tokenOf(old.address), tokenOf(fresh.address))
   // The old principal, its full address, and its mailbox are all still there

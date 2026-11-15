@@ -12,6 +12,7 @@
 // PUBLIC_ERROR_STATUS in ../constants.mjs, never per-route.
 
 import {
+  ENROLLMENT_WINDOW_MS,
   FRAME_MAX_BYTES,
   PROTOCOL_HEADER,
   PUBLIC_ERRORS,
@@ -56,6 +57,7 @@ const BODY_METHODS = new Set(['POST', 'PATCH'])
 export const ERROR_ENVELOPE_EXTRAS = Object.freeze({
   ambiguous_chat_id: Object.freeze(['candidates']),
   rate_limited: Object.freeze(['retry_after_ms']),
+  queue_full: Object.freeze(['retry_after_ms']),
   // Story 7.2 (the observed incumbent): a same-Actor 409 chat_id_taken
   // carries the opaque conflict ticket the operator confirms against — the
   // one extra the takeover flow needs (foreign collisions carry none).
@@ -63,15 +65,6 @@ export const ERROR_ENVELOPE_EXTRAS = Object.freeze({
 })
 
 const ENVELOPE_FIXED_FIELDS = new Set(['ok', 'code', 'message', 'status'])
-
-// The send routes the send-bucket gate covers: the frozen per-room send
-// route, and — v0.9.0 (additive) — the addressed send, which spends from the
-// same per-Actor bucket so a sender's burst rate is bounded identically
-// whichever way it addresses a peer. (The bucket's idempotency probe needs
-// the room, which the addressed send resolves inside its handler, so the
-// probe never short-circuits there: every addressed attempt consumes one
-// token, exactly like a new send.)
-const SEND_BUCKET_ROUTE_PATHS = new Set(['/api/rooms/:id/messages', '/api/messages'])
 
 for (const [code, names] of Object.entries(ERROR_ENVELOPE_EXTRAS)) {
   for (const name of names) {
@@ -305,42 +298,18 @@ export class AuthStage {
   }
 }
 
-// Budgets stage (AD-7): request budgets per key / per IP. Story 4.2 landed
-// the policy's first gate, scoped exactly as its story demanded: the enroll
-// route only, through the minimal fixed-window limiter injected at
-// startServer. Story 4.4 completes the stage with the two per-Actor token
-// buckets (server/api/rate-gates.mjs): the request budget — every
-// authenticated (actor-class) request consumes one token at admission,
-// whatever it later answers (failed and replayed attempts count, FR-16; a
-// long-poll is one request and counts once, at admission, never per poll
-// iteration) — and the send bucket on the send route, which is
-// idempotency-aware: the stage consults the store's idempotency index FIRST,
-// so an exact retry (an existing (room, actor, client_message_id) tuple)
-// passes without consuming even from an empty bucket, and only a NEW send
-// spends a token. The AC's gate ordering is structural: idempotency tuple →
-// send bucket → duplicate gate (the duplicate gate lives inside the store's
-// append transaction, after the same idempotency lookup — see room-log.mjs).
-//
-// For the send route the stage also performs the request-field read (the one
-// body parse every POST gets), because the idempotency probe needs the
-// body's client_message_id; readRequestFields is re-entrant (a context flag
-// makes runPipeline's later read a no-op), the field gate's rejections are
-// unchanged, and every other route still reads fields after the stages as
-// before. A refusal is the coded rate_limited (429) carrying the
-// declared retry_after_ms extra: zero state, nothing further consumed, the
-// handler never runs. Gate logic lives here — never in a handler.
+// Budgets stage (AD-7): pre-auth IP rate limiting on /api/auth/enroll.
+// Post-auth per-Actor request/send token buckets were retired in Story 1.1
+// in favor of the bounded per-session write queue. A refusal is the coded
+// rate_limited (429) carrying retry_after_ms: zero state, nothing consumed.
 export class BudgetStage {
   constructor({
     enrollRateLimiter = null,
     trustedProxy = false,
-    requestBudgetGate = null,
-    sendBucketGate = null,
   } = {}) {
     this.name = 'budgets'
     this.enrollRateLimiter = enrollRateLimiter
     this.trustedProxy = trustedProxy === true
-    this.requestBudgetGate = requestBudgetGate
-    this.sendBucketGate = sendBucketGate
   }
 
   async process(context) {
@@ -353,70 +322,10 @@ export class BudgetStage {
         trustedProxy: this.trustedProxy,
       })
       if (this.enrollRateLimiter.check(identity) !== true) {
-        return reject('rate_limited')
-      }
-    }
-
-    const actorKey = context.session?.actorFingerprint
-    const actorKeyUsable = typeof actorKey === 'string' && actorKey.length > 0
-
-    // The request budget: one token per authenticated request, at admission,
-    // before anything else about the request can refuse it — failed and
-    // replayed attempts count (FR-16). Pre-auth routes have no key yet (the
-    // enroll route keeps its own per-identity limiter above); viewer and
-    // health carry no Actor budget.
-    if (this.requestBudgetGate !== null && context.route?.class === 'actor' && actorKeyUsable) {
-      const verdict = this.requestBudgetGate.check(actorKey)
-      if (verdict.ok !== true) {
-        return reject('rate_limited', undefined, { retry_after_ms: verdict.retryAfterMs })
-      }
-    }
-
-    // The send bucket: per Actor, on the send route only. The idempotency
-    // probe runs BEFORE the bucket consumes: a tuple the store already holds
-    // is a retry — it passes free (the handler resolves it as the original
-    // or the coded conflict) whatever the bucket's state, so an exact retry
-    // during a rate-limited period still returns the original and consumes
-    // nothing. Only a NEW send spends a token.
-    if (
-      this.sendBucketGate !== null
-      && context.method === 'POST'
-      && SEND_BUCKET_ROUTE_PATHS.has(context.route?.path)
-    ) {
-      // The probe reads the body's client_message_id, so the send route's
-      // one field read happens here (re-entrant; runPipeline will not
-      // re-read). A field-gate rejection is the request's answer, exactly as
-      // if it had been read after the stages.
-      const fieldsOutcome = await readRequestFields(context)
-      if (fieldsOutcome) return fieldsOutcome
-
-      const clientMessageId = context.body?.client_message_id
-      const roomId = context.params?.id
-      const probeable = actorKeyUsable
-        && typeof roomId === 'string' && roomId.length > 0
-        && typeof clientMessageId === 'string' && clientMessageId.length > 0
-      if (probeable) {
-        try {
-          const existing = context.store?.findIdempotentSend?.({
-            roomId,
-            actorFingerprint: actorKey,
-            clientMessageId,
-          })
-          // An existing tuple is a retry: admit free, consume nothing.
-          if (existing) return undefined
-        } catch (error) {
-          // A tuple that cannot be proven existing is a new admission: any
-          // coded store refusal here (a malformed id among them) would fail
-          // the send later anyway, and the request budget already counted
-          // this attempt — fall through to the bucket like a first send.
-          // Anything that is not a coded store failure is a real fault and
-          // propagates.
-          if (!(error instanceof AgentRoomRuntimeError)) throw error
-        }
-      }
-      const verdict = this.sendBucketGate.check(actorKey)
-      if (verdict.ok !== true) {
-        return reject('rate_limited', undefined, { retry_after_ms: verdict.retryAfterMs })
+        const retryAfterMs = typeof this.enrollRateLimiter.retryAfterMs === 'function'
+          ? this.enrollRateLimiter.retryAfterMs(identity)
+          : ENROLLMENT_WINDOW_MS
+        return reject('rate_limited', undefined, { retry_after_ms: retryAfterMs })
       }
     }
     return undefined
@@ -509,10 +418,10 @@ export function assertStageOrder(stages) {
 // Per-class assembly: the identical-gate door for Stories 1.4-1.8. Actor and
 // pre-auth classes run all stages; viewer and health skip the protocol stage.
 // The two verifier slots keep actor and viewer credentials apart. The budget
-// stage's injects (Stories 4.2 and 4.4) default to no limiting — a direct
-// assemblePipeline caller gets the structural pass-through; startServer wires
-// the enroll route's limiter, its proxy-trust configuration, and the two
-// per-Actor token buckets (request budget + send bucket).
+// stage's injects default to no limiting — a direct assemblePipeline caller
+// gets the structural pass-through; startServer wires the enroll route's
+// limiter and its proxy-trust configuration (post-auth token buckets were
+// retired in Story 1.1 in favor of the bounded per-session write queue).
 export function assemblePipeline(routeClass, options = {}) {
   if (!PROTOCOL_APPLIES_TO.includes(routeClass) && routeClass !== 'viewer' && routeClass !== 'health') {
     throw new AgentRoomRuntimeError('invalid_argument', `unknown route class "${String(routeClass)}"`)
@@ -528,8 +437,6 @@ export function assemblePipeline(routeClass, options = {}) {
     new BudgetStage({
       enrollRateLimiter: options.enrollRateLimiter ?? null,
       trustedProxy: options.trustedProxy,
-      requestBudgetGate: options.requestBudgetGate ?? null,
-      sendBucketGate: options.sendBucketGate ?? null,
     }),
     new AuthzStage(),
   )
@@ -691,7 +598,7 @@ export async function runPipeline(stages, context, handler) {
       // internal-only codes — falls back to `request_failed` (500) per AD-8.
       // The failing detail travels to stderr via internalDetail, never to the
       // wire: the envelope keeps the canonical fallback message.
-      const failure = reject(error?.code, error?.message)
+      const failure = reject(error?.code, error?.message, error)
       failure.internalDetail = internalDetailOf(error)
       return failure
     }

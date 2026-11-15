@@ -262,6 +262,17 @@ async function captureStderr(body) {
 // Contract helper: every object key in a payload (recursively) must be a
 // frozen AD-8 response-vocabulary name — the drift class the review flagged
 // must fail tests, not ship.
+const WRITE_QUEUE_METRIC_KEYS = [
+  'batches_total',
+  'busy_retries_total',
+  'bytes',
+  'coalesced_total',
+  'committed_total',
+  'depth',
+  'max_depth',
+  'rejected_total',
+]
+
 function assertVocabularyKeys(value, vocabulary, path = 'result') {
   if (Array.isArray(value)) {
     value.forEach((item, index) => assertVocabularyKeys(item, vocabulary, `${path}[${index}]`))
@@ -273,6 +284,14 @@ function assertVocabularyKeys(value, vocabulary, path = 'result') {
         vocabulary.includes(key),
         `${path}.${key} is outside the frozen response vocabulary`,
       )
+      if (key === 'write_queue') {
+        assert.ok(child !== null && typeof child === 'object' && !Array.isArray(child), `${path}.write_queue must be an object`)
+        assert.deepEqual(Object.keys(child).sort(), WRITE_QUEUE_METRIC_KEYS)
+        for (const metricKey of WRITE_QUEUE_METRIC_KEYS) {
+          assert.ok(Number.isSafeInteger(child[metricKey]) && child[metricKey] >= 0, `${path}.write_queue.${metricKey} must be a non-negative integer`)
+        }
+        continue
+      }
       assertVocabularyKeys(child, vocabulary, `${path}.${key}`)
     }
   }
@@ -911,10 +930,14 @@ test('GET /api/status answers realm_id, version, and broadcast_room_id to an aut
   const status = await statusGet(record.port, aliceToken)
   assert.equal(status.status, 200, status.text)
   const result = status.json().result
-  assert.deepEqual(Object.keys(result).sort(), ['broadcast_room_id', 'realm_id', 'version'])
+  assert.deepEqual(Object.keys(result).sort(), ['broadcast_room_id', 'realm_id', 'version', 'write_queue'])
   assert.match(result.realm_id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
   assert.equal(result.version, APP_VERSION)
   assert.ok(typeof result.broadcast_room_id === 'string' && result.broadcast_room_id.length > 0)
+  assert.deepEqual(Object.keys(result.write_queue).sort(), WRITE_QUEUE_METRIC_KEYS)
+  for (const metricKey of WRITE_QUEUE_METRIC_KEYS) {
+    assert.ok(Number.isSafeInteger(result.write_queue[metricKey]) && result.write_queue[metricKey] >= 0)
+  }
 
   // The query allowlist holds here too.
   const extra = await request(record.port, 'GET', '/api/status?include_offline=true', {

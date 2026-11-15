@@ -14,13 +14,17 @@ export const FRAME_MAX_BYTES = 1024 * 1024
 export const READ_PAGE_MAX = 200
 export const READ_HOLD_MAX_MS = 20_000
 
-// Sends: token bucket refill and capacity.
-export const SEND_TOKEN_REFILL_PER_SECOND = 0.5
-export const SEND_TOKEN_CAPACITY = 10
-
-// Request budgets: per key, per IP for enrollment.
-export const REQUEST_BUDGET_PER_MINUTE = 120
-export const REQUEST_BUDGET_BURST = 30
+// Write queue: bounded batch coalescing and SQLite contention backoff.
+export const WRITE_QUEUE_FLUSH_MS = 25
+export const WRITE_QUEUE_BATCH_MAX = 64
+export const WRITE_QUEUE_MAX_OPS = 2048
+export const WRITE_QUEUE_MAX_BYTES = 32 * 1024 * 1024
+export const WRITE_QUEUE_PER_SESSION_MAX = 16
+export const WRITE_QUEUE_BUSY_TIMEOUT_MS = 50
+export const WRITE_QUEUE_RETRY_BASE_MS = 25
+export const WRITE_QUEUE_RETRY_MAX_MS = 200
+export const WRITE_QUEUE_BUSY_BUDGET_MS = 1_500
+export const WRITE_QUEUE_DRAIN_MS = 2_000
 export const ENROLLMENT_PER_MINUTE = 5
 export const ENROLLMENT_BURST = 5
 // Story 4.2: the fixed window the enroll route's minimal limiter counts over
@@ -285,10 +289,11 @@ export const PUBLIC_ERRORS = Object.freeze({
   // durable enrollment record can prove possession and still mint no session.
   not_enrolled: 'this public key is not enrolled on this server',
   protocol_required: 'Agent-Room-Protocol header is required',
-  // Story 4.2: the enroll route's admission refusal — the minimal fixed-
-  // window counter that paces POST /api/auth/enroll at ENROLLMENT_PER_MINUTE
-  // per client identity. The full request-budget policy (counting every
-  // route, per key) is Story 4.4's and extends from this code.
+  queue_full: 'write queue capacity exceeded; retry after backoff',
+  // Story 4.2: the enroll route's admission refusal — the fixed-window
+  // counter that paces POST /api/auth/enroll at ENROLLMENT_PER_MINUTE per
+  // client identity (post-auth token buckets were retired in Story 1.1 in
+  // favor of queue_full backpressure from the bounded write queue).
   rate_limited: 'request rate limit exceeded',
   reply_room_mismatch: 'reply target belongs to another room',
   request_cancelled: 'request was cancelled',
@@ -413,6 +418,7 @@ export const PUBLIC_ERROR_STATUS = Object.freeze({
   peer_not_found: 404,
   not_enrolled: 403,
   protocol_required: 400,
+  queue_full: 503,
   rate_limited: 429,
   reply_room_mismatch: 400,
   request_cancelled: 400,
@@ -676,18 +682,12 @@ export const RECONNECT_RECOVERY_PROBE_MS = 250
 // the reusable base name's liveness bookkeeping; the durable principal —
 // session id, full address, pair-room membership, cursor namespace, mailbox —
 // is retained until explicit revoke or the 30-day retention expiry. Heartbeat
-// cadence is 10 s ± jitter; a lease expires after three missed beats (30 s).
+// cadence is 15 s ± jitter; a lease expires after three missed beats (45 s).
 // Declared once here (AD-9); every consumer imports them by name.
-export const SESSION_HEARTBEAT_INTERVAL_MS = 10_000
+export const SESSION_HEARTBEAT_INTERVAL_MS = 15_000
 export const SESSION_HEARTBEAT_JITTER = 0.1
-export const SESSION_BASE_LEASE_MS = 30_000
+export const SESSION_BASE_LEASE_MS = 45_000
 export const SESSION_PRINCIPAL_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
-// The heartbeat traffic class budget (session-protocol.md §3): 20 req/s per
-// realm at the 100-session target. On the wire each beat is one authenticated
-// actor-class request, so the per-installation request budget already bounds
-// a tenant's beats (6/min per session under the declared cadence); this
-// constant names the design envelope the gates must keep serving.
-export const SESSION_HEARTBEAT_REQUEST_BUDGET_PER_SECOND = 20
 
 // The session address grammar: `base~token@machine`. The base is a DR-1 chat
 // id (the installation's configured name); the locator token is exactly

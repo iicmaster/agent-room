@@ -1024,7 +1024,7 @@ test('Story 7.1: the pipeline acquires the pin WITH authentication, before the s
   const pending = runPipeline(
     [
       new AuthStage({ sessionVerifier: createSessionVerifier({ registry }) }),
-      new BudgetStage({ sendBucketGate: { check() { return { ok: true } } } }),
+      new BudgetStage(),
       new AuthzStage(),
     ],
     context,

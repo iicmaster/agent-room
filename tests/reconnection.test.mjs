@@ -1209,3 +1209,366 @@ test('backoff loop: an abort landing as a wait completes still cancels before an
   assert.equal(after.pid, record.pid, 'a cancelled call booted nothing and re-resolved nothing')
   assert.equal(after.port, record.port, 'a cancelled call booted nothing and re-resolved nothing')
 })
+
+function deferred() {
+  let resolvePromise
+  let rejectPromise
+  const promise = new Promise((res, rej) => {
+    resolvePromise = res
+    rejectPromise = rej
+  })
+  return { promise, resolve: resolvePromise, reject: rejectPromise }
+}
+
+async function until(predicate, label, timeoutMs = CALL_DEADLINE_MS) {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    if (predicate()) return
+    if (Date.now() > deadline) {
+      throw new Error(`${label} timed out after ${timeoutMs}ms`)
+    }
+    await sleep(10)
+  }
+}
+
+async function startCountingProxy(t, initialUpstreamPort, { beforeForward } = {}) {
+  let upstreamPort = initialUpstreamPort
+  const entries = []
+  let forwardHook = beforeForward ?? null
+
+  const server = http.createServer((incoming, response) => {
+    const chunks = []
+    incoming.on('data', chunk => chunks.push(chunk))
+    incoming.on('error', () => {
+      if (!response.headersSent) response.writeHead(502)
+      response.end()
+    })
+    incoming.on('end', async () => {
+      const body = Buffer.concat(chunks)
+      const path = incoming.url ?? '/'
+      try {
+        if (forwardHook !== null) {
+          await forwardHook({ method: incoming.method, path, headers: incoming.headers, body })
+        }
+      } catch (error) {
+        if (!response.headersSent) response.writeHead(500)
+        response.end(String(error))
+        return
+      }
+      const targetPort = upstreamPort
+      const req = http.request(
+        {
+          host: '127.0.0.1',
+          port: targetPort,
+          method: incoming.method,
+          path,
+          headers: { ...incoming.headers, host: `127.0.0.1:${targetPort}` },
+          agent: false,
+        },
+        upstreamResponse => {
+          const resChunks = []
+          upstreamResponse.on('data', chunk => resChunks.push(chunk))
+          upstreamResponse.on('error', () => {
+            if (!response.headersSent) response.writeHead(502)
+            response.end()
+          })
+          upstreamResponse.on('end', () => {
+            const resBody = Buffer.concat(resChunks)
+            let parsed = null
+            try { parsed = JSON.parse(resBody.toString('utf8')) } catch { parsed = null }
+            entries.push({
+              method: incoming.method,
+              path,
+              status: upstreamResponse.statusCode,
+              code: parsed?.error?.code ?? null,
+              authHeader: incoming.headers.authorization ?? null,
+            })
+            if (!response.headersSent) {
+              response.writeHead(upstreamResponse.statusCode ?? 500, upstreamResponse.headers)
+            }
+            response.end(resBody)
+          })
+        },
+      )
+      req.on('error', () => {
+        if (!response.headersSent) response.writeHead(502)
+        response.end()
+      })
+      if (body.length > 0) req.write(body)
+      req.end()
+    })
+  })
+
+  await new Promise(resolvePromise => server.listen(0, '127.0.0.1', resolvePromise))
+  const port = server.address().port
+  t.after(() => new Promise(resolvePromise => {
+    server.closeAllConnections?.()
+    server.close(() => resolvePromise())
+  }))
+
+  return {
+    port,
+    entries,
+    setUpstream(nextPort) { upstreamPort = nextPort },
+    setBeforeForward(nextHook) { forwardHook = nextHook },
+    clearEntries() { entries.length = 0 },
+  }
+}
+
+test('concurrent restart recovery: concurrent ECONNREFUSED recoveries and concurrent stale-token 401s bind once without chat_id_taken or rate_limited', async t => {
+  await t.test('concurrent ECONNREFUSED recoveries bind chat_id once across a server restart', async t => {
+    const dataDir = makeDataDir(t)
+    const first = spawnServerChild(t, dataDir)
+    await first.waitReady()
+    const pluginData = makePluginDir(t, 'Alice')
+
+    const sleepWaiters = []
+    const client = createAgentRoomClient({
+      dataDir,
+      pluginDataDir: pluginData,
+      reconnectSleep: async () => {
+        const gate = deferred()
+        sleepWaiters.push(gate)
+        await gate.promise
+      },
+      reconnectRandom: () => 0.5,
+    })
+
+    const warmStatus = await withDeadline(client.status(), 'warm-up status')
+    await first.stop()
+
+    // Launch 8 concurrent requests against the dead server so every caller
+    // enters reconnectWait with the same pre-recovery attachEpoch.
+    const calls = range(0, 7).map(index => (index % 2 === 0
+      ? client.sendMessage({
+        roomId: warmStatus.broadcast_room_id,
+        clientMessageId: `econn-msg-${index}`,
+        text: `recovered concurrent ${index}`,
+      })
+      : client.status()))
+
+    await until(() => sleepWaiters.length === 8, 'all 8 callers entered reconnectWait')
+
+    // Start the replacement server behind a counting proxy whose /api/auth/local
+    // gate pauses the first recovering caller mid-ensure (after needsReresolve
+    // cleared to false, before attachEpoch increments).
+    const second = spawnServerChild(t, dataDir)
+    const recordB = await second.waitReady()
+    const authArrived = deferred()
+    const authHold = deferred()
+    let healthHits = 0
+    const proxy = await startCountingProxy(t, recordB.port, {
+      beforeForward: async ({ method, path }) => {
+        if (method === 'GET' && path === '/health') {
+          healthHits += 1
+        } else if (method === 'POST' && path === '/api/auth/local') {
+          authArrived.resolve()
+          await authHold.promise
+        }
+      },
+    })
+    atomicWriteJson(join(dataDir, RUNTIME_RECORD_FILENAME), {
+      pid: process.pid,
+      port: proxy.port,
+      version: APP_VERSION,
+    })
+
+    // Wake Caller 0 first so it owns recovery and pauses mid-ensure on auth.
+    sleepWaiters.shift().resolve()
+    await withDeadline(authArrived.promise, 'first recoverer paused on POST /api/auth/local')
+
+    // Now wake the remaining 7 callers while Caller 0's ensure() is still
+    // mid-flight (ensurePromise !== null && !ensureSettled): all 7 observe a
+    // healthy recovery probe (2 hits from Caller 0 + 7 hits from Callers 1..7)
+    // and must join ensurePromise without dirtying needsReresolve or starting
+    // another bind.
+    while (sleepWaiters.length > 0) sleepWaiters.shift().resolve()
+    await until(() => healthHits >= 9, 'all 7 remaining callers finished recovery probe')
+    await sleep(25)
+
+    assert.equal(
+      proxy.entries.filter(entry => entry.path === '/api/session').length,
+      0,
+      'no session bind occurred before the held auth exchange completed',
+    )
+
+    authHold.resolve()
+    const outcomes = await withDeadline(Promise.all(calls), '8 concurrent ECONNREFUSED recoveries')
+    assert.equal(outcomes.length, 8)
+
+    // Follow-up calls prove needsReresolve was not left dirty behind the first bind.
+    const followUp = await withDeadline(Promise.all([
+      client.status(),
+      client.presence(),
+      client.sendMessage({
+        roomId: warmStatus.broadcast_room_id,
+        clientMessageId: 'econn-after',
+        text: 'post recovery follow-up',
+      }),
+    ]), 'follow-up calls after ECONNREFUSED burst')
+
+    const authCalls = proxy.entries.filter(entry => entry.method === 'POST' && entry.path === '/api/auth/local')
+    const bindCalls = proxy.entries.filter(entry => entry.method === 'POST' && entry.path === '/api/session')
+    const conflicts = proxy.entries.filter(entry => entry.status === 409 || entry.code === 'chat_id_taken')
+    const rateLimited = proxy.entries.filter(entry => entry.status === 429 || entry.code === 'rate_limited')
+
+    assert.equal(authCalls.length, 1, `expected 1 /api/auth/local exchange, got ${authCalls.length}`)
+    assert.equal(bindCalls.length, 1, `expected 1 POST /api/session bind, got ${bindCalls.length}`)
+    assert.equal(bindCalls[0].status, 200)
+    assert.equal(conflicts.length, 0, `unexpected chat_id_taken collisions: ${JSON.stringify(conflicts)}`)
+    assert.equal(rateLimited.length, 0, `unexpected rate_limited responses: ${JSON.stringify(rateLimited)}`)
+
+    assert.equal(
+      followUp[1].online.some(row => row.chat_id === 'Alice' && row.fingerprint === client.fingerprint),
+      true,
+      'Alice remains bound online after recovery',
+    )
+    const page = await withDeadline(
+      client.readMessage({ roomId: warmStatus.broadcast_room_id, afterSeq: 0, limit: 20 }),
+      'read recovered messages',
+    )
+    const ids = new Set(page.messages.map(message => message.client_message_id))
+    for (const id of ['econn-msg-0', 'econn-msg-2', 'econn-msg-4', 'econn-msg-6', 'econn-after']) {
+      assert.equal(ids.has(id), true, `message ${id} committed to store`)
+    }
+    await second.stop()
+  })
+
+  await t.test('concurrent stale-token 401 responses bind chat_id once across a server restart', async t => {
+    const dataDir = makeDataDir(t)
+    const first = spawnServerChild(t, dataDir)
+    const recordA = await first.waitReady()
+    const proxy = await startCountingProxy(t, recordA.port)
+    atomicWriteJson(join(dataDir, RUNTIME_RECORD_FILENAME), {
+      pid: process.pid,
+      port: proxy.port,
+      version: APP_VERSION,
+    })
+
+    const pluginData = makePluginDir(t, 'Alice')
+    const client = createAgentRoomClient({ dataDir, pluginDataDir: pluginData })
+    const warmStatus = await withDeadline(client.status(), 'warm-up status on server A')
+    const statusWarmEntry = proxy.entries.find(entry => entry.path === '/api/status' && entry.status === 200)
+    assert.ok(statusWarmEntry?.authHeader?.startsWith('Bearer '), 'captured initial session bearer')
+    const staleAuthHeader = statusWarmEntry.authHeader
+
+    // Restart onto Server B behind the same endpoint so all in-flight and new
+    // requests using staleAuthHeader receive genuine 401 unauthorized answers.
+    await first.stop()
+    rmSync(join(dataDir, RUNTIME_RECORD_FILENAME), { force: true })
+    const second = spawnServerChild(t, dataDir)
+    const recordB = await second.waitReady()
+    assert.notEqual(recordB.port, proxy.port, 'waitReady observed Server B port, not proxy port')
+    atomicWriteJson(join(dataDir, RUNTIME_RECORD_FILENAME), {
+      pid: process.pid,
+      port: proxy.port,
+      version: APP_VERSION,
+    })
+    proxy.setUpstream(recordB.port)
+    proxy.clearEntries()
+
+    const initialEightArrived = deferred()
+    const lateTwoArrived = deferred()
+    const releaseInitialEight = deferred()
+    const releaseLateTwo = deferred()
+    let staleSeen = 0
+
+    proxy.setBeforeForward(async ({ headers }) => {
+      if (headers.authorization !== staleAuthHeader) return
+      staleSeen += 1
+      if (staleSeen <= 8) {
+        if (staleSeen === 8) initialEightArrived.resolve()
+        await releaseInitialEight.promise
+        return
+      }
+      // Hold callers 9 and 10 carrying the stale bearer until callers 1..8
+      // have finished re-authenticating (sessionToken rotated AND authPromise
+      // returned to null), forcing a late 401 against an idle authPromise.
+      if (staleSeen === 10) lateTwoArrived.resolve()
+      await releaseLateTwo.promise
+    })
+
+    const firstEight = range(0, 7).map(index => (index < 5
+      ? client.sendMessage({
+        roomId: warmStatus.broadcast_room_id,
+        clientMessageId: `stale-401-msg-${index}`,
+        text: `stale bearer ${index}`,
+      })
+      : client.status()))
+
+    await withDeadline(initialEightArrived.promise, 'first 8 stale-bearer calls reached proxy')
+
+    // Launch two more calls while the first 8 are still held pre-401 so these
+    // also capture staleAuthHeader in usedBearer and hit the wire with it.
+    const lateTwo = [
+      client.sendMessage({
+        roomId: warmStatus.broadcast_room_id,
+        clientMessageId: 'stale-401-msg-5',
+        text: 'stale bearer delayed',
+      }),
+      client.status(),
+    ]
+    await withDeadline(lateTwoArrived.promise, 'delayed 2 stale-bearer calls captured on the wire')
+
+    // Let callers 1..8 hit Server B's 401 together, coalesce re-auth, bind once,
+    // and finish their retried requests completely before callers 9..10 hit 401.
+    releaseInitialEight.resolve()
+    await withDeadline(Promise.all(firstEight), 'first 8 stale-token 401 recoveries')
+
+    // Now release the two delayed stale-token requests after authPromise === null.
+    releaseLateTwo.resolve()
+    await withDeadline(Promise.all(lateTwo), 'delayed stale-token 401 recoveries')
+
+    const followUp = await withDeadline(Promise.all([
+      client.status(),
+      client.presence(),
+      client.sendMessage({
+        roomId: warmStatus.broadcast_room_id,
+        clientMessageId: 'stale-401-after',
+        text: 'post 401 burst follow-up',
+      }),
+    ]), 'follow-up calls after 401 recovery burst')
+
+    const unauthorizedResponses = proxy.entries.filter(
+      entry => entry.status === 401 && entry.code === 'unauthorized',
+    )
+    const authCalls = proxy.entries.filter(entry => entry.method === 'POST' && entry.path === '/api/auth/local')
+    const bindCalls = proxy.entries.filter(entry => entry.method === 'POST' && entry.path === '/api/session')
+    const conflicts = proxy.entries.filter(entry => entry.status === 409 || entry.code === 'chat_id_taken')
+    const rateLimited = proxy.entries.filter(entry => entry.status === 429 || entry.code === 'rate_limited')
+
+    assert.equal(
+      unauthorizedResponses.length,
+      10,
+      `all 10 stale-bearer requests hit 401 unauthorized (got ${unauthorizedResponses.length})`,
+    )
+    assert.equal(authCalls.length, 1, `expected 1 /api/auth/local exchange on Server B, got ${authCalls.length}`)
+    assert.equal(bindCalls.length, 1, `expected 1 POST /api/session bind on Server B, got ${bindCalls.length}`)
+    assert.equal(bindCalls[0].status, 200)
+    assert.equal(conflicts.length, 0, `unexpected chat_id_taken collisions: ${JSON.stringify(conflicts)}`)
+    assert.equal(rateLimited.length, 0, `unexpected rate_limited responses: ${JSON.stringify(rateLimited)}`)
+
+    assert.equal(
+      followUp[1].online.some(row => row.chat_id === 'Alice' && row.fingerprint === client.fingerprint),
+      true,
+      'Alice remains bound online after 401 burst',
+    )
+    const page = await withDeadline(
+      client.readMessage({ roomId: warmStatus.broadcast_room_id, afterSeq: 0, limit: 20 }),
+      'read messages committed across 401 burst',
+    )
+    const ids = new Set(page.messages.map(message => message.client_message_id))
+    for (const id of [
+      'stale-401-msg-0',
+      'stale-401-msg-1',
+      'stale-401-msg-2',
+      'stale-401-msg-3',
+      'stale-401-msg-4',
+      'stale-401-msg-5',
+      'stale-401-after',
+    ]) {
+      assert.equal(ids.has(id), true, `message ${id} committed to store`)
+    }
+    await second.stop()
+  })
+})

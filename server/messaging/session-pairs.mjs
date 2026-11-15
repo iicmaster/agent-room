@@ -72,6 +72,50 @@ export function createSessionPairOperations({ database, withImmediateTransaction
     if (!member) fail('actor_not_member', `session is not a member of room ${room.id}`)
   }
 
+  function openSessionPairRoomValidatedInTx(valid) {
+    const { min, max, pairKey, createdAt } = valid
+    for (const sessionId of new Set([min, max])) {
+      const principal = database.prepare(`
+        SELECT 1 AS found FROM session_principals
+        WHERE session_id = ? AND principal_status = 'retained'
+      `).get(sessionId)
+      if (!principal) fail('peer_not_found', 'no session principal resolves to this address')
+    }
+    let room = database
+      .prepare('SELECT id, kind, title, pair_key, created_by_fingerprint, created_at FROM rooms WHERE pair_key = ?')
+      .get(pairKey)
+    if (!room) {
+      const id = roomIdentity()
+      database
+        .prepare('INSERT INTO rooms (id, kind, title, pair_key, created_by_fingerprint, created_at) VALUES (?, ?, NULL, ?, NULL, ?)')
+        .run(id, DIRECT_KIND, pairKey, createdAt)
+      room = database
+        .prepare('SELECT id, kind, title, pair_key, created_by_fingerprint, created_at FROM rooms WHERE pair_key = ?')
+        .get(pairKey)
+    }
+    for (const sessionId of new Set([min, max])) {
+      database.prepare(`
+        INSERT INTO session_pair_members (room_id, session_id, joined_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT (room_id, session_id) DO NOTHING
+      `).run(room.id, sessionId, createdAt)
+    }
+    return plainRoom(room)
+  }
+
+  function validateOpenSessionPairRoomOptions(options) {
+    assertOpen()
+    const { sessionIds, nowMs } = requireObject(options)
+    if (!Array.isArray(sessionIds) || sessionIds.length !== 2) {
+      fail('invalid_request', 'sessionIds must contain exactly two session ids')
+    }
+    const [firstSessionId, secondSessionId] = sessionIds.map(requireSessionId)
+    const now = requireNowMs(nowMs)
+    const createdAt = new Date(now).toISOString()
+    const { min, max, pairKey } = canonicalSessionPair(firstSessionId, secondSessionId)
+    return { min, max, pairKey, createdAt }
+  }
+
   return Object.freeze({
     // Open-or-reuse the pair room between two retained session principals and
     // idempotently ensure both membership rows, in one BEGIN IMMEDIATE. Both
@@ -81,45 +125,18 @@ export function createSessionPairOperations({ database, withImmediateTransaction
     // live and a dead principal is never created. The room carries a NULL
     // creator: like the Broadcast Room, its identity is the pair itself and
     // the schema's fingerprint CHECK admits no fabricated creator.
-    openSessionPairRoom(options) {
+    openSessionPairRoomInTx(options) {
       assertOpen()
-      const { sessionIds, nowMs } = requireObject(options)
-      if (!Array.isArray(sessionIds) || sessionIds.length !== 2) {
-        fail('invalid_request', 'sessionIds must contain exactly two session ids')
+      if (!database.isTransaction) {
+        fail('invalid_argument', 'openSessionPairRoomInTx requires an active transaction')
       }
-      const [firstSessionId, secondSessionId] = sessionIds.map(requireSessionId)
-      const now = requireNowMs(nowMs)
-      const createdAt = new Date(now).toISOString()
-      const { min, max, pairKey } = canonicalSessionPair(firstSessionId, secondSessionId)
-      return withImmediateTransaction(database, () => {
-        for (const sessionId of new Set([min, max])) {
-          const principal = database.prepare(`
-            SELECT 1 AS found FROM session_principals
-            WHERE session_id = ? AND principal_status = 'retained'
-          `).get(sessionId)
-          if (!principal) fail('peer_not_found', 'no session principal resolves to this address')
-        }
-        let room = database
-          .prepare('SELECT id, kind, title, pair_key, created_by_fingerprint, created_at FROM rooms WHERE pair_key = ?')
-          .get(pairKey)
-        if (!room) {
-          const id = roomIdentity()
-          database
-            .prepare('INSERT INTO rooms (id, kind, title, pair_key, created_by_fingerprint, created_at) VALUES (?, ?, NULL, ?, NULL, ?)')
-            .run(id, DIRECT_KIND, pairKey, createdAt)
-          room = database
-            .prepare('SELECT id, kind, title, pair_key, created_by_fingerprint, created_at FROM rooms WHERE pair_key = ?')
-            .get(pairKey)
-        }
-        for (const sessionId of new Set([min, max])) {
-          database.prepare(`
-            INSERT INTO session_pair_members (room_id, session_id, joined_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT (room_id, session_id) DO NOTHING
-          `).run(room.id, sessionId, createdAt)
-        }
-        return plainRoom(room)
-      })
+      const valid = validateOpenSessionPairRoomOptions(options)
+      return openSessionPairRoomValidatedInTx(valid)
+    },
+
+    openSessionPairRoom(options) {
+      const valid = validateOpenSessionPairRoomOptions(options)
+      return withImmediateTransaction(database, () => openSessionPairRoomValidatedInTx(valid))
     },
 
     // The per-session membership read: the read route's session-pair branch
