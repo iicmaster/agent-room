@@ -107,6 +107,7 @@ import {
   clearSessionState,
   loadSessionState,
   machineLabel,
+  newRecoveryId,
   saveSessionState,
   sessionPrincipalEnabled,
   sessionScopeKey,
@@ -239,23 +240,22 @@ export async function resolveOrMintSessionPrincipal({
       || requestedName === undefined
       || stored.baseName.toLowerCase() === requestedName.toLowerCase())
   ) {
-    try {
-      const resumed = await resumePrincipal({
-        sessionId: stored.sessionId,
-        generation: stored.generation,
-        capability: stored.capability,
-      })
-      const updated = { ...stored, generation: resumed.generation }
-      saveSessionState(pluginDataDir, sessionScope, updated)
-      return updated
-    } catch (error) {
-      if (error instanceof AgentRoomRuntimeError
-        && ['session_expired', 'session_revoked', 'session_credential_invalid'].includes(error.code)) {
-        clearSessionState(pluginDataDir, sessionScope)
-      } else {
-        throw error
-      }
+    const recoveryId = stored.recoveryId ?? newRecoveryId()
+    saveSessionState(pluginDataDir, sessionScope, { ...stored, recoveryId })
+    const resumed = await resumePrincipal({
+      sessionId: stored.sessionId,
+      generation: stored.generation,
+      capability: stored.capability,
+      recoveryId,
+    })
+    const updated = {
+      ...stored,
+      generation: resumed.generation,
+      capability: resumed.session_capability ?? stored.capability,
+      recoveryId: null,
     }
+    saveSessionState(pluginDataDir, sessionScope, updated)
+    return updated
   }
   let allocated = null
   if (requestedName !== null && requestedName !== undefined) {
@@ -777,8 +777,12 @@ export function createAgentRoomClient({
             sessionScope,
             requestedName,
             requestedRole,
-            resumePrincipal: ({ sessionId, generation, capability }) => rawRequest('POST', '/api/session-principals/resume', {
-              body: { session_id: sessionId, generation },
+            resumePrincipal: ({ sessionId, generation, capability, recoveryId }) => rawRequest('POST', '/api/session-principals/resume', {
+              body: {
+                session_id: sessionId,
+                generation,
+                ...(recoveryId ? { recovery_id: recoveryId } : {}),
+              },
               sessionCredential: capability,
             }),
             allocatePrincipal: baseChatId => rawRequest('POST', '/api/session-principals', {
@@ -833,12 +837,25 @@ export function createAgentRoomClient({
       } catch (error) {
         if (error instanceof AgentRoomRuntimeError
           && ['session_expired', 'session_revoked', 'session_credential_invalid'].includes(error.code)) {
-          clearSessionState(pluginDataDir, sessionScope)
-          sessionPrincipal = null
-          try {
-            await ensureSessionPrincipal()
-          } catch {
-            // The next beat retries the allocation; nothing here blocks exit.
+          if (error.code === 'session_credential_invalid' && sessionPrincipal !== null) {
+            try {
+              const recovered = await recoverRotatedSessionCredential(sessionPrincipal.capability)
+              if (recovered !== null) {
+                sessionPrincipal = recovered
+              } else {
+                sessionPrincipal = null
+                heartbeatTimer = null
+                return
+              }
+            } catch {
+              sessionPrincipal = null
+              heartbeatTimer = null
+              return
+            }
+          } else {
+            sessionPrincipal = null
+            heartbeatTimer = null
+            return
           }
         }
         // Any other failure (transport, rate limit): the lease is simply not
@@ -1202,6 +1219,32 @@ export function createAgentRoomClient({
   // (sendMessage's outcome-unknown retry) skips the loop: that retry must
   // stay immediate, and the schedule — if the first attempt ran it — has
   // already been paid once for this call.
+  async function recoverRotatedSessionCredential(failedCapability) {
+    const disk = loadSessionState(pluginDataDir, sessionScope)
+    if (disk === null) return null
+    if (disk.capability !== failedCapability) {
+      return disk
+    }
+    const recoveryId = disk.recoveryId ?? newRecoveryId()
+    saveSessionState(pluginDataDir, sessionScope, { ...disk, recoveryId })
+    const resumed = await rawRequest('POST', '/api/session-principals/resume', {
+      body: {
+        session_id: disk.sessionId,
+        generation: disk.generation,
+        recovery_id: recoveryId,
+      },
+      sessionCredential: disk.capability,
+    })
+    const updated = {
+      ...disk,
+      generation: resumed.generation,
+      capability: resumed.session_capability ?? disk.capability,
+      recoveryId: null,
+    }
+    saveSessionState(pluginDataDir, sessionScope, updated)
+    return updated
+  }
+
   async function request(method, path, options = {}) {
     const authSeqBefore = authEpoch
     const epochAtStart = await ensure()
@@ -1223,6 +1266,20 @@ export function createAgentRoomClient({
         && options.reconnect !== false
       ) {
         return reconnect(method, path, options, error, epochAtStart)
+      }
+      if (
+        options.sessionCredential !== undefined
+        && error.code === 'session_credential_invalid'
+        && options.sessionRecoverAttempted !== true
+      ) {
+        const recovered = await recoverRotatedSessionCredential(options.sessionCredential)
+        if (recovered === null) throw error
+        sessionPrincipal = recovered
+        return rawRequest(method, path, {
+          ...options,
+          sessionCredential: recovered.capability,
+          sessionRecoverAttempted: true,
+        })
       }
       if (error.code !== 'unauthorized') throw error
       if (usedBearer === undefined) throw error

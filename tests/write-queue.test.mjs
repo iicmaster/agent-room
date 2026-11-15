@@ -1383,9 +1383,10 @@ test('RETENTION_AND_MIXED_GEN_HB: backdated retention fails POST /api/messages &
   })
   assert.equal(resumeRes.status, 200, resumeRes.text)
   assert.equal(resumeRes.json().result.generation, 2)
+  const gen2Capability = resumeRes.json().result.session_capability
 
   const gen2Promise = request(server.port, 'POST', '/api/session-principals/heartbeat', {
-    headers: sessionHeaders(hbActor.session_capability),
+    headers: sessionHeaders(gen2Capability),
     body: JSON.stringify({ session_id: hbActor.session_id, generation: 2 }),
   })
 

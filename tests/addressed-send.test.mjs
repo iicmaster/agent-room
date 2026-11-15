@@ -315,18 +315,28 @@ test('OFFLINE_SEND + resume: the durable principal receives while offline and re
   assert.equal(resumedPrincipal.session_id, b.session_id)
   assert.equal(resumedPrincipal.address, b.address)
   assert.equal(resumedPrincipal.generation, b.generation + 1)
+  assert.ok(typeof resumedPrincipal.session_capability === 'string' && resumedPrincipal.session_capability.length > 0)
+  assert.notEqual(resumedPrincipal.session_capability, b.session_capability)
 
-  // The OLD generation is fenced now: its beat answers session_expired.
-  const staleBeat = await request(record.port, 'POST', '/api/session-principals/heartbeat', {
+  // The OLD capability is rotated away: its beat answers 401 session_credential_invalid.
+  const oldCapBeat = await request(record.port, 'POST', '/api/session-principals/heartbeat', {
     headers: headersFor({ capability: b.session_capability }),
+    body: JSON.stringify({ session_id: b.session_id, generation: b.generation }),
+  })
+  assert.equal(oldCapBeat.status, 401)
+  assert.equal(oldCapBeat.json().error.code, 'session_credential_invalid')
+
+  // And the OLD generation with the NEW capability is fenced: its beat answers 409 session_expired.
+  const staleBeat = await request(record.port, 'POST', '/api/session-principals/heartbeat', {
+    headers: headersFor({ capability: resumedPrincipal.session_capability }),
     body: JSON.stringify({ session_id: b.session_id, generation: b.generation }),
   })
   assert.equal(staleBeat.status, 409)
   assert.equal(staleBeat.json().error.code, 'session_expired')
 
-  // The resumed generation beats cleanly.
+  // The resumed generation beats cleanly with the rotated capability.
   const beat = await request(record.port, 'POST', '/api/session-principals/heartbeat', {
-    headers: headersFor({ capability: b.session_capability }),
+    headers: headersFor({ capability: resumedPrincipal.session_capability }),
     body: JSON.stringify({ session_id: b.session_id, generation: resumedPrincipal.generation }),
   })
   assert.equal(beat.status, 200, beat.text)
@@ -335,7 +345,7 @@ test('OFFLINE_SEND + resume: the durable principal receives while offline and re
   // And B reads the message that waited in its mailbox.
   const room = receipt.room_id
   const read = await request(record.port, 'GET', `/api/rooms/${room}/messages?after_seq=0`, {
-    headers: headersFor({ capability: b.session_capability }),
+    headers: headersFor({ capability: resumedPrincipal.session_capability }),
   })
   assert.equal(read.status, 200, read.text)
   const page = read.json().result

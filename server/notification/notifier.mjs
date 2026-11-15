@@ -95,7 +95,7 @@ export const NOTIFY_CMD_ENV = 'AGENT_ROOM_NOTIFY_CMD'
 // notifier says about ITSELF does.
 export const STATUS_KIND = 'notifier_status'
 
-const STOP_CODES = new Set(['banned', 'not_enrolled'])
+const STOP_CODES = new Set(['banned', 'not_enrolled', 'session_revoked'])
 const INBOX_OPEN_FLAGS = fsConstants.O_WRONLY | fsConstants.O_APPEND | fsConstants.O_CREAT | fsConstants.O_NOFOLLOW
 
 export function notifierEnabled(env = process.env) {

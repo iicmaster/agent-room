@@ -86,8 +86,8 @@ export const ROUTE_TABLE = Object.freeze([
   // the pipeline's Session-scheme branch resolves to its bound principal
   // before the handler runs. Session id / generation / address in a body are
   // SELECTORS — never authority (NFR-3: no identity travels in a body).
-  Object.freeze({ method: 'POST', path: '/api/session-principals', class: 'actor', implemented: true, requestFields: Object.freeze(['base_chat_id', 'client_type', 'machine']) }),
-  Object.freeze({ method: 'POST', path: '/api/session-principals/resume', class: 'actor', implemented: true, requestFields: Object.freeze(['generation', 'session_id']) }),
+  Object.freeze({ method: 'POST', path: '/api/session-principals', class: 'actor', implemented: true, requestFields: Object.freeze(['base_chat_id', 'client_type', 'machine', 'replace_existing', 'conflict_ticket', 'recovery_id']) }),
+  Object.freeze({ method: 'POST', path: '/api/session-principals/resume', class: 'actor', implemented: true, requestFields: Object.freeze(['generation', 'session_id', 'recovery_id']) }),
   Object.freeze({ method: 'POST', path: '/api/session-principals/heartbeat', class: 'actor', implemented: true, requestFields: Object.freeze(['generation', 'session_id']) }),
   Object.freeze({ method: 'DELETE', path: '/api/session-principals/current', class: 'actor', implemented: true, requestFields: Object.freeze([]) }),
   Object.freeze({ method: 'POST', path: '/api/session-principals/revoke', class: 'actor', implemented: true, requestFields: Object.freeze(['reason', 'session_id']) }),
@@ -218,6 +218,7 @@ export const REQUEST_FIELD_VOCABULARY = Object.freeze([
   'session_id',
   'generation',
   'reason',
+  'recovery_id',
 ])
 
 export const RESPONSE_FIELD_VOCABULARY = Object.freeze([

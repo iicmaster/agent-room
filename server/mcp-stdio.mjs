@@ -845,7 +845,13 @@ export function createMcpServer({
             await readyClient.ensureSessionPrincipal()
             sessionActive = true
           }
-        } catch {
+        } catch (error) {
+          if (
+            error instanceof AgentRoomRuntimeError
+            && ['session_revoked', 'session_expired', 'session_credential_invalid', 'agent_id_taken'].includes(error.code)
+          ) {
+            throw error
+          }
           sessionActive = false
         }
         const stored = sessionActive

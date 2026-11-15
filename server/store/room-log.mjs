@@ -34,6 +34,7 @@ import { DatabaseSync } from 'node:sqlite'
 import {
   CHAT_ID_INVALID_MESSAGE,
   CHAT_ID_MAX,
+  CLI_BUSY_RETRY_DELAYS_MS,
   CLIENT_MESSAGE_ID_MAX,
   DUPLICATE_WINDOW_MS,
   FINGERPRINT_HEX_LENGTH,
@@ -63,11 +64,16 @@ import {
 import { createIdentityRepository } from '../identity/repository.mjs'
 import {
   SESSION_PRINCIPALS_ADDRESS_INDEX_NAME,
+  SESSION_PRINCIPALS_CAPABILITY_INDEX_NAME,
   SESSION_PRINCIPALS_COLUMNS,
   SESSION_PRINCIPALS_LIVE_BASE_INDEX_NAME,
+  SESSION_PRINCIPALS_PREV_CAPABILITY_INDEX_NAME,
+  SESSION_PRINCIPALS_TAIL_ADD_DDL,
   createSessionPrincipalOperations,
   sessionPrincipalsAddressIndexDdl,
+  sessionPrincipalsCapabilityIndexDdl,
   sessionPrincipalsLiveBaseIndexDdl,
+  sessionPrincipalsPrevCapabilityIndexDdl,
   sessionPrincipalsTableDdl,
 } from '../identity/session-principals.mjs'
 import { createMessagingRoomOperations } from '../messaging/rooms.mjs'
@@ -690,6 +696,19 @@ function withBusyRetry(operation) {
   }
 }
 
+function withCliBusyRetry(operation) {
+  let attempt = 0
+  for (;;) {
+    try {
+      return operation()
+    } catch (error) {
+      if (!isBusyError(error) || attempt >= CLI_BUSY_RETRY_DELAYS_MS.length) throw error
+      sleepSync(CLI_BUSY_RETRY_DELAYS_MS[attempt])
+      attempt += 1
+    }
+  }
+}
+
 function verifyStrictTables(database) {
   const strictTables = database.prepare(`
     SELECT name, strict
@@ -923,16 +942,64 @@ function verifyBannedActorsColumns(database) {
 // NOT unique — two live principals may share one base+machine under distinct
 // locator tokens (DUP_BASE_SAME_INSTALL), so `chat_id_taken` never arises
 // from a same-base allocation race.
-function ensureSessionPrincipalTable(database) {
+function ensureSessionPrincipalTable(database, { role = 'server', preexisting = false } = {}) {
   const tableExisted = hasTable(database, 'session_principals')
-  if (!tableExisted) {
-    database.exec(sessionPrincipalsTableDdl({ ifNotExists: true }))
-    database.exec(sessionPrincipalsAddressIndexDdl())
-    database.exec(sessionPrincipalsLiveBaseIndexDdl())
-    return
+  if (!tableExisted && role === 'cli' && preexisting) {
+    fail('database_schema_invalid', 'database table session_principals is missing on existing database')
   }
-  if (!hasIndex(database, SESSION_PRINCIPALS_ADDRESS_INDEX_NAME)) {
-    database.exec(sessionPrincipalsAddressIndexDdl())
+  if (tableExisted) {
+    // Read-only probe first so clean 2nd boot performs 0 SQLite writes.
+    const existingCols = new Set(
+      database.prepare("SELECT name FROM pragma_table_info('session_principals')").all().map(row => row.name),
+    )
+    const missingCols = SESSION_PRINCIPALS_TAIL_ADD_DDL.filter(([col]) => !existingCols.has(col))
+    const existingIndexes = new Set(
+      database.prepare("SELECT name FROM pragma_index_list('session_principals')").all().map(row => row.name),
+    )
+    const missingAddress = !existingIndexes.has(SESSION_PRINCIPALS_ADDRESS_INDEX_NAME)
+    const missingCap = !existingIndexes.has(SESSION_PRINCIPALS_CAPABILITY_INDEX_NAME)
+    const missingPrevCap = !existingIndexes.has(SESSION_PRINCIPALS_PREV_CAPABILITY_INDEX_NAME)
+    if (missingCols.length === 0 && !missingAddress && !missingCap && !missingPrevCap) {
+      return
+    }
+    if (role !== 'server') return
+  }
+  database.exec('BEGIN IMMEDIATE')
+  try {
+    if (!hasTable(database, 'session_principals')) {
+      database.exec(sessionPrincipalsTableDdl({ ifNotExists: true }))
+      database.exec(sessionPrincipalsAddressIndexDdl())
+      database.exec(sessionPrincipalsLiveBaseIndexDdl())
+      database.exec(sessionPrincipalsCapabilityIndexDdl())
+      database.exec(sessionPrincipalsPrevCapabilityIndexDdl())
+    } else {
+      const existingCols = new Set(
+        database.prepare("SELECT name FROM pragma_table_info('session_principals')").all().map(row => row.name),
+      )
+      for (const [col, ddl] of SESSION_PRINCIPALS_TAIL_ADD_DDL) {
+        if (!existingCols.has(col)) database.exec(ddl)
+      }
+      const existingIndexes = new Set(
+        database.prepare("SELECT name FROM pragma_index_list('session_principals')").all().map(row => row.name),
+      )
+      if (!existingIndexes.has(SESSION_PRINCIPALS_ADDRESS_INDEX_NAME)) {
+        database.exec(sessionPrincipalsAddressIndexDdl())
+      }
+      if (!existingIndexes.has(SESSION_PRINCIPALS_CAPABILITY_INDEX_NAME)) {
+        database.exec(sessionPrincipalsCapabilityIndexDdl())
+      }
+      if (!existingIndexes.has(SESSION_PRINCIPALS_PREV_CAPABILITY_INDEX_NAME)) {
+        database.exec(sessionPrincipalsPrevCapabilityIndexDdl())
+      }
+    }
+    database.exec('COMMIT')
+  } catch (error) {
+    try {
+      if (database.isTransaction) database.exec('ROLLBACK')
+    } catch {
+      // Preserve root error.
+    }
+    fail('database_configuration_failed', `failed to converge session_principals schema: ${error?.message ?? 'unknown error'}`)
   }
 }
 
@@ -1033,6 +1100,22 @@ function verifySessionPrincipalLiveBaseIndex(database, { role }) {
     .get(SESSION_PRINCIPALS_LIVE_BASE_INDEX_NAME)
   if (!indexRow || typeof indexRow.sql !== 'string' || !/lower\s*\(\s*base_name\s*\)/i.test(indexRow.sql)) {
     fail('database_schema_invalid', `database index ${SESSION_PRINCIPALS_LIVE_BASE_INDEX_NAME} has a divergent definition`)
+  }
+}
+
+function verifySessionPrincipalCapabilityIndexes(database, { role }) {
+  const indexList = database
+    .prepare("SELECT name, \"unique\" AS is_unique FROM pragma_index_list('session_principals')")
+    .all()
+  const byName = new Map(indexList.map(row => [row.name, Number(row.is_unique)]))
+  for (const indexName of [SESSION_PRINCIPALS_CAPABILITY_INDEX_NAME, SESSION_PRINCIPALS_PREV_CAPABILITY_INDEX_NAME]) {
+    if (!byName.has(indexName)) {
+      if (role !== 'server') continue
+      fail('database_schema_invalid', `database table session_principals is missing index ${indexName}`)
+    }
+    if (byName.get(indexName) !== 1) {
+      fail('database_schema_invalid', `database index ${indexName} must be unique`)
+    }
   }
 }
 
@@ -1210,6 +1293,7 @@ function plainRoom(row) {
 export function openRoomLog({
   dataDir,
   role = 'cli',
+  requireExisting = false,
   duplicateWindowMs = DUPLICATE_WINDOW_MS,
   storageWarnFreeBytes = STORAGE_WARN_FREE_BYTES,
   storageRefuseFreeBytes = STORAGE_REFUSE_FREE_BYTES,
@@ -1274,6 +1358,9 @@ export function openRoomLog({
   }
 
   if (!preexisting) {
+    if (requireExisting) {
+      fail('data_directory_invalid', `agent-room database does not exist at ${databasePath}`)
+    }
     // Pre-create at 0600 so the file never exists under a looser umask.
     let descriptor
     try {
@@ -1312,13 +1399,29 @@ export function openRoomLog({
     // without invoking the busy handler, so the whole idempotent sequence
     // retries with a small backoff; the first opener to commit the schema
     // makes every loser a no-op via the in-transaction re-read.
-    const opened = withBusyRetry(() => {
+    const runOpenSequence = () => {
       // Probe BEFORE any pragma or permission change so a refused database
       // file is left byte-for-byte untouched.
       const probedVersion = probeSchemaVersion(database)
+      const skipCliRepair = role === 'cli' && requireExisting
 
-      chmodSync(databasePath, 0o600)
+      if (!skipCliRepair) {
+        chmodSync(databasePath, 0o600)
+      }
       const connection = configureConnection(database, { maxPageCount })
+
+      if (skipCliRepair) {
+        if (probedVersion !== ROOM_LOG_SCHEMA_VERSION) {
+          fail('database_schema_invalid', `database user_version ${probedVersion} does not match ${ROOM_LOG_SCHEMA_VERSION}`)
+        }
+        verifySessionPrincipalColumns(database)
+        verifySessionPrincipalAddressIndex(database)
+        verifySessionPrincipalLiveBaseIndex(database, { role })
+        verifySessionPrincipalCapabilityIndexes(database, { role })
+        verifySessionPairMembersColumns(database)
+        verifyStrictTables(database)
+        return { ...connection, reportedVersion: probedVersion }
+      }
 
       if (probedVersion === 0) createSchema(database)
       ensureRealmTable(database)
@@ -1337,11 +1440,12 @@ export function openRoomLog({
       ensureMessagesChatIdAddressBound(database)
       ensureMessagesDuplicateGateIndex(database)
       verifyMessagesDuplicateGateIndex(database)
-      ensureSessionPrincipalTable(database)
+      ensureSessionPrincipalTable(database, { role, preexisting: skipCliRepair })
       verifySessionPrincipalColumns(database)
       verifySessionPrincipalAddressIndex(database)
       ensureSessionPrincipalLiveBaseIndex(database, { role })
       verifySessionPrincipalLiveBaseIndex(database, { role })
+      verifySessionPrincipalCapabilityIndexes(database, { role })
       ensureSessionPairMembersTable(database)
       verifySessionPairMembersColumns(database)
       verifyStrictTables(database)
@@ -1352,7 +1456,10 @@ export function openRoomLog({
         fail('database_schema_invalid', `database user_version ${reportedVersion} did not become ${ROOM_LOG_SCHEMA_VERSION}`)
       }
       return { ...connection, reportedVersion }
-    })
+    }
+    const opened = role === 'cli'
+      ? withCliBusyRetry(runOpenSequence)
+      : withBusyRetry(runOpenSequence)
     const { sqliteVersion, journalMode, pragmas, reportedVersion } = opened
     let runtimePragmas = pragmas
     if (role === 'server') {
@@ -1365,8 +1472,10 @@ export function openRoomLog({
     }
 
     // WAL sidecars are recreated on every open; keep them owner-only too.
-    for (const sidecar of [`${databasePath}-wal`, `${databasePath}-shm`]) {
-      if (existsSync(sidecar)) chmodSync(sidecar, 0o600)
+    if (role === 'server' || !preexisting) {
+      for (const sidecar of [`${databasePath}-wal`, `${databasePath}-shm`]) {
+        if (existsSync(sidecar)) chmodSync(sidecar, 0o600)
+      }
     }
 
     const STATEMENT_CACHE_MAX = 128
@@ -1900,9 +2009,21 @@ export function openRoomLog({
         return identityOperations.revokeSessionPrincipal(...args)
       },
 
+      revokeSessionPrincipalByHost(...args) {
+        assertOpen()
+        return role === 'cli'
+          ? withCliBusyRetry(() => identityOperations.revokeSessionPrincipalByHost(...args))
+          : identityOperations.revokeSessionPrincipalByHost(...args)
+      },
+
       findSessionPrincipalByCapabilityDigest(...args) {
         assertOpen()
         return identityOperations.findSessionPrincipalByCapabilityDigest(...args)
+      },
+
+      findSessionPrincipalByPrevCapabilityDigest(...args) {
+        assertOpen()
+        return identityOperations.findSessionPrincipalByPrevCapabilityDigest(...args)
       },
 
       resolveSessionPrincipalByAddress(...args) {
@@ -1994,6 +2115,26 @@ export function openRoomLog({
       resumeSessionPrincipalInTx(...args) {
         assertOpen()
         return identityOperations.resumeSessionPrincipalInTx(...args)
+      },
+
+      takeoverSessionPrincipalInTx(...args) {
+        assertOpen()
+        return identityOperations.takeoverSessionPrincipalInTx(...args)
+      },
+
+      retryTakeoverByRecoveryInTx(...args) {
+        assertOpen()
+        return identityOperations.retryTakeoverByRecoveryInTx(...args)
+      },
+
+      clearPrincipalRecoveryInTx(...args) {
+        assertOpen()
+        return identityOperations.clearPrincipalRecoveryInTx(...args)
+      },
+
+      revokeSessionPrincipalInTx(...args) {
+        assertOpen()
+        return identityOperations.revokeSessionPrincipalInTx(...args)
       },
 
       releaseSessionBaseLeaseInTx(...args) {

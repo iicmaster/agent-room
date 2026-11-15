@@ -133,6 +133,7 @@ import {
   CLAIMS_TTL_MS,
   CLIENT_MESSAGE_ID_MAX,
   CLIENT_TYPES,
+  CONFLICT_TICKET_MAX_CHARS,
   DUPLICATE_WINDOW_MS,
   ENROLLMENT_WINDOW_MS,
   FINGERPRINT_PATTERN,
@@ -156,6 +157,8 @@ import {
   SESSION_CAPABILITY_PATTERN,
   SESSION_MACHINE_MAX,
   SESSION_MACHINE_PATTERN,
+  SESSION_RECOVERY_ID_PATTERN,
+  SESSION_REVOKE_REASON_MAX,
   STORAGE_REFUSE_FREE_BYTES,
   STORAGE_WARN_FREE_BYTES,
   TITLE_MAX,
@@ -638,8 +641,13 @@ async function bindSession(context) {
   // request-shape refusal — the ticket exists only to bind an explicit
   // replacement to its observation, never as a side channel.
   const ticketRaw = context.body?.conflict_ticket
-  if (ticketRaw !== undefined && ticketRaw !== null && replaceExisting !== true) {
-    return reject('invalid_request', 'conflict_ticket is only accepted when replace_existing is true')
+  if (ticketRaw !== undefined && ticketRaw !== null) {
+    if (replaceExisting !== true) {
+      return reject('invalid_request', 'conflict_ticket is only accepted when replace_existing is true')
+    }
+    if (typeof ticketRaw !== 'string' || ticketRaw.length === 0 || ticketRaw.length > CONFLICT_TICKET_MAX_CHARS) {
+      return reject('invalid_request', `conflict_ticket must be a non-empty string of at most ${CONFLICT_TICKET_MAX_CHARS} characters`)
+    }
   }
   const liveRegistry = context.liveSessionRegistry ?? LIVE_SESSION_REGISTRY
   const conflictTickets = context.conflictTickets ?? CONFLICT_TICKETS
@@ -672,28 +680,75 @@ async function bindSession(context) {
       const nowMs = Date.now()
       tx.sweepBaseLeasesInTx(nowMs)
       const spHolder = tx.findOccupiedBaseOwner(chatId, nowMs)
+      let displacedPrincipal = false
       if (spHolder !== null && bearerKeys.get(spHolder.session_id) !== principal.sessionKey) {
-        return buildAgentIdConflictOutcome({
-          baseName: chatId,
-          conflictTickets,
-          requesterActorFingerprint: principal.actorFingerprint,
-          requesterSessionKey: principal.sessionKey,
-          holderActorFingerprint: spHolder.installation_fingerprint,
-          holderSessionKey: bearerKeys.get(spHolder.session_id) ?? spHolder.session_id,
-          observedGeneration: spHolder.generation,
+        if (replaceExisting !== true) {
+          return buildAgentIdConflictOutcome({
+            baseName: chatId,
+            conflictTickets,
+            requesterActorFingerprint: principal.actorFingerprint,
+            requesterSessionKey: principal.sessionKey,
+            holderActorFingerprint: spHolder.installation_fingerprint,
+            holderSessionKey: `sp:${spHolder.session_id}`,
+            observedGeneration: spHolder.generation,
+          })
+        }
+        if (spHolder.installation_fingerprint !== principal.actorFingerprint) {
+          return {
+            kind: 'refused',
+            code: 'agent_id_taken',
+            message: `Agent ID "${chatId}" is currently occupied by another live session`,
+          }
+        }
+        if (typeof ticketRaw !== 'string' || ticketRaw.length === 0) {
+          return buildAgentIdConflictOutcome({
+            baseName: chatId,
+            conflictTickets,
+            requesterActorFingerprint: principal.actorFingerprint,
+            requesterSessionKey: principal.sessionKey,
+            holderActorFingerprint: spHolder.installation_fingerprint,
+            holderSessionKey: `sp:${spHolder.session_id}`,
+            observedGeneration: spHolder.generation,
+          })
+        }
+        const observed = conflictTickets.redeem({
+          ticket: ticketRaw,
+          actorFingerprint: principal.actorFingerprint,
+          chatId,
+          observerSessionKey: principal.sessionKey,
         })
+        if (
+          observed === null
+          || observed.incumbentSessionKey !== `sp:${spHolder.session_id}`
+          || observed.observedGeneration !== spHolder.generation
+        ) {
+          return {
+            kind: 'refused',
+            code: 'conflict_stale',
+            message: PUBLIC_ERRORS.conflict_stale,
+          }
+        }
+        // AD-16.1 Case 2 (Legacy -> Principal, same Installation): release
+        // the principal's base lease in the same tx before binding legacy.
+        tx.releaseSessionBaseLeaseInTx({ sessionId: spHolder.session_id })
+        displacedPrincipal = true
       }
-      return bindIdentitySession({
+      const bound = bindIdentitySession({
         principal,
         chatId,
         clientType: declaredType,
-        replaceExisting,
-        conflictTicket: ticketRaw,
+        replaceExisting: displacedPrincipal ? false : replaceExisting,
+        conflictTicket: displacedPrincipal ? undefined : ticketRaw,
         liveRegistry,
         sessionRegistry: context.sessionRegistry,
         conflictTickets,
         persistClaim: claimPayload => tx.upsertChatIdClaimInTx(claimPayload),
       })
+      if (bound.kind === 'refused') return bound
+      return {
+        ...bound,
+        displacedPrincipal,
+      }
     },
   })
   if (outcome.kind === 'refused') return reject(outcome.code, outcome.message, outcome.extra)
@@ -701,7 +756,7 @@ async function bindSession(context) {
     chat_id: outcome.chatId,
     connected_since: new Date(outcome.connectedSince).toISOString(),
     last_seen: new Date(outcome.lastSeen).toISOString(),
-    replaced: outcome.displacedSessionKey !== null,
+    replaced: outcome.displacedSessionKey !== null || outcome.displacedPrincipal === true,
   }
 }
 
@@ -786,7 +841,8 @@ registerHandler('GET /api/presence', function presence(context) {
 // minted, never fabricated: a store without its Broadcast Room is a bootstrap
 // invariant failure answered as a coded 500 (request_failed on the wire, one
 // diagnosable stderr line), never a silent null.
-registerHandler('GET /api/status', function status(context) {
+registerHandler('GET /api/status', async function status(context) {
+  await clearPendingPrincipalRecovery(context)
   const broadcastRoom = context.store.findBroadcastRoom()
   if (broadcastRoom === null) {
     throw new AgentRoomRuntimeError('realm_bootstrap_incomplete', 'the realm Broadcast Room is missing from the store')
@@ -922,6 +978,7 @@ function integerQuery(value, name, { min, max, code }) {
 registerHandler('GET /api/rooms/:id/messages', async function readMessages(context) {
   const principal = sessionPrincipalOf(context)
   if (principal.ok === false) return principal
+  await clearPendingPrincipalRecovery(context)
 
   const afterSeqQuery = integerQuery(context.query?.after_seq, 'after_seq', {
     min: 0, max: Number.MAX_SAFE_INTEGER, code: 'invalid_cursor',
@@ -983,7 +1040,11 @@ registerHandler('GET /api/rooms/:id/messages', async function readMessages(conte
       if (status === null || status.principal_status === 'revoked') {
         return reject('session_revoked')
       }
-      if (status.principal_status !== 'retained') {
+      if (
+        status.principal_status !== 'retained'
+        || Date.parse(status.principal_retention_expires_at) <= Date.now()
+        || status.generation !== readerSession.generation
+      ) {
         return reject('session_expired')
       }
     }
@@ -1335,7 +1396,7 @@ function sessionCapabilityPrincipalOf(context) {
 // hits the fence — session_expired (409, the OLD_GEN_HEARTBEAT refusal).
 // Success is `{ok:true, sessionId, generation}`; rejections are the standard
 // pipeline shape (`ok:false`), returned verbatim by the handlers.
-function requireSessionSelectors(body, principal) {
+function requireSessionSelectors(body, principal, { allowEarlierGeneration = false } = {}) {
   const sessionIdField = requiredString(body?.session_id, 'session_id')
   if (sessionIdField.error) return sessionIdField.error
   const generationField = body?.generation
@@ -1345,10 +1406,32 @@ function requireSessionSelectors(body, principal) {
   if (sessionIdField.value !== principal.session_id) {
     return reject('session_credential_invalid', 'the session capability does not match the presented session_id selector')
   }
-  if (generationField !== principal.generation) {
+  if (allowEarlierGeneration ? generationField > principal.generation : generationField !== principal.generation) {
     return reject('session_expired', `session generation ${generationField} is fenced; the current generation is ${principal.generation}`)
   }
   return { ok: true, sessionId: sessionIdField.value, generation: generationField }
+}
+
+async function clearPendingPrincipalRecovery(context) {
+  const session = context.session
+  if (!session || session.isPrevCapability !== false || !session.sessionPrincipal || !session.presentedDigest) {
+    return
+  }
+  const sessionId = session.sessionPrincipal.session_id
+  const capabilityDigest = session.presentedDigest
+  const status = context.store.getSessionPrincipalStatus(sessionId)
+  if (!status || status.has_pending_recovery !== true) return
+  await context.store.enqueueWrite({
+    sessionKey: sessionId,
+    coalesceKey: `clear-rec:${sessionId}:${capabilityDigest}`,
+    priority: 'control',
+    trackMetrics: false,
+    bytes: 0,
+    payload: { action: 'clear_recovery', sessionId },
+    execute(tx) {
+      return tx.clearPrincipalRecoveryInTx({ sessionId, capabilityDigest })
+    },
+  })
 }
 
 // POST /api/session-principals — allocate (installation bearer alone). The
@@ -1384,6 +1467,34 @@ registerHandler('POST /api/session-principals', async function allocateSessionPr
     && (typeof declaredType !== 'string' || !CLIENT_TYPES.includes(declaredType))) {
     return reject('invalid_request', `client_type must be one of: ${CLIENT_TYPES.join(', ')}`)
   }
+  const replaceRaw = context.body?.replace_existing
+  let replaceExisting = false
+  if (replaceRaw !== undefined && replaceRaw !== null) {
+    if (typeof replaceRaw !== 'boolean') {
+      return reject('invalid_request', 'replace_existing must be true or false')
+    }
+    replaceExisting = replaceRaw
+  }
+  const ticketRaw = context.body?.conflict_ticket
+  if (ticketRaw !== undefined && ticketRaw !== null) {
+    if (replaceExisting !== true) {
+      return reject('invalid_request', 'conflict_ticket is only accepted when replace_existing is true')
+    }
+    if (typeof ticketRaw !== 'string' || ticketRaw.length === 0 || ticketRaw.length > CONFLICT_TICKET_MAX_CHARS) {
+      return reject('invalid_request', `conflict_ticket must be a non-empty string of at most ${CONFLICT_TICKET_MAX_CHARS} characters`)
+    }
+  }
+  if (replaceExisting === true && (ticketRaw === undefined || ticketRaw === null)) {
+    return reject('invalid_request', 'conflict_ticket is required when replace_existing is true')
+  }
+  const recoveryRaw = context.body?.recovery_id
+  let recoveryId = null
+  if (recoveryRaw !== undefined && recoveryRaw !== null) {
+    if (typeof recoveryRaw !== 'string' || !SESSION_RECOVERY_ID_PATTERN.test(recoveryRaw)) {
+      return reject('invalid_request', 'recovery_id must be 22-64 URL-safe base64 characters')
+    }
+    recoveryId = recoveryRaw
+  }
   const liveRegistry = context.liveSessionRegistry ?? LIVE_SESSION_REGISTRY
   const conflictTickets = context.conflictTickets ?? CONFLICT_TICKETS
   const bearerKeys = context.sessionPrincipalBearerKeys ?? SESSION_PRINCIPAL_BEARER_KEYS
@@ -1402,9 +1513,13 @@ registerHandler('POST /api/session-principals', async function allocateSessionPr
       }
     },
     captureMemoryUndo() {
+      const savedRegistry = snapshotIfSupported(liveRegistry)
+      const savedSessions = snapshotIfSupported(context.sessionRegistry)
       const savedBearers = bearerKeys.snapshot()
       const savedTickets = conflictTickets.snapshot()
       return () => {
+        restoreIfSupported(liveRegistry, savedRegistry)
+        restoreIfSupported(context.sessionRegistry, savedSessions)
         bearerKeys.restore(savedBearers)
         conflictTickets.restore(savedTickets)
       }
@@ -1412,6 +1527,80 @@ registerHandler('POST /api/session-principals', async function allocateSessionPr
     execute(tx) {
       const nowMs = Date.now()
       tx.sweepBaseLeasesInTx(nowMs)
+
+      if (replaceExisting === true) {
+        const observed = conflictTickets.redeem({
+          ticket: ticketRaw,
+          actorFingerprint: principal.actorFingerprint,
+          chatId: forms.display,
+          observerSessionKey: principal.sessionKey,
+        })
+        if (observed === null) {
+          if (recoveryId !== null) {
+            const retried = tx.retryTakeoverByRecoveryInTx({
+              installationFingerprint: principal.actorFingerprint,
+              baseName: forms.display,
+              recoveryId,
+              nowMs,
+            })
+            if (retried !== null) {
+              bearerKeys.set(retried.session_id, principal.sessionKey)
+              return { kind: 'allocated', result: retried }
+            }
+          }
+          return { kind: 'refused', code: 'conflict_stale', message: PUBLIC_ERRORS.conflict_stale }
+        }
+        if (observed.incumbentSessionKey.startsWith('sp:')) {
+          const targetSessionId = observed.incumbentSessionKey.slice(3)
+          const spHolder = tx.findOccupiedBaseOwner(forms.display, nowMs)
+          if (
+            spHolder === null
+            || spHolder.session_id !== targetSessionId
+            || spHolder.installation_fingerprint !== principal.actorFingerprint
+            || spHolder.generation !== observed.observedGeneration
+          ) {
+            return { kind: 'refused', code: 'conflict_stale', message: PUBLIC_ERRORS.conflict_stale }
+          }
+          const taken = tx.takeoverSessionPrincipalInTx({
+            sessionId: targetSessionId,
+            expectedGeneration: observed.observedGeneration,
+            nowMs,
+            recoveryId,
+          })
+          bearerKeys.set(taken.session_id, principal.sessionKey)
+          return { kind: 'allocated', result: taken }
+        }
+        if (observed.incumbentSessionKey.startsWith('ls:')) {
+          const targetSessionKey = observed.incumbentSessionKey.slice(3)
+          const liveHolder = liveHolderOf(liveRegistry, forms.display)
+          if (
+            liveHolder === null
+            || liveHolder.sessionKey !== targetSessionKey
+            || liveHolder.actorFingerprint !== principal.actorFingerprint
+            || liveOccupancyGeneration(liveRegistry, forms.display) !== observed.observedGeneration
+          ) {
+            return { kind: 'refused', code: 'conflict_stale', message: PUBLIC_ERRORS.conflict_stale }
+          }
+          if (typeof context.sessionRegistry?.supersede === 'function') {
+            context.sessionRegistry.supersede(targetSessionKey)
+          }
+          if (typeof liveRegistry?.release === 'function') {
+            liveRegistry.release(targetSessionKey)
+          }
+          const allocated = tx.allocateSessionPrincipalInTx({
+            installationFingerprint: principal.actorFingerprint,
+            baseName: forms.display,
+            machine,
+            clientType: declaredType === undefined ? null : declaredType,
+            recoveryId,
+            nowMs,
+          })
+          bearerKeys.set(allocated.session_id, principal.sessionKey)
+          return { kind: 'allocated', result: { ...allocated, replaced: true } }
+        }
+        return { kind: 'refused', code: 'conflict_stale', message: PUBLIC_ERRORS.conflict_stale }
+      }
+
       const liveHolder = liveHolderOf(liveRegistry, forms.display)
       if (liveHolder !== null && liveHolder.sessionKey !== principal.sessionKey) {
         return buildAgentIdConflictOutcome({
@@ -1420,7 +1609,7 @@ registerHandler('POST /api/session-principals', async function allocateSessionPr
           requesterActorFingerprint: principal.actorFingerprint,
           requesterSessionKey: principal.sessionKey,
           holderActorFingerprint: liveHolder.actorFingerprint,
-          holderSessionKey: liveHolder.sessionKey,
+          holderSessionKey: `ls:${liveHolder.sessionKey}`,
           observedGeneration: liveOccupancyGeneration(liveRegistry, forms.display),
         })
       }
@@ -1430,10 +1619,11 @@ registerHandler('POST /api/session-principals', async function allocateSessionPr
           baseName: forms.display,
           machine,
           clientType: declaredType === undefined ? null : declaredType,
+          recoveryId,
           nowMs,
         })
         bearerKeys.set(allocated.session_id, principal.sessionKey)
-        return { kind: 'allocated', result: allocated }
+        return { kind: 'allocated', result: { ...allocated, replaced: false } }
       } catch (error) {
         if (error instanceof AgentRoomRuntimeError && error.code === 'agent_id_taken') {
           const holder = error.conflictHolder
@@ -1443,7 +1633,7 @@ registerHandler('POST /api/session-principals', async function allocateSessionPr
             requesterActorFingerprint: principal.actorFingerprint,
             requesterSessionKey: principal.sessionKey,
             holderActorFingerprint: holder?.installation_fingerprint ?? null,
-            holderSessionKey: holder ? (bearerKeys.get(holder.session_id) ?? holder.session_id) : null,
+            holderSessionKey: holder ? `sp:${holder.session_id}` : null,
             observedGeneration: holder?.generation ?? 1,
             message: error.message,
           })
@@ -1465,6 +1655,7 @@ registerHandler('POST /api/session-principals', async function allocateSessionPr
     // The one wire appearance of the raw capability. Never logged, never
     // echoed by any other surface; the client stores it at 0600.
     session_capability: allocated.session_capability,
+    replaced: Boolean(allocated.replaced),
   }
 }, 'actor')
 
@@ -1524,13 +1715,19 @@ async function runSessionPrincipalLeaseWrite(context, {
                 requesterActorFingerprint: installationFingerprint,
                 requesterSessionKey: principalSessionId,
                 holderActorFingerprint: liveHolder.actorFingerprint,
-                holderSessionKey: liveHolder.sessionKey,
+                holderSessionKey: `ls:${liveHolder.sessionKey}`,
                 observedGeneration: liveOccupancyGeneration(liveRegistry, row.base_name),
               })
               throw new AgentRoomRuntimeError('agent_id_taken', conflictOutcome.message)
             }
           },
         })
+        if (context.session?.isPrevCapability === false && context.session?.presentedDigest) {
+          tx.clearPrincipalRecoveryInTx({
+            sessionId: principalSessionId,
+            capabilityDigest: context.session.presentedDigest,
+          })
+        }
         return { kind: 'ok', result }
       } catch (error) {
         if (conflictOutcome !== null) return conflictOutcome
@@ -1542,7 +1739,7 @@ async function runSessionPrincipalLeaseWrite(context, {
             requesterActorFingerprint: installationFingerprint,
             requesterSessionKey: principalSessionId,
             holderActorFingerprint: holder?.installation_fingerprint ?? null,
-            holderSessionKey: holder ? (bearerKeys.get(holder.session_id) ?? holder.session_id) : null,
+            holderSessionKey: holder ? `sp:${holder.session_id}` : null,
             observedGeneration: holder?.generation ?? 1,
             message: error.message,
           })
@@ -1556,8 +1753,19 @@ async function runSessionPrincipalLeaseWrite(context, {
 registerHandler('POST /api/session-principals/resume', async function resumeSessionPrincipalRoute(context) {
   const principal = sessionCapabilityPrincipalOf(context)
   if (principal.ok === false) return principal
-  const selectors = requireSessionSelectors(context.body, principal)
+  const isRecoveryRetry = context.session?.isPrevCapability === true
+  const selectors = requireSessionSelectors(context.body, principal, {
+    allowEarlierGeneration: isRecoveryRetry,
+  })
   if (selectors.ok !== true) return selectors
+  const recoveryRaw = context.body?.recovery_id
+  let recoveryId = null
+  if (recoveryRaw !== undefined && recoveryRaw !== null) {
+    if (typeof recoveryRaw !== 'string' || !SESSION_RECOVERY_ID_PATTERN.test(recoveryRaw)) {
+      return reject('invalid_request', 'recovery_id must be 22-64 URL-safe base64 characters')
+    }
+    recoveryId = recoveryRaw
+  }
   const outcome = await runSessionPrincipalLeaseWrite(context, {
     principal,
     sessionId: selectors.sessionId,
@@ -1565,7 +1773,11 @@ registerHandler('POST /api/session-principals/resume', async function resumeSess
     priority: 'control',
     trackMetrics: false,
     payload: { action: 'resume_principal', sessionId: selectors.sessionId, generation: selectors.generation },
-    invokeTx: (tx, params) => tx.resumeSessionPrincipalInTx(params),
+    invokeTx: (tx, params) => tx.resumeSessionPrincipalInTx({
+      ...params,
+      recoveryId,
+      presentedPrevDigest: isRecoveryRetry ? context.session.presentedDigest : null,
+    }),
   })
   if (outcome.kind === 'refused') return reject(outcome.code, outcome.message, outcome.extra)
   const resumed = outcome.result
@@ -1576,6 +1788,7 @@ registerHandler('POST /api/session-principals/resume', async function resumeSess
     base_lease_expires_at: resumed.base_lease_expires_at,
     principal_retention_expires_at: resumed.principal_retention_expires_at,
     last_heartbeat_at: resumed.last_heartbeat_at,
+    session_capability: resumed.session_capability,
   }
 }, 'actor')
 
@@ -1629,6 +1842,12 @@ registerHandler('DELETE /api/session-principals/current', async function release
     },
     execute(tx) {
       tx.releaseSessionBaseLeaseInTx({ sessionId: principal.session_id })
+      if (context.session?.isPrevCapability === false && context.session?.presentedDigest) {
+        tx.clearPrincipalRecoveryInTx({
+          sessionId: principal.session_id,
+          capabilityDigest: context.session.presentedDigest,
+        })
+      }
       return null
     },
   })
@@ -1640,19 +1859,37 @@ registerHandler('DELETE /api/session-principals/current', async function release
 // refusal is zero-state and reveals nothing. Marks the principal revoked,
 // frees its base lease, and ends retention: future capability use answers
 // session_revoked. Room-log messages are never deleted. Idempotent.
-registerHandler('POST /api/session-principals/revoke', function revokeSessionPrincipalRoute(context) {
+registerHandler('POST /api/session-principals/revoke', async function revokeSessionPrincipalRoute(context) {
   const principal = sessionPrincipalOf(context)
   if (principal.ok === false) return principal
   const sessionIdField = requiredString(context.body?.session_id, 'session_id')
   if (sessionIdField.error) return sessionIdField.error
   const reason = context.body?.reason
   if (reason !== undefined && reason !== null
-    && (typeof reason !== 'string' || reason.length > TITLE_MAX)) {
-    return reject('invalid_request', `reason must be a string of at most ${TITLE_MAX} characters when provided`)
+    && (typeof reason !== 'string' || reason.length > SESSION_REVOKE_REASON_MAX)) {
+    return reject('invalid_request', `reason must be a string of at most ${SESSION_REVOKE_REASON_MAX} characters when provided`)
   }
-  context.store.revokeSessionPrincipal({
-    sessionId: sessionIdField.value,
-    installationFingerprint: principal.actorFingerprint,
+  await context.store.enqueueWrite({
+    sessionKey: principal.sessionKey,
+    priority: 'control',
+    trackMetrics: false,
+    bytes: 0,
+    payload: { action: 'revoke_principal', sessionId: sessionIdField.value },
+    validateFence(tx) {
+      if (tx.isActorBanned(principal.actorFingerprint)) {
+        throw new AgentRoomRuntimeError('banned', PUBLIC_ERRORS.banned)
+      }
+      if (context.sessionRegistry?.isSuperseded?.(principal.sessionKey)) {
+        throw new AgentRoomRuntimeError('unauthorized', PUBLIC_ERRORS.unauthorized)
+      }
+    },
+    execute(tx) {
+      return tx.revokeSessionPrincipalInTx({
+        sessionId: sessionIdField.value,
+        installationFingerprint: principal.actorFingerprint,
+        reason: reason ?? null,
+      })
+    },
   })
   const bearerKeys = context.sessionPrincipalBearerKeys ?? SESSION_PRINCIPAL_BEARER_KEYS
   bearerKeys.delete(sessionIdField.value)
@@ -1772,11 +2009,17 @@ registerHandler('POST /api/messages', async function addressedSendRoute(context)
         }
       },
       execute(tx) {
-        const peer = tx.resolveSessionPrincipalByAddress(targetAddress)
+        const nowMs = Date.now()
+        if (context.session?.isPrevCapability === false && context.session?.presentedDigest) {
+          tx.clearPrincipalRecoveryInTx({
+            sessionId: senderSessionId,
+            capabilityDigest: context.session.presentedDigest,
+          })
+        }
+        const peer = tx.resolveSessionPrincipalByAddress(targetAddress, nowMs)
         if (peer === null) {
           throw new AgentRoomRuntimeError('peer_not_found', PUBLIC_ERRORS.peer_not_found)
         }
-        const nowMs = Date.now()
         const room = tx.openSessionPairRoomInTx({
           sessionIds: [senderSessionId, peer.session_id],
           nowMs,
@@ -2333,7 +2576,12 @@ export async function startServer({
     const presented = sessionCapabilityFromHeaders(context.headers)
     if (presented.error) return presented.error
     const digest = capabilityDigestOf(presented.capability)
-    const row = store.findSessionPrincipalByCapabilityDigest(digest)
+    let row = store.findSessionPrincipalByCapabilityDigest(digest)
+    let isPrevCapability = false
+    if (row === null && context.route?.path === '/api/session-principals/resume' && context.method === 'POST') {
+      row = store.findSessionPrincipalByPrevCapabilityDigest(digest)
+      if (row !== null) isPrevCapability = true
+    }
     if (row === null) return reject('session_credential_invalid')
     if (row.principal_status === 'revoked') return reject('session_revoked')
     if (
@@ -2352,6 +2600,8 @@ export async function startServer({
       // the authority that ends it.
       sessionKey: `scap:${digest}`,
       sessionPrincipal: row,
+      isPrevCapability,
+      presentedDigest: digest,
     }
   }
   const effectiveSessionVerifier = context => {

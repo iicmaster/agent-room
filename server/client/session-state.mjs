@@ -23,7 +23,8 @@
 // grammar. A hostname change mid-session never relocates an address — the
 // label was captured at allocation and rides the principal.
 
-import { existsSync, rmSync } from 'node:fs'
+import { randomBytes } from 'node:crypto'
+import { existsSync, unlinkSync } from 'node:fs'
 import { hostname } from 'node:os'
 import { join } from 'node:path'
 
@@ -34,6 +35,7 @@ import {
   SESSION_CURSOR_SEED_MARKER_FILENAME,
   SESSION_MACHINE_MAX,
   SESSION_MACHINE_PATTERN,
+  SESSION_RECOVERY_ID_PATTERN,
   SESSION_SCOPE_MAX,
   SESSION_SCOPE_PATTERN,
 } from '../constants.mjs'
@@ -135,17 +137,23 @@ export function loadSessionState(pluginDataDir, scope, { onError = defaultOnSess
     baseName,
     machine,
     capability,
+    recoveryId: typeof value.recovery_id === 'string' && SESSION_RECOVERY_ID_PATTERN.test(value.recovery_id)
+      ? value.recovery_id
+      : null,
     savedAt: typeof value.saved_at === 'string' ? value.saved_at : null,
   }
 }
 
+export function newRecoveryId() {
+  return randomBytes(24).toString('base64url')
+}
+
 // Atomic 0600 save (atomicWriteJson keeps the file at 0600 whatever the
 // umask and creates the 0700 directory). Called only after a successful
-// allocate/resume; a failed save surfaces to the caller — an unrecorded
-// capability would make the next start allocate a fresh principal while the
-// old one stays retained, which is safe but must not pass silently.
+// allocate/resume (or pre-flight to persist recovery_id); a failed save
+// surfaces to the caller.
 export function saveSessionState(pluginDataDir, scope, state) {
-  atomicWriteJson(sessionStatePath(pluginDataDir, scope), {
+  const payload = {
     version: 1,
     session_id: state.sessionId,
     generation: state.generation,
@@ -154,21 +162,23 @@ export function saveSessionState(pluginDataDir, scope, state) {
     machine: state.machine,
     capability: state.capability,
     saved_at: new Date().toISOString(),
-  })
+  }
+  if (typeof state.recoveryId === 'string' && SESSION_RECOVERY_ID_PATTERN.test(state.recoveryId)) {
+    payload.recovery_id = state.recoveryId
+  }
+  atomicWriteJson(sessionStatePath(pluginDataDir, scope), payload)
 }
 
-// Best-effort removal (resume-fenced state is cleared before a fresh
-// allocation). The scope is the same guarded key the paths use, so the
-// recursive remove can never escape sessions/. Never throws for a missing
-// file.
+// Best-effort removal of ONLY session.json (never rm -rf the scope directory,
+// so cursors.json, inbox.jsonl, loop-ledger.sqlite, and wait.lock persist
+// byte-identically). Never throws for a missing file.
 export function clearSessionState(pluginDataDir, scope) {
+  const target = sessionStatePath(pluginDataDir, scope)
   try {
-    rmSync(join(pluginDataDir, SESSIONS_DIRECTORY_NAME, assertSafeSessionScope(scope)), { recursive: true, force: true })
+    unlinkSync(target)
   } catch (error) {
     if (error instanceof AgentRoomRuntimeError) throw error
-    // A directory that cannot be removed leaves a stale credential file;
-    // the next load treats a malformed state as absent, so this is never
-    // a correctness problem — only disk residue.
+    if (error?.code === 'ENOENT') return
   }
 }
 

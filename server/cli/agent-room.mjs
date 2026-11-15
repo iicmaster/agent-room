@@ -134,6 +134,7 @@ import { runBanFamilyCommand } from './ban-commands.mjs'
 import { runCapacityFamilyCommand } from './capacity-commands.mjs'
 import { runViewerFamilyCommand } from './viewer-commands.mjs'
 import { runSessionFamilyCommand } from './session-commands.mjs'
+import { runSessionPrincipalsFamilyCommand } from './session-principals-commands.mjs'
 import { runWaitFamilyCommand } from './wait-commands.mjs'
 import { loadRemoteConfig } from '../client/remote-config.mjs'
 import { runDmCommand, runReadFamilyCommand, runSendFamilyCommand, runSessionVerify, runSessionsCommand } from './message-commands.mjs'
@@ -812,7 +813,7 @@ export async function main(argv = process.argv.slice(2), {
   // this printer. (Capacity's refuse state keeps its report on stdout and
   // exits 1 through the outcome's exitCode — the report IS the answer, and
   // the exit code is the severity a script keys on.)
-  if (command === 'invite' || command === 'remote' || command === 'ban' || command === 'unban' || command === 'capacity' || command === 'viewer' || command === 'session' || command === 'wait' || command === 'send' || command === 'read' || command === 'dm' || command === 'sessions') {
+  if (command === 'invite' || command === 'remote' || command === 'ban' || command === 'unban' || command === 'capacity' || command === 'viewer' || command === 'session' || command === 'session-principals' || command === 'wait' || command === 'send' || command === 'read' || command === 'dm' || command === 'sessions') {
     const outcome = command === 'invite'
       ? await runInviteFamilyCommand(subcommand, argv.slice(2), deps)
       : command === 'remote'
@@ -825,7 +826,9 @@ export async function main(argv = process.argv.slice(2), {
               ? (subcommand === 'verify'
                 ? await runSessionVerify(deps, argv.slice(2)[0])
                 : await runSessionFamilyCommand(subcommand, argv.slice(2), deps))
-              : command === 'wait'
+              : command === 'session-principals'
+                ? await runSessionPrincipalsFamilyCommand(subcommand, argv.slice(2), deps)
+                : command === 'wait'
                 ? await runWaitFamilyCommand(argv.slice(1), deps)
                 : command === 'send'
                   ? await runSendFamilyCommand(argv.slice(1), deps)

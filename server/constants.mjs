@@ -765,3 +765,9 @@ export const SESSION_SCOPE_PATTERN = new RegExp(
 // legacy realms/<realm>/cursors.json. Later sessions start at 0; re-runs are
 // no-ops.
 export const SESSION_CURSOR_SEED_MARKER_FILENAME = '.cursor_seed_done'
+
+// Story 1.3: crash-safe resume, takeover, and host revoke bounds.
+export const SESSION_RECOVERY_ID_PATTERN = /^[A-Za-z0-9_-]{22,64}$/
+export const CONFLICT_TICKET_MAX_CHARS = 256
+export const SESSION_REVOKE_REASON_MAX = 200
+export const CLI_BUSY_RETRY_DELAYS_MS = Object.freeze([250, 250, 250])

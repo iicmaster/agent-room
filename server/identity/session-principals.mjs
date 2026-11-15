@@ -31,22 +31,26 @@
 //     projection below omits the digest, and no operation ever logs or
 //     re-emits credential material.
 
-import { createHash, randomBytes, randomUUID } from 'node:crypto'
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 
 import { AgentRoomRuntimeError } from '../runtime.mjs'
 import {
+  CONFLICT_TICKET_TTL_MS,
   SESSION_ADDRESS_MAX_CHARS,
   SESSION_BASE_LEASE_MS,
   SESSION_LOCATOR_TOKEN_CHARS,
   SESSION_MACHINE_MAX,
   SESSION_MACHINE_PATTERN,
   SESSION_PRINCIPAL_RETENTION_MS,
+  SESSION_RECOVERY_ID_PATTERN,
+  SESSION_REVOKE_REASON_MAX,
   CHAT_ID_MAX,
 } from '../constants.mjs'
 
-// The canonical principal projection. capability_digest is deliberately
-// absent — the digest never leaves the store layer, and no caller (route,
-// listing, receipt) ever sees credential material.
+// The canonical principal projection. capability_digest, prev_capability_digest,
+// and recovery_id_digest are deliberately absent — digests never leave the
+// store layer, and no caller (route, listing, receipt) ever sees credential
+// material.
 const PRINCIPAL_COLUMNS = `
   session_id,
   installation_fingerprint,
@@ -60,7 +64,8 @@ const PRINCIPAL_COLUMNS = `
   base_lease_expires_at,
   base_lease_status,
   principal_retention_expires_at,
-  principal_status
+  principal_status,
+  revoked_reason
 `
 
 function plainPrincipal(row) {
@@ -78,6 +83,7 @@ function plainPrincipal(row) {
     base_lease_status: row.base_lease_status,
     principal_retention_expires_at: row.principal_retention_expires_at,
     principal_status: row.principal_status,
+    revoked_reason: row.revoked_reason === null || row.revoked_reason === undefined ? null : String(row.revoked_reason),
   }
 }
 
@@ -104,12 +110,19 @@ export function sessionPrincipalsTableDdl({ ifNotExists = false } = {}) {
       base_lease_status TEXT NOT NULL CHECK (base_lease_status IN ('occupied','expired','released')),
       principal_retention_expires_at TEXT NOT NULL,
       principal_status TEXT NOT NULL CHECK (principal_status IN ('retained','revoked','retention_expired')),
+      prev_capability_digest TEXT,
+      rotated_at TEXT,
+      recovery_id_digest TEXT,
+      revoked_reason TEXT,
       CHECK (length(base_name) BETWEEN 1 AND ${CHAT_ID_MAX}),
       CHECK (length(address) BETWEEN 1 AND ${SESSION_ADDRESS_MAX_CHARS}),
       CHECK (length(machine) BETWEEN 1 AND ${SESSION_MACHINE_MAX}),
       CHECK (address GLOB '*~*@*'),
       CHECK (length(client_type) IS NULL OR length(client_type) BETWEEN 1 AND 32),
-      CHECK (length(capability_digest) = 64 AND capability_digest NOT GLOB '*[^0-9a-f]*')
+      CHECK (length(capability_digest) = 64 AND capability_digest NOT GLOB '*[^0-9a-f]*'),
+      CHECK (prev_capability_digest IS NULL OR (length(prev_capability_digest) = 64 AND prev_capability_digest NOT GLOB '*[^0-9a-f]*')),
+      CHECK (recovery_id_digest IS NULL OR (length(recovery_id_digest) = 64 AND recovery_id_digest NOT GLOB '*[^0-9a-f]*')),
+      CHECK (revoked_reason IS NULL OR length(revoked_reason) <= ${SESSION_REVOKE_REASON_MAX})
     ) STRICT;
   `
 }
@@ -129,10 +142,23 @@ export const SESSION_PRINCIPALS_COLUMNS = Object.freeze([
   'base_lease_status',
   'principal_retention_expires_at',
   'principal_status',
+  'prev_capability_digest',
+  'rotated_at',
+  'recovery_id_digest',
+  'revoked_reason',
+])
+
+export const SESSION_PRINCIPALS_TAIL_ADD_DDL = Object.freeze([
+  ['prev_capability_digest', 'ALTER TABLE session_principals ADD COLUMN prev_capability_digest TEXT;'],
+  ['rotated_at', 'ALTER TABLE session_principals ADD COLUMN rotated_at TEXT;'],
+  ['recovery_id_digest', 'ALTER TABLE session_principals ADD COLUMN recovery_id_digest TEXT;'],
+  ['revoked_reason', 'ALTER TABLE session_principals ADD COLUMN revoked_reason TEXT;'],
 ])
 
 export const SESSION_PRINCIPALS_ADDRESS_INDEX_NAME = 'idx_session_principals_address'
 export const SESSION_PRINCIPALS_LIVE_BASE_INDEX_NAME = 'idx_session_principals_live_base'
+export const SESSION_PRINCIPALS_CAPABILITY_INDEX_NAME = 'idx_session_principals_capability'
+export const SESSION_PRINCIPALS_PREV_CAPABILITY_INDEX_NAME = 'idx_session_principals_prev_capability'
 
 // Full-address uniqueness among RETAINED principals (the address of a revoked
 // or retention-expired principal is freed). IF NOT EXISTS on every open; the
@@ -152,6 +178,21 @@ export function sessionPrincipalsLiveBaseIndexDdl() {
     CREATE UNIQUE INDEX IF NOT EXISTS ${SESSION_PRINCIPALS_LIVE_BASE_INDEX_NAME}
       ON session_principals (lower(base_name))
       WHERE principal_status = 'retained' AND base_lease_status = 'occupied';
+  `
+}
+
+export function sessionPrincipalsCapabilityIndexDdl() {
+  return `
+    CREATE UNIQUE INDEX IF NOT EXISTS ${SESSION_PRINCIPALS_CAPABILITY_INDEX_NAME}
+      ON session_principals (capability_digest);
+  `
+}
+
+export function sessionPrincipalsPrevCapabilityIndexDdl() {
+  return `
+    CREATE UNIQUE INDEX IF NOT EXISTS ${SESSION_PRINCIPALS_PREV_CAPABILITY_INDEX_NAME}
+      ON session_principals (prev_capability_digest)
+      WHERE prev_capability_digest IS NOT NULL;
   `
 }
 
@@ -177,7 +218,7 @@ export function createSessionPrincipalOperations({ database, withImmediateTransa
     database.prepare(`
       UPDATE session_principals
       SET principal_status = 'retention_expired', base_lease_status = 'released'
-      WHERE principal_status = 'retained' AND principal_retention_expires_at < ?
+      WHERE principal_status = 'retained' AND principal_retention_expires_at <= ?
     `).run(cutoff)
   }
 
@@ -194,9 +235,28 @@ export function createSessionPrincipalOperations({ database, withImmediateTransa
     .prepare(`SELECT ${PRINCIPAL_COLUMNS} FROM session_principals WHERE session_id = ?`)
     .get(sessionId)
 
-  const selectRetainedByAddress = address => database
-    .prepare(`SELECT ${PRINCIPAL_COLUMNS} FROM session_principals WHERE address = ? AND principal_status = 'retained'`)
-    .get(address)
+  const selectRetainedByAddress = (address, nowMs = undefined) => {
+    if (nowMs !== undefined) {
+      const cutoff = new Date(requireNow(nowMs)).toISOString()
+      return database
+        .prepare(`
+          SELECT ${PRINCIPAL_COLUMNS}
+          FROM session_principals
+          WHERE address = ?
+            AND principal_status = 'retained'
+            AND principal_retention_expires_at > ?
+        `)
+        .get(address, cutoff)
+    }
+    return database
+      .prepare(`
+        SELECT ${PRINCIPAL_COLUMNS}
+        FROM session_principals
+        WHERE address = ?
+          AND principal_status = 'retained'
+      `)
+      .get(address)
+  }
 
   const selectOccupiedByBase = baseName => database
     .prepare(`
@@ -235,6 +295,7 @@ export function createSessionPrincipalOperations({ database, withImmediateTransa
       baseName,
       machine,
       clientType = null,
+      recoveryId = null,
       nowMs,
       locatorTokenFn = () => randomBytes(7).toString('base64url').slice(0, SESSION_LOCATOR_TOKEN_CHARS),
       capabilityBytesFn = () => randomBytes(32),
@@ -248,6 +309,7 @@ export function createSessionPrincipalOperations({ database, withImmediateTransa
       : (typeof clientType === 'string' && clientType.length >= 1 && clientType.length <= 32
         ? clientType
         : fail('invalid_request', 'clientType must be a string of 1-32 characters when provided'))
+    const validRecoveryId = validateOptionalRecoveryId(recoveryId)
     const capability = capabilityBytesFn()
     if (!Buffer.isBuffer(capability) || capability.length !== 32) {
       fail('invalid_argument', 'capabilityBytesFn must answer a 32-byte Buffer')
@@ -258,6 +320,7 @@ export function createSessionPrincipalOperations({ database, withImmediateTransa
       validBase,
       validMachine,
       validClientType,
+      validRecoveryId,
       now,
       locatorTokenFn,
       capability,
@@ -265,11 +328,44 @@ export function createSessionPrincipalOperations({ database, withImmediateTransa
     }
   }
 
+  function validateOptionalRecoveryId(recoveryId) {
+    if (recoveryId === null || recoveryId === undefined) return null
+    if (typeof recoveryId !== 'string' || !SESSION_RECOVERY_ID_PATTERN.test(recoveryId)) {
+      fail('invalid_request', 'recovery_id must be 22-64 URL-safe base64 characters')
+    }
+    return recoveryId
+  }
+
+  function mintCapability(capabilityBytesFn = () => randomBytes(32)) {
+    const capability = capabilityBytesFn()
+    if (!Buffer.isBuffer(capability) || capability.length !== 32) {
+      fail('invalid_argument', 'capabilityBytesFn must answer a 32-byte Buffer')
+    }
+    const raw = capability.toString('base64url')
+    return { raw, digest: capabilityDigestOf(raw) }
+  }
+
+  function digestsEqualHex(aHex, bHex) {
+    if (typeof aHex !== 'string' || typeof bHex !== 'string' || aHex.length !== 64 || bHex.length !== 64) {
+      return false
+    }
+    return timingSafeEqual(Buffer.from(aHex, 'hex'), Buffer.from(bHex, 'hex'))
+  }
+
+  function withinRecoveryWindow(rotatedAtIso, now) {
+    if (typeof rotatedAtIso !== 'string') return false
+    const rotatedAtMs = Date.parse(rotatedAtIso)
+    if (!Number.isFinite(rotatedAtMs)) return false
+    const elapsed = now - rotatedAtMs
+    return elapsed >= 0 && elapsed <= CONFLICT_TICKET_TTL_MS
+  }
+
   function allocateSessionPrincipalInTxImpl({
     validFingerprint,
     validBase,
     validMachine,
     validClientType,
+    validRecoveryId,
     now,
     locatorTokenFn,
     capability,
@@ -278,6 +374,8 @@ export function createSessionPrincipalOperations({ database, withImmediateTransa
     const createdAt = new Date(now).toISOString()
     const leaseExpiresAt = new Date(now + SESSION_BASE_LEASE_MS).toISOString()
     const retentionExpiresAt = new Date(now + SESSION_PRINCIPAL_RETENTION_MS).toISOString()
+    const recoveryDigest = validRecoveryId ? capabilityDigestOf(validRecoveryId) : null
+    const rotatedAt = validRecoveryId ? createdAt : null
     sweepRetention(now)
     sweepBaseLeasesImpl(now)
     const baseHolder = selectOccupiedByBase(validBase)
@@ -285,7 +383,7 @@ export function createSessionPrincipalOperations({ database, withImmediateTransa
       failAgentIdTaken(validBase, baseHolder)
     }
     const address = `${validBase}~${locatorTokenFn()}@${validMachine}`
-    const holder = selectRetainedByAddress(address)
+    const holder = selectRetainedByAddress(address, now)
     if (holder) {
       // Explicit duplicate live address: refuse with the holder's machine,
       // never suffix, never merge, never take the base from a live holder.
@@ -297,18 +395,20 @@ export function createSessionPrincipalOperations({ database, withImmediateTransa
         INSERT INTO session_principals (
           session_id, installation_fingerprint, generation, base_name, address, machine,
           client_type, capability_digest, created_at, last_heartbeat_at, base_lease_expires_at,
-          base_lease_status, principal_retention_expires_at, principal_status
-        ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, 'occupied', ?, 'retained')
+          base_lease_status, principal_retention_expires_at, principal_status,
+          rotated_at, recovery_id_digest
+        ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, 'occupied', ?, 'retained', ?, ?)
       `).run(
         sessionId, validFingerprint, validBase, address, validMachine,
         validClientType, capabilityDigest, createdAt, createdAt, leaseExpiresAt, retentionExpiresAt,
+        rotatedAt, recoveryDigest,
       )
     } catch (error) {
       const conflictingBase = selectOccupiedByBase(validBase)
       if (conflictingBase) {
         failAgentIdTaken(validBase, conflictingBase)
       }
-      const conflictingAddress = selectRetainedByAddress(address)
+      const conflictingAddress = selectRetainedByAddress(address, now)
       if (conflictingAddress) {
         fail('name_taken', `session address ${address} is already held by a live principal on machine ${conflictingAddress.machine}`)
       }
@@ -353,30 +453,80 @@ export function createSessionPrincipalOperations({ database, withImmediateTransa
     return plainPrincipal(selectBySessionId(sessionId))
   }
 
-  function resumeSessionPrincipalInTxImpl({ sessionId, generation, now, onReoccupy }) {
+  function resumeSessionPrincipalInTxImpl({
+    sessionId,
+    generation,
+    now,
+    recoveryId = null,
+    presentedPrevDigest = null,
+    onReoccupy,
+    capabilityBytesFn,
+  }) {
     sweepRetention(now)
     sweepBaseLeasesImpl(now)
-    const row = selectBySessionId(sessionId)
+    const row = database.prepare(`
+      SELECT ${PRINCIPAL_COLUMNS}, capability_digest, prev_capability_digest, rotated_at, recovery_id_digest
+      FROM session_principals
+      WHERE session_id = ?
+    `).get(sessionId)
     requireRetainedLive(row)
-    if (Number(row.generation) !== generation) {
+
+    const validRecoveryId = validateOptionalRecoveryId(recoveryId)
+    const isRecoveryRetry = presentedPrevDigest !== null
+    if (isRecoveryRetry) {
+      if (!validRecoveryId) {
+        fail('session_credential_invalid', 'recovery_id is required to recover a rotated session capability')
+      }
+      if (
+        row.prev_capability_digest !== presentedPrevDigest
+        || !withinRecoveryWindow(row.rotated_at, now)
+        || !digestsEqualHex(capabilityDigestOf(validRecoveryId), row.recovery_id_digest)
+      ) {
+        fail('session_credential_invalid', 'session capability recovery window expired or recovery_id did not match')
+      }
+      if (generation > Number(row.generation)) {
+        fail('session_expired', `session generation ${generation} is fenced; the current generation is ${Number(row.generation)}`)
+      }
+    } else if (Number(row.generation) !== generation) {
       fail('session_expired', `session generation ${generation} is fenced; the current generation is ${Number(row.generation)}`)
     }
+
     const existingHolder = selectOccupiedByBase(row.base_name)
     if (existingHolder && existingHolder.session_id !== row.session_id) {
       failAgentIdTaken(row.base_name, existingHolder)
     }
     onReoccupy?.(plainPrincipal(row))
+
+    const { raw: nextCapability, digest: nextDigest } = mintCapability(capabilityBytesFn)
     const beatAt = new Date(now).toISOString()
     const leaseExpiresAt = new Date(now + SESSION_BASE_LEASE_MS).toISOString()
     const retentionExpiresAt = new Date(now + SESSION_PRINCIPAL_RETENTION_MS).toISOString()
+
     try {
-      database.prepare(`
-        UPDATE session_principals
-        SET generation = generation + 1, last_heartbeat_at = ?,
-            base_lease_expires_at = ?, base_lease_status = 'occupied',
-            principal_retention_expires_at = ?
-        WHERE session_id = ?
-      `).run(beatAt, leaseExpiresAt, retentionExpiresAt, sessionId)
+      if (isRecoveryRetry) {
+        // Keep the original prev_capability_digest, rotated_at (t0), and
+        // recovery_id_digest unextended across repeated lost-response retries.
+        database.prepare(`
+          UPDATE session_principals
+          SET generation = generation + 1, capability_digest = ?,
+              last_heartbeat_at = ?, base_lease_expires_at = ?,
+              base_lease_status = 'occupied', principal_retention_expires_at = ?
+          WHERE session_id = ?
+        `).run(nextDigest, beatAt, leaseExpiresAt, retentionExpiresAt, sessionId)
+      } else {
+        const recoveryDigest = validRecoveryId ? capabilityDigestOf(validRecoveryId) : null
+        database.prepare(`
+          UPDATE session_principals
+          SET generation = generation + 1, capability_digest = ?,
+              prev_capability_digest = ?, rotated_at = ?, recovery_id_digest = ?,
+              last_heartbeat_at = ?, base_lease_expires_at = ?,
+              base_lease_status = 'occupied', principal_retention_expires_at = ?
+          WHERE session_id = ?
+        `).run(
+          nextDigest, row.capability_digest, beatAt, recoveryDigest,
+          beatAt, leaseExpiresAt, retentionExpiresAt, sessionId,
+        )
+      }
     } catch (error) {
       const holderAfter = selectOccupiedByBase(row.base_name)
       if (holderAfter && holderAfter.session_id !== row.session_id) {
@@ -384,7 +534,82 @@ export function createSessionPrincipalOperations({ database, withImmediateTransa
       }
       throw error
     }
-    return plainPrincipal(selectBySessionId(sessionId))
+    return { ...plainPrincipal(selectBySessionId(sessionId)), session_capability: nextCapability }
+  }
+
+  function takeoverSessionPrincipalInTxImpl({
+    sessionId,
+    expectedGeneration,
+    now,
+    recoveryId = null,
+    capabilityBytesFn,
+  }) {
+    sweepRetention(now)
+    sweepBaseLeasesImpl(now)
+    const row = database.prepare(`
+      SELECT ${PRINCIPAL_COLUMNS}, capability_digest
+      FROM session_principals
+      WHERE session_id = ?
+    `).get(sessionId)
+    if (!row || row.principal_status !== 'retained' || Number(row.generation) !== expectedGeneration) {
+      fail('conflict_stale', 'the observed incumbent session principal is no longer at the observed generation')
+    }
+    const validRecoveryId = validateOptionalRecoveryId(recoveryId)
+    const recoveryDigest = validRecoveryId ? capabilityDigestOf(validRecoveryId) : null
+    const { raw: nextCapability, digest: nextDigest } = mintCapability(capabilityBytesFn)
+    const beatAt = new Date(now).toISOString()
+    const leaseExpiresAt = new Date(now + SESSION_BASE_LEASE_MS).toISOString()
+    const retentionExpiresAt = new Date(now + SESSION_PRINCIPAL_RETENTION_MS).toISOString()
+    database.prepare(`
+      UPDATE session_principals
+      SET generation = generation + 1, capability_digest = ?,
+          prev_capability_digest = ?, rotated_at = ?, recovery_id_digest = ?,
+          last_heartbeat_at = ?, base_lease_expires_at = ?,
+          base_lease_status = 'occupied', principal_retention_expires_at = ?
+      WHERE session_id = ?
+    `).run(
+      nextDigest, row.capability_digest, beatAt, recoveryDigest,
+      beatAt, leaseExpiresAt, retentionExpiresAt, sessionId,
+    )
+    return { ...plainPrincipal(selectBySessionId(sessionId)), session_capability: nextCapability, replaced: true }
+  }
+
+  function retryTakeoverByRecoveryInTxImpl({
+    installationFingerprint,
+    baseName,
+    recoveryId,
+    now,
+    capabilityBytesFn,
+  }) {
+    const validRecoveryId = validateOptionalRecoveryId(recoveryId)
+    if (!validRecoveryId) return null
+    sweepRetention(now)
+    sweepBaseLeasesImpl(now)
+    const recoveryDigest = capabilityDigestOf(validRecoveryId)
+    const row = database.prepare(`
+      SELECT ${PRINCIPAL_COLUMNS}, rotated_at
+      FROM session_principals
+      WHERE installation_fingerprint = ?
+        AND lower(base_name) = lower(?)
+        AND recovery_id_digest = ?
+        AND principal_status = 'retained'
+      LIMIT 1
+    `).get(installationFingerprint, baseName, recoveryDigest)
+    if (!row || !withinRecoveryWindow(row.rotated_at, now)) {
+      return null
+    }
+    const { raw: nextCapability, digest: nextDigest } = mintCapability(capabilityBytesFn)
+    const beatAt = new Date(now).toISOString()
+    const leaseExpiresAt = new Date(now + SESSION_BASE_LEASE_MS).toISOString()
+    const retentionExpiresAt = new Date(now + SESSION_PRINCIPAL_RETENTION_MS).toISOString()
+    database.prepare(`
+      UPDATE session_principals
+      SET generation = generation + 1, capability_digest = ?,
+          last_heartbeat_at = ?, base_lease_expires_at = ?,
+          base_lease_status = 'occupied', principal_retention_expires_at = ?
+      WHERE session_id = ?
+    `).run(nextDigest, beatAt, leaseExpiresAt, retentionExpiresAt, row.session_id)
+    return { ...plainPrincipal(selectBySessionId(row.session_id)), session_capability: nextCapability, replaced: true }
   }
 
   function releaseSessionBaseLeaseInTxImpl(sessionId) {
@@ -467,22 +692,92 @@ export function createSessionPrincipalOperations({ database, withImmediateTransa
       if (!database.isTransaction) {
         fail('invalid_argument', 'resumeSessionPrincipalInTx requires an active transaction')
       }
-      const { sessionId, generation, nowMs, onReoccupy } = requireObject(options)
+      const { sessionId, generation, nowMs, recoveryId, presentedPrevDigest, onReoccupy, capabilityBytesFn } = requireObject(options)
       const now = requireNow(nowMs)
-      return resumeSessionPrincipalInTxImpl({ sessionId, generation, now, onReoccupy })
+      return resumeSessionPrincipalInTxImpl({
+        sessionId,
+        generation,
+        now,
+        recoveryId,
+        presentedPrevDigest,
+        onReoccupy,
+        capabilityBytesFn,
+      })
     },
 
     // Resume an offline-but-retained principal: the capability's generation
     // must still be current. Success INCREMENTS the generation (fencing every
-    // older beat), refreshes the base lease, and returns the SAME session id
-    // and full address.
+    // older beat), rotates capability_digest, refreshes the base lease, and
+    // returns the SAME session id and full address.
     resumeSessionPrincipal(options) {
       assertOpen()
-      const { sessionId, generation, nowMs, onReoccupy } = requireObject(options)
+      const { sessionId, generation, nowMs, recoveryId, presentedPrevDigest, onReoccupy, capabilityBytesFn } = requireObject(options)
       const now = requireNow(nowMs)
       return withImmediateTransaction(database, () =>
-        resumeSessionPrincipalInTxImpl({ sessionId, generation, now, onReoccupy }),
+        resumeSessionPrincipalInTxImpl({
+          sessionId,
+          generation,
+          now,
+          recoveryId,
+          presentedPrevDigest,
+          onReoccupy,
+          capabilityBytesFn,
+        }),
       )
+    },
+
+    takeoverSessionPrincipalInTx(options) {
+      assertOpen()
+      if (!database.isTransaction) {
+        fail('invalid_argument', 'takeoverSessionPrincipalInTx requires an active transaction')
+      }
+      const { sessionId, expectedGeneration, nowMs, recoveryId, capabilityBytesFn } = requireObject(options)
+      const now = requireNow(nowMs)
+      return takeoverSessionPrincipalInTxImpl({
+        sessionId,
+        expectedGeneration,
+        now,
+        recoveryId,
+        capabilityBytesFn,
+      })
+    },
+
+    retryTakeoverByRecoveryInTx(options) {
+      assertOpen()
+      if (!database.isTransaction) {
+        fail('invalid_argument', 'retryTakeoverByRecoveryInTx requires an active transaction')
+      }
+      const { installationFingerprint, baseName, recoveryId, nowMs, capabilityBytesFn } = requireObject(options)
+      const validFingerprint = requireFingerprint(installationFingerprint)
+      const validBase = requireChatId(baseName)
+      const now = requireNow(nowMs)
+      return retryTakeoverByRecoveryInTxImpl({
+        installationFingerprint: validFingerprint,
+        baseName: validBase,
+        recoveryId,
+        now,
+        capabilityBytesFn,
+      })
+    },
+
+    clearPrincipalRecoveryInTx(options) {
+      assertOpen()
+      if (!database.isTransaction) {
+        fail('invalid_argument', 'clearPrincipalRecoveryInTx requires an active transaction')
+      }
+      const { sessionId, capabilityDigest } = requireObject(options)
+      if (typeof sessionId !== 'string' || sessionId.length === 0) {
+        fail('invalid_argument', 'sessionId must be a non-empty string')
+      }
+      if (typeof capabilityDigest !== 'string' || capabilityDigest.length !== 64) {
+        fail('invalid_argument', 'capabilityDigest must be 64 hex characters')
+      }
+      const result = database.prepare(`
+        UPDATE session_principals
+        SET prev_capability_digest = NULL, rotated_at = NULL, recovery_id_digest = NULL
+        WHERE session_id = ? AND capability_digest = ? AND prev_capability_digest IS NOT NULL
+      `).run(sessionId, capabilityDigest)
+      return Number(result.changes ?? 0)
     },
 
     releaseSessionBaseLeaseInTx(options) {
@@ -516,13 +811,47 @@ export function createSessionPrincipalOperations({ database, withImmediateTransa
     // Idempotent: revoking an already-revoked principal succeeds. A session
     // id that belongs to another installation (or no session at all) is a
     // zero-state refusal that reveals nothing.
-    revokeSessionPrincipal(options) {
+    revokeSessionPrincipalInTx(options) {
       assertOpen()
-      const { sessionId, installationFingerprint } = requireObject(options)
+      if (!database.isTransaction) {
+        fail('invalid_argument', 'revokeSessionPrincipalInTx requires an active transaction')
+      }
+      const { sessionId, installationFingerprint, reason = null } = requireObject(options)
       const validFingerprint = requireFingerprint(installationFingerprint)
       if (typeof sessionId !== 'string' || sessionId.length === 0) {
         fail('invalid_argument', 'sessionId must be a non-empty string')
       }
+      const validReason = reason === null || reason === undefined
+        ? null
+        : (typeof reason === 'string' && reason.length <= SESSION_REVOKE_REASON_MAX
+          ? reason
+          : fail('invalid_request', `reason must be a string of at most ${SESSION_REVOKE_REASON_MAX} characters`))
+      const row = selectBySessionId(sessionId)
+      if (!row || row.installation_fingerprint !== validFingerprint) {
+        fail('unauthorized', 'this session principal does not belong to this installation')
+      }
+      database.prepare(`
+        UPDATE session_principals
+        SET principal_status = 'revoked', base_lease_status = 'released',
+            revoked_reason = COALESCE(?, revoked_reason),
+            prev_capability_digest = NULL, rotated_at = NULL, recovery_id_digest = NULL
+        WHERE session_id = ?
+      `).run(validReason, sessionId)
+      return plainPrincipal(selectBySessionId(sessionId))
+    },
+
+    revokeSessionPrincipal(options) {
+      assertOpen()
+      const { sessionId, installationFingerprint, reason = null } = requireObject(options)
+      const validFingerprint = requireFingerprint(installationFingerprint)
+      if (typeof sessionId !== 'string' || sessionId.length === 0) {
+        fail('invalid_argument', 'sessionId must be a non-empty string')
+      }
+      const validReason = reason === null || reason === undefined
+        ? null
+        : (typeof reason === 'string' && reason.length <= SESSION_REVOKE_REASON_MAX
+          ? reason
+          : fail('invalid_request', `reason must be a string of at most ${SESSION_REVOKE_REASON_MAX} characters`))
       return withImmediateTransaction(database, () => {
         const row = selectBySessionId(sessionId)
         if (!row || row.installation_fingerprint !== validFingerprint) {
@@ -530,10 +859,46 @@ export function createSessionPrincipalOperations({ database, withImmediateTransa
         }
         database.prepare(`
           UPDATE session_principals
-          SET principal_status = 'revoked', base_lease_status = 'released'
+          SET principal_status = 'revoked', base_lease_status = 'released',
+              revoked_reason = COALESCE(?, revoked_reason),
+              prev_capability_digest = NULL, rotated_at = NULL, recovery_id_digest = NULL
           WHERE session_id = ?
-        `).run(sessionId)
+        `).run(validReason, sessionId)
         return plainPrincipal(selectBySessionId(sessionId))
+      })
+    },
+
+    // Host-local operator revoke (AD-13): matches by session_id or full
+    // address without an installation check, keeps capability_digest intact so
+    // future requests answer canonical 401 session_revoked, and clears any
+    // transitional recovery columns. Returns null when no principal matches.
+    revokeSessionPrincipalByHost(options) {
+      assertOpen()
+      const { target, reason = null } = requireObject(options)
+      if (typeof target !== 'string' || target.length === 0) {
+        fail('invalid_argument', 'target must be a non-empty session_id or session_address')
+      }
+      const validReason = reason === null || reason === undefined
+        ? null
+        : (typeof reason === 'string' && reason.length <= SESSION_REVOKE_REASON_MAX
+          ? reason
+          : fail('invalid_request', `reason must be a string of at most ${SESSION_REVOKE_REASON_MAX} characters`))
+      return withImmediateTransaction(database, () => {
+        const row = database.prepare(`
+          SELECT ${PRINCIPAL_COLUMNS}
+          FROM session_principals
+          WHERE (session_id = ? OR address = ?) AND principal_status = 'retained'
+          LIMIT 1
+        `).get(target, target)
+        if (!row) return null
+        database.prepare(`
+          UPDATE session_principals
+          SET principal_status = 'revoked', base_lease_status = 'released',
+              revoked_reason = ?,
+              prev_capability_digest = NULL, rotated_at = NULL, recovery_id_digest = NULL
+          WHERE session_id = ?
+        `).run(validReason, row.session_id)
+        return plainPrincipal(selectBySessionId(row.session_id))
       })
     },
 
@@ -552,15 +917,27 @@ export function createSessionPrincipalOperations({ database, withImmediateTransa
       return row ? plainPrincipal(row) : null
     },
 
-    // Addressed-send resolution: only a RETAINED principal resolves. The
-    // constant `peer_not_found` refusal is the caller's; this read never
-    // enumerates anything.
-    resolveSessionPrincipalByAddress(address) {
+    // Recovery-window lookup: accepted ONLY on POST /api/session-principals/resume.
+    findSessionPrincipalByPrevCapabilityDigest(prevCapabilityDigest) {
+      assertOpen()
+      if (typeof prevCapabilityDigest !== 'string' || prevCapabilityDigest.length !== 64) {
+        fail('invalid_argument', 'prevCapabilityDigest must be the 64-hex-character SHA-256 digest')
+      }
+      const row = database
+        .prepare(`SELECT ${PRINCIPAL_COLUMNS} FROM session_principals WHERE prev_capability_digest = ?`)
+        .get(prevCapabilityDigest)
+      return row ? plainPrincipal(row) : null
+    },
+
+    // Addressed-send resolution: only a RETAINED, non-expired principal
+    // resolves. The constant `peer_not_found` refusal is the caller's; this
+    // read never enumerates anything.
+    resolveSessionPrincipalByAddress(address, nowMs = undefined) {
       assertOpen()
       if (typeof address !== 'string' || address.length === 0) {
         fail('invalid_argument', 'address must be a non-empty string')
       }
-      const row = selectRetainedByAddress(address)
+      const row = selectRetainedByAddress(address, nowMs)
       return row ? plainPrincipal(row) : null
     },
 
@@ -575,13 +952,14 @@ export function createSessionPrincipalOperations({ database, withImmediateTransa
         fail('invalid_argument', 'sessionId must be a non-empty string')
       }
       const row = database
-        .prepare(`SELECT principal_status, generation, principal_retention_expires_at FROM session_principals WHERE session_id = ?`)
+        .prepare(`SELECT principal_status, generation, principal_retention_expires_at, (prev_capability_digest IS NOT NULL) AS has_pending_recovery FROM session_principals WHERE session_id = ?`)
         .get(sessionId)
       return row
         ? {
             principal_status: row.principal_status,
             generation: Number(row.generation),
             principal_retention_expires_at: row.principal_retention_expires_at,
+            has_pending_recovery: Boolean(row.has_pending_recovery),
           }
         : null
     },
@@ -598,7 +976,7 @@ export function createSessionPrincipalOperations({ database, withImmediateTransa
       const hasRetentionExpired = database.prepare(`
         SELECT 1
         FROM session_principals
-        WHERE principal_status = 'retained' AND principal_retention_expires_at < ?
+        WHERE principal_status = 'retained' AND principal_retention_expires_at <= ?
         LIMIT 1
       `).get(cutoff)
       const readRows = () => database
@@ -622,7 +1000,7 @@ export function createSessionPrincipalOperations({ database, withImmediateTransa
 
 function requireNow(nowMs) {
   const now = nowMs === undefined ? Date.now() : nowMs
-  if (typeof now !== 'number' || !Number.isSafeInteger(now) || now <= 0) {
+  if (typeof now !== 'number' || !Number.isSafeInteger(now) || now <= 0 || now >= 253402300800000) {
     throw new AgentRoomRuntimeError('invalid_argument', 'nowMs must be a positive epoch-millisecond integer')
   }
   return now

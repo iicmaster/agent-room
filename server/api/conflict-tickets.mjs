@@ -168,7 +168,7 @@ export function createConflictTicketStore({
   // occupancy pair), or null for every stale shape: unknown, expired,
   // already consumed, wrong Actor, or wrong name. A scope mismatch (wrong
   // Actor / wrong name) never burns the rightful ticket.
-  function redeem({ ticket, actorFingerprint, chatId }) {
+  function redeem({ ticket, actorFingerprint, chatId, observerSessionKey = undefined }) {
     if (typeof ticket !== 'string' || ticket.length === 0) return null
     const digest = ticketDigest(ticket)
     const record = tickets.get(digest)
@@ -182,7 +182,8 @@ export function createConflictTicketStore({
     const forms = chatIdForms(chatId)
     if (forms === null
       || record.actorFingerprint !== actorFingerprint
-      || record.chatIdNormalized !== forms.normalized) {
+      || record.chatIdNormalized !== forms.normalized
+      || (observerSessionKey !== undefined && record.observerSessionKey !== observerSessionKey)) {
       return null
     }
     tickets.delete(digest)
