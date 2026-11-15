@@ -595,7 +595,7 @@ export function createSessionPrincipalOperations({ database, withImmediateTransa
         AND principal_status = 'retained'
       LIMIT 1
     `).get(installationFingerprint, baseName, recoveryDigest)
-    if (!row || !withinRecoveryWindow(row.rotated_at, now)) {
+    if (!row || row.base_lease_status !== 'occupied' || !withinRecoveryWindow(row.rotated_at, now)) {
       return null
     }
     const { raw: nextCapability, digest: nextDigest } = mintCapability(capabilityBytesFn)

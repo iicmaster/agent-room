@@ -426,6 +426,28 @@ test('CRASH_SAFE_RECOVERY_ID: 60s retry survives dropped response & server resta
   assert.equal(t2p2.replaced, true)
   assert.equal(t2p2.session_id, t2p1.session_id)
   assert.notEqual(t2p2.session_capability, t2p1.session_capability)
+
+  // Security regression: if t2p2 is subsequently displaced by Case 3 POST /api/session,
+  // a late T2 recovery_id retry MUST NOT split-brain or 500 -> returns 409 conflict_stale.
+  const tok3 = await authenticateLocal(env2.port, env2.token, inst)
+  const spConflict = await requestJson(env2.port, 'POST', '/api/session', {
+    headers: bearerHeaders(tok3),
+    body: JSON.stringify({ chat_id: 'bob', client_type: 'api' }),
+  })
+  assert.equal(spConflict.status, 409)
+  const spTk = spConflict.json().error.conflict_ticket
+  const displaceByLegacy = await requestJson(env2.port, 'POST', '/api/session', {
+    headers: bearerHeaders(tok3),
+    body: JSON.stringify({ chat_id: 'bob', client_type: 'api', replace_existing: true, conflict_ticket: spTk }),
+  })
+  assert.equal(displaceByLegacy.status, 200, displaceByLegacy.text)
+
+  const lateT2AfterDisplace = await requestJson(env2.port, 'POST', '/api/session-principals', {
+    headers: bearerHeaders(tok2),
+    body: JSON.stringify({ base_chat_id: 'bob', machine: 'mac', client_type: 'api', replace_existing: true, conflict_ticket: ticket, recovery_id: t2RecId }),
+  })
+  assert.equal(lateT2AfterDisplace.status, 409, lateT2AfterDisplace.text)
+  assert.equal(lateT2AfterDisplace.json().error.code, 'conflict_stale')
 })
 
 test('CLIENT_HYGIENE_AND_BUDGET: clearSessionState preserves cursors.json, <=3 HTTP calls on 401, notifier stops on session_revoked', async t => {
