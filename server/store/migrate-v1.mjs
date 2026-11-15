@@ -98,6 +98,7 @@ import {
 } from '../constants.mjs'
 import {
   AgentRoomRuntimeError,
+  isPidAlive,
   readJsonFile,
   runtimeRecordPath,
 } from '../runtime.mjs'
@@ -169,17 +170,6 @@ function withImmediateTransaction(database, operation) {
 }
 
 const delay = ms => new Promise(resolvePromise => { setTimeout(resolvePromise, ms) })
-
-// ESRCH means the pid is gone; EPERM means a live process owned by another
-// user — either way that pid is not this user's dead record.
-function pidAlive(pid) {
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch (error) {
-    return error?.code === 'EPERM'
-  }
-}
 
 // The recorded port, from either runtime-record generation: the v0.2 record
 // carries `port`; the v0.1 record carries `httpOrigin`
@@ -275,7 +265,7 @@ async function stopIdentifiedDaemon(pid) {
     }
     const giveUpAt = Date.now() + SERVER_CHILD_REAP_TIMEOUT_MS
     while (Date.now() < giveUpAt) {
-      if (!pidAlive(pid)) return
+      if (!isPidAlive(pid)) return
       await delay(SERVER_ATTACH_POLL_MS)
     }
   }
@@ -294,7 +284,7 @@ async function absorbOrStopLiveV1Daemon(dataDir) {
   }
   if (!record || typeof record !== 'object' || Array.isArray(record)) return
   if (!Number.isInteger(record.pid) || record.pid <= 0) return
-  if (!pidAlive(record.pid)) return // dead-and-unreachable: reclaimed by the boot
+  if (!isPidAlive(record.pid)) return // dead-and-unreachable: reclaimed by the boot
 
   const port = portFromRecord(record)
   if (port === null) {
@@ -308,7 +298,7 @@ async function absorbOrStopLiveV1Daemon(dataDir) {
   const settleDeadline = Date.now() + MIGRATION_DAEMON_SETTLE_MS
   let probe = await probeAgentRoomHealth(port)
   while (!probe.reachable && Date.now() < settleDeadline) {
-    if (!pidAlive(record.pid)) return // died while settling: reclaimed
+    if (!isPidAlive(record.pid)) return // died while settling: reclaimed
     await delay(SERVER_ATTACH_POLL_MS)
     probe = await probeAgentRoomHealth(port)
   }

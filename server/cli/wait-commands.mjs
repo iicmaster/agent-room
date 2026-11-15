@@ -59,7 +59,7 @@ import {
   READ_HOLD_MAX_MS,
   SESSION_SCOPE_PATTERN,
 } from '../constants.mjs'
-import { AgentRoomRuntimeError, assertSafePathKey, readJsonFile } from '../runtime.mjs'
+import { AgentRoomRuntimeError, assertSafePathKey, isPidAlive, readJsonFile } from '../runtime.mjs'
 import { CONNECTION_MODE_ENV, loadChatIdConfig } from '../client/api-client.mjs'
 import { REMOTE_TRANSPORT } from '../client/trust.mjs'
 import { createDeliveryClassifier } from '../notification/delivery.mjs'
@@ -222,18 +222,6 @@ async function holdForRoom({ target, token, roomId, afterSeq, holdMs, ownFingerp
   }
 }
 
-// pid-liveness: ESRCH means the process is gone; EPERM means it lives (and
-// belongs to someone else — unreachable under one PLUGIN_DATA, treated as
-// alive to stay on the safe side).
-function pidAlive(pid) {
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch (error) {
-    return error?.code === 'EPERM'
-  }
-}
-
 // The one-per-installation fence, FAIL-CLOSED on stale locks (the round-5
 // gate): acquisition is the atomic create-only-if-absent link(2) — the
 // loser's link fails EEXIST instead of replacing the winner's file — and a
@@ -282,12 +270,12 @@ function acquireWaitLock(pluginDataDir, timeoutMs, { reclaim = false } = {}) {
       const pid = typeof existing?.pid === 'number' && Number.isSafeInteger(existing.pid) && existing.pid > 0
         ? existing.pid
         : null
-      const holder = pid !== null && pid !== process.pid && pidAlive(pid)
+      const holder = pid !== null && pid !== process.pid && isPidAlive(pid)
         ? `a live process (pid ${pid})`
         : pid !== null
           ? `a stale lock whose pid ${pid} is no longer running`
           : 'a lock file this installation cannot read'
-      return { acquired: false, path, token: null, holder, reclaimable: pid === null || !pidAlive(pid) }
+      return { acquired: false, path, token: null, holder, reclaimable: pid === null || !isPidAlive(pid) }
     }
     // The EXPLICIT take-over: one operator decision, atomic at the link.
     const reclaimed = `${path}.reclaimed.${randomUUID()}`

@@ -71,6 +71,7 @@ import {
   APP_VERSION,
   AgentRoomRuntimeError,
   ensurePrivateDirectory,
+  isPidAlive,
   readJsonFile,
   runtimeRecordPath,
   serverStartupLockPath,
@@ -85,16 +86,6 @@ const OK_STATUS = 200
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
 
-// ESRCH means the pid is gone; EPERM means a live process owned by another
-// user — either way the holder is not this user's dead record.
-function pidAlive(pid) {
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch (error) {
-    return error?.code === 'EPERM'
-  }
-}
 
 // Read and shape-validate the runtime record. An absent, unreadable, or
 // malformed record is treated as absent: the boot path overwrites the file
@@ -272,7 +263,7 @@ async function inspectRuntimeRecord(directory, { connectionMode } = {}) {
     const probe = await probeHealth(record.port)
     if (probe.agentRoom) {
       assertAttachableVersion(record)
-      if (pidAlive(record.pid)) return { state: 'ready', record }
+      if (isPidAlive(record.pid)) return { state: 'ready', record }
       // Declared-remote: the reuse proof stops at the health+version check —
       // the credential proof happens after attach, on the challenge lane.
       // proveReuse below would present the shared local token, which a
@@ -289,7 +280,7 @@ async function inspectRuntimeRecord(directory, { connectionMode } = {}) {
         'the recorded server port is held by a process that is not agent-room',
       )
     }
-    if (pidAlive(record.pid)) return { state: 'pending' }
+    if (isPidAlive(record.pid)) return { state: 'pending' }
     // Fenced reclaim: unlink only when the file still holds exactly the
     // record just judged stale; otherwise re-read and re-evaluate.
     if (runtimeRecordUnchanged(directory, record)) {
@@ -401,7 +392,7 @@ function acquireServerLock(path) {
     // runtime-record attach path instead.
     const separator = observed.indexOf(':')
     const ownerPid = separator > 0 ? Number.parseInt(observed.slice(0, separator), 10) : Number.NaN
-    if (Number.isInteger(ownerPid) && ownerPid > 0 && pidAlive(ownerPid)) return null
+    if (Number.isInteger(ownerPid) && ownerPid > 0 && isPidAlive(ownerPid)) return null
   } catch {
     return null // the lock vanished mid-decision — retry
   }

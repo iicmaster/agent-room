@@ -176,6 +176,21 @@ export function assertSafePathKey(
   return key
 }
 
+// PID liveness, one implementation for the whole tree (Epic 1 retro F-3).
+// ESRCH means the pid is gone; EPERM means a live process owned by another
+// user — alive either way, and "alive" is the safe side for every caller
+// that asks (lock reclaim, scope bindings, server boot records, v1
+// migration). A pid of 0 or 1 is never a caller's own holder, never alive.
+export function isPidAlive(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 1) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return error?.code === 'EPERM'
+  }
+}
+
 export function atomicWriteJson(path, value, mode = 0o600) {
   const directory = ensurePrivateDirectory(dirname(path))
   const temporary = join(directory, `.${randomUUID()}.tmp`)

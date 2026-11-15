@@ -57,6 +57,7 @@ import {
   assertSafePathKey,
   atomicWriteJson,
   ensurePrivateDirectory,
+  isPidAlive,
   readJsonFile,
 } from '../runtime.mjs'
 
@@ -97,16 +98,6 @@ export function resolveHostPid(env = process.env, ppid = process.ppid) {
     if (Number.isSafeInteger(parsed) && parsed > 1) return parsed
   }
   return Number(ppid)
-}
-
-function isPidAlive(pid) {
-  if (!Number.isSafeInteger(pid) || pid <= 1) return false
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch (error) {
-    return error?.code === 'EPERM'
-  }
 }
 
 function readScopeBindingsRaw(pluginDataDir) {

@@ -794,3 +794,14 @@ export const CLAUDE_ENV_FILE_MAX_BYTES = 64 * 1024
 export const NOFILE_RECOMMENDED = 4096
 export const NOFILE_PROBE_TIMEOUT_MS = 1000
 export const BOOTSTRAP_READINESS_TIMEOUT_MS = 10_000
+
+// Story 2.1: the per-scope cursor file and its lock. The file carries the
+// read/notified split (see server/client/cursors.mjs); the lock serializes
+// concurrent read-modify-write from the MCP adapter and a one-shot CLI in
+// the same scope. A lock older than CURSOR_LOCK_STALE_MS whose holder is gone
+// is reclaimed; a waiter gives up after CURSOR_LOCK_WAIT_MS with a loud
+// refusal. CURSOR_FILE_MAX_BYTES bounds the document: an oversize file is a
+// refusal, never a silent reset.
+export const CURSOR_FILE_MAX_BYTES = 1024 * 1024
+export const CURSOR_LOCK_STALE_MS = 5000
+export const CURSOR_LOCK_WAIT_MS = 2000

@@ -19,8 +19,10 @@ function usage(command, message) {
   return { status: 'usage', command, code: 'usage', message }
 }
 
+// Every CLI family answers a failure with 'refusal' (11 modules, 21 sites);
+// this module was the lone 'error' until the Epic 1 retrospective, F-5.
 function failure(command, code, message) {
-  return { status: 'error', command, code, message }
+  return { status: 'refusal', command, code, message }
 }
 
 export function runSessionPrincipalsRevoke({ sharedDataDir }, target, options = {}) {

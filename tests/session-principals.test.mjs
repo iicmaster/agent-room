@@ -134,7 +134,9 @@ test('LEASE_EXPIRE_RECLAIM: after SESSION_BASE_LEASE_MS without a beat, a new pr
   assert.notEqual(tokenOf(old.address), tokenOf(fresh.address))
   // The old principal, its full address, and its mailbox are all still there
   // — offline, retained, resolvable.
-  const resolved = store.resolveSessionPrincipalByAddress(old.address)
+  // nowMs is REQUIRED here: the resolver defaults to Date.now(), and T0 is a
+  // 2001 timestamp, so an omitted nowMs filters the row out on retention.
+  const resolved = store.resolveSessionPrincipalByAddress(old.address, now)
   assert.equal(resolved.session_id, old.session_id)
   assert.equal(resolved.principal_status, 'retained')
   const listed = store.listSessionPrincipals({ nowMs: now })
@@ -162,7 +164,7 @@ test('OLD_GEN_HEARTBEAT: a beat with a fenced generation answers session_expired
   )
   // The lease was renewed by the RESUME (generation 2's own beat), not by
   // any fenced attempt.
-  const row = store.resolveSessionPrincipalByAddress(principal.address)
+  const row = store.resolveSessionPrincipalByAddress(principal.address, T0 + 2000)
   assert.equal(row.generation, 2)
   assert.equal(row.base_lease_expires_at, iso(T0 + 1000 + SESSION_BASE_LEASE_MS))
   store.close()
@@ -254,11 +256,11 @@ test('server restart restores retained principals and lease states; expired leas
 
   const second = openRoomLog({ dataDir })
   // Same generation, same address, no silent re-mint.
-  const liveRestored = second.resolveSessionPrincipalByAddress(live.address)
+  const liveRestored = second.resolveSessionPrincipalByAddress(live.address, T0)
   assert.equal(liveRestored.session_id, live.session_id)
   assert.equal(liveRestored.generation, 1)
   assert.equal(liveRestored.base_lease_expires_at, live.base_lease_expires_at)
-  const offlineRestored = second.resolveSessionPrincipalByAddress(offline.address)
+  const offlineRestored = second.resolveSessionPrincipalByAddress(offline.address, T0)
   assert.equal(offlineRestored.base_lease_status, 'released')
   // The resumed beat works across the restart with the same generation.
   const beaten = second.heartbeatSessionPrincipal({ sessionId: live.session_id, generation: 1, nowMs: T0 + 5000 })
