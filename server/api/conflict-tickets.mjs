@@ -35,7 +35,7 @@
 //   clock — `now < deadline` at the redemption check; receiving a request's
 //   headers before the deadline reserves nothing after it.
 
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 
 import {
   CONFLICT_TICKET_MAX_OUTSTANDING,
@@ -45,11 +45,15 @@ import {
 } from '../constants.mjs'
 import { AgentRoomRuntimeError } from '../runtime.mjs'
 
-// The opaque ticket id: 32 bytes of entropy, url-safe. It encodes nothing —
-// not the incumbent's key, not a digest, not the Actor — it is only a
-// reference into this server's in-memory map.
+// The opaque ticket id: >=128 bits of entropy (24 random bytes = 192 bits,
+// url-safe). The store retains ONLY the SHA-256 digest of the ticket; raw
+// tickets never persist in memory maps or records.
 function newTicketId() {
-  return randomBytes(32).toString('base64url')
+  return randomBytes(24).toString('base64url')
+}
+
+function ticketDigest(rawTicket) {
+  return createHash('sha256').update(rawTicket, 'utf8').digest('hex')
 }
 
 export function createConflictTicketStore({
@@ -72,21 +76,19 @@ export function createConflictTicketStore({
     throw new AgentRoomRuntimeError('invalid_argument', 'conflict ticket store maxPerActor must be a positive safe integer')
   }
 
-  // ticketId → { actorFingerprint, chatIdNormalized, observerSessionKey,
-  // incumbentSessionKey, observedGeneration, issuedAt, deadline }. The
-  // per-(Actor, name, observing session) slot index keeps ONE outstanding
-  // ticket per observing session per name (re-observation by the same
-  // session replaces its own; two sessions of one Actor each keep their own
-  // — the two-independent-observations proof depends on that).
+  // sha256(ticket) digest → { actorFingerprint, chatIdNormalized,
+  // observerSessionKey, incumbentSessionKey, observedGeneration, issuedAt,
+  // deadline }. Raw ticket strings are never stored in memory; slots maps
+  // per-(Actor, name, observing session) key → sha256(ticket) digest.
   const tickets = new Map()
   const slots = new Map()
 
   function purgeExpired(timestamp) {
-    for (const [id, record] of tickets) {
+    for (const [digest, record] of tickets) {
       if (timestamp >= record.deadline) {
-        tickets.delete(id)
+        tickets.delete(digest)
         const slotKey = `${record.actorFingerprint}\n${record.chatIdNormalized}\n${record.observerSessionKey}`
-        if (slots.get(slotKey) === id) slots.delete(slotKey)
+        if (slots.get(slotKey) === digest) slots.delete(slotKey)
       }
     }
   }
@@ -134,8 +136,8 @@ export function createConflictTicketStore({
     const timestamp = now()
     purgeExpired(timestamp)
     const slotKey = `${actorFingerprint}\n${forms.normalized}\n${observerSessionKey}`
-    const existingId = slots.get(slotKey)
-    const existingCounted = existingId !== undefined && tickets.has(existingId) ? 1 : 0
+    const existingDigest = slots.get(slotKey)
+    const existingCounted = existingDigest !== undefined && tickets.has(existingDigest) ? 1 : 0
     const outstandingAfterReplace = tickets.size - existingCounted + 1
     const actorCountAfterReplace = countForActor(actorFingerprint) - existingCounted + 1
     if (outstandingAfterReplace > maxOutstanding || actorCountAfterReplace > maxPerActor) {
@@ -143,11 +145,12 @@ export function createConflictTicketStore({
       const retryAfterMs = Math.max(1, Math.ceil((earliest - timestamp)))
       return { rateLimited: true, retryAfterMs }
     }
-    if (existingId !== undefined) {
-      tickets.delete(existingId)
+    if (existingDigest !== undefined) {
+      tickets.delete(existingDigest)
     }
-    const id = randomId()
-    tickets.set(id, {
+    const rawTicket = randomId()
+    const digest = ticketDigest(rawTicket)
+    tickets.set(digest, {
       actorFingerprint,
       chatIdNormalized: forms.normalized,
       observerSessionKey,
@@ -156,8 +159,8 @@ export function createConflictTicketStore({
       issuedAt: timestamp,
       deadline: timestamp + ttlMs,
     })
-    slots.set(slotKey, id)
-    return { ticket: id }
+    slots.set(slotKey, digest)
+    return { ticket: rawTicket }
   }
 
   // Redeem a ticket under the presenting Actor and target name. Returns the
@@ -167,12 +170,13 @@ export function createConflictTicketStore({
   // Actor / wrong name) never burns the rightful ticket.
   function redeem({ ticket, actorFingerprint, chatId }) {
     if (typeof ticket !== 'string' || ticket.length === 0) return null
-    const record = tickets.get(ticket)
+    const digest = ticketDigest(ticket)
+    const record = tickets.get(digest)
     if (record === undefined) return null
     if (now() >= record.deadline) {
-      tickets.delete(ticket)
+      tickets.delete(digest)
       const slotKey = `${record.actorFingerprint}\n${record.chatIdNormalized}\n${record.observerSessionKey}`
-      if (slots.get(slotKey) === ticket) slots.delete(slotKey)
+      if (slots.get(slotKey) === digest) slots.delete(slotKey)
       return null
     }
     const forms = chatIdForms(chatId)
@@ -181,13 +185,27 @@ export function createConflictTicketStore({
       || record.chatIdNormalized !== forms.normalized) {
       return null
     }
-    tickets.delete(ticket)
+    tickets.delete(digest)
     const slotKey = `${record.actorFingerprint}\n${record.chatIdNormalized}\n${record.observerSessionKey}`
-    if (slots.get(slotKey) === ticket) slots.delete(slotKey)
+    if (slots.get(slotKey) === digest) slots.delete(slotKey)
     return {
       incumbentSessionKey: record.incumbentSessionKey,
       observedGeneration: record.observedGeneration,
     }
+  }
+
+  function snapshot() {
+    return {
+      tickets: new Map([...tickets].map(([k, v]) => [k, { ...v }])),
+      slots: new Map(slots),
+    }
+  }
+
+  function restore(saved) {
+    tickets.clear()
+    for (const [k, v] of saved.tickets) tickets.set(k, { ...v })
+    slots.clear()
+    for (const [k, v] of saved.slots) slots.set(k, v)
   }
 
   // Test/inspection surface: how many tickets are outstanding.
@@ -195,5 +213,5 @@ export function createConflictTicketStore({
     return tickets.size
   }
 
-  return Object.freeze({ mint, redeem, size })
+  return Object.freeze({ mint, redeem, size, snapshot, restore })
 }

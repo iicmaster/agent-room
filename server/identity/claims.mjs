@@ -9,38 +9,49 @@
 
 export function createIdentityClaimOperations({ database, withImmediateTransaction, validate }) {
   const { assertOpen, fail, requireObject, requireChatId, requireFingerprint, requireClaimTimestamp } = validate
+
+  function upsertChatIdClaimImpl(options) {
+    const { chatId, actorFingerprint, lastSeenAt } = requireObject(options)
+    const validChatId = requireChatId(chatId)
+    const validFingerprint = requireFingerprint(actorFingerprint)
+    const lastSeen = requireClaimTimestamp(lastSeenAt)
+    const normalized = validChatId.toLowerCase()
+    database.prepare(`
+      INSERT INTO chat_id_claims (chat_id_normalized, actor_fingerprint, chat_id_display, last_seen_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT (chat_id_normalized, actor_fingerprint) DO UPDATE SET
+        chat_id_display = excluded.chat_id_display,
+        last_seen_at = CASE
+          WHEN excluded.last_seen_at > chat_id_claims.last_seen_at
+          THEN excluded.last_seen_at
+          ELSE chat_id_claims.last_seen_at
+        END
+    `).run(normalized, validFingerprint, validChatId, lastSeen)
+    const row = database.prepare(`
+      SELECT chat_id_normalized, actor_fingerprint, chat_id_display, last_seen_at
+      FROM chat_id_claims
+      WHERE chat_id_normalized = ? AND actor_fingerprint = ?
+    `).get(normalized, validFingerprint)
+    return {
+      chat_id: row.chat_id_display,
+      chat_id_normalized: row.chat_id_normalized,
+      actor_fingerprint: row.actor_fingerprint,
+      last_seen_at: row.last_seen_at,
+    }
+  }
+
   return Object.freeze({
+    upsertChatIdClaimInTx(options) {
+      assertOpen()
+      if (!database.isTransaction) {
+        fail('invalid_argument', 'upsertChatIdClaimInTx requires an active transaction')
+      }
+      return upsertChatIdClaimImpl(options)
+    },
+
     upsertChatIdClaim(options) {
       assertOpen()
-      const { chatId, actorFingerprint, lastSeenAt } = requireObject(options)
-      const validChatId = requireChatId(chatId)
-      const validFingerprint = requireFingerprint(actorFingerprint)
-      const lastSeen = requireClaimTimestamp(lastSeenAt)
-      const normalized = validChatId.toLowerCase()
-      return withImmediateTransaction(database, () => {
-        database.prepare(`
-          INSERT INTO chat_id_claims (chat_id_normalized, actor_fingerprint, chat_id_display, last_seen_at)
-          VALUES (?, ?, ?, ?)
-          ON CONFLICT (chat_id_normalized, actor_fingerprint) DO UPDATE SET
-            chat_id_display = excluded.chat_id_display,
-            last_seen_at = CASE
-              WHEN excluded.last_seen_at > chat_id_claims.last_seen_at
-              THEN excluded.last_seen_at
-              ELSE chat_id_claims.last_seen_at
-            END
-        `).run(normalized, validFingerprint, validChatId, lastSeen)
-        const row = database.prepare(`
-          SELECT chat_id_normalized, actor_fingerprint, chat_id_display, last_seen_at
-          FROM chat_id_claims
-          WHERE chat_id_normalized = ? AND actor_fingerprint = ?
-        `).get(normalized, validFingerprint)
-        return {
-          chat_id: row.chat_id_display,
-          chat_id_normalized: row.chat_id_normalized,
-          actor_fingerprint: row.actor_fingerprint,
-          last_seen_at: row.last_seen_at,
-        }
-      })
+      return withImmediateTransaction(database, () => upsertChatIdClaimImpl(options))
     },
 
     listClaimsForChatId(chatId) {
@@ -129,6 +140,8 @@ export function createIdentityClaimOperations({ database, withImmediateTransacti
       const cutoffMs = timestamp - olderThanMs
       if (!Number.isFinite(cutoffMs)) fail('invalid_argument', 'the prune cutoff must be a finite epoch-millisecond value')
       const cutoff = new Date(cutoffMs).toISOString()
+      const hasStale = database.prepare('SELECT 1 FROM chat_id_claims WHERE last_seen_at < ? LIMIT 1').get(cutoff)
+      if (!hasStale) return 0
       return withImmediateTransaction(database, () => Number(
         database.prepare('DELETE FROM chat_id_claims WHERE last_seen_at < ?').run(cutoff).changes,
       ))
@@ -141,6 +154,14 @@ export function createIdentityClaimOperations({ database, withImmediateTransacti
       const { actorFingerprint, enrolledAt } = requireObject(options)
       const validFingerprint = requireFingerprint(actorFingerprint)
       const enrolled = requireClaimTimestamp(enrolledAt)
+      const existing = database.prepare(`
+        SELECT actor_fingerprint, enrolled_at
+        FROM enrolled_actors
+        WHERE actor_fingerprint = ?
+      `).get(validFingerprint)
+      if (existing) {
+        return { actor_fingerprint: existing.actor_fingerprint, enrolled_at: existing.enrolled_at }
+      }
       return withImmediateTransaction(database, () => {
         database.prepare(`
           INSERT INTO enrolled_actors (actor_fingerprint, enrolled_at)

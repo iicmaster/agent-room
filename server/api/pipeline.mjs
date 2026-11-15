@@ -62,6 +62,9 @@ export const ERROR_ENVELOPE_EXTRAS = Object.freeze({
   // carries the opaque conflict ticket the operator confirms against — the
   // one extra the takeover flow needs (foreign collisions carry none).
   chat_id_taken: Object.freeze(['conflict_ticket']),
+  // Story 1.2 (realm-unique Agent ID): a same-Installation 409 agent_id_taken
+  // carries the digest-backed opaque conflict_ticket (omitted on foreign).
+  agent_id_taken: Object.freeze(['conflict_ticket']),
 })
 
 const ENVELOPE_FIXED_FIELDS = new Set(['ok', 'code', 'message', 'status'])

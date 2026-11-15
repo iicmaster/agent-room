@@ -79,6 +79,9 @@ export function createWriteQueue({
   assertPositiveInt(busyBudgetMs, 'busyBudgetMs')
   assertPositiveInt(drainMs, 'drainMs')
 
+  // FIFO queue for session-lifecycle / control writes that must serialize
+  // inside the write queue ahead of buffered messages/heartbeats.
+  const controlQueue = []
   // sessionKey -> Entry[]
   const sessionQueues = new Map()
   // FIFO order of sessionKeys with >= 1 pending entry for fair round-robin
@@ -169,6 +172,15 @@ export function createWriteQueue({
 
   function dequeueBatch() {
     const batch = []
+    while (batch.length < batchMax && controlQueue.length > 0) {
+      const entry = controlQueue.shift()
+      pendingOps -= 1
+      pendingBytes -= entry.bytes
+      inFlightOps += 1
+      inFlightBytes += entry.bytes
+      sessionInFlight.set(entry.sessionKey, (sessionInFlight.get(entry.sessionKey) ?? 0) + 1)
+      batch.push(entry)
+    }
     while (batch.length < batchMax && activeSessions.length > 0) {
       const sessionKey = activeSessions.shift()
       const queue = sessionQueues.get(sessionKey)
@@ -205,13 +217,20 @@ export function createWriteQueue({
   function rejectBatchEntries(batch, error) {
     releaseBatchAccounting(batch)
     for (const entry of batch) {
-      rejectedTotal += 1
+      if (entry.trackMetrics !== false) rejectedTotal += 1
       for (const waiter of entry.waiters) waiter.reject(error)
     }
   }
 
   function rejectAllPending(error) {
     clearFlushTimer()
+    while (controlQueue.length > 0) {
+      const entry = controlQueue.shift()
+      pendingOps -= 1
+      pendingBytes -= entry.bytes
+      if (entry.trackMetrics !== false) rejectedTotal += 1
+      for (const waiter of entry.waiters) waiter.reject(error)
+    }
     while (activeSessions.length > 0) {
       const sessionKey = activeSessions.shift()
       const queue = sessionQueues.get(sessionKey)
@@ -220,7 +239,7 @@ export function createWriteQueue({
       for (const entry of queue) {
         pendingOps -= 1
         pendingBytes -= entry.bytes
-        rejectedTotal += 1
+        if (entry.trackMetrics !== false) rejectedTotal += 1
         for (const waiter of entry.waiters) waiter.reject(error)
       }
     }
@@ -262,12 +281,14 @@ export function createWriteQueue({
           throw new Error('runBatch must return one outcome per queued op')
         }
         releaseBatchAccounting(batch)
-        batchesTotal += 1
+        if (batch.some(entry => entry.trackMetrics !== false)) {
+          batchesTotal += 1
+        }
         for (let i = 0; i < batch.length; i += 1) {
           const entry = batch[i]
           const outcome = outcomes[i]
           if (outcome?.ok) {
-            committedTotal += 1
+            if (entry.trackMetrics !== false) committedTotal += 1
             for (const waiter of entry.waiters) waiter.resolve(outcome.result)
           } else {
             const err = outcome?.error ?? new Error('queued write failed')
@@ -339,6 +360,9 @@ export function createWriteQueue({
       payload,
       validateFence,
       execute,
+      captureMemoryUndo,
+      priority = 'normal',
+      trackMetrics = true,
     } = op
 
     if (typeof sessionKey !== 'string' || sessionKey.length === 0) {
@@ -354,22 +378,25 @@ export function createWriteQueue({
       throw invalidArgument('enqueue requires an execute function')
     }
 
+    const track = trackMetrics !== false
+    const isControl = priority === 'control'
+
     if (draining || closed) {
-      rejectedTotal += 1
+      if (track) rejectedTotal += 1
       return Promise.reject(createQueueFullError(retryMaxMs, 'server is shutting down; retry after backoff'))
     }
 
     const existingQueue = sessionQueues.get(sessionKey)
-    if (coalesceKey !== null && existingQueue) {
+    if (!isControl && coalesceKey !== null && existingQueue) {
       const existing = existingQueue.find(entry => entry.coalesceKey === coalesceKey)
       if (existing) {
         if (existing.waiters.length >= maxOps) {
-          rejectedTotal += 1
+          if (track) rejectedTotal += 1
           return Promise.reject(createQueueFullError(computeRetryAfterMs()))
         }
         const projectedTotalBytes = currentBytes() - existing.bytes + bytes
         if (projectedTotalBytes > maxBytes) {
-          rejectedTotal += 1
+          if (track) rejectedTotal += 1
           return Promise.reject(createQueueFullError(computeRetryAfterMs()))
         }
         pendingBytes += bytes - existing.bytes
@@ -377,6 +404,7 @@ export function createWriteQueue({
         existing.payload = payload
         existing.validateFence = validateFence
         existing.execute = execute
+        existing.captureMemoryUndo = captureMemoryUndo
         coalescedTotal += 1
         return new Promise((resolve, reject) => {
           existing.waiters.push({ resolve, reject })
@@ -388,9 +416,9 @@ export function createWriteQueue({
     if (
       currentDepth() >= maxOps
       || currentBytes() + bytes > maxBytes
-      || sessionDepth >= perSessionMax
+      || (!isControl && sessionDepth >= perSessionMax)
     ) {
-      rejectedTotal += 1
+      if (track) rejectedTotal += 1
       return Promise.reject(createQueueFullError(computeRetryAfterMs()))
     }
 
@@ -399,13 +427,17 @@ export function createWriteQueue({
       const entry = {
         sessionKey,
         bytes,
-        coalesceKey,
+        coalesceKey: isControl ? null : coalesceKey,
         payload,
         validateFence,
         execute,
+        captureMemoryUndo,
+        trackMetrics: track,
         waiters: [{ resolve, reject }],
       }
-      if (existingQueue) {
+      if (isControl) {
+        controlQueue.push(entry)
+      } else if (existingQueue) {
         existingQueue.push(entry)
       } else {
         sessionQueues.set(sessionKey, [entry])
@@ -415,7 +447,7 @@ export function createWriteQueue({
       pendingBytes += bytes
       updateHighWater()
       if (!running) {
-        schedulePump(wasEmpty || draining || pendingOps >= batchMax)
+        schedulePump(wasEmpty || draining || isControl || pendingOps >= batchMax)
       }
     })
   }

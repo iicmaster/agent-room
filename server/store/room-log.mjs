@@ -64,8 +64,10 @@ import { createIdentityRepository } from '../identity/repository.mjs'
 import {
   SESSION_PRINCIPALS_ADDRESS_INDEX_NAME,
   SESSION_PRINCIPALS_COLUMNS,
+  SESSION_PRINCIPALS_LIVE_BASE_INDEX_NAME,
   createSessionPrincipalOperations,
   sessionPrincipalsAddressIndexDdl,
+  sessionPrincipalsLiveBaseIndexDdl,
   sessionPrincipalsTableDdl,
 } from '../identity/session-principals.mjs'
 import { createMessagingRoomOperations } from '../messaging/rooms.mjs'
@@ -331,14 +333,16 @@ function configureConnection(database, { maxPageCount } = {}) {
 
   database.exec('PRAGMA busy_timeout = 5000;')
 
-  let journalMode
-  try {
-    journalMode = String(pragmaValue(database, 'PRAGMA journal_mode = WAL')).toLowerCase()
-  } catch (error) {
-    if (error?.errcode === SQLITE_BUSY) {
-      fail('database_busy', 'agent-room database stayed busy while enabling WAL journal mode')
+  let journalMode = String(pragmaValue(database, 'PRAGMA journal_mode')).toLowerCase()
+  if (journalMode !== 'wal') {
+    try {
+      journalMode = String(pragmaValue(database, 'PRAGMA journal_mode = WAL')).toLowerCase()
+    } catch (error) {
+      if (error?.errcode === SQLITE_BUSY) {
+        fail('database_busy', 'agent-room database stayed busy while enabling WAL journal mode')
+      }
+      throw error
     }
-    throw error
   }
   if (journalMode !== 'wal') {
     fail('wal_unavailable', 'agent-room requires SQLite WAL journal mode')
@@ -706,7 +710,16 @@ function verifyStrictTables(database) {
 // created by earlier Epic-1 builds converging on the same shape on every
 // open, and the singleton PRIMARY KEY enforces the at-most-one-realm
 // invariant at the schema level (AD-14: one process = one realm).
+function hasTable(database, tableName) {
+  return Boolean(database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1").get(tableName))
+}
+
+function hasIndex(database, indexName) {
+  return Boolean(database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ? LIMIT 1").get(indexName))
+}
+
 function ensureRealmTable(database) {
+  if (hasTable(database, 'realms')) return
   database.exec(realmsTableDdl({ ifNotExists: true }))
 }
 
@@ -759,6 +772,7 @@ function ensureNullableRoomCreator(database) {
 // normalized form is the ASCII-lowercased display form, which the grammar's
 // character class makes exact.
 function ensureChatIdClaimsTable(database) {
+  if (hasTable(database, 'chat_id_claims')) return
   database.exec(chatIdClaimsTableDdl({ ifNotExists: true }))
 }
 
@@ -769,6 +783,7 @@ function ensureChatIdClaimsTable(database) {
 // joins AFTER the column verification so a divergent pre-existing table
 // fails coded before the index build ever touches it.
 function ensureChatIdClaimsLastSeenIndex(database) {
+  if (hasIndex(database, 'idx_chat_id_claims_last_seen_at')) return
   database.exec(`
     CREATE INDEX IF NOT EXISTS idx_chat_id_claims_last_seen_at
       ON chat_id_claims (last_seen_at);
@@ -818,6 +833,7 @@ function verifyChatIdClaimsIndex(database) {
 // foreign or drifted table is a coded schema failure at open, never a runtime
 // surprise mid-gate.
 function ensureEnrolledActorsTable(database) {
+  if (hasTable(database, 'enrolled_actors')) return
   database.exec(enrolledActorsTableDdl({ ifNotExists: true }))
 }
 
@@ -847,8 +863,12 @@ function verifyEnrolledActorsColumns(database) {
 // contributes its one transaction runner so consumption + enrollment commit
 // or roll back inside the store's single-writer discipline.
 function ensureInvitesTables(database) {
-  database.exec(invitesTableDdl({ ifNotExists: true }))
-  database.exec(inviteConsumptionsTableDdl({ ifNotExists: true }))
+  if (!hasTable(database, 'invites')) {
+    database.exec(invitesTableDdl({ ifNotExists: true }))
+  }
+  if (!hasTable(database, 'invite_consumptions')) {
+    database.exec(inviteConsumptionsTableDdl({ ifNotExists: true }))
+  }
 }
 
 function verifyInvitesColumns(database, tableName, expectedColumns) {
@@ -875,6 +895,7 @@ function verifyInvitesColumns(database, tableName, expectedColumns) {
 // table, so a ban written by the separate CLI process is visible at next
 // request through WAL.
 function ensureBannedActorsTable(database) {
+  if (hasTable(database, 'banned_actors')) return
   database.exec(bannedActorsTableDdl({ ifNotExists: true }))
 }
 
@@ -903,8 +924,16 @@ function verifyBannedActorsColumns(database) {
 // locator tokens (DUP_BASE_SAME_INSTALL), so `chat_id_taken` never arises
 // from a same-base allocation race.
 function ensureSessionPrincipalTable(database) {
-  database.exec(sessionPrincipalsTableDdl({ ifNotExists: true }))
-  database.exec(sessionPrincipalsAddressIndexDdl())
+  const tableExisted = hasTable(database, 'session_principals')
+  if (!tableExisted) {
+    database.exec(sessionPrincipalsTableDdl({ ifNotExists: true }))
+    database.exec(sessionPrincipalsAddressIndexDdl())
+    database.exec(sessionPrincipalsLiveBaseIndexDdl())
+    return
+  }
+  if (!hasIndex(database, SESSION_PRINCIPALS_ADDRESS_INDEX_NAME)) {
+    database.exec(sessionPrincipalsAddressIndexDdl())
+  }
 }
 
 function verifySessionPrincipalColumns(database) {
@@ -937,12 +966,83 @@ function verifySessionPrincipalAddressIndex(database) {
   }
 }
 
+function ensureSessionPrincipalLiveBaseIndex(database, { role }) {
+  if (hasIndex(database, SESSION_PRINCIPALS_LIVE_BASE_INDEX_NAME)) return
+  if (role !== 'server') return
+  let converged = 0
+  let migrated = false
+  database.exec('BEGIN IMMEDIATE')
+  try {
+    if (!hasIndex(database, SESSION_PRINCIPALS_LIVE_BASE_INDEX_NAME)) {
+      const nowIso = new Date().toISOString()
+      database.prepare(`
+        UPDATE session_principals
+        SET base_lease_status = 'expired'
+        WHERE principal_status = 'retained'
+          AND base_lease_status = 'occupied'
+          AND base_lease_expires_at <= ?
+      `).run(nowIso)
+      const convergeResult = database.prepare(`
+        WITH ranked AS (
+          SELECT
+            rowid AS rid,
+            ROW_NUMBER() OVER (
+              PARTITION BY lower(base_name)
+              ORDER BY last_heartbeat_at DESC, created_at DESC, rowid DESC
+            ) AS rn
+          FROM session_principals
+          WHERE principal_status = 'retained'
+            AND base_lease_status = 'occupied'
+        )
+        UPDATE session_principals
+        SET base_lease_status = 'expired'
+        WHERE rowid IN (SELECT rid FROM ranked WHERE rn > 1)
+      `).run()
+      converged = Number(convergeResult.changes ?? 0)
+      database.exec(sessionPrincipalsLiveBaseIndexDdl())
+      migrated = true
+    }
+    database.exec('COMMIT')
+  } catch (error) {
+    try {
+      if (database.isTransaction) database.exec('ROLLBACK')
+    } catch {
+      // Preserve root migration error below.
+    }
+    fail('database_configuration_failed', `failed to migrate live Agent ID index: ${error?.message ?? 'unknown error'}`)
+  }
+  if (migrated) {
+    process.stderr.write(`agent-room: converged ${converged} duplicate live Agent IDs before indexing\n`)
+  }
+}
+
+function verifySessionPrincipalLiveBaseIndex(database, { role }) {
+  const indexList = database
+    .prepare("SELECT name, \"unique\" AS is_unique FROM pragma_index_list('session_principals')")
+    .all()
+  const match = indexList.find(row => row.name === SESSION_PRINCIPALS_LIVE_BASE_INDEX_NAME)
+  if (!match) {
+    if (role !== 'server') return
+    fail('database_schema_invalid', 'database table session_principals is missing the live-base unique index')
+  }
+  if (Number(match.is_unique) !== 1) {
+    fail('database_schema_invalid', `database index ${SESSION_PRINCIPALS_LIVE_BASE_INDEX_NAME} must be unique`)
+  }
+  const indexRow = database
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?")
+    .get(SESSION_PRINCIPALS_LIVE_BASE_INDEX_NAME)
+  if (!indexRow || typeof indexRow.sql !== 'string' || !/lower\s*\(\s*base_name\s*\)/i.test(indexRow.sql)) {
+    fail('database_schema_invalid', `database index ${SESSION_PRINCIPALS_LIVE_BASE_INDEX_NAME} has a divergent definition`)
+  }
+}
+
 // v0.9.0 (additive, no schema-version bump): the session-pair membership
 // table. The pair ROOMS themselves are rows of the existing rooms table under
 // the `ssession:` pair-key prefix (same substrate, same durable log — the
 // rooms table's UNIQUE(pair_key) already makes the canonical session pair
 // idempotent); only membership needed a new table, keyed by session id.
 function ensureSessionPairMembersTable(database) {
+  if (hasTable(database, 'session_pair_members')) return
   database.exec(sessionPairMembersTableDdl({ ifNotExists: true }))
 }
 
@@ -1049,6 +1149,7 @@ const MESSAGES_DUPLICATE_GATE_INDEX_COLUMNS = Object.freeze([
 ])
 
 function ensureMessagesDuplicateGateIndex(database) {
+  if (hasIndex(database, MESSAGES_DUPLICATE_GATE_INDEX_NAME)) return
   database.exec(`
     CREATE INDEX IF NOT EXISTS ${MESSAGES_DUPLICATE_GATE_INDEX_NAME}
       ON messages (room_id, actor_fingerprint, text, seq);
@@ -1239,6 +1340,8 @@ export function openRoomLog({
       ensureSessionPrincipalTable(database)
       verifySessionPrincipalColumns(database)
       verifySessionPrincipalAddressIndex(database)
+      ensureSessionPrincipalLiveBaseIndex(database, { role })
+      verifySessionPrincipalLiveBaseIndex(database, { role })
       ensureSessionPairMembersTable(database)
       verifySessionPairMembersColumns(database)
       verifyStrictTables(database)
@@ -1402,10 +1505,13 @@ export function openRoomLog({
 
       const outcomes = new Array(batch.length)
       const deferredWarnLines = []
+      const batchUndos = []
+      let activeUndo = null
       try {
         for (let index = 0; index < batch.length; index += 1) {
           const entry = batch[index]
           const savepoint = `sp_${index}`
+          activeUndo = typeof entry.captureMemoryUndo === 'function' ? entry.captureMemoryUndo() : null
           database.exec(`SAVEPOINT ${savepoint}`)
           try {
             if (typeof entry.validateFence === 'function') {
@@ -1413,6 +1519,8 @@ export function openRoomLog({
             }
             const rawResult = entry.execute(api)
             database.exec(`RELEASE ${savepoint}`)
+            if (activeUndo !== null) batchUndos.push(activeUndo)
+            activeUndo = null
             if (rawResult && typeof rawResult === 'object' && typeof rawResult.warnLine === 'string') {
               deferredWarnLines.push(rawResult.warnLine)
             }
@@ -1439,6 +1547,14 @@ export function openRoomLog({
             }
             database.exec(`ROLLBACK TO ${savepoint}`)
             database.exec(`RELEASE ${savepoint}`)
+            if (activeUndo !== null) {
+              try {
+                activeUndo()
+              } catch {
+                // Keep rollback recovery deterministic.
+              }
+              activeUndo = null
+            }
             const recordedError = isSqliteFull
               ? new AgentRoomRuntimeError('storage_low', 'the disk holding the agent-room data directory is full; the message was not committed')
               : opError
@@ -1451,6 +1567,21 @@ export function openRoomLog({
           if (database.isTransaction) database.exec('ROLLBACK')
         } catch {
           // Preserve batchError below.
+        }
+        if (activeUndo !== null) {
+          try {
+            activeUndo()
+          } catch {
+            // Keep rollback recovery deterministic.
+          }
+          activeUndo = null
+        }
+        for (let i = batchUndos.length - 1; i >= 0; i -= 1) {
+          try {
+            batchUndos[i]()
+          } catch {
+            // Keep unwinding earlier ops.
+          }
         }
         if ((Number(batchError?.errcode) & 0xff) === SQLITE_BUSY) {
           fail('database_busy', 'agent-room database write lock stayed busy during commit')
@@ -1680,6 +1811,7 @@ export function openRoomLog({
       // Identity context operations are delegated to the same-connection
       // repository; the room-log module remains schema and connection owner.
       upsertChatIdClaim(...args) { assertOpen(); return identityOperations.upsertChatIdClaim(...args) },
+      upsertChatIdClaimInTx(...args) { assertOpen(); return identityOperations.upsertChatIdClaimInTx(...args) },
       listClaimsForChatId(...args) { assertOpen(); return identityOperations.listClaimsForChatId(...args) },
       latestClaimForActor(...args) { assertOpen(); return identityOperations.latestClaimForActor(...args) },
       recentClaims(...args) { assertOpen(); return identityOperations.recentClaims(...args) },
@@ -1842,6 +1974,31 @@ export function openRoomLog({
       heartbeatSessionPrincipalInTx(...args) {
         assertOpen()
         return identityOperations.heartbeatSessionPrincipalInTx(...args)
+      },
+
+      sweepBaseLeasesInTx(...args) {
+        assertOpen()
+        return identityOperations.sweepBaseLeasesInTx(...args)
+      },
+
+      findOccupiedBaseOwner(...args) {
+        assertOpen()
+        return identityOperations.findOccupiedBaseOwner(...args)
+      },
+
+      allocateSessionPrincipalInTx(...args) {
+        assertOpen()
+        return identityOperations.allocateSessionPrincipalInTx(...args)
+      },
+
+      resumeSessionPrincipalInTx(...args) {
+        assertOpen()
+        return identityOperations.resumeSessionPrincipalInTx(...args)
+      },
+
+      releaseSessionBaseLeaseInTx(...args) {
+        assertOpen()
+        return identityOperations.releaseSessionBaseLeaseInTx(...args)
       },
     }
     return Object.freeze(api)

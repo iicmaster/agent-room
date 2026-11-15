@@ -27,6 +27,7 @@ import { randomUUID } from 'node:crypto'
 
 import {
   CHAT_ID_INVALID_MESSAGE,
+  CHAT_ID_PATTERN,
   CLIENT_MESSAGE_ID_MAX,
   MESSAGE_TEXT_MAX,
   PROTOCOL_HEADER,
@@ -43,8 +44,12 @@ import {
   CONNECTION_MODE_ENV,
   applyUntrustedEnvelope,
   loadChatIdConfig,
+  resolveOrMintSessionPrincipal,
 } from '../client/api-client.mjs'
-import { machineLabel } from '../client/session-state.mjs'
+import {
+  machineLabel,
+  sessionScopeKey,
+} from '../client/session-state.mjs'
 import { REMOTE_TRANSPORT, applyTrustMatrix, loadAllowlist } from '../client/trust.mjs'
 import { ensureServer } from '../client/ensure-server.mjs'
 import { loadRemoteConfig } from '../client/remote-config.mjs'
@@ -186,7 +191,7 @@ export async function runSendFamilyCommand(tokens, { pluginDataDir, sharedDataDi
   const attempt = { clientMessageId: null, room: null, realmId: null, origin: null, transport: null, postSend: false, provablyNotSent: false }
   try {
     const parsed = parseFlags(tokens, new Map([
-      ['room', 'string'], ['to', 'string'], ['text', 'string'], ['reply-to', 'integer'], ['id', 'string'],
+      ['room', 'string'], ['to', 'string'], ['text', 'string'], ['reply-to', 'integer'], ['id', 'string'], ['name', 'string'], ['role', 'string'],
     ]))
     if (parsed.error !== undefined) return usage(command, parsed.error)
     const { flags } = parsed
@@ -197,8 +202,12 @@ export async function runSendFamilyCommand(tokens, { pluginDataDir, sharedDataDi
     if (flags.to !== undefined) {
       return runAddressedSend({
         command, to: flags.to, text: flags.text, clientMessageId: flags.id, replyToFlag: flags['reply-to'],
+        agentName: flags.name, agentRole: flags.role,
         attempt, deps: { pluginDataDir, sharedDataDir, env },
       })
+    }
+    if (flags.name !== undefined || flags.role !== undefined) {
+      return usage(command, '--name and --role apply only with --to')
     }
     if (flags.room === undefined) return usage(command, '--room is required: agent-room send --room <room_id> --text <text>')
     if (flags.text === undefined) return usage(command, '--text is required: agent-room send --room <room_id> --text <text>')
@@ -652,12 +661,25 @@ function addressedResultReceipt({ command, to, result, clientMessageId, realmId,
 // ephemeral principal, POST /api/messages once with the Session capability
 // (the outcome-unknown discipline: one identical-id retry when the FIRST
 // connection itself was refused), then release the base lease.
-async function runAddressedSend({ command, to, text, clientMessageId: clientMessageIdFlag, replyToFlag, deps, attempt }) {
+async function runAddressedSend({
+  command,
+  to,
+  text,
+  clientMessageId: clientMessageIdFlag,
+  replyToFlag,
+  agentName,
+  agentRole,
+  deps,
+  attempt,
+}) {
   const { pluginDataDir, sharedDataDir, env } = deps
   try {
     if (to === undefined) return usage(command, '--to is required: the peer session\u0027s full address (base~locator-token@machine); see "agent-room sessions"')
     const address = sessionAddressForms(to)
     if (address === null) return usage(command, `"${String(to).slice(0, 96)}" is not a valid session address: ${SESSION_ADDRESS_INVALID_MESSAGE}`)
+    if (agentName !== undefined && !CHAT_ID_PATTERN.test(agentName)) {
+      return usage(command, `--name: ${CHAT_ID_INVALID_MESSAGE}`)
+    }
     if (text === undefined) return usage(command, '--text is required')
     if (text.trim().length < 1 || text.length > MESSAGE_TEXT_MAX) {
       return usage(command, `--text must contain 1 to ${MESSAGE_TEXT_MAX} characters`)
@@ -675,12 +697,6 @@ async function runAddressedSend({ command, to, text, clientMessageId: clientMess
     const clientMessageId = clientMessageIdFlag ?? randomUUID()
     attempt.clientMessageId = clientMessageId
 
-    let config
-    try {
-      config = loadChatIdConfig(pluginDataDir)
-    } catch (error) {
-      return refusal(command, error)
-    }
     const { target, origin } = await resolveTarget({ pluginDataDir, sharedDataDir, env })
     const { token, transport } = await authenticate(target, { pluginDataDir, sharedDataDir, env })
     const realmId = await realmIdOf(target, token)
@@ -688,22 +704,41 @@ async function runAddressedSend({ command, to, text, clientMessageId: clientMess
     attempt.transport = transport
     attempt.realmId = realmId
 
-    // The ephemeral principal: allocation carries the installation bearer;
-    // everything after carries the Session capability. The base-lease
-    // release in the finally is best-effort and bounded.
-    const allocated = await roundTrip(target, 'POST', '/api/session-principals', protocolHeaders(token), {
-      base_chat_id: config.chatId,
-      machine: machineLabel({ env }),
-      client_type: 'cli',
-    }, CLIENT_REQUEST_TIMEOUT_MS)
-    if (allocated.status !== 200) {
-      throw new AgentRoomRuntimeError(
-        allocated.body?.error?.code ?? 'request_failed',
-        allocated.body?.error?.message ?? `the agent-room server answered ${allocated.status}`,
-      )
+    // Resolve the session principal for this process scope (resuming a stored
+    // principal unless --name overrides it, else allocating --name once or
+    // auto-minting <role>-<shortToken> up to 3 attempts), act with its Session
+    // capability, then release the base lease best-effort in finally.
+    const sessionScope = sessionScopeKey({ env })
+    const machine = machineLabel({ env })
+    const roundTripOrThrow = async (method, path, headers, body) => {
+      const response = await roundTrip(target, method, path, headers, body, CLIENT_REQUEST_TIMEOUT_MS)
+      if (response.status !== 200) {
+        throw new AgentRoomRuntimeError(
+          response.body?.error?.code ?? 'request_failed',
+          response.body?.error?.message ?? `the agent-room server answered ${response.status}`,
+        )
+      }
+      return response.body.result
     }
-    const principal = allocated.body.result
-    const capability = principal.session_capability
+    const principal = await resolveOrMintSessionPrincipal({
+      pluginDataDir,
+      sessionScope,
+      requestedName: agentName ?? null,
+      requestedRole: agentRole ?? 'agent',
+      resumePrincipal: ({ sessionId, generation, capability: sessionCapability }) => roundTripOrThrow(
+        'POST',
+        '/api/session-principals/resume',
+        sessionHeadersOf(sessionCapability),
+        { session_id: sessionId, generation },
+      ),
+      allocatePrincipal: baseChatId => roundTripOrThrow(
+        'POST',
+        '/api/session-principals',
+        protocolHeaders(token),
+        { base_chat_id: baseChatId, machine, client_type: 'cli' },
+      ),
+    })
+    const capability = principal.capability
     try {
       const sendBody = {
         to: address.address,
@@ -744,13 +779,14 @@ export async function runDmCommand(tokens, deps) {
   const attempt = { clientMessageId: null, room: null, realmId: null, origin: null, transport: null, postSend: false, provablyNotSent: false }
   try {
     const parsed = parseFlags(tokens, new Map([
-      ['to', 'string'], ['text', 'string'], ['id', 'string'], ['reply-to', 'integer'],
+      ['to', 'string'], ['text', 'string'], ['id', 'string'], ['reply-to', 'integer'], ['name', 'string'], ['role', 'string'],
     ]))
     if (parsed.error !== undefined) return usage(command, parsed.error)
     const { flags } = parsed
     if (parsed.rest.length > 0) return usage(command, `unexpected argument "${parsed.rest[0]}"; agent-room dm takes options only`)
     return await runAddressedSend({
       command, to: flags.to, text: flags.text, clientMessageId: flags.id, replyToFlag: flags['reply-to'],
+      agentName: flags.name, agentRole: flags.role,
       attempt, deps,
     })
   } catch (error) {

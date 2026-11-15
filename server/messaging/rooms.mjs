@@ -30,6 +30,8 @@ export function createMessagingRoomOperations({ database, withImmediateTransacti
       assertOpen()
       const { title } = requireObject(options)
       const validTitle = requireTitle(title, 'Broadcast Room')
+      const outside = database.prepare(`SELECT id, kind, title, pair_key, created_by_fingerprint, created_at FROM rooms WHERE kind = 'broadcast' ORDER BY created_at ASC, id ASC LIMIT 1`).get()
+      if (outside) return plainRoom(outside)
       return withImmediateTransaction(database, () => {
         const existingRow = database.prepare(`SELECT id, kind, title, pair_key, created_by_fingerprint, created_at FROM rooms WHERE kind = 'broadcast' ORDER BY created_at ASC, id ASC LIMIT 1`).get()
         if (existingRow) return plainRoom(existingRow)

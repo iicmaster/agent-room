@@ -132,6 +132,7 @@ export const SESSION_PRINCIPALS_COLUMNS = Object.freeze([
 ])
 
 export const SESSION_PRINCIPALS_ADDRESS_INDEX_NAME = 'idx_session_principals_address'
+export const SESSION_PRINCIPALS_LIVE_BASE_INDEX_NAME = 'idx_session_principals_live_base'
 
 // Full-address uniqueness among RETAINED principals (the address of a revoked
 // or retention-expired principal is freed). IF NOT EXISTS on every open; the
@@ -141,6 +142,16 @@ export function sessionPrincipalsAddressIndexDdl() {
     CREATE UNIQUE INDEX IF NOT EXISTS ${SESSION_PRINCIPALS_ADDRESS_INDEX_NAME}
       ON session_principals (address)
       WHERE principal_status = 'retained';
+  `
+}
+
+// Live Agent ID (lower(base_name)) uniqueness across retained principals with
+// an occupied base lease (Story 1.2).
+export function sessionPrincipalsLiveBaseIndexDdl() {
+  return `
+    CREATE UNIQUE INDEX IF NOT EXISTS ${SESSION_PRINCIPALS_LIVE_BASE_INDEX_NAME}
+      ON session_principals (lower(base_name))
+      WHERE principal_status = 'retained' AND base_lease_status = 'occupied';
   `
 }
 
@@ -170,6 +181,15 @@ export function createSessionPrincipalOperations({ database, withImmediateTransa
     `).run(cutoff)
   }
 
+  const sweepBaseLeasesImpl = nowMs => {
+    const cutoff = new Date(nowMs).toISOString()
+    database.prepare(`
+      UPDATE session_principals
+      SET base_lease_status = 'expired'
+      WHERE principal_status = 'retained' AND base_lease_status = 'occupied' AND base_lease_expires_at <= ?
+    `).run(cutoff)
+  }
+
   const selectBySessionId = sessionId => database
     .prepare(`SELECT ${PRINCIPAL_COLUMNS} FROM session_principals WHERE session_id = ?`)
     .get(sessionId)
@@ -177,6 +197,26 @@ export function createSessionPrincipalOperations({ database, withImmediateTransa
   const selectRetainedByAddress = address => database
     .prepare(`SELECT ${PRINCIPAL_COLUMNS} FROM session_principals WHERE address = ? AND principal_status = 'retained'`)
     .get(address)
+
+  const selectOccupiedByBase = baseName => database
+    .prepare(`
+      SELECT ${PRINCIPAL_COLUMNS}
+      FROM session_principals
+      WHERE principal_status = 'retained' AND base_lease_status = 'occupied' AND lower(base_name) = lower(?)
+      LIMIT 1
+    `)
+    .get(baseName)
+
+  const failAgentIdTaken = (baseName, holder) => {
+    const error = new AgentRoomRuntimeError(
+      'agent_id_taken',
+      `Agent ID "${baseName}" is currently occupied by another live session`,
+    )
+    if (holder) {
+      error.conflictHolder = plainPrincipal(holder)
+    }
+    throw error
+  }
 
   const requireRetainedLive = (row, { allowRevokedCode = null } = {}) => {
     if (!row) fail('session_expired', 'no retained session principal matches this credential')
@@ -189,85 +229,212 @@ export function createSessionPrincipalOperations({ database, withImmediateTransa
     return row
   }
 
-  function heartbeatSessionPrincipalInTxImpl({ sessionId, generation, now }) {
+  function prepareAllocateArgs(options) {
+    const {
+      installationFingerprint,
+      baseName,
+      machine,
+      clientType = null,
+      nowMs,
+      locatorTokenFn = () => randomBytes(7).toString('base64url').slice(0, SESSION_LOCATOR_TOKEN_CHARS),
+      capabilityBytesFn = () => randomBytes(32),
+    } = requireObject(options)
+    const validFingerprint = requireFingerprint(installationFingerprint)
+    const validBase = requireChatId(baseName)
+    const validMachine = machineForm(machine)
+    const now = requireNow(nowMs)
+    const validClientType = clientType === null || clientType === undefined
+      ? null
+      : (typeof clientType === 'string' && clientType.length >= 1 && clientType.length <= 32
+        ? clientType
+        : fail('invalid_request', 'clientType must be a string of 1-32 characters when provided'))
+    const capability = capabilityBytesFn()
+    if (!Buffer.isBuffer(capability) || capability.length !== 32) {
+      fail('invalid_argument', 'capabilityBytesFn must answer a 32-byte Buffer')
+    }
+    const capabilityDigest = capabilityDigestOf(capability.toString('base64url'))
+    return {
+      validFingerprint,
+      validBase,
+      validMachine,
+      validClientType,
+      now,
+      locatorTokenFn,
+      capability,
+      capabilityDigest,
+    }
+  }
+
+  function allocateSessionPrincipalInTxImpl({
+    validFingerprint,
+    validBase,
+    validMachine,
+    validClientType,
+    now,
+    locatorTokenFn,
+    capability,
+    capabilityDigest,
+  }) {
+    const createdAt = new Date(now).toISOString()
+    const leaseExpiresAt = new Date(now + SESSION_BASE_LEASE_MS).toISOString()
+    const retentionExpiresAt = new Date(now + SESSION_PRINCIPAL_RETENTION_MS).toISOString()
     sweepRetention(now)
+    sweepBaseLeasesImpl(now)
+    const baseHolder = selectOccupiedByBase(validBase)
+    if (baseHolder) {
+      failAgentIdTaken(validBase, baseHolder)
+    }
+    const address = `${validBase}~${locatorTokenFn()}@${validMachine}`
+    const holder = selectRetainedByAddress(address)
+    if (holder) {
+      // Explicit duplicate live address: refuse with the holder's machine,
+      // never suffix, never merge, never take the base from a live holder.
+      fail('name_taken', `session address ${address} is already held by a live principal on machine ${holder.machine}`)
+    }
+    const sessionId = randomUUID()
+    try {
+      database.prepare(`
+        INSERT INTO session_principals (
+          session_id, installation_fingerprint, generation, base_name, address, machine,
+          client_type, capability_digest, created_at, last_heartbeat_at, base_lease_expires_at,
+          base_lease_status, principal_retention_expires_at, principal_status
+        ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, 'occupied', ?, 'retained')
+      `).run(
+        sessionId, validFingerprint, validBase, address, validMachine,
+        validClientType, capabilityDigest, createdAt, createdAt, leaseExpiresAt, retentionExpiresAt,
+      )
+    } catch (error) {
+      const conflictingBase = selectOccupiedByBase(validBase)
+      if (conflictingBase) {
+        failAgentIdTaken(validBase, conflictingBase)
+      }
+      const conflictingAddress = selectRetainedByAddress(address)
+      if (conflictingAddress) {
+        fail('name_taken', `session address ${address} is already held by a live principal on machine ${conflictingAddress.machine}`)
+      }
+      throw error
+    }
+    const row = selectBySessionId(sessionId)
+    return { ...plainPrincipal(row), session_capability: capability.toString('base64url') }
+  }
+
+  function heartbeatSessionPrincipalInTxImpl({ sessionId, generation, now, onReoccupy }) {
+    sweepRetention(now)
+    sweepBaseLeasesImpl(now)
     const row = selectBySessionId(sessionId)
     requireRetainedLive(row)
     if (Number(row.generation) !== generation) {
       fail('session_expired', `session generation ${generation} is fenced; the current generation is ${Number(row.generation)}`)
     }
+    if (row.base_lease_status !== 'occupied') {
+      const existingHolder = selectOccupiedByBase(row.base_name)
+      if (existingHolder && existingHolder.session_id !== row.session_id) {
+        failAgentIdTaken(row.base_name, existingHolder)
+      }
+      onReoccupy?.(plainPrincipal(row))
+    }
     const beatAt = new Date(now).toISOString()
     const leaseExpiresAt = new Date(now + SESSION_BASE_LEASE_MS).toISOString()
+    const retentionExpiresAt = new Date(now + SESSION_PRINCIPAL_RETENTION_MS).toISOString()
+    try {
+      database.prepare(`
+        UPDATE session_principals
+        SET last_heartbeat_at = ?, base_lease_expires_at = ?, base_lease_status = 'occupied',
+            principal_retention_expires_at = ?
+        WHERE session_id = ?
+      `).run(beatAt, leaseExpiresAt, retentionExpiresAt, sessionId)
+    } catch (error) {
+      const existingHolder = selectOccupiedByBase(row.base_name)
+      if (existingHolder && existingHolder.session_id !== row.session_id) {
+        failAgentIdTaken(row.base_name, existingHolder)
+      }
+      throw error
+    }
+    return plainPrincipal(selectBySessionId(sessionId))
+  }
+
+  function resumeSessionPrincipalInTxImpl({ sessionId, generation, now, onReoccupy }) {
+    sweepRetention(now)
+    sweepBaseLeasesImpl(now)
+    const row = selectBySessionId(sessionId)
+    requireRetainedLive(row)
+    if (Number(row.generation) !== generation) {
+      fail('session_expired', `session generation ${generation} is fenced; the current generation is ${Number(row.generation)}`)
+    }
+    const existingHolder = selectOccupiedByBase(row.base_name)
+    if (existingHolder && existingHolder.session_id !== row.session_id) {
+      failAgentIdTaken(row.base_name, existingHolder)
+    }
+    onReoccupy?.(plainPrincipal(row))
+    const beatAt = new Date(now).toISOString()
+    const leaseExpiresAt = new Date(now + SESSION_BASE_LEASE_MS).toISOString()
+    const retentionExpiresAt = new Date(now + SESSION_PRINCIPAL_RETENTION_MS).toISOString()
+    try {
+      database.prepare(`
+        UPDATE session_principals
+        SET generation = generation + 1, last_heartbeat_at = ?,
+            base_lease_expires_at = ?, base_lease_status = 'occupied',
+            principal_retention_expires_at = ?
+        WHERE session_id = ?
+      `).run(beatAt, leaseExpiresAt, retentionExpiresAt, sessionId)
+    } catch (error) {
+      const holderAfter = selectOccupiedByBase(row.base_name)
+      if (holderAfter && holderAfter.session_id !== row.session_id) {
+        failAgentIdTaken(row.base_name, holderAfter)
+      }
+      throw error
+    }
+    return plainPrincipal(selectBySessionId(sessionId))
+  }
+
+  function releaseSessionBaseLeaseInTxImpl(sessionId) {
+    const row = selectBySessionId(sessionId)
+    if (!row) fail('session_expired', 'no session principal matches this credential')
     database.prepare(`
-      UPDATE session_principals
-      SET last_heartbeat_at = ?, base_lease_expires_at = ?, base_lease_status = 'occupied'
-      WHERE session_id = ?
-    `).run(beatAt, leaseExpiresAt, sessionId)
+      UPDATE session_principals SET base_lease_status = 'released' WHERE session_id = ?
+    `).run(sessionId)
     return plainPrincipal(selectBySessionId(sessionId))
   }
 
   return Object.freeze({
+    sweepBaseLeasesInTx(nowMs) {
+      assertOpen()
+      if (!database.isTransaction) {
+        fail('invalid_argument', 'sweepBaseLeasesInTx requires an active transaction')
+      }
+      sweepBaseLeasesImpl(requireNow(nowMs))
+    },
+
+    findOccupiedBaseOwner(baseName, nowMs) {
+      assertOpen()
+      const validBase = requireChatId(baseName)
+      const cutoff = new Date(requireNow(nowMs)).toISOString()
+      const row = database.prepare(`
+        SELECT ${PRINCIPAL_COLUMNS}
+        FROM session_principals
+        WHERE principal_status = 'retained'
+          AND base_lease_status = 'occupied'
+          AND lower(base_name) = lower(?)
+          AND base_lease_expires_at > ?
+        LIMIT 1
+      `).get(validBase, cutoff)
+      return row ? plainPrincipal(row) : null
+    },
+
+    allocateSessionPrincipalInTx(options) {
+      assertOpen()
+      if (!database.isTransaction) {
+        fail('invalid_argument', 'allocateSessionPrincipalInTx requires an active transaction')
+      }
+      const prepared = prepareAllocateArgs(options)
+      return allocateSessionPrincipalInTxImpl(prepared)
+    },
+
     // Allocate one session principal under an authenticated installation.
-    // One BEGIN IMMEDIATE: retention sweep → address mint → uniqueness check
-    // → insert with an occupied 45 s base lease and a 30-day retention
-    // window. The raw capability is generated here, returned in the result
-    // ONCE, and only its digest is persisted. `locatorTokenFn` and
-    // `capabilityBytesFn` are test seams (defaulting to the real random
-    // sources); the DUP_FULL_ADDRESS refusal is reached by pinning the token
-    // seam to a live address's token — a collision refuses with the holder's
-    // machine and never retries with a suffixed name.
     allocateSessionPrincipal(options) {
       assertOpen()
-      const {
-        installationFingerprint,
-        baseName,
-        machine,
-        clientType = null,
-        nowMs,
-        locatorTokenFn = () => randomBytes(7).toString('base64url').slice(0, SESSION_LOCATOR_TOKEN_CHARS),
-        capabilityBytesFn = () => randomBytes(32),
-      } = requireObject(options)
-      const validFingerprint = requireFingerprint(installationFingerprint)
-      const validBase = requireChatId(baseName)
-      const validMachine = machineForm(machine)
-      const now = requireNow(nowMs)
-      const validClientType = clientType === null || clientType === undefined
-        ? null
-        : (typeof clientType === 'string' && clientType.length >= 1 && clientType.length <= 32
-          ? clientType
-          : fail('invalid_request', 'clientType must be a string of 1-32 characters when provided'))
-      const capability = capabilityBytesFn()
-      if (!Buffer.isBuffer(capability) || capability.length !== 32) {
-        fail('invalid_argument', 'capabilityBytesFn must answer a 32-byte Buffer')
-      }
-      const capabilityDigest = capabilityDigestOf(capability.toString('base64url'))
-      const createdAt = new Date(now).toISOString()
-      const leaseExpiresAt = new Date(now + SESSION_BASE_LEASE_MS).toISOString()
-      const retentionExpiresAt = new Date(now + SESSION_PRINCIPAL_RETENTION_MS).toISOString()
-
-      return withImmediateTransaction(database, () => {
-        sweepRetention(now)
-        const address = `${validBase}~${locatorTokenFn()}@${validMachine}`
-        const holder = selectRetainedByAddress(address)
-        if (holder) {
-          // Explicit duplicate live address: refuse with the holder's machine,
-          // never suffix, never merge, never take the base from a live holder.
-          fail('name_taken', `session address ${address} is already held by a live principal on machine ${holder.machine}`)
-        }
-        const sessionId = randomUUID()
-        database.prepare(`
-          INSERT INTO session_principals (
-            session_id, installation_fingerprint, generation, base_name, address, machine,
-            client_type, capability_digest, created_at, last_heartbeat_at, base_lease_expires_at,
-            base_lease_status, principal_retention_expires_at, principal_status
-          ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, 'occupied', ?, 'retained')
-        `).run(
-          sessionId, validFingerprint, validBase, address, validMachine,
-          validClientType, capabilityDigest, createdAt, createdAt, leaseExpiresAt, retentionExpiresAt,
-        )
-        const row = selectBySessionId(sessionId)
-        return { ...plainPrincipal(row), session_capability: capability.toString('base64url') }
-      })
+      const prepared = prepareAllocateArgs(options)
+      return withImmediateTransaction(database, () => allocateSessionPrincipalInTxImpl(prepared))
     },
 
     // Heartbeat: authenticated callers resolved the capability digest first
@@ -281,48 +448,53 @@ export function createSessionPrincipalOperations({ database, withImmediateTransa
       if (!database.isTransaction) {
         fail('invalid_argument', 'heartbeatSessionPrincipalInTx requires an active transaction')
       }
-      const { sessionId, generation, nowMs } = requireObject(options)
+      const { sessionId, generation, nowMs, onReoccupy } = requireObject(options)
       const now = requireNow(nowMs)
-      return heartbeatSessionPrincipalInTxImpl({ sessionId, generation, now })
+      return heartbeatSessionPrincipalInTxImpl({ sessionId, generation, now, onReoccupy })
     },
 
     heartbeatSessionPrincipal(options) {
       assertOpen()
-      const { sessionId, generation, nowMs } = requireObject(options)
+      const { sessionId, generation, nowMs, onReoccupy } = requireObject(options)
       const now = requireNow(nowMs)
       return withImmediateTransaction(database, () =>
-        heartbeatSessionPrincipalInTxImpl({ sessionId, generation, now }),
+        heartbeatSessionPrincipalInTxImpl({ sessionId, generation, now, onReoccupy }),
       )
+    },
+
+    resumeSessionPrincipalInTx(options) {
+      assertOpen()
+      if (!database.isTransaction) {
+        fail('invalid_argument', 'resumeSessionPrincipalInTx requires an active transaction')
+      }
+      const { sessionId, generation, nowMs, onReoccupy } = requireObject(options)
+      const now = requireNow(nowMs)
+      return resumeSessionPrincipalInTxImpl({ sessionId, generation, now, onReoccupy })
     },
 
     // Resume an offline-but-retained principal: the capability's generation
     // must still be current. Success INCREMENTS the generation (fencing every
     // older beat), refreshes the base lease, and returns the SAME session id
-    // and full address. It never takes a base another live principal holds —
-    // base occupancy is per-principal in this implementation, so the resumed
-    // principal simply reoccupies its own lease row and its full locator
-    // keeps it distinct from whoever owns the reusable base.
+    // and full address.
     resumeSessionPrincipal(options) {
       assertOpen()
-      const { sessionId, generation, nowMs } = requireObject(options)
+      const { sessionId, generation, nowMs, onReoccupy } = requireObject(options)
       const now = requireNow(nowMs)
-      return withImmediateTransaction(database, () => {
-        sweepRetention(now)
-        const row = selectBySessionId(sessionId)
-        requireRetainedLive(row)
-        if (Number(row.generation) !== generation) {
-          fail('session_expired', `session generation ${generation} is fenced; the current generation is ${Number(row.generation)}`)
-        }
-        const beatAt = new Date(now).toISOString()
-        const leaseExpiresAt = new Date(now + SESSION_BASE_LEASE_MS).toISOString()
-        database.prepare(`
-          UPDATE session_principals
-          SET generation = generation + 1, last_heartbeat_at = ?,
-              base_lease_expires_at = ?, base_lease_status = 'occupied'
-          WHERE session_id = ?
-        `).run(beatAt, leaseExpiresAt, sessionId)
-        return plainPrincipal(selectBySessionId(sessionId))
-      })
+      return withImmediateTransaction(database, () =>
+        resumeSessionPrincipalInTxImpl({ sessionId, generation, now, onReoccupy }),
+      )
+    },
+
+    releaseSessionBaseLeaseInTx(options) {
+      assertOpen()
+      if (!database.isTransaction) {
+        fail('invalid_argument', 'releaseSessionBaseLeaseInTx requires an active transaction')
+      }
+      const { sessionId } = requireObject(options)
+      if (typeof sessionId !== 'string' || sessionId.length === 0) {
+        fail('invalid_argument', 'sessionId must be a non-empty string')
+      }
+      return releaseSessionBaseLeaseInTxImpl(sessionId)
     },
 
     // Release the base lease only: the durable principal, full address,
@@ -334,14 +506,7 @@ export function createSessionPrincipalOperations({ database, withImmediateTransa
       if (typeof sessionId !== 'string' || sessionId.length === 0) {
         fail('invalid_argument', 'sessionId must be a non-empty string')
       }
-      return withImmediateTransaction(database, () => {
-        const row = selectBySessionId(sessionId)
-        if (!row) fail('session_expired', 'no session principal matches this credential')
-        database.prepare(`
-          UPDATE session_principals SET base_lease_status = 'released' WHERE session_id = ?
-        `).run(sessionId)
-        return plainPrincipal(selectBySessionId(sessionId))
-      })
+      return withImmediateTransaction(database, () => releaseSessionBaseLeaseInTxImpl(sessionId))
     },
 
     // Operator revoke (installation-authenticated callers): the principal
@@ -429,17 +594,27 @@ export function createSessionPrincipalOperations({ database, withImmediateTransa
       assertOpen()
       const { nowMs } = requireObject(options)
       const now = requireNow(nowMs)
-      return withImmediateTransaction(database, () => {
-        sweepRetention(now)
-        const rows = database
-          .prepare(`SELECT ${PRINCIPAL_COLUMNS} FROM session_principals ORDER BY created_at ASC, session_id ASC`)
-          .all()
-        return rows.map(row => {
-          const principal = plainPrincipal(row)
-          const leaseLive = principal.base_lease_status === 'occupied'
-            && Date.parse(principal.base_lease_expires_at) > now
-          return { ...principal, presence: leaseLive ? 'online' : 'offline' }
-        })
+      const cutoff = new Date(now).toISOString()
+      const hasRetentionExpired = database.prepare(`
+        SELECT 1
+        FROM session_principals
+        WHERE principal_status = 'retained' AND principal_retention_expires_at < ?
+        LIMIT 1
+      `).get(cutoff)
+      const readRows = () => database
+        .prepare(`SELECT ${PRINCIPAL_COLUMNS} FROM session_principals ORDER BY created_at ASC, session_id ASC`)
+        .all()
+      const rows = hasRetentionExpired
+        ? withImmediateTransaction(database, () => {
+            sweepRetention(now)
+            return readRows()
+          })
+        : readRows()
+      return rows.map(row => {
+        const principal = plainPrincipal(row)
+        const leaseLive = principal.base_lease_status === 'occupied'
+          && Date.parse(principal.base_lease_expires_at) > now
+        return { ...principal, presence: leaseLive ? 'online' : 'offline' }
       })
     },
   })

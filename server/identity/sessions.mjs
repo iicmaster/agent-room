@@ -226,7 +226,21 @@ export function createSessionRegistry({
     return { actorFingerprint: entry.actorFingerprint }
   }
 
-  return { issue, verify, isLive, revoke, supersede, isSuperseded, enterInFlight, leaveInFlight, sessionKeys }
+  function snapshot() {
+    return {
+      sessions: new Map([...sessions].map(([k, v]) => [k, { ...v }])),
+      superseded: new Map(superseded),
+    }
+  }
+
+  function restore(saved) {
+    sessions.clear()
+    for (const [k, v] of saved.sessions) sessions.set(k, { ...v })
+    superseded.clear()
+    for (const [k, v] of saved.superseded) superseded.set(k, v)
+  }
+
+  return { issue, verify, isLive, revoke, supersede, isSuperseded, enterInFlight, leaveInFlight, sessionKeys, snapshot, restore }
 }
 
 // Extract the Bearer credential from request headers. The scheme is

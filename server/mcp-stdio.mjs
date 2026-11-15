@@ -573,6 +573,9 @@ export function createMcpServer({
   errorOutput = process.stderr,
   env = process.env,
   cwd = process.cwd(),
+  agentName = null,
+  agentRole = 'agent',
+  onFatalExit,
 } = {}) {
   assertSupportedRuntime()
   const dataDir = sharedDataDirectory(env)
@@ -603,7 +606,13 @@ export function createMcpServer({
   // starts a fresh one.
   let notifier = null
   function getClient() {
-    clientPromise ??= createAgentRoomClient({ dataDir, pluginDataDir: pluginData, sessionScope })
+    clientPromise ??= createAgentRoomClient({
+      dataDir,
+      pluginDataDir: pluginData,
+      sessionScope,
+      agentName,
+      agentRole,
+    })
     return clientPromise
   }
 
@@ -700,7 +709,13 @@ export function createMcpServer({
       // run yet: construction reads local state only. A construction failure
       // (nothing configured) leaves receive-ready off — the next tool call
       // surfaces the reason to the caller, where it belongs.
-      clientPromise ??= createAgentRoomClient({ dataDir, pluginDataDir: pluginData, sessionScope })
+      clientPromise ??= createAgentRoomClient({
+        dataDir,
+        pluginDataDir: pluginData,
+        sessionScope,
+        agentName,
+        agentRole,
+      })
       const started = startNotifier({
         client: clientPromise,
         pluginDataDir: pluginData,
@@ -723,18 +738,36 @@ export function createMcpServer({
   // retries, and an addressed send without a principal answers the coded
   // session_capability_required at its own call, where it belongs.
   let sessionPrincipalArmed = false
+  let sessionPrincipalPromise = null
+  let sessionPrincipalFatalError = null
   const sessionPrincipalOn = sessionPrincipalEnabled(env)
+  const isFatalSessionPrincipalError = error => (
+    error instanceof AgentRoomRuntimeError
+    && (error.code === 'agent_id_taken' || error.code === 'invalid_request')
+  )
   const startSessionPrincipalOnce = () => {
-    if (!sessionPrincipalOn || sessionPrincipalArmed || shutdownPromise !== null) return
+    if (!sessionPrincipalOn || sessionPrincipalArmed || shutdownPromise !== null || sessionPrincipalFatalError !== null) return
     sessionPrincipalArmed = true
-    void (async () => {
+    sessionPrincipalPromise = (async () => {
       try {
-        clientPromise ??= createAgentRoomClient({ dataDir, pluginDataDir: pluginData, sessionScope })
+        clientPromise ??= createAgentRoomClient({
+          dataDir,
+          pluginDataDir: pluginData,
+          sessionScope,
+          agentName,
+          agentRole,
+        })
         const readyClient = clientPromise
         await readyClient.ensureSessionPrincipal()
         readyClient.startSessionHeartbeat()
-      } catch {
+      } catch (error) {
         sessionPrincipalArmed = false
+        if (isFatalSessionPrincipalError(error)) {
+          sessionPrincipalFatalError = error
+          errorOutput.write(`agent-room MCP session principal failed: ${error.code}: ${error.message}\n`, () => {
+            onFatalExit?.(error)
+          })
+        }
       }
     })()
   }
@@ -742,6 +775,12 @@ export function createMcpServer({
   const callTool = async (name, args, signal) => {
     const invalid = validateArguments(name, args)
     if (invalid) return toolResult({ code: 'invalid_arguments', message: invalid }, true)
+    if (sessionPrincipalFatalError !== null) {
+      return toolResult({
+        code: sessionPrincipalFatalError.code,
+        message: sessionPrincipalFatalError.message,
+      }, true)
+    }
     try {
       const readyClient = await getClient()
       if (name === 'room_presence') {
@@ -896,6 +935,15 @@ export function createMcpServer({
         return toolResult(await readyClient.listRooms({ signal }))
       }
       if (name === 'room_status') {
+        if (sessionPrincipalOn && readyClient.sessionAddress === null && sessionPrincipalPromise !== null) {
+          await sessionPrincipalPromise
+          if (sessionPrincipalFatalError !== null) {
+            return toolResult({
+              code: sessionPrincipalFatalError.code,
+              message: sessionPrincipalFatalError.message,
+            }, true)
+          }
+        }
         const status = await readyClient.status({ signal })
         return toolResult({
           realm_id: status.realm_id,
@@ -1104,6 +1152,39 @@ export function createMcpServer({
   }
 }
 
+function parseMcpCliArgs(argv) {
+  let agentName = null
+  let agentRole = 'agent'
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index]
+    if (token === '--name' || token === '--role') {
+      const value = argv[index + 1]
+      if (typeof value !== 'string' || value.length === 0 || value.startsWith('--')) {
+        throw new AgentRoomRuntimeError('invalid_request', `${token} requires a value`)
+      }
+      if (token === '--name') agentName = value
+      else agentRole = value
+      index += 1
+      continue
+    }
+    if (token.startsWith('--name=')) {
+      agentName = token.slice('--name='.length)
+      if (agentName.length === 0) throw new AgentRoomRuntimeError('invalid_request', '--name requires a value')
+      continue
+    }
+    if (token.startsWith('--role=')) {
+      agentRole = token.slice('--role='.length)
+      if (agentRole.length === 0) throw new AgentRoomRuntimeError('invalid_request', '--role requires a value')
+      continue
+    }
+    throw new AgentRoomRuntimeError('invalid_request', `unknown option "${token}"`)
+  }
+  if (agentName !== null && !CHAT_ID_PATTERN.test(agentName)) {
+    throw new AgentRoomRuntimeError('invalid_request', `--name must match ${CHAT_ID_PATTERN.source}`)
+  }
+  return { agentName, agentRole }
+}
+
 function launchedDirectly() {
   if (!process.argv[1]) return false
   try { return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url)) } catch { return false }
@@ -1111,10 +1192,21 @@ function launchedDirectly() {
 
 if (launchedDirectly()) {
   try {
-    createMcpServer()
+    const cliOptions = parseMcpCliArgs(process.argv.slice(2))
+    let mcpServer = null
+    mcpServer = createMcpServer({
+      ...cliOptions,
+      onFatalExit: () => {
+        process.exitCode = 1
+        void (mcpServer ? mcpServer.close().catch(() => {}) : Promise.resolve()).finally(() => {
+          process.exit(1)
+        })
+      },
+    })
   } catch (error) {
-    process.stderr.write(`agent-room MCP failed: ${error.message}\n`)
+    process.stderr.write(`agent-room MCP failed: ${error?.code ?? 'startup_failed'}: ${error.message}\n`)
     process.exitCode = 1
+    process.exit(1)
   }
 }
 

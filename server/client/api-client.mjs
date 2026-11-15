@@ -65,12 +65,16 @@
 // Coded errors surface as AgentRoomRuntimeError carrying the wire code (and,
 // for ambiguous_chat_id, the candidates list from the error envelope).
 
+import { randomInt } from 'node:crypto'
 import http from 'node:http'
 import https from 'node:https'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 
 import {
+  AGENT_ID_MINT_ATTEMPTS,
+  AGENT_ID_MINT_ROLE_MAX,
+  AGENT_ID_MINT_TOKEN_CHARS,
   CLIENT_CONFIG_MAX_BYTES,
   CLIENT_LONGPOLL_MARGIN_MS,
   CLIENT_RELEASE_TIMEOUT_MS,
@@ -192,6 +196,99 @@ export function loadChatIdConfig(pluginDataDir) {
     )
   }
   return Object.freeze({ chatId: value.chat_id, path })
+}
+
+export function loadOptionalChatIdConfig(pluginDataDir) {
+  const path = join(pluginDataDir, 'config.json')
+  if (!existsSync(path)) return null
+  return loadChatIdConfig(pluginDataDir)
+}
+
+const MINT_TOKEN_ALPHABET = '0123456789abcdefghijklmnopqrstuvwxyz'
+
+export function mintCandidateAgentId({ role = 'agent', randomIntFn = randomInt } = {}) {
+  const cleaned = typeof role === 'string'
+    ? role
+        .toLowerCase()
+        .replace(/[^a-z0-9-]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, AGENT_ID_MINT_ROLE_MAX)
+        .replace(/-+$/, '')
+    : ''
+  const prefix = cleaned.length > 0 && /^[a-z0-9]/.test(cleaned) ? cleaned : 'agent'
+  let token = ''
+  for (let i = 0; i < AGENT_ID_MINT_TOKEN_CHARS; i += 1) {
+    token += MINT_TOKEN_ALPHABET[randomIntFn(MINT_TOKEN_ALPHABET.length)]
+  }
+  return `${prefix}-${token}`
+}
+
+/** Resume a matching scope session principal, or allocate explicit / auto-minted <=3 attempts. */
+export async function resolveOrMintSessionPrincipal({
+  pluginDataDir,
+  sessionScope,
+  requestedName = null,
+  requestedRole = 'agent',
+  resumePrincipal,
+  allocatePrincipal,
+}) {
+  const stored = loadSessionState(pluginDataDir, sessionScope)
+  if (
+    stored !== null
+    && (requestedName === null
+      || requestedName === undefined
+      || stored.baseName.toLowerCase() === requestedName.toLowerCase())
+  ) {
+    try {
+      const resumed = await resumePrincipal({
+        sessionId: stored.sessionId,
+        generation: stored.generation,
+        capability: stored.capability,
+      })
+      const updated = { ...stored, generation: resumed.generation }
+      saveSessionState(pluginDataDir, sessionScope, updated)
+      return updated
+    } catch (error) {
+      if (error instanceof AgentRoomRuntimeError
+        && ['session_expired', 'session_revoked', 'session_credential_invalid'].includes(error.code)) {
+        clearSessionState(pluginDataDir, sessionScope)
+      } else {
+        throw error
+      }
+    }
+  }
+  let allocated = null
+  if (requestedName !== null && requestedName !== undefined) {
+    allocated = await allocatePrincipal(requestedName)
+  } else {
+    for (let attempt = 1; attempt <= AGENT_ID_MINT_ATTEMPTS; attempt += 1) {
+      const candidateBase = mintCandidateAgentId({ role: requestedRole })
+      try {
+        allocated = await allocatePrincipal(candidateBase)
+        break
+      } catch (error) {
+        if (!(error instanceof AgentRoomRuntimeError) || error.code !== 'agent_id_taken') {
+          throw error
+        }
+        if (attempt >= AGENT_ID_MINT_ATTEMPTS) {
+          throw new AgentRoomRuntimeError(
+            'agent_id_taken',
+            `could not mint a unique Agent ID after ${AGENT_ID_MINT_ATTEMPTS} attempts; pass --name`,
+          )
+        }
+      }
+    }
+  }
+  const principal = {
+    sessionId: allocated.session_id,
+    generation: allocated.generation,
+    address: allocated.address,
+    baseName: allocated.base_name,
+    machine: allocated.machine,
+    capability: allocated.session_capability,
+  }
+  saveSessionState(pluginDataDir, sessionScope, principal)
+  return principal
 }
 
 // One HTTP round trip. Resolves { status, body } for any complete response;
@@ -370,6 +467,8 @@ export function createAgentRoomClient({
   // harness scope by default derives per-process (parent pid + pid). Tests
   // and embedding hosts may pin it explicitly.
   sessionScope: declaredSessionScope,
+  agentName: defaultAgentName = null,
+  agentRole: defaultAgentRole = 'agent',
 } = {}) {
   if (!Number.isInteger(requestTimeoutMs) || requestTimeoutMs <= 0) {
     throw new AgentRoomRuntimeError('invalid_argument', 'requestTimeoutMs must be a positive integer')
@@ -409,7 +508,13 @@ export function createAgentRoomClient({
   // this base. Immutable after construction — one client, one server.
   const remoteBase = remoteOrigin === null ? null : new URL(remoteOrigin)
 
-  const config = loadChatIdConfig(pluginDataDir)
+  let optionalConfig = loadOptionalChatIdConfig(pluginDataDir)
+  function refreshOptionalConfig() {
+    if (optionalConfig === null) {
+      optionalConfig = loadOptionalChatIdConfig(pluginDataDir)
+    }
+    return optionalConfig
+  }
   // Mutable by design (Story 4.1 review triage): the identity is reloaded
   // from disk when the challenge lane proves the cached key stale — a
   // keypair replaced while this client was live. Everything that reads the
@@ -419,6 +524,9 @@ export function createAgentRoomClient({
 
   let port = null
   let sessionToken = null
+  let boundLegacyEpoch = -1
+  let hadLegacyBind = false
+  let inFlightLegacyBind = null
   // The receiving installation's own connection mode (Story 3.2's trust
   // matrix input): how the LIVE session authenticated. The local token file
   // exchange records 'local'; the remote challenge path (Story 4.1) records
@@ -443,6 +551,7 @@ export function createAgentRoomClient({
   // second bind of the same Chat ID against the fresh server, lose it to
   // the live first session, and wedge the client on chat_id_taken).
   let attachEpoch = 0
+  let authEpoch = 0
 
   // The wire target for one request: the loopback port on the local path
   // (resolved fresh each call — ensureServer fills it in), or the configured
@@ -484,11 +593,13 @@ export function createAgentRoomClient({
   // release()) so the shutdown operation can await it instead of exiting
   // over it.
   let rollbackPromise = null
-  async function bindWithToken(token) {
+  async function bindWithToken(token, { signal } = {}) {
+    const legacyConfig = refreshOptionalConfig() ?? loadChatIdConfig(pluginDataDir)
     try {
       const bind = await rawRequest('POST', '/api/session', {
-        body: { chat_id: config.chatId, client_type: MCP_CLIENT_TYPE },
+        body: { chat_id: legacyConfig.chatId, client_type: MCP_CLIENT_TYPE },
         bearer: token,
+        signal,
       })
       if (shuttingDown) {
         rollbackPromise = rawRequest('DELETE', '/api/session', { bearer: token, timeoutMs: CLIENT_RELEASE_TIMEOUT_MS })
@@ -500,8 +611,46 @@ export function createAgentRoomClient({
       sessionToken = token
       return bind
     } catch (error) {
-      if (sessionToken === token) sessionToken = null
+      if (error instanceof AgentRoomRuntimeError && error.code === 'unauthorized' && sessionToken === token) {
+        sessionToken = null
+      }
       throw explainBindFailure(error)
+    }
+  }
+
+  async function ensureLegacyChatIdBound({ signal, allowExistingLegacyHolder = false } = {}) {
+    refreshOptionalConfig() ?? loadChatIdConfig(pluginDataDir)
+    await ensure()
+    if (boundLegacyEpoch === authEpoch) return
+    if (inFlightLegacyBind === null) {
+      const currentBind = (async () => {
+        try {
+          if (shuttingDown) {
+            throw new AgentRoomRuntimeError('shutdown', 'this client is shutting down; no new session is created')
+          }
+          const targetAuthEpoch = authEpoch
+          await bindWithToken(sessionToken, { signal })
+          boundLegacyEpoch = targetAuthEpoch
+          hadLegacyBind = true
+        } finally {
+          inFlightLegacyBind = null
+        }
+      })()
+      currentBind.catch(() => { /* joining await surfaces it */ })
+      inFlightLegacyBind = currentBind
+    }
+    try {
+      await inFlightLegacyBind
+    } catch (error) {
+      if (
+        allowExistingLegacyHolder
+        && !hadLegacyBind
+        && error instanceof AgentRoomRuntimeError
+        && (error.code === 'chat_id_taken' || error.code === 'agent_id_taken')
+      ) {
+        return
+      }
+      throw error
     }
   }
 
@@ -510,14 +659,19 @@ export function createAgentRoomClient({
   // command that recovers it and says plainly that the takeover displaces the
   // current holder — a human decision, never a silent retry.
   function explainBindFailure(error) {
-    if (!(error instanceof AgentRoomRuntimeError) || error.code !== 'chat_id_taken') return error
-    return new AgentRoomRuntimeError(
-      'chat_id_taken',
-      `This Chat ID ("${config.chatId}") is held by another connected session. `
-      + 'If that session is gone (its process died), an operator can take the name over explicitly: '
-      + 'run "agent-room session replace" on this machine. That takeover displaces the current holder, '
-      + `so it is never done automatically; until it is, this installation cannot use "${config.chatId}".`,
-    )
+    if (!(error instanceof AgentRoomRuntimeError) || (error.code !== 'chat_id_taken' && error.code !== 'agent_id_taken')) {
+      return error
+    }
+    const holderName = refreshOptionalConfig()?.chatId ?? 'this Chat ID'
+    const message = error.code === 'agent_id_taken'
+      ? (error.message || `Agent ID ("${holderName}") is currently occupied by another live session.`)
+      : (`This Chat ID ("${holderName}") is held by another connected session. `
+        + 'If that session is gone (its process died), an operator can take the name over explicitly: '
+        + 'run "agent-room session replace" on this machine. That takeover displaces the current holder, '
+        + `so it is never done automatically; until it is, this installation cannot use "${holderName}".`)
+    const explained = new AgentRoomRuntimeError(error.code, message)
+    if (error.conflict_ticket !== undefined) explained.conflict_ticket = error.conflict_ticket
+    return explained
   }
 
   // Release this session's live name on an orderly shutdown: an adapter that
@@ -547,7 +701,15 @@ export function createAgentRoomClient({
       }
       token = sessionToken
     }
-    if (token === null && rollbackPromise !== null) {
+    if (inFlightLegacyBind !== null) {
+      try {
+        await inFlightLegacyBind
+      } catch {
+        // The in-flight bind's own refusal (or shutdown rollback) belongs to its caller.
+      }
+      token = sessionToken
+    }
+    if (rollbackPromise !== null) {
       // The pending bind rolled itself back: the shutdown operation owns
       // that rollback's outcome now — it does not exit over a held socket.
       const rolledBack = await rollbackPromise
@@ -580,8 +742,19 @@ export function createAgentRoomClient({
   let sessionEnsurePromise = null
   let heartbeatTimer = null
 
-  async function ensureSessionPrincipal() {
-    if (sessionPrincipal !== null) return sessionPrincipal
+  async function ensureSessionPrincipal({ name = null, role = null } = {}) {
+    const requestedName = typeof name === 'string' && name.length > 0 ? name : defaultAgentName
+    const requestedRole = typeof role === 'string' && role.length > 0 ? role : defaultAgentRole
+    if (sessionPrincipal !== null) {
+      if (
+        requestedName === null
+        || requestedName === undefined
+        || sessionPrincipal.baseName.toLowerCase() === requestedName.toLowerCase()
+      ) {
+        return sessionPrincipal
+      }
+      sessionPrincipal = null
+    }
     if (!sessionPrincipalEnabled(env)) {
       throw new AgentRoomRuntimeError(
         'session_capability_required',
@@ -599,49 +772,23 @@ export function createAgentRoomClient({
           // The actor session token must exist first: allocation authenticates
           // by the installation bearer, never by anything in its body.
           await ensure()
-          const stored = loadSessionState(pluginDataDir, sessionScope)
-          if (stored !== null) {
-            try {
-              const resumed = await rawRequest('POST', '/api/session-principals/resume', {
-                body: { session_id: stored.sessionId, generation: stored.generation },
-                sessionCredential: stored.capability,
-              })
-              sessionPrincipal = { ...stored, generation: resumed.generation }
-              saveSessionState(pluginDataDir, sessionScope, sessionPrincipal)
-              return sessionPrincipal
-            } catch (error) {
-              // session_expired / session_revoked / session_credential_invalid:
-              // the stored principal is done — clear the local credential and
-              // allocate fresh. The old address stays retained (or freed, if
-              // revoked) exactly as the server decided; nothing here retries
-              // a fenced generation.
-              if (error instanceof AgentRoomRuntimeError
-                && ['session_expired', 'session_revoked', 'session_credential_invalid'].includes(error.code)) {
-                clearSessionState(pluginDataDir, sessionScope)
-              } else {
-                throw error
-              }
-            }
-          }
-          const allocated = await rawRequest('POST', '/api/session-principals', {
-            body: {
-              base_chat_id: config.chatId,
-              machine: machineLabel({ env }),
-              client_type: MCP_CLIENT_TYPE,
-            },
+          sessionPrincipal = await resolveOrMintSessionPrincipal({
+            pluginDataDir,
+            sessionScope,
+            requestedName,
+            requestedRole,
+            resumePrincipal: ({ sessionId, generation, capability }) => rawRequest('POST', '/api/session-principals/resume', {
+              body: { session_id: sessionId, generation },
+              sessionCredential: capability,
+            }),
+            allocatePrincipal: baseChatId => rawRequest('POST', '/api/session-principals', {
+              body: {
+                base_chat_id: baseChatId,
+                machine: machineLabel({ env }),
+                client_type: MCP_CLIENT_TYPE,
+              },
+            }),
           })
-          sessionPrincipal = {
-            sessionId: allocated.session_id,
-            generation: allocated.generation,
-            address: allocated.address,
-            baseName: allocated.base_name,
-            machine: allocated.machine,
-            capability: allocated.session_capability,
-          }
-          // The capability lands on disk (0600, atomic) before the address is
-          // reported anywhere; a failed save surfaces — an unrecorded
-          // capability would silently orphan the principal.
-          saveSessionState(pluginDataDir, sessionScope, sessionPrincipal)
           return sessionPrincipal
         } finally {
           sessionEnsurePromise = null
@@ -832,7 +979,14 @@ export function createAgentRoomClient({
         keypair = fresh
         token = await challengeExchange()
       }
-      return bindWithToken(token)
+      if (shuttingDown) {
+        sessionToken = null
+        throw new AgentRoomRuntimeError('shutdown', 'this client is shutting down; no new session is created')
+      }
+      sessionToken = token
+      authEpoch += 1
+      boundLegacyEpoch = -1
+      return token
     }
     const localToken = loadOrCreateLocalToken(dataDir)
     const exchange = await httpRequest({
@@ -854,7 +1008,14 @@ export function createAgentRoomClient({
     if (typeof token !== 'string' || token.length === 0) {
       throw new AgentRoomRuntimeError('request_failed', 'agent-room credential exchange returned no session token')
     }
-    return bindWithToken(token)
+    if (shuttingDown) {
+      sessionToken = null
+      throw new AgentRoomRuntimeError('shutdown', 'this client is shutting down; no new session is created')
+    }
+    sessionToken = token
+    authEpoch += 1
+    boundLegacyEpoch = -1
+    return token
   }
 
   // One single-flight credential exchange + bind for the whole client: the
@@ -1011,6 +1172,12 @@ export function createAgentRoomClient({
       }
       try {
         epochAtStart = await ensure()
+        if (options.bindLegacy === true) {
+          await ensureLegacyChatIdBound({
+            signal: options.signal,
+            allowExistingLegacyHolder: options.allowExistingLegacyHolder === true,
+          })
+        }
         return await rawRequest(method, path, options)
       } catch (error) {
         lastError = error
@@ -1036,9 +1203,17 @@ export function createAgentRoomClient({
   // stay immediate, and the schedule — if the first attempt ran it — has
   // already been paid once for this call.
   async function request(method, path, options = {}) {
+    const authSeqBefore = authEpoch
     const epochAtStart = await ensure()
+    const authSeqAfterEnsure = authEpoch
     const usedBearer = options.bearer === undefined && options.sessionCredential === undefined ? sessionToken : undefined
     try {
+      if (options.bindLegacy === true) {
+        await ensureLegacyChatIdBound({
+          signal: options.signal,
+          allowExistingLegacyHolder: options.allowExistingLegacyHolder === true,
+        })
+      }
       return await rawRequest(method, path, options)
     } catch (error) {
       if (!(error instanceof AgentRoomRuntimeError)) throw error
@@ -1051,11 +1226,34 @@ export function createAgentRoomClient({
       }
       if (error.code !== 'unauthorized') throw error
       if (usedBearer === undefined) throw error
+      if (authSeqAfterEnsure !== authSeqBefore && (sessionToken === usedBearer || sessionToken === null)) {
+        if (sessionToken === usedBearer) sessionToken = null
+        throw error
+      }
       if (sessionToken === usedBearer) sessionToken = null
       if (sessionToken === null) {
         await (ensurePromise !== null && !ensureSettled ? ensure() : authenticateOnce())
       }
-      return await rawRequest(method, path, options)
+      if (options.bindLegacy === true) {
+        await ensureLegacyChatIdBound({
+          signal: options.signal,
+          allowExistingLegacyHolder: options.allowExistingLegacyHolder === true,
+        })
+      }
+      const retriedBearer = sessionToken
+      try {
+        return await rawRequest(method, path, options)
+      } catch (retryError) {
+        if (
+          retryError instanceof AgentRoomRuntimeError
+          && retryError.code === 'unauthorized'
+          && retriedBearer !== null
+          && sessionToken === retriedBearer
+        ) {
+          sessionToken = null
+        }
+        throw retryError
+      }
     }
   }
 
@@ -1118,7 +1316,11 @@ export function createAgentRoomClient({
   }
 
   return {
-    get chatId() { return config.chatId },
+    get chatId() {
+      const legacy = refreshOptionalConfig()
+      if (legacy !== null) return legacy.chatId
+      return sessionPrincipal === null ? null : sessionPrincipal.baseName
+    },
     get fingerprint() { return keypair.fingerprint },
     // This installation's own connection mode ('local' once the live session
     // authenticated through the local token path, null before any
@@ -1129,7 +1331,7 @@ export function createAgentRoomClient({
 
     // GET /api/presence — who is addressable (optionally offline-recently).
     presence({ includeOffline = false, signal } = {}) {
-      return request('GET', `/api/presence${includeOffline ? '?include_offline=true' : ''}`, { signal })
+      return request('GET', `/api/presence${includeOffline ? '?include_offline=true' : ''}`, { signal, bindLegacy: true })
     },
 
     // GET /api/rooms — the returning session's enumeration (Story 2.2): one
@@ -1150,26 +1352,32 @@ export function createAgentRoomClient({
           ...(targetFingerprint === undefined ? {} : { target_fingerprint: targetFingerprint }),
         },
         signal,
+        bindLegacy: true,
       })
     },
 
     // POST /api/rooms/:id/messages — idempotent append with the
     // outcome_unknown discipline described at the module head.
     async sendMessage({ roomId, clientMessageId, text, replyToSeq, signal } = {}) {
+      const legacyConfig = refreshOptionalConfig() ?? loadChatIdConfig(pluginDataDir)
       // The recorded attempt pins the exact retry payload: the identical
       // client_message_id and body, whatever the caller does mid-flight.
       const attempt = Object.freeze({
         roomId: String(roomId),
         signal,
         body: Object.freeze({
-          chat_id: config.chatId,
+          chat_id: legacyConfig.chatId,
           client_message_id: String(clientMessageId),
           text: String(text),
           ...(replyToSeq === undefined ? {} : { reply_to_seq: replyToSeq }),
         }),
       })
       try {
-        return await request('POST', `/api/rooms/${encodeURIComponent(attempt.roomId)}/messages`, { body: attempt.body, signal })
+        return await request('POST', `/api/rooms/${encodeURIComponent(attempt.roomId)}/messages`, {
+          body: attempt.body,
+          signal,
+          bindLegacy: true,
+        })
       } catch (error) {
         if (!(error instanceof AgentRoomRuntimeError) || error.outcomeUnknown !== true) throw error
         // A cancelled call stays cancelled: no retry once the caller aborted.
@@ -1186,6 +1394,7 @@ export function createAgentRoomClient({
           body: attempt.body,
           signal,
           reconnect: false,
+          bindLegacy: true,
         })
       }
     },
@@ -1225,7 +1434,10 @@ export function createAgentRoomClient({
     // GET /api/status — the stable realm id and Broadcast Room id (the cursor
     // store keys realms by the former).
     status({ signal } = {}) {
-      return request('GET', '/api/status', { signal })
+      return request('GET', '/api/status', {
+        signal,
+        ...(refreshOptionalConfig() !== null ? { bindLegacy: true, allowExistingLegacyHolder: true } : {}),
+      })
     },
 
     // Release this session's live name (Story 6.4): the orderly-exit path.

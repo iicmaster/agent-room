@@ -129,6 +129,7 @@ import {
   CHALLENGE_SIGNATURE_MAX_CHARS,
   CHALLENGE_SIGNATURE_PATTERN,
   CHAT_ID_INVALID_MESSAGE,
+  CHAT_ID_PATTERN,
   CLAIMS_TTL_MS,
   CLIENT_MESSAGE_ID_MAX,
   CLIENT_TYPES,
@@ -231,6 +232,71 @@ const CHALLENGE_REGISTRY = createChallengeRegistry()
 // store's chat_id_claims index. startServer({liveSessionRegistry}) overrides
 // it so tests can isolate each server instance.
 const LIVE_SESSION_REGISTRY = createLiveSessionRegistry()
+const SESSION_PRINCIPAL_BEARER_KEYS = createSessionPrincipalBearerMap()
+
+function createSessionPrincipalBearerMap() {
+  const map = new Map()
+  return Object.freeze({
+    get(sessionId) { return map.get(sessionId) },
+    set(sessionId, sessionKey) { map.set(sessionId, sessionKey) },
+    delete(sessionId) { map.delete(sessionId) },
+    clear() { map.clear() },
+    snapshot() { return [...map.entries()] },
+    restore(saved) {
+      map.clear()
+      for (const [k, v] of saved) map.set(k, v)
+    },
+  })
+}
+
+function buildAgentIdConflictOutcome({
+  baseName,
+  conflictTickets,
+  requesterActorFingerprint,
+  requesterSessionKey,
+  holderActorFingerprint,
+  holderSessionKey,
+  observedGeneration,
+  message,
+}) {
+  const resolvedMessage = message ?? `Agent ID "${baseName}" is currently occupied by another live session`
+  if (
+    holderActorFingerprint === requesterActorFingerprint
+    && conflictTickets
+    && typeof conflictTickets.mint === 'function'
+    && typeof requesterSessionKey === 'string'
+    && requesterSessionKey.length > 0
+    && typeof holderSessionKey === 'string'
+    && holderSessionKey.length > 0
+  ) {
+    const minted = conflictTickets.mint({
+      actorFingerprint: requesterActorFingerprint,
+      chatId: baseName,
+      observerSessionKey: requesterSessionKey,
+      incumbentSessionKey: holderSessionKey,
+      observedGeneration,
+    })
+    if (minted.rateLimited === true) {
+      return {
+        kind: 'refused',
+        code: 'rate_limited',
+        message: PUBLIC_ERRORS.rate_limited,
+        extra: { retry_after_ms: minted.retryAfterMs },
+      }
+    }
+    return {
+      kind: 'refused',
+      code: 'agent_id_taken',
+      message: resolvedMessage,
+      extra: { conflict_ticket: minted.ticket },
+    }
+  }
+  return {
+    kind: 'refused',
+    code: 'agent_id_taken',
+    message: resolvedMessage,
+  }
+}
 // Story 7.2: the process-default conflict ticket store (ephemeral by
 // design — a restart voids every outstanding observation, and the operator
 // re-observes).
@@ -516,7 +582,25 @@ function sessionPrincipalOf(context) {
 // replace_existing intent without a ticket is a request-shape refusal: the
 // last-wins takeover is retired. The ticket is server-side, in-memory, and
 // single-use; it is not a credential and binds to the authenticated Actor.
-function bindSession(context) {
+function liveHolderOf(liveRegistry, chatId) {
+  return typeof liveRegistry?.holderOf === 'function' ? liveRegistry.holderOf(chatId) : null
+}
+
+function liveOccupancyGeneration(liveRegistry, chatId) {
+  return typeof liveRegistry?.occupancyGeneration === 'function' ? liveRegistry.occupancyGeneration(chatId) : 1
+}
+
+function snapshotIfSupported(target) {
+  return typeof target?.snapshot === 'function' ? target.snapshot() : null
+}
+
+function restoreIfSupported(target, snapshot) {
+  if (snapshot !== null && typeof target?.restore === 'function') {
+    target.restore(snapshot)
+  }
+}
+
+async function bindSession(context) {
   const principal = sessionPrincipalOf(context)
   if (principal.ok === false) return principal
   // Field-reporting convention (matching 1.4's public_key): an absent or
@@ -557,16 +641,60 @@ function bindSession(context) {
   if (ticketRaw !== undefined && ticketRaw !== null && replaceExisting !== true) {
     return reject('invalid_request', 'conflict_ticket is only accepted when replace_existing is true')
   }
-  const outcome = bindIdentitySession({
-    principal,
-    chatId,
-    clientType: declaredType,
-    replaceExisting,
-    conflictTicket: ticketRaw,
-    liveRegistry: context.liveSessionRegistry ?? LIVE_SESSION_REGISTRY,
-    sessionRegistry: context.sessionRegistry,
-    conflictTickets: context.conflictTickets ?? CONFLICT_TICKETS,
-    persistClaim: claimPayload => context.store.upsertChatIdClaim(claimPayload),
+  const liveRegistry = context.liveSessionRegistry ?? LIVE_SESSION_REGISTRY
+  const conflictTickets = context.conflictTickets ?? CONFLICT_TICKETS
+  const bearerKeys = context.sessionPrincipalBearerKeys ?? SESSION_PRINCIPAL_BEARER_KEYS
+  const outcome = await context.store.enqueueWrite({
+    sessionKey: principal.sessionKey,
+    priority: 'control',
+    trackMetrics: false,
+    bytes: 0,
+    payload: { action: 'bind_session', chatId },
+    validateFence(tx) {
+      if (tx.isActorBanned(principal.actorFingerprint)) {
+        throw new AgentRoomRuntimeError('banned', PUBLIC_ERRORS.banned)
+      }
+      if (context.sessionRegistry?.isSuperseded?.(principal.sessionKey)) {
+        throw new AgentRoomRuntimeError('unauthorized', PUBLIC_ERRORS.unauthorized)
+      }
+    },
+    captureMemoryUndo() {
+      const savedRegistry = snapshotIfSupported(liveRegistry)
+      const savedSessions = snapshotIfSupported(context.sessionRegistry)
+      const savedTickets = snapshotIfSupported(conflictTickets)
+      return () => {
+        restoreIfSupported(liveRegistry, savedRegistry)
+        restoreIfSupported(context.sessionRegistry, savedSessions)
+        restoreIfSupported(conflictTickets, savedTickets)
+      }
+    },
+    execute(tx) {
+      const nowMs = Date.now()
+      tx.sweepBaseLeasesInTx(nowMs)
+      const spHolder = tx.findOccupiedBaseOwner(chatId, nowMs)
+      if (spHolder !== null && bearerKeys.get(spHolder.session_id) !== principal.sessionKey) {
+        return buildAgentIdConflictOutcome({
+          baseName: chatId,
+          conflictTickets,
+          requesterActorFingerprint: principal.actorFingerprint,
+          requesterSessionKey: principal.sessionKey,
+          holderActorFingerprint: spHolder.installation_fingerprint,
+          holderSessionKey: bearerKeys.get(spHolder.session_id) ?? spHolder.session_id,
+          observedGeneration: spHolder.generation,
+        })
+      }
+      return bindIdentitySession({
+        principal,
+        chatId,
+        clientType: declaredType,
+        replaceExisting,
+        conflictTicket: ticketRaw,
+        liveRegistry,
+        sessionRegistry: context.sessionRegistry,
+        conflictTickets,
+        persistClaim: claimPayload => tx.upsertChatIdClaimInTx(claimPayload),
+      })
+    },
   })
   if (outcome.kind === 'refused') return reject(outcome.code, outcome.message, outcome.extra)
   return {
@@ -587,11 +715,35 @@ registerHandler('PATCH /api/session', bindSession, 'actor')
 // (documented choice): the session registry entry is left to expire naturally
 // (12 h sliding, DR-2) — the token re-authenticates to a nameless session,
 // and connecting again re-claims.
-registerHandler('DELETE /api/session', function disconnectSession(context) {
+registerHandler('DELETE /api/session', async function disconnectSession(context) {
   const principal = sessionPrincipalOf(context)
   if (principal.ok === false) return principal
   const registry = context.liveSessionRegistry ?? LIVE_SESSION_REGISTRY
-  registry.release(principal.sessionKey)
+  await context.store.enqueueWrite({
+    sessionKey: principal.sessionKey,
+    priority: 'control',
+    trackMetrics: false,
+    bytes: 0,
+    payload: { action: 'disconnect_session' },
+    validateFence(tx) {
+      if (tx.isActorBanned(principal.actorFingerprint)) {
+        throw new AgentRoomRuntimeError('banned', PUBLIC_ERRORS.banned)
+      }
+      if (context.sessionRegistry?.isSuperseded?.(principal.sessionKey)) {
+        throw new AgentRoomRuntimeError('unauthorized', PUBLIC_ERRORS.unauthorized)
+      }
+    },
+    captureMemoryUndo() {
+      const savedRegistry = snapshotIfSupported(registry)
+      return () => {
+        restoreIfSupported(registry, savedRegistry)
+      }
+    },
+    execute() {
+      registry.release(principal.sessionKey)
+      return null
+    },
+  })
   return null
 }, 'actor')
 
@@ -1033,7 +1185,27 @@ registerHandler('POST /api/rooms/:id/messages', async function appendMessageRout
                 `chat_id does not match the name this key last bound ("${resolved.claim.chat_id}"); the sender name is resolved server-side, never chosen by the caller`,
               )
             }
-            const holder = liveRegistry.holderOf(resolved.claim.chat_id)
+            const bearerKeys = context.sessionPrincipalBearerKeys ?? SESSION_PRINCIPAL_BEARER_KEYS
+            const conflictTickets = context.conflictTickets ?? CONFLICT_TICKETS
+            const nowMs = Date.now()
+            tx.sweepBaseLeasesInTx(nowMs)
+            const spHolder = tx.findOccupiedBaseOwner(resolved.claim.chat_id, nowMs)
+            if (spHolder !== null && bearerKeys.get(spHolder.session_id) !== sessionKey) {
+              const conflict = buildAgentIdConflictOutcome({
+                baseName: resolved.claim.chat_id,
+                conflictTickets,
+                requesterActorFingerprint: actorFingerprint,
+                requesterSessionKey: sessionKey,
+                holderActorFingerprint: spHolder.installation_fingerprint,
+                holderSessionKey: bearerKeys.get(spHolder.session_id) ?? spHolder.session_id,
+                observedGeneration: spHolder.generation,
+                message: 'the resolved name is held by another live session right now; the unbound send cannot speak under it',
+              })
+              const err = new AgentRoomRuntimeError(conflict.code, conflict.message ?? PUBLIC_ERRORS[conflict.code])
+              if (conflict.extra) Object.assign(err, conflict.extra)
+              throw err
+            }
+            const holder = liveHolderOf(liveRegistry, resolved.claim.chat_id)
             if (holder !== null && holder.actorFingerprint !== actorFingerprint) {
               throw new AgentRoomRuntimeError(
                 'chat_id_taken',
@@ -1165,15 +1337,18 @@ function requireSessionSelectors(body, principal) {
 // LIVE retained principal refuses name_taken with the holder's machine —
 // never suffixed, never merged, never displaced. The capability rides the
 // response exactly once; nothing here logs it.
-registerHandler('POST /api/session-principals', function allocateSessionPrincipalRoute(context) {
+registerHandler('POST /api/session-principals', async function allocateSessionPrincipalRoute(context) {
   const principal = sessionPrincipalOf(context)
   if (principal.ok === false) return principal
   const baseChatId = context.body?.base_chat_id
   if (baseChatId === undefined || baseChatId === null || baseChatId === '') {
     return reject('invalid_request', 'base_chat_id is required: the DR-1 chat id the address\u0027s base segment is shaped from')
   }
+  if (typeof baseChatId !== 'string' || !CHAT_ID_PATTERN.test(baseChatId)) {
+    return reject('invalid_request', 'base_chat_id: 1-32 chars of [A-Za-z0-9_.-]')
+  }
   const forms = chatIdForms(baseChatId)
-  if (forms === null) return reject('invalid_chat_id', CHAT_ID_INVALID_MESSAGE)
+  if (forms === null) return reject('invalid_request', 'base_chat_id: 1-32 chars of [A-Za-z0-9_.-]')
   const machine = context.body?.machine
   if (machine === undefined || machine === null || machine === '') {
     return reject('invalid_request', 'machine is required: the bounded machine label the address captures once (hostname changes mid-session never relocate an address)')
@@ -1187,12 +1362,76 @@ registerHandler('POST /api/session-principals', function allocateSessionPrincipa
     && (typeof declaredType !== 'string' || !CLIENT_TYPES.includes(declaredType))) {
     return reject('invalid_request', `client_type must be one of: ${CLIENT_TYPES.join(', ')}`)
   }
-  const allocated = context.store.allocateSessionPrincipal({
-    installationFingerprint: principal.actorFingerprint,
-    baseName: forms.display,
-    machine,
-    clientType: declaredType === undefined ? null : declaredType,
+  const liveRegistry = context.liveSessionRegistry ?? LIVE_SESSION_REGISTRY
+  const conflictTickets = context.conflictTickets ?? CONFLICT_TICKETS
+  const bearerKeys = context.sessionPrincipalBearerKeys ?? SESSION_PRINCIPAL_BEARER_KEYS
+  const outcome = await context.store.enqueueWrite({
+    sessionKey: principal.sessionKey,
+    priority: 'control',
+    trackMetrics: false,
+    bytes: 0,
+    payload: { action: 'allocate_principal', baseChatId: forms.display },
+    validateFence(tx) {
+      if (tx.isActorBanned(principal.actorFingerprint)) {
+        throw new AgentRoomRuntimeError('banned', PUBLIC_ERRORS.banned)
+      }
+      if (context.sessionRegistry?.isSuperseded?.(principal.sessionKey)) {
+        throw new AgentRoomRuntimeError('unauthorized', PUBLIC_ERRORS.unauthorized)
+      }
+    },
+    captureMemoryUndo() {
+      const savedBearers = bearerKeys.snapshot()
+      const savedTickets = conflictTickets.snapshot()
+      return () => {
+        bearerKeys.restore(savedBearers)
+        conflictTickets.restore(savedTickets)
+      }
+    },
+    execute(tx) {
+      const nowMs = Date.now()
+      tx.sweepBaseLeasesInTx(nowMs)
+      const liveHolder = liveHolderOf(liveRegistry, forms.display)
+      if (liveHolder !== null && liveHolder.sessionKey !== principal.sessionKey) {
+        return buildAgentIdConflictOutcome({
+          baseName: forms.display,
+          conflictTickets,
+          requesterActorFingerprint: principal.actorFingerprint,
+          requesterSessionKey: principal.sessionKey,
+          holderActorFingerprint: liveHolder.actorFingerprint,
+          holderSessionKey: liveHolder.sessionKey,
+          observedGeneration: liveOccupancyGeneration(liveRegistry, forms.display),
+        })
+      }
+      try {
+        const allocated = tx.allocateSessionPrincipalInTx({
+          installationFingerprint: principal.actorFingerprint,
+          baseName: forms.display,
+          machine,
+          clientType: declaredType === undefined ? null : declaredType,
+          nowMs,
+        })
+        bearerKeys.set(allocated.session_id, principal.sessionKey)
+        return { kind: 'allocated', result: allocated }
+      } catch (error) {
+        if (error instanceof AgentRoomRuntimeError && error.code === 'agent_id_taken') {
+          const holder = error.conflictHolder
+          return buildAgentIdConflictOutcome({
+            baseName: forms.display,
+            conflictTickets,
+            requesterActorFingerprint: principal.actorFingerprint,
+            requesterSessionKey: principal.sessionKey,
+            holderActorFingerprint: holder?.installation_fingerprint ?? null,
+            holderSessionKey: holder ? (bearerKeys.get(holder.session_id) ?? holder.session_id) : null,
+            observedGeneration: holder?.generation ?? 1,
+            message: error.message,
+          })
+        }
+        throw error
+      }
+    },
   })
+  if (outcome.kind === 'refused') return reject(outcome.code, outcome.message, outcome.extra)
+  const allocated = outcome.result
   return {
     session_id: allocated.session_id,
     generation: allocated.generation,
@@ -1214,15 +1453,100 @@ registerHandler('POST /api/session-principals', function allocateSessionPrincipa
 // address — never taking a base another live principal holds. Revoked or
 // retention-expired principals answer session_revoked / session_expired and
 // mutate nothing; the caller allocates a new principal.
-registerHandler('POST /api/session-principals/resume', function resumeSessionPrincipalRoute(context) {
+async function runSessionPrincipalLeaseWrite(context, {
+  principal,
+  sessionId,
+  generation,
+  coalesceKey = null,
+  priority = 'normal',
+  trackMetrics = true,
+  payload,
+  invokeTx,
+}) {
+  const liveRegistry = context.liveSessionRegistry ?? LIVE_SESSION_REGISTRY
+  const conflictTickets = context.conflictTickets ?? CONFLICT_TICKETS
+  const bearerKeys = context.sessionPrincipalBearerKeys ?? SESSION_PRINCIPAL_BEARER_KEYS
+  const principalSessionId = principal.session_id
+  const installationFingerprint = principal.installation_fingerprint
+  return context.store.enqueueWrite({
+    sessionKey: principalSessionId,
+    ...(coalesceKey === null ? {} : { coalesceKey }),
+    priority,
+    trackMetrics,
+    bytes: 0,
+    payload,
+    validateFence(tx) {
+      if (tx.isActorBanned(installationFingerprint)) {
+        throw new AgentRoomRuntimeError('banned', PUBLIC_ERRORS.banned)
+      }
+    },
+    captureMemoryUndo() {
+      const savedTickets = conflictTickets.snapshot()
+      return () => {
+        conflictTickets.restore(savedTickets)
+      }
+    },
+    execute(tx) {
+      let conflictOutcome = null
+      try {
+        const result = invokeTx(tx, {
+          sessionId,
+          generation,
+          nowMs: Date.now(),
+          onReoccupy(row) {
+            const liveHolder = liveHolderOf(liveRegistry, row.base_name)
+            if (liveHolder !== null && liveHolder.sessionKey !== bearerKeys.get(row.session_id)) {
+              conflictOutcome = buildAgentIdConflictOutcome({
+                baseName: row.base_name,
+                conflictTickets,
+                requesterActorFingerprint: installationFingerprint,
+                requesterSessionKey: principalSessionId,
+                holderActorFingerprint: liveHolder.actorFingerprint,
+                holderSessionKey: liveHolder.sessionKey,
+                observedGeneration: liveOccupancyGeneration(liveRegistry, row.base_name),
+              })
+              throw new AgentRoomRuntimeError('agent_id_taken', conflictOutcome.message)
+            }
+          },
+        })
+        return { kind: 'ok', result }
+      } catch (error) {
+        if (conflictOutcome !== null) return conflictOutcome
+        if (error instanceof AgentRoomRuntimeError && error.code === 'agent_id_taken') {
+          const holder = error.conflictHolder
+          return buildAgentIdConflictOutcome({
+            baseName: holder?.base_name ?? '',
+            conflictTickets,
+            requesterActorFingerprint: installationFingerprint,
+            requesterSessionKey: principalSessionId,
+            holderActorFingerprint: holder?.installation_fingerprint ?? null,
+            holderSessionKey: holder ? (bearerKeys.get(holder.session_id) ?? holder.session_id) : null,
+            observedGeneration: holder?.generation ?? 1,
+            message: error.message,
+          })
+        }
+        throw error
+      }
+    },
+  })
+}
+
+registerHandler('POST /api/session-principals/resume', async function resumeSessionPrincipalRoute(context) {
   const principal = sessionCapabilityPrincipalOf(context)
   if (principal.ok === false) return principal
   const selectors = requireSessionSelectors(context.body, principal)
   if (selectors.ok !== true) return selectors
-  const resumed = context.store.resumeSessionPrincipal({
+  const outcome = await runSessionPrincipalLeaseWrite(context, {
+    principal,
     sessionId: selectors.sessionId,
     generation: selectors.generation,
+    priority: 'control',
+    trackMetrics: false,
+    payload: { action: 'resume_principal', sessionId: selectors.sessionId, generation: selectors.generation },
+    invokeTx: (tx, params) => tx.resumeSessionPrincipalInTx(params),
   })
+  if (outcome.kind === 'refused') return reject(outcome.code, outcome.message, outcome.extra)
+  const resumed = outcome.result
   return {
     session_id: resumed.session_id,
     generation: resumed.generation,
@@ -1242,29 +1566,16 @@ registerHandler('POST /api/session-principals/heartbeat', async function heartbe
   if (principal.ok === false) return principal
   const selectors = requireSessionSelectors(context.body, principal)
   if (selectors.ok !== true) return selectors
-  const store = context.store
-  const principalSessionId = principal.session_id
-  const installationFingerprint = principal.installation_fingerprint
-  const sessionId = selectors.sessionId
-  const generation = selectors.generation
-  const beaten = await store.enqueueWrite({
-    sessionKey: principalSessionId,
-    coalesceKey: `hb:${principalSessionId}:${generation}`,
-    bytes: 0,
-    payload: { sessionId, generation },
-    validateFence(tx) {
-      if (tx.isActorBanned(installationFingerprint)) {
-        throw new AgentRoomRuntimeError('banned', PUBLIC_ERRORS.banned)
-      }
-    },
-    execute(tx) {
-      return tx.heartbeatSessionPrincipalInTx({
-        sessionId,
-        generation,
-        nowMs: Date.now(),
-      })
-    },
+  const outcome = await runSessionPrincipalLeaseWrite(context, {
+    principal,
+    sessionId: selectors.sessionId,
+    generation: selectors.generation,
+    coalesceKey: `hb:${principal.session_id}:${selectors.generation}`,
+    payload: { sessionId: selectors.sessionId, generation: selectors.generation },
+    invokeTx: (tx, params) => tx.heartbeatSessionPrincipalInTx(params),
   })
+  if (outcome.kind === 'refused') return reject(outcome.code, outcome.message, outcome.extra)
+  const beaten = outcome.result
   return {
     session_id: beaten.session_id,
     generation: beaten.generation,
@@ -1279,10 +1590,26 @@ registerHandler('POST /api/session-principals/heartbeat', async function heartbe
 // (orderly exit). Idempotent: releasing a released or expired lease is a
 // success. The durable principal, full address, pair-room membership, cursor
 // and mailbox all persist; the principal may resume with its capability.
-registerHandler('DELETE /api/session-principals/current', function releaseSessionBaseRoute(context) {
+registerHandler('DELETE /api/session-principals/current', async function releaseSessionBaseRoute(context) {
   const principal = sessionCapabilityPrincipalOf(context)
   if (principal.ok === false) return principal
-  context.store.releaseSessionBaseLease({ sessionId: principal.session_id })
+  const bearerKeys = context.sessionPrincipalBearerKeys ?? SESSION_PRINCIPAL_BEARER_KEYS
+  await context.store.enqueueWrite({
+    sessionKey: principal.session_id,
+    priority: 'control',
+    trackMetrics: false,
+    bytes: 0,
+    payload: { action: 'release_principal', sessionId: principal.session_id },
+    validateFence(tx) {
+      if (tx.isActorBanned(principal.installation_fingerprint)) {
+        throw new AgentRoomRuntimeError('banned', PUBLIC_ERRORS.banned)
+      }
+    },
+    execute(tx) {
+      tx.releaseSessionBaseLeaseInTx({ sessionId: principal.session_id })
+      return null
+    },
+  })
   return null
 }, 'actor')
 
@@ -1305,6 +1632,8 @@ registerHandler('POST /api/session-principals/revoke', function revokeSessionPri
     sessionId: sessionIdField.value,
     installationFingerprint: principal.actorFingerprint,
   })
+  const bearerKeys = context.sessionPrincipalBearerKeys ?? SESSION_PRINCIPAL_BEARER_KEYS
+  bearerKeys.delete(sessionIdField.value)
   return null
 }, 'actor')
 
@@ -1608,6 +1937,7 @@ async function handleRequest(request, response, options) {  let pathname = null
     webRoot: options.webRoot,
     sessionRegistry: options.sessionRegistry,
     liveSessionRegistry: options.liveSessionRegistry,
+    sessionPrincipalBearerKeys: options.sessionPrincipalBearerKeys,
     conflictTickets: options.conflictTickets,
     challengeRegistry: options.challengeRegistry,
     viewerSessions: options.viewerSessions,
@@ -1910,6 +2240,7 @@ export async function startServer({
   // Story 1.6: the process-default live registry receives the operator-tuned
   // presence TTL; an injected registry is the caller's to configure.
   const effectiveLiveRegistry = liveSessionRegistry ?? createLiveSessionRegistry({ presenceTtlMs })
+  const effectiveBearerKeys = createSessionPrincipalBearerMap()
   const effectiveConflictTickets = conflictTickets ?? CONFLICT_TICKETS
   // Story 4.1: the challenge nonces follow the same default-plus-override
   // pattern; issuance into the session registry always resolves through the
@@ -2083,6 +2414,7 @@ export async function startServer({
         webRoot,
         sessionRegistry: effectiveRegistry,
         liveSessionRegistry: effectiveLiveRegistry,
+        sessionPrincipalBearerKeys: effectiveBearerKeys,
         conflictTickets: effectiveConflictTickets,
         challengeRegistry: effectiveChallengeRegistry,
         viewerSessions: effectiveViewerSessions,
@@ -2151,6 +2483,7 @@ export async function startServer({
       // owns the process-default live registry, its close drops every live
       // row (an injected registry is the caller's to manage).
       if (effectiveLiveRegistry === LIVE_SESSION_REGISTRY) LIVE_SESSION_REGISTRY.clear()
+      effectiveBearerKeys.clear()
       store.close()
     }
 

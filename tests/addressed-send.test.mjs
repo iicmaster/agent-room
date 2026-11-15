@@ -179,21 +179,21 @@ test('ten concurrent allocations from one installation receive ten distinct addr
   const record = await waitReady()
   const token = await authenticateInstallation(record.port, dataDir, installation(), 'Allocator')
 
-  const allocated = await Promise.all(Array.from({ length: 10 }, () =>
-    allocateSession(record.port, token, 'zcode')))
+  const allocated = await Promise.all(Array.from({ length: 10 }, (_, index) =>
+    allocateSession(record.port, token, `zcode-${index + 1}`)))
   const addresses = new Set(allocated.map(entry => entry.address))
   const sessionIds = new Set(allocated.map(entry => entry.session_id))
   const capabilities = new Set(allocated.map(entry => entry.session_capability))
   assert.equal(addresses.size, 10, 'ten distinct full addresses')
   assert.equal(sessionIds.size, 10, 'ten distinct session ids')
   assert.equal(capabilities.size, 10, 'ten distinct capabilities')
-  for (const address of addresses) assert.match(address, /^zcode~[A-Za-z0-9_-]{10}@macbook$/)
+  for (const address of addresses) assert.match(address, /^zcode-\d+~[A-Za-z0-9_-]{10}@macbook$/)
 
   // The explicit listing sees all ten, and only the installations' own.
   const list = await request(record.port, 'GET', '/api/session-principals', { headers: bearerOf(token) })
   assert.equal(list.status, 200, list.text)
   const listed = list.json().result.sessions
-  assert.equal(listed.filter(row => row.base_name === 'zcode').length, 10)
+  assert.equal(listed.filter(row => row.base_name.startsWith('zcode-')).length, 10)
   assert.ok(listed.every(row => row.address !== undefined && row.presence === 'online'))
   // The wire projection carries no credential material.
   assert.ok(listed.every(row => row.session_capability === undefined && row.capability_digest === undefined))
@@ -536,7 +536,7 @@ test('the client lifecycle end to end: ensure, addressed send, offline peer resu
     sessionScope: 'sender-scope',
   })
   const principal = await sender.ensureSessionPrincipal()
-  assert.match(principal.address, /^Client~[A-Za-z0-9_-]{10}@/)
+  assert.match(principal.address, /^agent-[a-z0-9]{8}~[A-Za-z0-9_-]{10}@/)
 
   // The credential file is on disk at 0600, with the capability in it — the
   // only place the raw value persists client-side.
@@ -619,7 +619,7 @@ test('the client lifecycle end to end: ensure, addressed send, offline peer resu
   // The sender is a FOREIGN installation to the peer client: the rows arrive
   // wrapped in the static untrusted envelope, attributed by session address.
   assert.ok(texts.every(text => text.startsWith('<untrusted_message')), 'foreign sender rows arrive wrapped')
-  assert.equal(page.messages[0].chat_id.startsWith('Client~'), true)
+  assert.equal(page.messages[0].chat_id.startsWith(`${principal.baseName}~`), true)
 })
 
 test('unknown fields and bad shapes refuse before any state changes', async t => {
@@ -639,7 +639,7 @@ test('unknown fields and bad shapes refuse before any state changes', async t =>
     body: JSON.stringify({ base_chat_id: 'not a valid chat id!', machine: 'macbook' }),
   })
   assert.equal(badBase.status, 400)
-  assert.equal(badBase.json().error.code, 'invalid_chat_id')
+  assert.equal(badBase.json().error.code, 'invalid_request')
 
   const badMachine = await request(record.port, 'POST', '/api/session-principals', {
     headers: { ...bearerOf(token), 'content-type': 'application/json; charset=utf-8' },
@@ -680,7 +680,8 @@ test('the CLI family: agent-room sessions lists, agent-room dm sends by address,
   assert.ok(listed.sessions.every(row => row.session_capability === undefined))
 
   // `agent-room dm --to <address> --text` — the four-step operator flow.
-  const dm = await runDmCommand(['--to', peer.address, '--text', 'nonce-cli-123'], deps)
+  const dmDeps = { ...deps, env: { ...deps.env, AGENT_ROOM_SESSION_SCOPE: 'cli-dm-scope' } }
+  const dm = await runDmCommand(['--to', peer.address, '--text', 'nonce-cli-123'], dmDeps)
   assert.equal(dm.status, 'ok', JSON.stringify(dm))
   const dmReceipt = JSON.parse(dm.lines[0])
   assert.equal(dmReceipt.status, 'committed')
@@ -695,10 +696,11 @@ test('the CLI family: agent-room sessions lists, agent-room dm sends by address,
   })
   assert.equal(read.status, 200, read.text)
   assert.equal(read.json().result.messages[0].text, 'nonce-cli-123')
-  assert.equal(read.json().result.messages[0].chat_id.startsWith('CliSender~'), true)
+  assert.match(read.json().result.messages[0].chat_id, /^agent-[a-z0-9]{8}~/)
 
   // `agent-room send --to` — the same addressed wire under the send command.
-  const send = await runSendFamilyCommand(['--to', peer.address, '--text', 'via send to'], deps)
+  const sendDeps = { ...deps, env: { ...deps.env, AGENT_ROOM_SESSION_SCOPE: 'cli-send-scope' } }
+  const send = await runSendFamilyCommand(['--to', peer.address, '--text', 'via send to'], sendDeps)
   assert.equal(send.status, 'ok', JSON.stringify(send))
   const sendReceipt = JSON.parse(send.lines[0])
   assert.equal(sendReceipt.status, 'committed')

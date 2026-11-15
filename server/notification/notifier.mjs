@@ -62,7 +62,7 @@
 //     persisted cursor is read read-only, for the catch-up baseline);
 //   - is silent on stderr except when the inbox write fails;
 //   - stops on the adapter's teardown (every held long-poll is aborted), and
-//     on a session-level refusal (banned / chat_id_taken / not_enrolled) —
+//     on a session-level refusal (banned / not_enrolled) —
 //     the next successful tool call starts it again.
 
 import { execFile } from 'node:child_process'
@@ -95,7 +95,7 @@ export const NOTIFY_CMD_ENV = 'AGENT_ROOM_NOTIFY_CMD'
 // notifier says about ITSELF does.
 export const STATUS_KIND = 'notifier_status'
 
-const STOP_CODES = new Set(['banned', 'chat_id_taken', 'not_enrolled'])
+const STOP_CODES = new Set(['banned', 'not_enrolled'])
 const INBOX_OPEN_FLAGS = fsConstants.O_WRONLY | fsConstants.O_APPEND | fsConstants.O_CREAT | fsConstants.O_NOFOLLOW
 
 export function notifierEnabled(env = process.env) {

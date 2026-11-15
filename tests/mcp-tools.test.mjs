@@ -692,14 +692,15 @@ test('client cursors: persisted per session at 0600, seeded per the migration ru
   assert.deepEqual(first.messages.map(message => message.seq), [1, 2])
   assert.equal(first.next_after_seq, 2)
 
-  // v0.9.0: the session principal armed (message_read ensures it), so
-  // room_status answers this process's own full session address — the value
+  // v1.0.0: the session principal armed (message_read ensures it) with an
+  // auto-minted <role>-<shortToken> base while config.json keeps the legacy chat_id,
+  // so room_status answers this process's own full session address — the value
   // peers use as their message_send `to`.
   const armedStatus = structured(await mcp.tool('room_status'))
   assert.match(
     armedStatus.session_address,
-    new RegExp(`^${armedStatus.chat_id}~[A-Za-z0-9_-]{10}@`),
-    'the armed session address is <chat_id>~<10-char locator>@<machine>',
+    /^agent-[a-z0-9]{8}~[A-Za-z0-9_-]{10}@/,
+    'the armed session address is auto-minted <role>-<shortToken>~<10-char locator>@<machine>',
   )
   assert.notEqual(armedStatus.session_address, null)
 
@@ -842,18 +843,16 @@ test('stdin purity: JSON-RPC only, parse errors and oversized frames answered, n
   await mcp.close()
 })
 
-test('first run: no configured Chat ID fails with coded guidance and the process keeps serving', async t => {
+test('first run: zero-config startup without config.json succeeds using auto-minted session principal', async t => {
   const world = makeWorld(t, { chatId: null })
   await world.waitReady()
   const mcp = startMcpChild(t, world)
   t.after(() => mcp.close())
   await mcp.initialize()
 
-  const failure = structuredError(await mcp.tool('room_status'))
-  assert.equal(failure.error.code, 'invalid_request')
-  assert.match(failure.error.message, /No Chat ID is configured/)
-  // The guidance names the one-time command and never blocks the process.
-  assert.match(failure.error.message, /agent-room setup/)
+  const status = structured(await mcp.tool('room_status'))
+  assert.match(status.chat_id, /^agent-[a-z0-9]{8}$/)
+  assert.match(status.session_address, new RegExp(`^${status.chat_id}~[A-Za-z0-9_-]{10}@`))
 
   // The process stays alive and answers JSON-RPC afterwards.
   const listed = await mcp.request('tools/list')

@@ -235,6 +235,7 @@ export const PUBLIC_ERRORS = Object.freeze({
   // taking its wire face here, as rate_limited did before it).
   banned: 'this key is banned by the operator',
   chat_id_not_found: 'no actor has claimed this chat id',
+  agent_id_taken: 'agent id is already claimed by another active session',
   chat_id_taken: 'chat id is already claimed by another connected session',
   sender_claim_missing: "this installation's key has never bound a Chat ID on this server — bind a name once before sending unbound",
   sender_claim_ambiguous: "this key's most recent claims tie across several names — bind or re-assert one name, then send again",
@@ -375,6 +376,7 @@ export const PUBLIC_ERROR_STATUS = Object.freeze({
   ambiguous_chat_id: 409,
   banned: 403,
   chat_id_not_found: 404,
+  agent_id_taken: 409,
   chat_id_taken: 409,
   conflict_stale: 409,
   sender_claim_missing: 409,
@@ -627,9 +629,14 @@ export const HELD_WAKE_BUDGET_WINDOW_MS = 60_000
 // issuance only; an unexpired ticket is never evicted to make room (the
 // fence's lesson), and re-observing the same (Actor, name) pair replaces
 // that pair's outstanding ticket.
-export const CONFLICT_TICKET_TTL_MS = 120_000
+export const CONFLICT_TICKET_TTL_MS = 60_000
 export const CONFLICT_TICKET_MAX_OUTSTANDING = 4_096
-export const CONFLICT_TICKET_MAX_PER_ACTOR = 64
+export const CONFLICT_TICKET_MAX_PER_ACTOR = 1_024
+
+// Story 1.2: Zero-config Agent ID auto-minting bounds (<role>-<shortToken>).
+export const AGENT_ID_MINT_ATTEMPTS = 3
+export const AGENT_ID_MINT_TOKEN_CHARS = 8
+export const AGENT_ID_MINT_ROLE_MAX = 23
 
 // Story 7.2 (release-gate findings): the occupancy-generation history is a
 // bounded FIFO of per-name stamps whose EVICTED entries read null, never a

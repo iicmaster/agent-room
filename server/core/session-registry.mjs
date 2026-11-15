@@ -530,5 +530,38 @@ export function createLiveSessionRegistry({ now = Date.now, leaseMs = SESSION_TT
     names.clear()
   }
 
-  return Object.freeze({ claim, rename, transfer, release, touch, lookup, holderOf, occupancyGeneration, presenceSnapshot, clear })
+  function snapshotState() {
+    return {
+      sessions: [...sessions.entries()].map(([k, v]) => [k, { ...v }]),
+      names: [...names.entries()],
+      occupancySequence,
+      generations: [...generations.entries()],
+    }
+  }
+
+  function restoreState(saved) {
+    if (!saved) return
+    sessions.clear()
+    for (const [k, v] of saved.sessions) sessions.set(k, { ...v })
+    names.clear()
+    for (const [k, v] of saved.names) names.set(k, v)
+    occupancySequence = saved.occupancySequence
+    generations.clear()
+    for (const [k, v] of saved.generations) generations.set(k, v)
+  }
+
+  return Object.freeze({
+    claim,
+    rename,
+    transfer,
+    release,
+    touch,
+    lookup,
+    holderOf,
+    occupancyGeneration,
+    presenceSnapshot,
+    clear,
+    snapshot: snapshotState,
+    restore: restoreState,
+  })
 }

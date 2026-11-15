@@ -66,9 +66,16 @@ test('HAPPY_ALLOCATE: one allocation answers the full principal shape, capabilit
   store.close()
 })
 
-test('DUP_BASE_SAME_INSTALL: two processes, one base, one machine — both succeed, distinct tokens', t => {
+test('DUP_BASE_SAME_INSTALL: two live processes claiming the same base are refused with agent_id_taken, while distinct bases or offline bases succeed', t => {
   const store = makeStore(t)
   const first = store.allocateSessionPrincipal({ installationFingerprint: FINGERPRINT_A, baseName: 'zcode', machine: 'macbook', nowMs: T0 })
+  assert.throws(
+    () => store.allocateSessionPrincipal({ installationFingerprint: FINGERPRINT_A, baseName: 'ZCode', machine: 'macbook', nowMs: T0 }),
+    error => error.code === 'agent_id_taken',
+  )
+  // After the first principal releases its base lease (offline/retained),
+  // another principal can occupy that base name with a distinct address/token.
+  store.releaseSessionBaseLease({ sessionId: first.session_id, generation: 1, nowMs: T0 })
   const second = store.allocateSessionPrincipal({ installationFingerprint: FINGERPRINT_A, baseName: 'zcode', machine: 'macbook', nowMs: T0 })
   assert.notEqual(first.address, second.address)
   assert.notEqual(tokenOf(first.address), tokenOf(second.address))
@@ -76,7 +83,6 @@ test('DUP_BASE_SAME_INSTALL: two processes, one base, one machine — both succe
   assert.equal(first.machine, second.machine)
   assert.notEqual(first.session_id, second.session_id)
   assert.notEqual(first.session_capability, second.session_capability)
-  // `chat_id_taken` never arises from this race: both principals are listed.
   assert.equal(store.listSessionPrincipals({ nowMs: T0 }).length, 2)
   store.close()
 })
@@ -85,6 +91,9 @@ test('DUP_FULL_ADDRESS: a pinned token collision refuses name_taken with the hol
   const store = makeStore(t)
   const first = store.allocateSessionPrincipal({ installationFingerprint: FINGERPRINT_A, baseName: 'zcode', machine: 'macbook', nowMs: T0 })
   const pinnedToken = tokenOf(first.address)
+  // Release first's live base lease so the second allocation reaches the
+  // full-address uniqueness gate for the retained principal's pinned token.
+  store.releaseSessionBaseLease({ sessionId: first.session_id, generation: 1, nowMs: T0 })
   assert.throws(
     () => store.allocateSessionPrincipal({
       installationFingerprint: FINGERPRINT_B, baseName: 'zcode', machine: 'macbook', nowMs: T0,
@@ -92,8 +101,7 @@ test('DUP_FULL_ADDRESS: a pinned token collision refuses name_taken with the hol
     }),
     error => error.code === 'name_taken' && error.message.includes('macbook') && error.message.includes(pinnedToken),
   )
-  // No suffix, no merge: exactly two allocates produced exactly one live row
-  // for this base plus the second attempt wrote nothing.
+  // No suffix, no merge: only the first principal exists; the second attempt wrote nothing.
   const listed = store.listSessionPrincipals({ nowMs: T0 })
   assert.equal(listed.length, 1)
   assert.equal(listed[0].session_id, first.session_id)

@@ -323,6 +323,7 @@ test('every v0.1 public error code has an HTTP status declared once', () => {
   const codes = Object.keys(PUBLIC_ERRORS).sort()
   assert.deepEqual(codes, [
     'actor_not_member',
+    'agent_id_taken',
     'ambiguous_chat_id',
     'banned',
     'challenge_invalid',
@@ -402,6 +403,8 @@ test('every v0.1 public error code has an HTTP status declared once', () => {
     room_not_found: 404,
     actor_not_member: 403,
     client_message_id_conflict: 409,
+    // Story 1.2: realm-unique live Agent ID collision refuses 409 explicitly.
+    agent_id_taken: 409,
     // Story 1.5: a live chat id collision is a conflicted state — refused
     // explicitly, never suffixed.
     chat_id_taken: 409,

@@ -124,11 +124,12 @@ test('error-envelope extras are a declared allowlist gated by code and can never
   // rate-limited refusal always names its retry delay (FR-17); the Story
   // 7.2 amendment added chat_id_taken's conflict_ticket — the observed
   // incumbent the takeover confirms against (same-Actor collisions only).
-  assert.deepEqual(Object.keys(ERROR_ENVELOPE_EXTRAS), ['ambiguous_chat_id', 'rate_limited', 'queue_full', 'chat_id_taken'])
+  assert.deepEqual(Object.keys(ERROR_ENVELOPE_EXTRAS), ['ambiguous_chat_id', 'rate_limited', 'queue_full', 'chat_id_taken', 'agent_id_taken'])
   assert.deepEqual([...ERROR_ENVELOPE_EXTRAS.ambiguous_chat_id], ['candidates'])
   assert.deepEqual([...ERROR_ENVELOPE_EXTRAS.rate_limited], ['retry_after_ms'])
   assert.deepEqual([...ERROR_ENVELOPE_EXTRAS.queue_full], ['retry_after_ms'])
   assert.deepEqual([...ERROR_ENVELOPE_EXTRAS.chat_id_taken], ['conflict_ticket'])
+  assert.deepEqual([...ERROR_ENVELOPE_EXTRAS.agent_id_taken], ['conflict_ticket'])
 
   // Fixed fields are construction-time protected: no declared extra may be
   // named ok, code, message, or status, and a spread of unlisted extras is
