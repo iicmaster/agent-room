@@ -110,6 +110,12 @@ test('the remote dress rehearsal: two identity sandboxes run the full governance
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
+  t.after(async () => {
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill('SIGKILL')
+      await once(child, 'exit')
+    }
+  })
   const stdoutChunks = []
   const stderrChunks = []
   child.stdout.on('data', chunk => stdoutChunks.push(chunk))

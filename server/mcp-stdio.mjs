@@ -638,8 +638,12 @@ export function createMcpServer({
       pending.clear()
       let outcome = 'no_session'
       if (clientPromise !== null) {
+        let timeoutHandle = null
         try {
           const readyClient = await clientPromise
+          const budgetTimeout = new Promise(resolveTimeout => {
+            timeoutHandle = setTimeout(() => resolveTimeout('timeout'), CLIENT_RELEASE_TIMEOUT_MS)
+          })
           outcome = await Promise.race([
             readyClient.release().then(async result => {
               // v0.9.0: hand the session principal's base lease back too
@@ -650,10 +654,12 @@ export function createMcpServer({
               if (result.released === true) return result.rolled_back === true ? 'released' : 'released'
               return result.reason ?? 'unknown'
             }),
-            delay(CLIENT_RELEASE_TIMEOUT_MS).then(() => 'timeout'),
+            budgetTimeout,
           ])
         } catch {
           outcome = 'unknown'
+        } finally {
+          if (timeoutHandle !== null) clearTimeout(timeoutHandle)
         }
       }
       if (outcome !== 'released' && outcome !== 'no_session') {
@@ -759,6 +765,7 @@ export function createMcpServer({
         })
         const readyClient = clientPromise
         await readyClient.ensureSessionPrincipal()
+        if (shutdownPromise !== null) return
         readyClient.startSessionHeartbeat()
       } catch (error) {
         sessionPrincipalArmed = false

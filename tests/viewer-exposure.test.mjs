@@ -132,8 +132,11 @@ async function runDriver(t) {
   const stderrChunks = []
   child.stdout.on('data', chunk => stdoutChunks.push(chunk))
   child.stderr.on('data', chunk => stderrChunks.push(chunk))
-  t.after(() => {
-    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+  t.after(async () => {
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill('SIGKILL')
+      await once(child, 'exit')
+    }
   })
   const [code] = await once(child, 'exit')
   const stdout = Buffer.concat(stdoutChunks).toString('utf8')

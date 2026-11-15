@@ -524,11 +524,30 @@ test('the CLI reads --chat-id / AGENT_ROOM_CHAT_ID / --overwrite for setup and e
 
 test('setup parser: --chat-id=<value> form reaches the grammar gate and unknown options are coded usage errors', async t => {
   const parent = mkdtempSync(join(tmpdir(), 'agent-room-setup-parse-'))
-  t.after(() => rmSync(parent, { recursive: true, force: true }))
   const sharedData = join(parent, 'shared')
   const pluginData = join(parent, 'plugin-data')
   mkdirSync(sharedData, { mode: 0o700 })
   mkdirSync(pluginData, { mode: 0o700 })
+  t.after(async () => {
+    const runtimePath = join(sharedData, 'runtime.json')
+    if (existsSync(runtimePath)) {
+      try {
+        const pid = JSON.parse(readFileSync(runtimePath, 'utf8'))?.pid
+        if (Number.isInteger(pid) && pid > 1) {
+          for (const signal of ['SIGTERM', 'SIGKILL']) {
+            try { process.kill(pid, 0) } catch { break }
+            try { process.kill(pid, signal) } catch {}
+            const deadline = Date.now() + 2000
+            while (Date.now() < deadline) {
+              try { process.kill(pid, 0) } catch { break }
+              await sleep(25)
+            }
+          }
+        }
+      } catch {}
+    }
+    rmSync(parent, { recursive: true, force: true })
+  })
   const savedExitCode = process.exitCode
   try {
     // The `=` form hands the value to the grammar gate (nothing touches a
@@ -542,6 +561,7 @@ test('setup parser: --chat-id=<value> form reaches the grammar gate and unknown 
     })
     assert.equal(equalForm.status, 'refused', 'the --chat-id=<value> form reached the grammar gate')
     assert.equal(existsSync(join(pluginData, 'config.json')), false, 'a refused setup wrote no config')
+    assert.equal(existsSync(join(sharedData, 'runtime.json')), false, 'a grammar refusal never boots the local server')
 
     const unknown = await cliMain(['setup', '--wat'], {
       input: process.stdin,

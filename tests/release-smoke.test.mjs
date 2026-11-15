@@ -182,9 +182,9 @@ function repoBoundary() {
 // assertion runs on the realpath-resolved path — before any packaging child is
 // spawned, exactly as in tests/package.test.mjs. The removal hook registers
 // first so a hostile TMPDIR cannot leak a parent.
-function makeTempParent(t, prefix) {
+function makeTempParent(t, prefix, { registerCleanup = true } = {}) {
   const parent = mkdtempSync(join(tmpdir(), prefix))
-  t.after(() => rmSync(parent, { recursive: true, force: true }))
+  if (registerCleanup) t.after(() => rmSync(parent, { recursive: true, force: true }))
   const resolvedParent = realpathSync(parent)
   assert.equal(
     isInsideDirectory(resolvedParent, repoBoundary()),
@@ -367,10 +367,10 @@ async function runClaudePluginValidate(binary, pluginRoot, timeoutMs = VALIDATE_
 // detached — unparented by design — so the record is the only handle), and
 // remove the parent only after every known pid is proven dead.
 function makeSmokeWorld(t, prefix) {
-  const { parent, resolvedParent } = makeTempParent(t, prefix)
+  const { parent, resolvedParent } = makeTempParent(t, prefix, { registerCleanup: false })
   const sharedData = join(resolvedParent, 'shared')
   const children = []
-  let runtimeRecordPath = null
+  const runtimeRecordPath = join(sharedData, 'runtime.json')
 
   const pidAlive = pid => {
     try {
@@ -382,7 +382,7 @@ function makeSmokeWorld(t, prefix) {
   }
 
   const reapSharedServer = async label => {
-    if (runtimeRecordPath === null || !existsSync(runtimeRecordPath)) return
+    if (!existsSync(runtimeRecordPath)) return
     let pid = null
     try {
       pid = JSON.parse(readFileSync(runtimeRecordPath, 'utf8'))?.pid
@@ -403,17 +403,21 @@ function makeSmokeWorld(t, prefix) {
 
   t.after(async () => {
     const failures = []
-    for (const { label, close } of children) {
-      try {
-        await close()
-      } catch (error) {
-        failures.push(new Error(`${label}: ${error.message}`))
-      }
-    }
     try {
-      await reapSharedServer(prefix)
-    } catch (error) {
-      failures.push(error)
+      for (const { label, close } of children) {
+        try {
+          await close()
+        } catch (error) {
+          failures.push(new Error(`${label}: ${error.message}`))
+        }
+      }
+      try {
+        await reapSharedServer(prefix)
+      } catch (error) {
+        failures.push(error)
+      }
+    } finally {
+      rmSync(parent, { recursive: true, force: true })
     }
     if (failures.length > 0) throw new AggregateError(failures, `${prefix}: cleanup failed`)
   })
@@ -422,10 +426,7 @@ function makeSmokeWorld(t, prefix) {
     parent,
     resolvedParent,
     sharedData,
-    runtimeRecordPath: () => {
-      runtimeRecordPath ??= join(sharedData, 'runtime.json')
-      return runtimeRecordPath
-    },
+    runtimeRecordPath: () => runtimeRecordPath,
     registerChild(label, close) {
       children.push({ label, close })
     },

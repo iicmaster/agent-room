@@ -1309,8 +1309,11 @@ test('an orderly exit hands the name back: the next session binds it at once', a
     },
     stdio: ['pipe', 'pipe', 'pipe'],
   })
-  t.after(() => {
-    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+  t.after(async () => {
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill('SIGKILL')
+      await once(child, 'exit')
+    }
   })
   child.stdout.resume()
   child.stderr.resume()
@@ -1368,8 +1371,11 @@ test('the MCP adapter hands its name back when its stdin closes', async t => {
     },
     stdio: ['pipe', 'pipe', 'pipe'],
   })
-  t.after(() => {
-    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+  t.after(async () => {
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill('SIGKILL')
+      await once(child, 'exit')
+    }
   })
   child.stdout.setEncoding('utf8')
   child.stderr.setEncoding('utf8')
@@ -1531,8 +1537,11 @@ async function spawnMcpChild(t, { gate = null } = {}) {
     },
     stdio: ['pipe', 'pipe', 'pipe'],
   })
-  t.after(() => {
-    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+  t.after(async () => {
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill('SIGKILL')
+      await once(child, 'exit')
+    }
   })
   child.stdout.setEncoding('utf8')
   let stderr = ''

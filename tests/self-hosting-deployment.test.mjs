@@ -155,8 +155,11 @@ function spawnServerChild(t, { env, dataDir }) {
   child.stdout.on('data', chunk => stdoutChunks.push(chunk))
   child.stderr.on('data', chunk => stderrChunks.push(chunk))
   if (dataDir !== undefined) {
-    t.after(() => {
-      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+    t.after(async () => {
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill('SIGKILL')
+        await once(child, 'exit')
+      }
     })
   }
   return {
@@ -234,8 +237,11 @@ function spawnCliChild(t, { pluginData, token, caPath }) {
   const stderrChunks = []
   child.stdout.on('data', chunk => stdoutChunks.push(chunk))
   child.stderr.on('data', chunk => stderrChunks.push(chunk))
-  t.after(() => {
-    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+  t.after(async () => {
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill('SIGKILL')
+      await once(child, 'exit')
+    }
   })
   return async () => {
     const [code] = await once(child, 'exit')
@@ -280,8 +286,11 @@ function spawnSignatureProbe(t, { caPath, origin, body }) {
   })
   const chunks = []
   child.stdout.on('data', chunk => chunks.push(chunk))
-  t.after(() => {
-    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+  t.after(async () => {
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill('SIGKILL')
+      await once(child, 'exit')
+    }
   })
   return async () => {
     const [code] = await once(child, 'exit')

@@ -287,6 +287,10 @@ test('two concurrent ensureServer calls on a fresh dir spawn exactly one server'
     ensureServer({ dataDir }),
     ensureServer({ dataDir }),
   ])
+  t.after(async () => {
+    await stopServer(first.record.pid)
+    if (second.record.pid !== first.record.pid) await stopServer(second.record.pid)
+  })
   // Order-tolerant: exactly one caller wins the boot, the other attaches —
   // never two servers.
   const spawned = [first, second].filter(result => result.spawned === true)
@@ -295,7 +299,6 @@ test('two concurrent ensureServer calls on a fresh dir spawn exactly one server'
   assert.equal(attached.length, 1, 'exactly one loser attaching')
   assert.equal(first.record.pid, second.record.pid, 'both callers attach to the same server')
   assert.equal(first.port, second.port)
-  t.after(() => stopServer(first.record.pid))
 
   const health = await healthRequest(first.port)
   assert.equal(health.status, 200)
@@ -378,10 +381,9 @@ test('a stale runtime record (dead pid, unreachable health) is reclaimed and a s
   await waitGone(crashed.record.pid)
   assert.ok(existsSync(join(dataDir, RUNTIME_RECORD_FILENAME)), 'the crashed server left its record')
 
-  const result = await ensureServer({ dataDir })
+  const result = await ensureForTest(t, { dataDir })
   assertRecordShape(result, { spawned: true })
   assert.notEqual(result.record.pid, crashed.record.pid)
-  t.after(() => stopServer(result.record.pid))
 
   const health = await healthRequest(result.port)
   assert.equal(health.status, 200)

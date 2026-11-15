@@ -1008,9 +1008,31 @@ registerHandler('GET /api/rooms/:id/messages', async function readMessages(conte
     }
     // The wake-up sleep never overshoots the deadline: it clamps to the
     // remaining hold time, so a response always lands within wait_ms.
+    const shutdownSignal = context.shutdownSignal
+    const requestClosed = () =>
+      Boolean(shutdownSignal?.aborted || context.response?.closed || context.response?.destroyed || context.request?.destroyed)
+    if (requestClosed()) {
+      return { messages: [], next_after_seq: afterSeq, head_seq: afterSeq }
+    }
     await new Promise(resolvePromise => {
-      setTimeout(resolvePromise, Math.min(LONGPOLL_POLL_INTERVAL_MS, remainingMs))
+      let settled = false
+      const done = () => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        shutdownSignal?.removeEventListener('abort', done)
+        context.response?.removeListener?.('close', done)
+        context.request?.removeListener?.('close', done)
+        resolvePromise()
+      }
+      const timer = setTimeout(done, Math.min(LONGPOLL_POLL_INTERVAL_MS, remainingMs))
+      shutdownSignal?.addEventListener('abort', done, { once: true })
+      context.response?.once?.('close', done)
+      context.request?.once?.('close', done)
     })
+    if (requestClosed()) {
+      return { messages: [], next_after_seq: afterSeq, head_seq: afterSeq }
+    }
   }
 }, 'actor')
 
@@ -1942,6 +1964,7 @@ async function handleRequest(request, response, options) {  let pathname = null
     challengeRegistry: options.challengeRegistry,
     viewerSessions: options.viewerSessions,
     store: options.store,
+    shutdownSignal: options.shutdownSignal ?? null,
   }
 
   try {
@@ -2404,6 +2427,7 @@ export async function startServer({
     // tls option this is byte-identical to today's node:http server; with
     // operator TLS material https.createServer wraps the SAME callback —
     // "both paths use the same request handler" is structural, never claimed.
+    const shutdownController = new AbortController()
     const requestHandler = (request, response) => {
       // handleRequest maps its own failures; this guard only contains a
       // failure of the failure path itself.
@@ -2421,6 +2445,7 @@ export async function startServer({
         enrollRateLimiter: effectiveEnrollRateLimiter,
         trustedProxy,
         store,
+        shutdownSignal: shutdownController.signal,
       }).catch(() => {
         response.destroy()
       })
@@ -2453,6 +2478,7 @@ export async function startServer({
 
     let closePromise = null
     const closeServerAndStore = async () => {
+      shutdownController.abort()
       if (pruneTimer !== null) clearInterval(pruneTimer)
       const httpClosed = new Promise(resolvePromise => {
         httpServer.close(() => resolvePromise())

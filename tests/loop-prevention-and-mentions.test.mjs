@@ -21,7 +21,15 @@ test('Infinite Loop Prevention & Mention-Driven Coordination Suite', async t => 
 
   t.after(async () => {
     if (status?.pid) {
-      try { process.kill(status.pid, 'SIGTERM') } catch {}
+      for (const signal of ['SIGTERM', 'SIGKILL']) {
+        try { process.kill(status.pid, 0) } catch { break }
+        try { process.kill(status.pid, signal) } catch { break }
+        const deadline = Date.now() + 2000
+        while (Date.now() < deadline) {
+          try { process.kill(status.pid, 0) } catch { break }
+          await new Promise(resolve => setTimeout(resolve, 25))
+        }
+      }
     }
     await rm(baseDir, { recursive: true, force: true })
   })

@@ -260,6 +260,16 @@ export async function runSetup({
       }
     }
 
+    // Non-interactive mode already holds the candidate Chat ID: refuse an
+    // invalid grammar before booting the local server or touching shared state.
+    if (nonInteractive) {
+      const candidate = String(chatId).trim()
+      if (chatIdForms(candidate) === null) {
+        say(`"${candidate.slice(0, CHAT_ID_MAX + 16)}" is not a valid Chat ID: ${CHAT_ID_INVALID_MESSAGE}`)
+        return { status: 'refused', message: `"${candidate.slice(0, CHAT_ID_MAX + 16)}" is not a valid Chat ID: ${CHAT_ID_INVALID_MESSAGE}; no configuration was written` }
+      }
+    }
+
     // Local Mode bootstrap: the shared server (and, after a boot, the local
     // credential file) exists before the first probe.
     const server = await ensureServer({ dataDir: sharedDataDir, ...(waitMs === undefined ? {} : { waitMs }) })
