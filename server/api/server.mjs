@@ -152,11 +152,18 @@ import {
   READ_HOLD_MAX_MS,
   READ_PAGE_DEFAULT,
   READ_PAGE_MAX,
+  BEARER_CLAIM_TOUCH_THROTTLE_MS,
+  FRAME_MAX_BYTES,
+  POOL_QUEUE_FULL_RETRY_AFTER_MS,
+  RETENTION_PRUNE_INTERVAL_MS,
+  RETENTION_SWEEP_BATCH_MAX,
   SESSION_ADDRESS_INVALID_MESSAGE,
   SESSION_CAPABILITY_CHARS,
   SESSION_CAPABILITY_PATTERN,
+  SESSION_KINDS,
   SESSION_MACHINE_MAX,
   SESSION_MACHINE_PATTERN,
+  SESSION_PRINCIPALS_LIST_MAX,
   SESSION_RECOVERY_ID_PATTERN,
   SESSION_REVOKE_REASON_MAX,
   STORAGE_REFUSE_FREE_BYTES,
@@ -387,20 +394,61 @@ registerHandler('GET /health', function health() {
 // against without re-enrolling (FR-3/FR-12; the INSERT ... DO NOTHING write
 // keeps the first registration's timestamp). A rejected exchange still
 // writes nothing.
-registerHandler('POST /api/auth/local', function localAuth(context) {
+function parseSessionKind(raw) {
+  if (raw === undefined || raw === null) return { ok: true, kind: 'long_lived' }
+  if (typeof raw !== 'string' || !SESSION_KINDS.includes(raw)) {
+    return {
+      ok: false,
+      rejection: reject('invalid_request', "session_kind must be 'long_lived' or 'cli_oneshot'"),
+    }
+  }
+  return { ok: true, kind: raw }
+}
+
+function issueSessionToken(registry, fingerprint, { kind, via }) {
+  try {
+    return { ok: true, session_token: registry.issue(fingerprint, { kind, via }) }
+  } catch (error) {
+    if (error?.code === 'queue_full') {
+      return {
+        ok: false,
+        rejection: reject('queue_full', error.message, {
+          retry_after_ms: error.retryAfterMs ?? POOL_QUEUE_FULL_RETRY_AFTER_MS,
+        }),
+      }
+    }
+    throw error
+  }
+}
+
+registerHandler('POST /api/auth/local', async function localAuth(context) {
   const presented = bearerTokenFromHeaders(context.headers)
   if (presented === null) return reject('unauthorized')
   const publicKey = rawInstallationPublicKey(context.body?.public_key)
   if (publicKey === null) {
     return reject('invalid_request', 'public_key is required: the raw 32-byte Ed25519 public key as base64url')
   }
+  const kindParsed = parseSessionKind(context.body?.session_kind)
+  if (!kindParsed.ok) return kindParsed.rejection
   const localToken = readLocalToken(context.dataDir)
   if (!credentialsMatch(presented, localToken)) return reject('unauthorized')
   const fingerprint = fingerprintFromPublicKey(publicKey)
-  context.store.enrollActor({ actorFingerprint: fingerprint, enrolledAt: new Date().toISOString() })
+  if (!context.store.isActorEnrolled(fingerprint)) {
+    await context.store.enqueueWrite({
+      sessionKey: `enroll:${fingerprint}`,
+      coalesceKey: `enroll:${fingerprint}`,
+      priority: 'control',
+      execute: tx => tx.enrollActorInTx({
+        actorFingerprint: fingerprint,
+        enrolledAt: new Date().toISOString(),
+        enrolledVia: 'local',
+      }),
+    })
+  }
   const registry = context.sessionRegistry ?? SESSION_REGISTRY
-  const sessionToken = registry.issue(fingerprint)
-  return { session_token: sessionToken }
+  const issued = issueSessionToken(registry, fingerprint, { kind: kindParsed.kind, via: 'local' })
+  if (!issued.ok) return issued.rejection
+  return { session_token: issued.session_token }
 })
 
 // Story 4.1 remote credential path (pre-auth class), the challenge half: a
@@ -450,6 +498,8 @@ registerHandler('POST /api/auth/answer', function answerChallenge(context) {
   if (typeof signature !== 'string' || signature.length > CHALLENGE_SIGNATURE_MAX_CHARS) {
     return reject('invalid_request', `signature must be a base64url string of at most ${CHALLENGE_SIGNATURE_MAX_CHARS} characters`)
   }
+  const kindParsed = parseSessionKind(context.body?.session_kind)
+  if (!kindParsed.ok) return kindParsed.rejection
   const registry = context.challengeRegistry ?? CHALLENGE_REGISTRY
   const rawKey = registry.consume(nonce)
   if (rawKey === null) return reject('challenge_invalid')
@@ -471,7 +521,9 @@ registerHandler('POST /api/auth/answer', function answerChallenge(context) {
   const fingerprint = fingerprintFromPublicKey(rawKey)
   if (!context.store.isActorEnrolled(fingerprint)) return reject('not_enrolled')
   const sessionRegistry = context.sessionRegistry ?? SESSION_REGISTRY
-  return { session_token: sessionRegistry.issue(fingerprint) }
+  const issued = issueSessionToken(sessionRegistry, fingerprint, { kind: kindParsed.kind, via: 'answer' })
+  if (!issued.ok) return issued.rejection
+  return { session_token: issued.session_token }
 })
 
 // Story 4.2 invite-gated enrollment (pre-auth class, the frozen route's last
@@ -495,7 +547,7 @@ registerHandler('POST /api/auth/answer', function answerChallenge(context) {
 // decorated spelling onto real signature bytes). Admission is paced by the
 // budgets stage's fixed-window limiter — a rate_limited refusal happens
 // before this handler and consumes nothing.
-registerHandler('POST /api/auth/enroll', function enroll(context) {
+registerHandler('POST /api/auth/enroll', async function enroll(context) {
   const inviteToken = context.body?.invite_token
   if (typeof inviteToken !== 'string' || !INVITE_TOKEN_PATTERN.test(inviteToken)) {
     return reject(
@@ -515,10 +567,15 @@ registerHandler('POST /api/auth/enroll', function enroll(context) {
     return reject('invalid_request', `signature must be a base64url string of at most ${CHALLENGE_SIGNATURE_MAX_CHARS} characters`)
   }
   if (!CHALLENGE_SIGNATURE_PATTERN.test(signature)) return reject('signature_invalid')
-  const outcome = context.store.enrollRemoteActor({
-    inviteToken,
-    rawPublicKey: publicKey,
-    signature: Buffer.from(signature, 'base64url'),
+  const fingerprint = fingerprintFromPublicKey(publicKey)
+  const outcome = await context.store.enqueueWrite({
+    sessionKey: `enroll:${fingerprint}`,
+    priority: 'control',
+    execute: tx => tx.enrollRemoteActorInTx({
+      inviteToken,
+      rawPublicKey: publicKey,
+      signature: Buffer.from(signature, 'base64url'),
+    }),
   })
   return { fingerprint: outcome.fingerprint }
 })
@@ -898,7 +955,7 @@ registerHandler('GET /api/rooms', function listRooms(context) {
 // the store keys it with the same fingerprint twice, so two local sessions can
 // coordinate privately. The response is deliberately minimal: room_id and
 // kind — the pair room's full shape is the store's, not the wire's.
-registerHandler('POST /api/rooms/direct', function directOpen(context) {
+registerHandler('POST /api/rooms/direct', async function directOpen(context) {
   const principal = sessionPrincipalOf(context)
   if (principal.ok === false) return principal
   const chatId = context.body?.chat_id
@@ -913,12 +970,16 @@ registerHandler('POST /api/rooms/direct', function directOpen(context) {
     return reject('invalid_actor_id', 'target_fingerprint must be sha256: followed by 64 lowercase hex characters')
   }
 
+  let pendingFingerprints = null
   const outcome = resolveDirectRoom({
     chatId: forms.display,
     targetFingerprint,
     callerFingerprint: principal.actorFingerprint,
     listClaimsForChatId: value => context.store.listClaimsForChatId(value),
-    openDirectRoom: options => context.store.openDirectRoom(options),
+    openDirectRoom: options => {
+      pendingFingerprints = options.actorFingerprints
+      return { id: '__pending__', kind: 'direct' }
+    },
   })
   if (outcome.ok === false && outcome.code === 'chat_id_not_found') {
     return reject(
@@ -935,7 +996,20 @@ registerHandler('POST /api/rooms/direct', function directOpen(context) {
       { candidates: outcome.candidates },
     )
   }
-  return { room_id: outcome.room_id, kind: outcome.kind }
+  const room = await context.store.enqueueWrite({
+    sessionKey: principal.sessionKey,
+    priority: 'control',
+    validateFence() {
+      if (context.store.isActorBanned(principal.actorFingerprint)) {
+        throw new AgentRoomRuntimeError('banned', PUBLIC_ERRORS.banned)
+      }
+      if (context.sessionRegistry?.isSuperseded?.(principal.sessionKey)) {
+        throw new AgentRoomRuntimeError('unauthorized', PUBLIC_ERRORS.unauthorized)
+      }
+    },
+    execute: tx => tx.openDirectRoomInTx({ actorFingerprints: pendingFingerprints }),
+  })
+  return { room_id: room.id, kind: room.kind }
 }, 'actor')
 
 // GET /api/rooms/:id/messages: the long-poll read. The page semantics are
@@ -1904,23 +1978,37 @@ registerHandler('POST /api/session-principals/revoke', async function revokeSess
 registerHandler('GET /api/session-principals', function listSessionPrincipalsRoute(context) {
   const principal = sessionPrincipalOf(context)
   if (principal.ok === false) return principal
-  const rows = context.store.listSessionPrincipals({})
-  return {
-    sessions: rows.map(row => ({
+  const { principals, truncated: capTruncated } = context.store.listSessionPrincipals({
+    limit: SESSION_PRINCIPALS_LIST_MAX,
+    withTruncation: true,
+  })
+  const sessions = []
+  let byteBudget = Buffer.byteLength('{"ok":true,"result":{"sessions":[],"truncated":true}}', 'utf8')
+  let frameTruncated = Boolean(capTruncated)
+  for (const row of principals) {
+    const projected = {
       session_id: row.session_id,
-      generation: row.generation,
       address: row.address,
       base_name: row.base_name,
       machine: row.machine,
-      client_type: row.client_type,
-      created_at: row.created_at,
-      last_heartbeat_at: row.last_heartbeat_at,
-      base_lease_expires_at: row.base_lease_expires_at,
-      base_lease_status: row.base_lease_status,
-      principal_retention_expires_at: row.principal_retention_expires_at,
-      principal_status: row.principal_status,
+      fingerprint: row.installation_fingerprint,
+      enrolled_via: row.enrolled_via ?? 'local',
       presence: row.presence,
-    })),
+      last_heartbeat_at: row.last_heartbeat_at,
+      principal_status: row.principal_status,
+      base_lease_status: row.base_lease_status,
+    }
+    const rowBytes = Buffer.byteLength(JSON.stringify(projected), 'utf8') + (sessions.length > 0 ? 1 : 0)
+    if (byteBudget + rowBytes >= FRAME_MAX_BYTES) {
+      frameTruncated = true
+      break
+    }
+    byteBudget += rowBytes
+    sessions.push(projected)
+  }
+  return {
+    sessions,
+    truncated: frameTruncated,
   }
 }, 'actor')
 
@@ -2568,6 +2656,7 @@ export async function startServer({
     ['/api/session-principals/resume', new Set(['POST'])],
     ['/api/session-principals/heartbeat', new Set(['POST'])],
     ['/api/session-principals/current', new Set(['DELETE'])],
+    ['/api/session-principals', new Set(['GET'])],
     ['/api/messages', new Set(['POST'])],
     ['/api/rooms/:id/messages', new Set(['GET'])],
     ['/api/status', new Set(['GET'])],
@@ -2604,6 +2693,50 @@ export async function startServer({
       presentedDigest: digest,
     }
   }
+  const lastPersistedTouchAt = new Map()
+  const touchThrottleMs = Math.max(1, Math.min(BEARER_CLAIM_TOUCH_THROTTLE_MS, Math.floor(claimsTtlMs / 4)))
+  let lastTouchWarnAt = 0
+  const throttledTouchSession = sessionKey => {
+    const existing = effectiveLiveRegistry.lookup(sessionKey)
+    if (!existing) return null
+    const snapshot = effectiveLiveRegistry.touch(sessionKey)
+    if (!snapshot) return null
+    const nowMs = Date.now()
+    const recorded = lastPersistedTouchAt.get(sessionKey)
+    const baseline = recorded ?? existing.lastSeen ?? nowMs
+    if (recorded === undefined) lastPersistedTouchAt.set(sessionKey, baseline)
+    if (nowMs - baseline < touchThrottleMs) return snapshot
+    lastPersistedTouchAt.set(sessionKey, nowMs)
+    const claimPayload = {
+      chatId: snapshot.chatId,
+      actorFingerprint: snapshot.actorFingerprint,
+      lastSeenAt: new Date(snapshot.lastSeen).toISOString(),
+    }
+    store.enqueueWrite({
+      sessionKey,
+      coalesceKey: `touch:${sessionKey}`,
+      priority: 'best_effort',
+      validateFence() {
+        if (effectiveRegistry.isSuperseded(sessionKey)) {
+          throw new AgentRoomRuntimeError('unauthorized', PUBLIC_ERRORS.unauthorized)
+        }
+        const current = effectiveLiveRegistry.lookup(sessionKey)
+        if (!current || current.chatId !== claimPayload.chatId || current.actorFingerprint !== claimPayload.actorFingerprint) {
+          throw new AgentRoomRuntimeError('unauthorized', PUBLIC_ERRORS.unauthorized)
+        }
+      },
+      execute: tx => tx.upsertChatIdClaimInTx(claimPayload),
+    }).catch(error => {
+      if (error?.code === 'unauthorized') return
+      const errNow = Date.now()
+      if (errNow - lastTouchWarnAt >= 60_000) {
+        lastTouchWarnAt = errNow
+        process.stderr.write(`agent-room-server: throttled bearer touch skipped: ${internalDetailOf(error)}\n`)
+      }
+    })
+    return snapshot
+  }
+
   const effectiveSessionVerifier = context => {
     const authHeader = context.headers?.authorization ?? context.headers?.['Authorization']
     const authValue = Array.isArray(authHeader) ? authHeader[0] : authHeader
@@ -2623,9 +2756,7 @@ export async function startServer({
       && typeof outcome.sessionKey === 'string'
       && outcome.sessionKey.length > 0
     ) {
-      effectiveLiveRegistry.touch(outcome.sessionKey, {
-        persist: claimPayload => store.upsertChatIdClaim(claimPayload),
-      })
+      throttledTouchSession(outcome.sessionKey)
     }
     return outcome
   }
@@ -2642,28 +2773,33 @@ export async function startServer({
   })
   let httpServer = null
   let pruneTimer = null
+  let retentionPruneTimer = null
+  let retentionPruneInFlight = false
   try {
     // First boot mints the realm id and the implicit Broadcast Room; restarts
     // and racing bootstraps on the same data dir converge on both (AD-14).
-    bootstrapRealm(store)
+    const realm = bootstrapRealm(store)
 
-    // Story 1.5 claims maintenance: prune the durable chat_id_claims index
-    // once on boot, then lazily on the (overridable) interval. A tuned TTL
-    // below the interval clamps the interval to half the TTL — pruning must
-    // keep pace with expiry or rows would outlive their window for a full
-    // cycle. The timer never holds the process open (unref) and is cleared on
-    // close; a failed cycle is one bounded stderr line — the next interval
-    // retries, the server keeps serving. `pruneClaims` is the injectable
-    // seam (default: the store's prune at the tuned TTL) used by tests to
-    // prove that containment.
     const effectivePruneIntervalMs = Math.min(
       pruneIntervalMs ?? PRUNE_INTERVAL_MS,
       Math.floor(claimsTtlMs / 2),
     )
-    const pruneStep = pruneClaims ?? (() => store.pruneChatIdClaims(claimsTtlMs))
+    const pruneStep = pruneClaims
+      ? () => pruneClaims()
+      : () => store.enqueueWrite({
+          sessionKey: 'prune:claims',
+          coalesceKey: 'prune:claims',
+          priority: 'best_effort',
+          execute: tx => tx.pruneChatIdClaimsInTx(claimsTtlMs),
+        })
     const pruneSafely = () => {
       try {
-        pruneStep()
+        const result = pruneStep()
+        if (result && typeof result.then === 'function') {
+          result.catch(error => {
+            process.stderr.write(`agent-room-server: chat id claims prune failed: ${internalDetailOf(error)}\n`)
+          })
+        }
       } catch (error) {
         process.stderr.write(`agent-room-server: chat id claims prune failed: ${internalDetailOf(error)}\n`)
       }
@@ -2671,6 +2807,29 @@ export async function startServer({
     pruneSafely()
     pruneTimer = setInterval(pruneSafely, effectivePruneIntervalMs)
     pruneTimer.unref()
+
+    // Story 1.4: bounded background retention prune (<= 500 rows per 300_000ms tick).
+    const retentionPruneSafely = () => {
+      if (retentionPruneInFlight) return
+      retentionPruneInFlight = true
+      store.enqueueWrite({
+        sessionKey: 'prune:retention',
+        coalesceKey: 'prune:retention',
+        priority: 'best_effort',
+        execute: tx => tx.pruneExpiredSessionPrincipalsInTx({
+          nowMs: Date.now(),
+          limit: RETENTION_SWEEP_BATCH_MAX,
+        }),
+      }).catch(error => {
+        if (error?.code !== 'queue_full') {
+          process.stderr.write(`agent-room-server: principal retention prune failed: ${internalDetailOf(error)}\n`)
+        }
+      }).finally(() => {
+        retentionPruneInFlight = false
+      })
+    }
+    retentionPruneTimer = setInterval(retentionPruneSafely, RETENTION_PRUNE_INTERVAL_MS)
+    retentionPruneTimer.unref()
 
     // Story 4.7: ONE request callback, TWO transports. The callback body is
     // unchanged from the pre-4.7 inline form; only its name moved. With no
@@ -2723,6 +2882,7 @@ export async function startServer({
       pid: process.pid,
       port: address.port,
       version: APP_VERSION,
+      realm_id: realm.realmId,
     })
     atomicWriteJson(runtimeRecordPath(dataDir), runtimeRecord)
 
@@ -2730,6 +2890,7 @@ export async function startServer({
     const closeServerAndStore = async () => {
       shutdownController.abort()
       if (pruneTimer !== null) clearInterval(pruneTimer)
+      if (retentionPruneTimer !== null) clearInterval(retentionPruneTimer)
       const httpClosed = new Promise(resolvePromise => {
         httpServer.close(() => resolvePromise())
       })
@@ -2773,9 +2934,7 @@ export async function startServer({
       // (one liveness mechanism). Exposed for callers that must advance a
       // session outside the request path, and for tests.
       touchSession(sessionKey) {
-        return effectiveLiveRegistry.touch(sessionKey, {
-          persist: claimPayload => store.upsertChatIdClaim(claimPayload),
-        })
+        return throttledTouchSession(sessionKey)
       },
       close() {
         if (!closePromise) {
@@ -2795,6 +2954,7 @@ export async function startServer({
     })
   } catch (error) {
     if (pruneTimer !== null) clearInterval(pruneTimer)
+    if (retentionPruneTimer !== null) clearInterval(retentionPruneTimer)
     if (httpServer !== null) {
       try {
         await new Promise(resolvePromise => {

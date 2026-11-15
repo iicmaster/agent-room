@@ -99,7 +99,7 @@ function pidAlive(pid) {
 // Read and shape-validate the runtime record. An absent, unreadable, or
 // malformed record is treated as absent: the boot path overwrites the file
 // atomically, so bootstrap self-heals from tampered state.
-function readRuntimeRecord(directory) {
+export function readRuntimeRecord(directory) {
   let value
   try {
     value = readJsonFile(runtimeRecordPath(directory))
@@ -114,7 +114,12 @@ function readRuntimeRecord(directory) {
   ) {
     return null
   }
-  return { pid: value.pid, port: value.port, version: value.version }
+  return {
+    pid: value.pid,
+    port: value.port,
+    version: value.version,
+    ...(typeof value.realm_id === 'string' && value.realm_id.length > 0 ? { realm_id: value.realm_id } : {}),
+  }
 }
 
 // Attach requires major-version compatibility (no new error code): a record
@@ -201,7 +206,7 @@ export function probeHealth(port) {
 // a different status, a transport failure — is a refusal.
 function exchangeLocalCredential(port, localToken, publicKey) {
   return new Promise(resolve => {
-    const body = JSON.stringify({ public_key: publicKey })
+    const body = JSON.stringify({ public_key: publicKey, session_kind: 'cli_oneshot' })
     const request = http.request(
       {
         host: '127.0.0.1',

@@ -498,10 +498,12 @@ export const MIGRATION_DAEMON_SETTLE_MS = 2_000
 export const SESSION_TTL_MS = SESSION_TTL_SECONDS * 1000
 export const SESSION_TOKEN_BYTES = 32
 export const SESSION_TOKEN_MAX_CHARS = 256
-// Session registry capacity: one Actor may hold many sessions (each with its
-// own Chat ID in Story 1.5), so the bound is per-realm, not per-Actor; issue()
-// lazily sweeps expired entries and evicts oldest-expired-then-oldest.
-export const SESSIONS_MAX = 1000
+// Session registry capacity: non-evicting dual-pool bounds (Story 1.4).
+export const SESSIONS_MAX = 2048
+export const CLI_SESSIONS_MAX = 512
+export const CLI_SESSION_TTL_MS = 120_000
+export const REMOTE_BEARER_SESSIONS_PER_ACTOR_MAX = 256
+export const SESSION_KINDS = Object.freeze(['long_lived', 'cli_oneshot'])
 
 // The local bootstrap credential file (0600, shared data dir) is a bounded
 // regular non-symlink file like every other private state file.
@@ -771,3 +773,11 @@ export const SESSION_RECOVERY_ID_PATTERN = /^[A-Za-z0-9_-]{22,64}$/
 export const CONFLICT_TICKET_MAX_CHARS = 256
 export const SESSION_REVOKE_REASON_MAX = 200
 export const CLI_BUSY_RETRY_DELAYS_MS = Object.freeze([250, 250, 250])
+
+// Story 1.4: zero-write live directory, throttled Bearer touch, and bounded background retention prune.
+export const SESSION_PRINCIPALS_LIST_MAX = 2048
+export const BEARER_CLAIM_TOUCH_THROTTLE_MS = 60_000
+export const RETENTION_PRUNE_INTERVAL_MS = 300_000
+export const RETENTION_SWEEP_BATCH_MAX = 500
+export const SESSION_PRINCIPAL_RETENTION_GRACE_MS = 60 * 60 * 1000
+export const POOL_QUEUE_FULL_RETRY_AFTER_MS = 250

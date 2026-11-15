@@ -42,27 +42,35 @@ export function createMessagingRoomOperations({ database, withImmediateTransacti
       })
     },
 
+    openDirectRoomInTx(options) {
+      assertOpen()
+      if (!database.isTransaction) {
+        fail('invalid_argument', 'openDirectRoomInTx requires an active transaction')
+      }
+      const { actorFingerprints } = requireObject(options)
+      if (!Array.isArray(actorFingerprints) || actorFingerprints.length !== 2) fail('invalid_actor_id', 'actorFingerprints must contain exactly two fingerprints')
+      const [firstFingerprint, secondFingerprint] = actorFingerprints.map(requireFingerprint)
+      const { min, pairKey } = canonicalDirectPair(firstFingerprint, secondFingerprint)
+      const createdAt = new Date().toISOString()
+      const existingRow = database.prepare('SELECT id, kind, title, pair_key, created_by_fingerprint, created_at FROM rooms WHERE pair_key = ?').get(pairKey)
+      let room
+      if (existingRow) room = plainRoom(existingRow)
+      else {
+        const id = randomBytes(ROOM_ID_ENTROPY_BYTES).toString('base64url')
+        database.prepare(`INSERT INTO rooms (id, kind, title, pair_key, created_by_fingerprint, created_at) VALUES (?, ?, NULL, ?, ?, ?)`).run(id, DIRECT_KIND, pairKey, min, createdAt)
+        room = { id, kind: DIRECT_KIND, title: null, pair_key: pairKey, created_by_fingerprint: min, created_at: createdAt }
+      }
+      for (const fingerprint of new Set([firstFingerprint, secondFingerprint])) {
+        database.prepare(`INSERT INTO direct_members (room_id, actor_fingerprint, joined_at) VALUES (?, ?, ?) ON CONFLICT (room_id, actor_fingerprint) DO NOTHING`).run(room.id, fingerprint, createdAt)
+      }
+      return room
+    },
+
     openDirectRoom(options) {
       assertOpen()
       const { actorFingerprints } = requireObject(options)
       if (!Array.isArray(actorFingerprints) || actorFingerprints.length !== 2) fail('invalid_actor_id', 'actorFingerprints must contain exactly two fingerprints')
-      const [firstFingerprint, secondFingerprint] = actorFingerprints.map(requireFingerprint)
-      const { min, max, pairKey } = canonicalDirectPair(firstFingerprint, secondFingerprint)
-      const createdAt = new Date().toISOString()
-      return withImmediateTransaction(database, () => {
-        const existingRow = database.prepare('SELECT id, kind, title, pair_key, created_by_fingerprint, created_at FROM rooms WHERE pair_key = ?').get(pairKey)
-        let room
-        if (existingRow) room = plainRoom(existingRow)
-        else {
-          const id = randomBytes(ROOM_ID_ENTROPY_BYTES).toString('base64url')
-          database.prepare(`INSERT INTO rooms (id, kind, title, pair_key, created_by_fingerprint, created_at) VALUES (?, ?, NULL, ?, ?, ?)`).run(id, DIRECT_KIND, pairKey, min, createdAt)
-          room = { id, kind: DIRECT_KIND, title: null, pair_key: pairKey, created_by_fingerprint: min, created_at: createdAt }
-        }
-        for (const fingerprint of new Set([firstFingerprint, secondFingerprint])) {
-          database.prepare(`INSERT INTO direct_members (room_id, actor_fingerprint, joined_at) VALUES (?, ?, ?) ON CONFLICT (room_id, actor_fingerprint) DO NOTHING`).run(room.id, fingerprint, createdAt)
-        }
-        return room
-      })
+      return withImmediateTransaction(database, () => this.openDirectRoomInTx(options))
     },
 
     listRoomsForActor(actorFingerprint) {

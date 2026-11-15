@@ -105,6 +105,7 @@ export async function exchangeCliSession({ port, sharedDataDir, pluginDataDir })
   const keypair = loadOrCreateKeypair(pluginDataDir)
   const exchange = await cliHttpJson(port, 'POST', '/api/auth/local', cliBearerHeaders(localToken), {
     public_key: keypair.publicKey.toString('base64url'),
+    session_kind: 'cli_oneshot',
   })
   if (exchange.status !== OK_STATUS || exchange.body?.result?.session_token === undefined) {
     throw new AgentRoomRuntimeError(

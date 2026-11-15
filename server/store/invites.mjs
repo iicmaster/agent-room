@@ -287,7 +287,10 @@ export function createInviteOperations({ database, withImmediateTransaction, now
     // { reattached, fingerprint, digest } — reattached true means the
     // (invite, fingerprint) pair had already consumed a use, so this call
     // is the lost-response retry and wrote nothing.
-    enrollRemoteActor(options) {
+    enrollRemoteActorInTx(options) {
+      if (!database.isTransaction) {
+        fail('invalid_argument', 'enrollRemoteActorInTx requires an active transaction')
+      }
       const { inviteToken, rawPublicKey, signature } = options ?? {}
       if (typeof inviteToken !== 'string' || !INVITE_TOKEN_PATTERN.test(inviteToken)) {
         fail('invite_invalid', `invite token must be ${INVITE_TOKEN_PREFIX} followed by exactly ${INVITE_TOKEN_CHARS} base64url characters`)
@@ -301,56 +304,55 @@ export function createInviteOperations({ database, withImmediateTransaction, now
       const timestamp = now()
       const fingerprint = fingerprintFromPublicKey(rawPublicKey)
       const digest = digestOfToken(inviteToken)
-      // The possession proof is bound to the exact presented token bytes —
-      // the invite secret is the challenge, and the proof names both the
-      // key (via the derived fingerprint) and this invite presentation.
       const tokenBytes = Buffer.from(inviteToken, 'utf8')
+      const row = selectInvite(digest)
+      if (!row) fail('invite_invalid', 'invite is unknown to this server')
+      if (row.revoked_at !== null) fail('invite_invalid', 'invite was revoked by the operator')
+      if (timestamp >= expireMs(row.expires_at)) fail('invite_invalid', 'invite has expired')
+      if (!verifyWithRawPublicKey(rawPublicKey, tokenBytes, Buffer.from(signature))) {
+        fail('signature_invalid', 'the invite possession proof failed: the signature does not verify under the presented key over the exact token bytes')
+      }
+      if (isBanned(fingerprint)) {
+        fail('banned', 'this key is banned by the operator')
+      }
+      const reattached = database.prepare(`
+        SELECT 1 AS found
+        FROM invite_consumptions
+        WHERE digest = ? AND actor_fingerprint = ?
+      `).get(digest, fingerprint)
+      if (reattached) {
+        return { reattached: true, fingerprint, digest }
+      }
+      if (Number(row.uses_remaining) <= 0) {
+        fail('invite_exhausted', 'invite has no uses remaining')
+      }
+      database.prepare(`
+        INSERT INTO invite_consumptions (digest, actor_fingerprint, consumed_at)
+        VALUES (?, ?, ?)
+      `).run(digest, fingerprint, new Date(timestamp).toISOString())
+      database.prepare(
+        'UPDATE invites SET uses_remaining = uses_remaining - 1 WHERE digest = ?',
+      ).run(digest)
+      database.prepare(`
+        INSERT INTO enrolled_actors (actor_fingerprint, enrolled_at, enrolled_via)
+        VALUES (?, ?, 'remote')
+        ON CONFLICT (actor_fingerprint) DO NOTHING
+      `).run(fingerprint, new Date(timestamp).toISOString())
+      return { reattached: false, fingerprint, digest }
+    },
 
-      return withImmediateTransaction(database, () => {
-        const row = selectInvite(digest)
-        if (!row) fail('invite_invalid', 'invite is unknown to this server')
-        if (row.revoked_at !== null) fail('invite_invalid', 'invite was revoked by the operator')
-        if (timestamp >= expireMs(row.expires_at)) fail('invite_invalid', 'invite has expired')
-        if (!verifyWithRawPublicKey(rawPublicKey, tokenBytes, Buffer.from(signature))) {
-          fail('signature_invalid', 'the invite possession proof failed: the signature does not verify under the presented key over the exact token bytes')
-        }
-        // Story 4.5: the operator ban's enrollment gate — AFTER the proof
-        // (ban state is never revealed to a caller who cannot prove
-        // possession of the key) and BEFORE the reattach check or any use
-        // is consumed (every re-enroll from a banned key is refused
-        // `banned`, and a banned attempt consumes nothing).
-        if (isBanned(fingerprint)) {
-          fail('banned', 'this key is banned by the operator')
-        }
-        const reattached = database.prepare(`
-          SELECT 1 AS found
-          FROM invite_consumptions
-          WHERE digest = ? AND actor_fingerprint = ?
-        `).get(digest, fingerprint)
-        if (reattached) {
-          return { reattached: true, fingerprint, digest }
-        }
-        if (Number(row.uses_remaining) <= 0) {
-          fail('invite_exhausted', 'invite has no uses remaining')
-        }
-        database.prepare(`
-          INSERT INTO invite_consumptions (digest, actor_fingerprint, consumed_at)
-          VALUES (?, ?, ?)
-        `).run(digest, fingerprint, new Date(timestamp).toISOString())
-        database.prepare(
-          'UPDATE invites SET uses_remaining = uses_remaining - 1 WHERE digest = ?',
-        ).run(digest)
-        // The durable enrollment record the challenge-answer route gates on
-        // (Story 4.1): the second writer Story 4.1's design reserved this
-        // story for. INSERT DO NOTHING — a key already enrolled through the
-        // local path or an earlier invite keeps its first registration.
-        database.prepare(`
-          INSERT INTO enrolled_actors (actor_fingerprint, enrolled_at)
-          VALUES (?, ?)
-          ON CONFLICT (actor_fingerprint) DO NOTHING
-        `).run(fingerprint, new Date(timestamp).toISOString())
-        return { reattached: false, fingerprint, digest }
-      })
+    enrollRemoteActor(options) {
+      const { inviteToken, rawPublicKey, signature } = options ?? {}
+      if (typeof inviteToken !== 'string' || !INVITE_TOKEN_PATTERN.test(inviteToken)) {
+        fail('invite_invalid', `invite token must be ${INVITE_TOKEN_PREFIX} followed by exactly ${INVITE_TOKEN_CHARS} base64url characters`)
+      }
+      if (!(rawPublicKey instanceof Uint8Array) || rawPublicKey.length !== 32) {
+        fail('invalid_argument', 'enrollRemoteActor requires the raw 32-byte Ed25519 public key as a Buffer or Uint8Array')
+      }
+      if (!(signature instanceof Uint8Array) || signature.length !== 64) {
+        fail('invalid_argument', 'enrollRemoteActor requires the 64-byte Ed25519 signature as a Buffer or Uint8Array')
+      }
+      return withImmediateTransaction(database, () => this.enrollRemoteActorInTx(options))
     },
   }
 }

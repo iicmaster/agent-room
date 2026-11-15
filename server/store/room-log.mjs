@@ -68,12 +68,14 @@ import {
   SESSION_PRINCIPALS_COLUMNS,
   SESSION_PRINCIPALS_LIVE_BASE_INDEX_NAME,
   SESSION_PRINCIPALS_PREV_CAPABILITY_INDEX_NAME,
+  SESSION_PRINCIPALS_RETENTION_INDEX_NAME,
   SESSION_PRINCIPALS_TAIL_ADD_DDL,
   createSessionPrincipalOperations,
   sessionPrincipalsAddressIndexDdl,
   sessionPrincipalsCapabilityIndexDdl,
   sessionPrincipalsLiveBaseIndexDdl,
   sessionPrincipalsPrevCapabilityIndexDdl,
+  sessionPrincipalsRetentionIndexDdl,
   sessionPrincipalsTableDdl,
 } from '../identity/session-principals.mjs'
 import { createMessagingRoomOperations } from '../messaging/rooms.mjs'
@@ -573,6 +575,7 @@ export function enrolledActorsTableDdl({ ifNotExists = false } = {}) {
     CREATE TABLE ${ifNotExists ? 'IF NOT EXISTS ' : ''}enrolled_actors (
       actor_fingerprint TEXT PRIMARY KEY,
       enrolled_at TEXT NOT NULL,
+      enrolled_via TEXT CHECK (enrolled_via IS NULL OR enrolled_via IN ('local', 'remote')),
       ${fingerprintCheck('actor_fingerprint')}
     ) STRICT;
   `
@@ -852,13 +855,38 @@ function verifyChatIdClaimsIndex(database) {
 // foreign or drifted table is a coded schema failure at open, never a runtime
 // surprise mid-gate.
 function ensureEnrolledActorsTable(database) {
-  if (hasTable(database, 'enrolled_actors')) return
-  database.exec(enrolledActorsTableDdl({ ifNotExists: true }))
+  if (!hasTable(database, 'enrolled_actors')) {
+    database.exec(enrolledActorsTableDdl({ ifNotExists: true }))
+    return
+  }
+  const existingCols = new Set(
+    database.prepare("SELECT name FROM pragma_table_info('enrolled_actors')").all().map(row => row.name),
+  )
+  if (!existingCols.has('enrolled_via')) {
+    database.exec('BEGIN IMMEDIATE')
+    try {
+      const colsAfter = new Set(
+        database.prepare("SELECT name FROM pragma_table_info('enrolled_actors')").all().map(row => row.name),
+      )
+      if (!colsAfter.has('enrolled_via')) {
+        database.exec("ALTER TABLE enrolled_actors ADD COLUMN enrolled_via TEXT CHECK (enrolled_via IS NULL OR enrolled_via IN ('local', 'remote'));")
+      }
+      database.exec('COMMIT')
+    } catch (error) {
+      try {
+        if (database.isTransaction) database.exec('ROLLBACK')
+      } catch {
+        // Preserve root error.
+      }
+      fail('database_configuration_failed', `failed to converge enrolled_actors schema: ${error?.message ?? 'unknown error'}`)
+    }
+  }
 }
 
 const ENROLLED_ACTORS_COLUMNS = Object.freeze([
   'actor_fingerprint',
   'enrolled_at',
+  'enrolled_via',
 ])
 
 function verifyEnrolledActorsColumns(database) {
@@ -959,7 +987,8 @@ function ensureSessionPrincipalTable(database, { role = 'server', preexisting = 
     const missingAddress = !existingIndexes.has(SESSION_PRINCIPALS_ADDRESS_INDEX_NAME)
     const missingCap = !existingIndexes.has(SESSION_PRINCIPALS_CAPABILITY_INDEX_NAME)
     const missingPrevCap = !existingIndexes.has(SESSION_PRINCIPALS_PREV_CAPABILITY_INDEX_NAME)
-    if (missingCols.length === 0 && !missingAddress && !missingCap && !missingPrevCap) {
+    const missingRetention = !existingIndexes.has(SESSION_PRINCIPALS_RETENTION_INDEX_NAME)
+    if (missingCols.length === 0 && !missingAddress && !missingCap && !missingPrevCap && !missingRetention) {
       return
     }
     if (role !== 'server') return
@@ -972,6 +1001,7 @@ function ensureSessionPrincipalTable(database, { role = 'server', preexisting = 
       database.exec(sessionPrincipalsLiveBaseIndexDdl())
       database.exec(sessionPrincipalsCapabilityIndexDdl())
       database.exec(sessionPrincipalsPrevCapabilityIndexDdl())
+      database.exec(sessionPrincipalsRetentionIndexDdl())
     } else {
       const existingCols = new Set(
         database.prepare("SELECT name FROM pragma_table_info('session_principals')").all().map(row => row.name),
@@ -990,6 +1020,9 @@ function ensureSessionPrincipalTable(database, { role = 'server', preexisting = 
       }
       if (!existingIndexes.has(SESSION_PRINCIPALS_PREV_CAPABILITY_INDEX_NAME)) {
         database.exec(sessionPrincipalsPrevCapabilityIndexDdl())
+      }
+      if (!existingIndexes.has(SESSION_PRINCIPALS_RETENTION_INDEX_NAME)) {
+        database.exec(sessionPrincipalsRetentionIndexDdl())
       }
     }
     database.exec('COMMIT')
@@ -1116,6 +1149,9 @@ function verifySessionPrincipalCapabilityIndexes(database, { role }) {
     if (byName.get(indexName) !== 1) {
       fail('database_schema_invalid', `database index ${indexName} must be unique`)
     }
+  }
+  if (!byName.has(SESSION_PRINCIPALS_RETENTION_INDEX_NAME) && role === 'server') {
+    fail('database_schema_invalid', `database table session_principals is missing index ${SESSION_PRINCIPALS_RETENTION_INDEX_NAME}`)
   }
 }
 
@@ -1762,6 +1798,7 @@ export function openRoomLog({
       // room. Direct rooms carry no stored title — DM labeling belongs to
       // the chat ids on the messages, which are never rewritten.
       openDirectRoom(...args) { assertOpen(); return messagingRoomOperations.openDirectRoom(...args) },
+      openDirectRoomInTx(...args) { assertOpen(); return messagingRoomOperations.openDirectRoomInTx(...args) },
 
       // Story 4.4: the send-bucket gate's idempotency probe — a pure read of
       // the idempotency tuple (room, actor fingerprint, client_message_id).
@@ -1925,7 +1962,9 @@ export function openRoomLog({
       latestClaimForActor(...args) { assertOpen(); return identityOperations.latestClaimForActor(...args) },
       recentClaims(...args) { assertOpen(); return identityOperations.recentClaims(...args) },
       pruneChatIdClaims(...args) { assertOpen(); return identityOperations.pruneChatIdClaims(...args) },
+      pruneChatIdClaimsInTx(...args) { assertOpen(); return identityOperations.pruneChatIdClaimsInTx(...args) },
       enrollActor(...args) { assertOpen(); return identityOperations.enrollActor(...args) },
+      enrollActorInTx(...args) { assertOpen(); return identityOperations.enrollActorInTx(...args) },
       isActorEnrolled(...args) { assertOpen(); return identityOperations.isActorEnrolled(...args) },
 
       // Story 4.2: the invite registry and the atomic invite-gated
@@ -1951,6 +1990,11 @@ export function openRoomLog({
       enrollRemoteActor(...args) {
         assertOpen()
         return identityOperations.enrollRemoteActor(...args)
+      },
+
+      enrollRemoteActorInTx(...args) {
+        assertOpen()
+        return identityOperations.enrollRemoteActorInTx(...args)
       },
 
       // Story 4.5: the operator ban registry (./bans.mjs). banActor and
@@ -2039,6 +2083,11 @@ export function openRoomLog({
       listSessionPrincipals(...args) {
         assertOpen()
         return identityOperations.listSessionPrincipals(...args)
+      },
+
+      pruneExpiredSessionPrincipalsInTx(...args) {
+        assertOpen()
+        return identityOperations.pruneExpiredSessionPrincipalsInTx(...args)
       },
 
       // Messaging-context session-pair operations: open-or-reuse the pair

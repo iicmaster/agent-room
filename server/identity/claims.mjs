@@ -128,6 +128,26 @@ export function createIdentityClaimOperations({ database, withImmediateTransacti
       }))
     },
 
+    pruneChatIdClaimsInTx(olderThanMs, now = Date.now) {
+      assertOpen()
+      if (!database.isTransaction) {
+        fail('invalid_argument', 'pruneChatIdClaimsInTx requires an active transaction')
+      }
+      if (!Number.isSafeInteger(olderThanMs) || olderThanMs <= 0) {
+        fail('invalid_argument', 'olderThanMs must be a positive safe integer')
+      }
+      const timestamp = typeof now === 'function' ? now() : now
+      if (typeof timestamp !== 'number' || !Number.isFinite(timestamp)) {
+        fail('invalid_argument', 'now must be an epoch-millisecond number or a function returning one')
+      }
+      const cutoffMs = timestamp - olderThanMs
+      if (!Number.isFinite(cutoffMs)) fail('invalid_argument', 'the prune cutoff must be a finite epoch-millisecond value')
+      const cutoff = new Date(cutoffMs).toISOString()
+      return Number(
+        database.prepare('DELETE FROM chat_id_claims WHERE last_seen_at < ?').run(cutoff).changes,
+      )
+    },
+
     pruneChatIdClaims(olderThanMs, now = Date.now) {
       assertOpen()
       if (!Number.isSafeInteger(olderThanMs) || olderThanMs <= 0) {
@@ -149,31 +169,70 @@ export function createIdentityClaimOperations({ database, withImmediateTransacti
 
     // Enrollment is Identity ownership; invite consumption is composed by the
     // invite repository in the same DB transaction at the outer store root.
-    enrollActor(options) {
+    enrollActorInTx(options) {
       assertOpen()
-      const { actorFingerprint, enrolledAt } = requireObject(options)
+      if (!database.isTransaction) {
+        fail('invalid_argument', 'enrollActorInTx requires an active transaction')
+      }
+      const { actorFingerprint, enrolledAt, enrolledVia = 'local' } = requireObject(options)
       const validFingerprint = requireFingerprint(actorFingerprint)
       const enrolled = requireClaimTimestamp(enrolledAt)
+      if (enrolledVia !== 'local' && enrolledVia !== 'remote') {
+        fail('invalid_argument', "enrolledVia must be 'local' or 'remote'")
+      }
+      database.prepare(`
+        INSERT INTO enrolled_actors (actor_fingerprint, enrolled_at, enrolled_via)
+        VALUES (?, ?, ?)
+        ON CONFLICT (actor_fingerprint) DO NOTHING
+      `).run(validFingerprint, enrolled, enrolledVia)
+      const row = database.prepare(`
+        SELECT actor_fingerprint, enrolled_at, enrolled_via
+        FROM enrolled_actors
+        WHERE actor_fingerprint = ?
+      `).get(validFingerprint)
+      return {
+        actor_fingerprint: row.actor_fingerprint,
+        enrolled_at: row.enrolled_at,
+        enrolled_via: row.enrolled_via ?? 'local',
+      }
+    },
+
+    enrollActor(options) {
+      assertOpen()
+      const { actorFingerprint, enrolledAt, enrolledVia = 'local' } = requireObject(options)
+      const validFingerprint = requireFingerprint(actorFingerprint)
+      const enrolled = requireClaimTimestamp(enrolledAt)
+      if (enrolledVia !== 'local' && enrolledVia !== 'remote') {
+        fail('invalid_argument', "enrolledVia must be 'local' or 'remote'")
+      }
       const existing = database.prepare(`
-        SELECT actor_fingerprint, enrolled_at
+        SELECT actor_fingerprint, enrolled_at, enrolled_via
         FROM enrolled_actors
         WHERE actor_fingerprint = ?
       `).get(validFingerprint)
       if (existing) {
-        return { actor_fingerprint: existing.actor_fingerprint, enrolled_at: existing.enrolled_at }
+        return {
+          actor_fingerprint: existing.actor_fingerprint,
+          enrolled_at: existing.enrolled_at,
+          enrolled_via: existing.enrolled_via ?? 'local',
+        }
       }
       return withImmediateTransaction(database, () => {
         database.prepare(`
-          INSERT INTO enrolled_actors (actor_fingerprint, enrolled_at)
-          VALUES (?, ?)
+          INSERT INTO enrolled_actors (actor_fingerprint, enrolled_at, enrolled_via)
+          VALUES (?, ?, ?)
           ON CONFLICT (actor_fingerprint) DO NOTHING
-        `).run(validFingerprint, enrolled)
+        `).run(validFingerprint, enrolled, enrolledVia)
         const row = database.prepare(`
-          SELECT actor_fingerprint, enrolled_at
+          SELECT actor_fingerprint, enrolled_at, enrolled_via
           FROM enrolled_actors
           WHERE actor_fingerprint = ?
         `).get(validFingerprint)
-        return { actor_fingerprint: row.actor_fingerprint, enrolled_at: row.enrolled_at }
+        return {
+          actor_fingerprint: row.actor_fingerprint,
+          enrolled_at: row.enrolled_at,
+          enrolled_via: row.enrolled_via ?? 'local',
+        }
       })
     },
 

@@ -36,11 +36,14 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypt
 import { AgentRoomRuntimeError } from '../runtime.mjs'
 import {
   CONFLICT_TICKET_TTL_MS,
+  RETENTION_SWEEP_BATCH_MAX,
   SESSION_ADDRESS_MAX_CHARS,
   SESSION_BASE_LEASE_MS,
   SESSION_LOCATOR_TOKEN_CHARS,
   SESSION_MACHINE_MAX,
   SESSION_MACHINE_PATTERN,
+  SESSION_PRINCIPALS_LIST_MAX,
+  SESSION_PRINCIPAL_RETENTION_GRACE_MS,
   SESSION_PRINCIPAL_RETENTION_MS,
   SESSION_RECOVERY_ID_PATTERN,
   SESSION_REVOKE_REASON_MAX,
@@ -159,6 +162,13 @@ export const SESSION_PRINCIPALS_ADDRESS_INDEX_NAME = 'idx_session_principals_add
 export const SESSION_PRINCIPALS_LIVE_BASE_INDEX_NAME = 'idx_session_principals_live_base'
 export const SESSION_PRINCIPALS_CAPABILITY_INDEX_NAME = 'idx_session_principals_capability'
 export const SESSION_PRINCIPALS_PREV_CAPABILITY_INDEX_NAME = 'idx_session_principals_prev_capability'
+export const SESSION_PRINCIPALS_RETENTION_INDEX_NAME = 'idx_session_principals_retention'
+
+export function isRetentionExpired(row, nowMs = Date.now()) {
+  if (!row || typeof row.principal_retention_expires_at !== 'string') return false
+  const expiresAtMs = Date.parse(row.principal_retention_expires_at)
+  return Number.isFinite(expiresAtMs) && expiresAtMs <= nowMs
+}
 
 // Full-address uniqueness among RETAINED principals (the address of a revoked
 // or retention-expired principal is freed). IF NOT EXISTS on every open; the
@@ -196,6 +206,14 @@ export function sessionPrincipalsPrevCapabilityIndexDdl() {
   `
 }
 
+export function sessionPrincipalsRetentionIndexDdl() {
+  return `
+    CREATE INDEX IF NOT EXISTS ${SESSION_PRINCIPALS_RETENTION_INDEX_NAME}
+      ON session_principals (principal_retention_expires_at)
+      WHERE principal_status = 'retained';
+  `
+}
+
 export function createSessionPrincipalOperations({ database, withImmediateTransaction, validate }) {
   const { assertOpen, fail, requireObject, requireFingerprint, requireChatId } = validate
 
@@ -229,6 +247,38 @@ export function createSessionPrincipalOperations({ database, withImmediateTransa
       SET base_lease_status = 'expired'
       WHERE principal_status = 'retained' AND base_lease_status = 'occupied' AND base_lease_expires_at <= ?
     `).run(cutoff)
+  }
+
+  // Targeted O(1) reclaim for colliding base_name or address inside queued
+  // write transactions, avoiding full-table sweeps on allocate/resume/heartbeat.
+  const reclaimExpiredForBaseInTx = (baseName, nowMs) => {
+    const cutoff = new Date(nowMs).toISOString()
+    database.prepare(`
+      UPDATE session_principals
+      SET principal_status = 'retention_expired', base_lease_status = 'released'
+      WHERE principal_status = 'retained'
+        AND lower(base_name) = lower(?)
+        AND principal_retention_expires_at <= ?
+    `).run(baseName, cutoff)
+    database.prepare(`
+      UPDATE session_principals
+      SET base_lease_status = 'expired'
+      WHERE principal_status = 'retained'
+        AND base_lease_status = 'occupied'
+        AND lower(base_name) = lower(?)
+        AND base_lease_expires_at <= ?
+    `).run(baseName, cutoff)
+  }
+
+  const reclaimExpiredForAddressInTx = (address, nowMs) => {
+    const cutoff = new Date(nowMs).toISOString()
+    database.prepare(`
+      UPDATE session_principals
+      SET principal_status = 'retention_expired', base_lease_status = 'released'
+      WHERE address = ?
+        AND principal_status = 'retained'
+        AND principal_retention_expires_at <= ?
+    `).run(address, cutoff)
   }
 
   const selectBySessionId = sessionId => database
@@ -278,12 +328,12 @@ export function createSessionPrincipalOperations({ database, withImmediateTransa
     throw error
   }
 
-  const requireRetainedLive = (row, { allowRevokedCode = null } = {}) => {
+  const requireRetainedLive = (row, { allowRevokedCode = null, nowMs = undefined } = {}) => {
     if (!row) fail('session_expired', 'no retained session principal matches this credential')
     if (row.principal_status === 'revoked') {
       fail(allowRevokedCode ?? 'session_revoked', 'session principal was revoked by the operator')
     }
-    if (row.principal_status !== 'retained') {
+    if (row.principal_status !== 'retained' || (nowMs !== undefined && isRetentionExpired(row, nowMs))) {
       fail('session_expired', 'session principal retention has expired')
     }
     return row
@@ -376,13 +426,13 @@ export function createSessionPrincipalOperations({ database, withImmediateTransa
     const retentionExpiresAt = new Date(now + SESSION_PRINCIPAL_RETENTION_MS).toISOString()
     const recoveryDigest = validRecoveryId ? capabilityDigestOf(validRecoveryId) : null
     const rotatedAt = validRecoveryId ? createdAt : null
-    sweepRetention(now)
-    sweepBaseLeasesImpl(now)
+    reclaimExpiredForBaseInTx(validBase, now)
     const baseHolder = selectOccupiedByBase(validBase)
     if (baseHolder) {
       failAgentIdTaken(validBase, baseHolder)
     }
     const address = `${validBase}~${locatorTokenFn()}@${validMachine}`
+    reclaimExpiredForAddressInTx(address, now)
     const holder = selectRetainedByAddress(address, now)
     if (holder) {
       // Explicit duplicate live address: refuse with the holder's machine,
@@ -419,19 +469,22 @@ export function createSessionPrincipalOperations({ database, withImmediateTransa
   }
 
   function heartbeatSessionPrincipalInTxImpl({ sessionId, generation, now, onReoccupy }) {
-    sweepRetention(now)
-    sweepBaseLeasesImpl(now)
     const row = selectBySessionId(sessionId)
-    requireRetainedLive(row)
+    requireRetainedLive(row, { nowMs: now })
     if (Number(row.generation) !== generation) {
       fail('session_expired', `session generation ${generation} is fenced; the current generation is ${Number(row.generation)}`)
     }
-    if (row.base_lease_status !== 'occupied') {
-      const existingHolder = selectOccupiedByBase(row.base_name)
+    const leaseExpired = row.base_lease_status !== 'occupied' || Date.parse(row.base_lease_expires_at) <= now
+    if (leaseExpired) {
+      reclaimExpiredForBaseInTx(row.base_name, now)
+      reclaimExpiredForBaseInTx(row.base_name, now)
+    const existingHolder = selectOccupiedByBase(row.base_name)
       if (existingHolder && existingHolder.session_id !== row.session_id) {
         failAgentIdTaken(row.base_name, existingHolder)
       }
-      onReoccupy?.(plainPrincipal(row))
+      if (row.base_lease_status !== 'occupied') {
+        onReoccupy?.(plainPrincipal(row))
+      }
     }
     const beatAt = new Date(now).toISOString()
     const leaseExpiresAt = new Date(now + SESSION_BASE_LEASE_MS).toISOString()
@@ -444,7 +497,8 @@ export function createSessionPrincipalOperations({ database, withImmediateTransa
         WHERE session_id = ?
       `).run(beatAt, leaseExpiresAt, retentionExpiresAt, sessionId)
     } catch (error) {
-      const existingHolder = selectOccupiedByBase(row.base_name)
+      reclaimExpiredForBaseInTx(row.base_name, now)
+    const existingHolder = selectOccupiedByBase(row.base_name)
       if (existingHolder && existingHolder.session_id !== row.session_id) {
         failAgentIdTaken(row.base_name, existingHolder)
       }
@@ -462,14 +516,12 @@ export function createSessionPrincipalOperations({ database, withImmediateTransa
     onReoccupy,
     capabilityBytesFn,
   }) {
-    sweepRetention(now)
-    sweepBaseLeasesImpl(now)
     const row = database.prepare(`
       SELECT ${PRINCIPAL_COLUMNS}, capability_digest, prev_capability_digest, rotated_at, recovery_id_digest
       FROM session_principals
       WHERE session_id = ?
     `).get(sessionId)
-    requireRetainedLive(row)
+    requireRetainedLive(row, { nowMs: now })
 
     const validRecoveryId = validateOptionalRecoveryId(recoveryId)
     const isRecoveryRetry = presentedPrevDigest !== null
@@ -491,6 +543,7 @@ export function createSessionPrincipalOperations({ database, withImmediateTransa
       fail('session_expired', `session generation ${generation} is fenced; the current generation is ${Number(row.generation)}`)
     }
 
+    reclaimExpiredForBaseInTx(row.base_name, now)
     const existingHolder = selectOccupiedByBase(row.base_name)
     if (existingHolder && existingHolder.session_id !== row.session_id) {
       failAgentIdTaken(row.base_name, existingHolder)
@@ -544,14 +597,12 @@ export function createSessionPrincipalOperations({ database, withImmediateTransa
     recoveryId = null,
     capabilityBytesFn,
   }) {
-    sweepRetention(now)
-    sweepBaseLeasesImpl(now)
     const row = database.prepare(`
       SELECT ${PRINCIPAL_COLUMNS}, capability_digest
       FROM session_principals
       WHERE session_id = ?
     `).get(sessionId)
-    if (!row || row.principal_status !== 'retained' || Number(row.generation) !== expectedGeneration) {
+    if (!row || row.principal_status !== 'retained' || isRetentionExpired(row, now) || Number(row.generation) !== expectedGeneration) {
       fail('conflict_stale', 'the observed incumbent session principal is no longer at the observed generation')
     }
     const validRecoveryId = validateOptionalRecoveryId(recoveryId)
@@ -583,8 +634,6 @@ export function createSessionPrincipalOperations({ database, withImmediateTransa
   }) {
     const validRecoveryId = validateOptionalRecoveryId(recoveryId)
     if (!validRecoveryId) return null
-    sweepRetention(now)
-    sweepBaseLeasesImpl(now)
     const recoveryDigest = capabilityDigestOf(validRecoveryId)
     const row = database.prepare(`
       SELECT ${PRINCIPAL_COLUMNS}, rotated_at
@@ -595,7 +644,13 @@ export function createSessionPrincipalOperations({ database, withImmediateTransa
         AND principal_status = 'retained'
       LIMIT 1
     `).get(installationFingerprint, baseName, recoveryDigest)
-    if (!row || row.base_lease_status !== 'occupied' || !withinRecoveryWindow(row.rotated_at, now)) {
+    if (
+      !row
+      || isRetentionExpired(row, now)
+      || row.base_lease_status !== 'occupied'
+      || Date.parse(row.base_lease_expires_at) <= now
+      || !withinRecoveryWindow(row.rotated_at, now)
+    ) {
       return null
     }
     const { raw: nextCapability, digest: nextDigest } = mintCapability(capabilityBytesFn)
@@ -932,7 +987,7 @@ export function createSessionPrincipalOperations({ database, withImmediateTransa
     // Addressed-send resolution: only a RETAINED, non-expired principal
     // resolves. The constant `peer_not_found` refusal is the caller's; this
     // read never enumerates anything.
-    resolveSessionPrincipalByAddress(address, nowMs = undefined) {
+    resolveSessionPrincipalByAddress(address, nowMs = Date.now()) {
       assertOpen()
       if (typeof address !== 'string' || address.length === 0) {
         fail('invalid_argument', 'address must be a non-empty string')
@@ -964,36 +1019,116 @@ export function createSessionPrincipalOperations({ database, withImmediateTransa
         : null
     },
 
-    // The explicit listing (CAP-3: enumeration is a separate command, never
-    // piggybacked on a refusal). Runs the retention sweep first, then every
-    // principal in deterministic created-then-id order with its computed
-    // presence: online iff its own base lease is occupied and unexpired.
+    // Zero-write read-only directory listing (Story 1.4): projects
+    // retention_expired/released/offline at read time without opening a write
+    // transaction, ordered online-first -> last_heartbeat_at DESC -> session_id ASC.
     listSessionPrincipals(options = {}) {
       assertOpen()
-      const { nowMs } = requireObject(options)
+      const { nowMs, limit = SESSION_PRINCIPALS_LIST_MAX, withTruncation = false } = requireObject(options)
       const now = requireNow(nowMs)
+      const effectiveLimit = Number.isInteger(limit) && limit > 0
+        ? Math.min(limit, SESSION_PRINCIPALS_LIST_MAX)
+        : SESSION_PRINCIPALS_LIST_MAX
       const cutoff = new Date(now).toISOString()
-      const hasRetentionExpired = database.prepare(`
-        SELECT 1
-        FROM session_principals
-        WHERE principal_status = 'retained' AND principal_retention_expires_at <= ?
-        LIMIT 1
-      `).get(cutoff)
-      const readRows = () => database
-        .prepare(`SELECT ${PRINCIPAL_COLUMNS} FROM session_principals ORDER BY created_at ASC, session_id ASC`)
-        .all()
-      const rows = hasRetentionExpired
-        ? withImmediateTransaction(database, () => {
-            sweepRetention(now)
-            return readRows()
-          })
-        : readRows()
-      return rows.map(row => {
+      const rows = database.prepare(`
+        SELECT
+          sp.session_id,
+          sp.installation_fingerprint,
+          sp.generation,
+          sp.base_name,
+          sp.address,
+          sp.machine,
+          sp.client_type,
+          sp.created_at,
+          sp.last_heartbeat_at,
+          sp.base_lease_expires_at,
+          sp.base_lease_status,
+          sp.principal_retention_expires_at,
+          sp.principal_status,
+          sp.revoked_reason,
+          ea.enrolled_via AS enrolled_via
+        FROM session_principals sp
+        LEFT JOIN enrolled_actors ea
+          ON ea.actor_fingerprint = sp.installation_fingerprint
+        ORDER BY
+          (sp.principal_status = 'retained'
+            AND sp.base_lease_status = 'occupied'
+            AND sp.base_lease_expires_at > ?
+            AND sp.principal_retention_expires_at > ?) DESC,
+          sp.last_heartbeat_at DESC,
+          sp.session_id ASC
+        LIMIT ?
+      `).all(cutoff, cutoff, effectiveLimit + 1)
+
+      const truncated = rows.length > effectiveLimit
+      const slice = truncated ? rows.slice(0, effectiveLimit) : rows
+      const principals = slice.map(row => {
         const principal = plainPrincipal(row)
-        const leaseLive = principal.base_lease_status === 'occupied'
-          && Date.parse(principal.base_lease_expires_at) > now
-        return { ...principal, presence: leaseLive ? 'online' : 'offline' }
+        const retentionExpired = principal.principal_status === 'retained' && isRetentionExpired(principal, now)
+        const effectivePrincipalStatus = retentionExpired ? 'retention_expired' : principal.principal_status
+        const leaseExpired = principal.base_lease_status === 'occupied' && Date.parse(principal.base_lease_expires_at) <= now
+        const effectiveLeaseStatus = retentionExpired
+          ? 'released'
+          : (leaseExpired ? 'expired' : principal.base_lease_status)
+        const online = effectivePrincipalStatus === 'retained' && effectiveLeaseStatus === 'occupied'
+        return {
+          ...principal,
+          principal_status: effectivePrincipalStatus,
+          base_lease_status: effectiveLeaseStatus,
+          enrolled_via: row.enrolled_via === 'remote' ? 'remote' : 'local',
+          presence: online ? 'online' : 'offline',
+        }
       })
+      return withTruncation ? { principals, truncated } : principals
+    },
+
+    // Bounded background retention prune (Story 1.4): marks <= limit
+    // retention-expired rows per tick, and hard-deletes retention_expired rows
+    // past the retention grace window within the same <= limit budget.
+    pruneExpiredSessionPrincipalsInTx(options = {}) {
+      assertOpen()
+      if (!database.isTransaction) {
+        fail('invalid_argument', 'pruneExpiredSessionPrincipalsInTx requires an active transaction')
+      }
+      const {
+        nowMs,
+        limit = RETENTION_SWEEP_BATCH_MAX,
+        graceMs = SESSION_PRINCIPAL_RETENTION_GRACE_MS,
+      } = requireObject(options)
+      const now = requireNow(nowMs)
+      const maxRows = Number.isInteger(limit) && limit > 0
+        ? Math.min(limit, RETENTION_SWEEP_BATCH_MAX)
+        : RETENTION_SWEEP_BATCH_MAX
+      const cutoff = new Date(now).toISOString()
+      const expiredResult = database.prepare(`
+        UPDATE session_principals
+        SET principal_status = 'retention_expired', base_lease_status = 'released'
+        WHERE rowid IN (
+          SELECT rowid
+          FROM session_principals
+          WHERE principal_status = 'retained' AND principal_retention_expires_at <= ?
+          ORDER BY principal_retention_expires_at ASC, session_id ASC
+          LIMIT ?
+        )
+      `).run(cutoff, maxRows)
+      const expiredCount = Number(expiredResult.changes ?? 0)
+      const remaining = maxRows - expiredCount
+      let deletedCount = 0
+      if (remaining > 0) {
+        const graceCutoff = new Date(now - graceMs).toISOString()
+        const deletedResult = database.prepare(`
+          DELETE FROM session_principals
+          WHERE rowid IN (
+            SELECT rowid
+            FROM session_principals
+            WHERE principal_status = 'retention_expired' AND principal_retention_expires_at <= ?
+            ORDER BY principal_retention_expires_at ASC, session_id ASC
+            LIMIT ?
+          )
+        `).run(graceCutoff, remaining)
+        deletedCount = Number(deletedResult.changes ?? 0)
+      }
+      return { expiredCount, deletedCount }
     },
   })
 }

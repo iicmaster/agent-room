@@ -153,6 +153,7 @@ export const SETUP_REQUIRES_TTY_MESSAGE = 'agent-room setup asks a human to choo
 async function probeClaim({ port, localToken, publicKey, chatId, timeoutMs = CLIENT_REQUEST_TIMEOUT_MS }) {
   const exchange = await cliHttpJson(port, 'POST', '/api/auth/local', cliBearerHeaders(localToken), {
     public_key: publicKey,
+    session_kind: 'cli_oneshot',
   }, timeoutMs)
   if (exchange.status !== OK_STATUS || exchange.body?.result?.session_token === undefined) {
     throw new AgentRoomRuntimeError(

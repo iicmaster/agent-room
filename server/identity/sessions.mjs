@@ -25,9 +25,14 @@
 import { createHash, randomBytes } from 'node:crypto'
 
 import {
+  CLI_SESSIONS_MAX,
+  CLI_SESSION_TTL_MS,
   FINGERPRINT_PATTERN,
+  POOL_QUEUE_FULL_RETRY_AFTER_MS,
   PUBLIC_ERROR_STATUS,
+  REMOTE_BEARER_SESSIONS_PER_ACTOR_MAX,
   SESSIONS_MAX,
+  SESSION_KINDS,
   SESSION_TOKEN_BYTES,
   SESSION_TOKEN_MAX_CHARS,
   SESSION_TTL_MS,
@@ -47,11 +52,17 @@ function sessionDigest(token) {
 // `maxSessions` exists for capacity tests and defaults to SESSIONS_MAX.
 export function createSessionRegistry({
   ttlMs = SESSION_TTL_MS,
+  cliTtlMs = CLI_SESSION_TTL_MS,
   now = Date.now,
   maxSessions = SESSIONS_MAX,
+  maxCliSessions = CLI_SESSIONS_MAX,
+  remotePerActorMax = REMOTE_BEARER_SESSIONS_PER_ACTOR_MAX,
 } = {}) {
   if (!Number.isInteger(ttlMs) || ttlMs <= 0) {
     throw new AgentRoomRuntimeError('invalid_argument', 'session ttlMs must be a positive integer')
+  }
+  if (!Number.isInteger(cliTtlMs) || cliTtlMs <= 0) {
+    throw new AgentRoomRuntimeError('invalid_argument', 'session cliTtlMs must be a positive integer')
   }
   if (typeof now !== 'function') {
     throw new AgentRoomRuntimeError('invalid_argument', 'session now must be a function')
@@ -59,8 +70,48 @@ export function createSessionRegistry({
   if (!Number.isInteger(maxSessions) || maxSessions <= 0) {
     throw new AgentRoomRuntimeError('invalid_argument', 'session maxSessions must be a positive integer')
   }
-  // sha256(token) hex → { actorFingerprint, digest, expiresAt }.
-  const sessions = new Map()
+  if (!Number.isInteger(maxCliSessions) || maxCliSessions <= 0) {
+    throw new AgentRoomRuntimeError('invalid_argument', 'session maxCliSessions must be a positive integer')
+  }
+  if (!Number.isInteger(remotePerActorMax) || remotePerActorMax <= 0) {
+    throw new AgentRoomRuntimeError('invalid_argument', 'session remotePerActorMax must be a positive integer')
+  }
+  // sha256(token) hex → { actorFingerprint, digest, expiresAt, kind, via }.
+  const longLivedSessions = new Map()
+  const cliOneshotSessions = new Map()
+  // Active challenge-origin (`via: 'answer'`) token count per actorFingerprint
+  // across BOTH pools.
+  const remoteCounts = new Map()
+
+  const poolFor = kind => (kind === 'cli_oneshot' ? cliOneshotSessions : longLivedSessions)
+  const capFor = kind => (kind === 'cli_oneshot' ? maxCliSessions : maxSessions)
+  const ttlFor = kind => (kind === 'cli_oneshot' ? cliTtlMs : ttlMs)
+
+  function deleteEntry(pool, digest, entry) {
+    if (!pool.delete(digest)) return false
+    if (entry?.via === 'answer') {
+      const next = (remoteCounts.get(entry.actorFingerprint) ?? 0) - 1
+      if (next > 0) remoteCounts.set(entry.actorFingerprint, next)
+      else remoteCounts.delete(entry.actorFingerprint)
+    }
+    return true
+  }
+
+  function sweepExpired(timestamp) {
+    for (const pool of [longLivedSessions, cliOneshotSessions]) {
+      for (const [digest, entry] of pool) {
+        if (entry.expiresAt <= timestamp) deleteEntry(pool, digest, entry)
+      }
+    }
+  }
+
+  function lookupEntry(digest) {
+    const longEntry = longLivedSessions.get(digest)
+    if (longEntry) return { pool: longLivedSessions, entry: longEntry }
+    const cliEntry = cliOneshotSessions.get(digest)
+    if (cliEntry) return { pool: cliOneshotSessions, entry: cliEntry }
+    return null
+  }
   // The fenced set: session keys displaced by an EXPLICIT same-Actor
   // replacement (the reconnect-recovery takeover). Displacing a session
   // revokes its token — it stops authenticating at once — and leaves its key
@@ -119,29 +170,53 @@ export function createSessionRegistry({
     }
   }
 
-  function issue(actorFingerprint) {
+  function issue(actorFingerprint, { kind = 'long_lived', via = 'local' } = {}) {
     if (typeof actorFingerprint !== 'string' || !FINGERPRINT_PATTERN.test(actorFingerprint)) {
       throw new AgentRoomRuntimeError(
         'invalid_argument',
         'session issue requires a canonical actor fingerprint (sha256:<64 hex>)',
       )
     }
-    const timestamp = now()
-    // Lazy sweep: expired entries leave the Map at the next issue, not on a
-    // timer — no unbounded growth from idle expirations.
-    for (const [digest, entry] of sessions) {
-      if (entry.expiresAt <= timestamp) sessions.delete(digest)
+    if (!SESSION_KINDS.includes(kind)) {
+      throw new AgentRoomRuntimeError('invalid_request', "session_kind must be 'long_lived' or 'cli_oneshot'")
     }
-    // Capacity: oldest-expired-then-oldest. The sweep above already removed
-    // every expired entry, so this evicts the oldest live session when the
-    // realm is at capacity — the bound holds under sustained issuance.
-    while (sessions.size >= maxSessions) {
-      const oldestExpired = [...sessions.entries()].find(([, entry]) => entry.expiresAt <= timestamp)
-      sessions.delete(oldestExpired ? oldestExpired[0] : sessions.keys().next().value)
+    if (via !== 'local' && via !== 'answer') {
+      throw new AgentRoomRuntimeError('invalid_argument', "session via must be 'local' or 'answer'")
+    }
+    const timestamp = now()
+    // Lazy sweep: expired entries leave both pools before capacity checks.
+    sweepExpired(timestamp)
+    if (via === 'answer' && (remoteCounts.get(actorFingerprint) ?? 0) >= remotePerActorMax) {
+      const error = new AgentRoomRuntimeError(
+        'queue_full',
+        `remote session limit (${remotePerActorMax}) reached for this actor; retry after backoff`,
+      )
+      error.retryAfterMs = POOL_QUEUE_FULL_RETRY_AFTER_MS
+      throw error
+    }
+    const pool = poolFor(kind)
+    const maxPool = capFor(kind)
+    // Non-evicting pool: never evict a live session; refuse with 503 queue_full.
+    if (pool.size >= maxPool) {
+      const error = new AgentRoomRuntimeError(
+        'queue_full',
+        `session pool ${kind} is full (${maxPool}); retry after backoff`,
+      )
+      error.retryAfterMs = POOL_QUEUE_FULL_RETRY_AFTER_MS
+      throw error
     }
     const token = randomBytes(SESSION_TOKEN_BYTES).toString('base64url')
     const digest = sessionDigest(token)
-    sessions.set(digest, { actorFingerprint, digest, expiresAt: timestamp + ttlMs })
+    pool.set(digest, {
+      actorFingerprint,
+      digest,
+      expiresAt: timestamp + ttlFor(kind),
+      kind,
+      via,
+    })
+    if (via === 'answer') {
+      remoteCounts.set(actorFingerprint, (remoteCounts.get(actorFingerprint) ?? 0) + 1)
+    }
     return token
   }
 
@@ -151,46 +226,33 @@ export function createSessionRegistry({
   // nothing, it never slides the TTL and never creates an entry.
   function isLive(sessionKey) {
     if (typeof sessionKey !== 'string' || sessionKey.length === 0) return false
-    const entry = sessions.get(sessionKey)
-    if (!entry) return false
-    return now() < entry.expiresAt
+    const found = lookupEntry(sessionKey)
+    if (!found) return false
+    return now() < found.entry.expiresAt
   }
 
-  // Explicit revocation by session KEY: the session stops authenticating at
-  // once. This is the session-token registry's invalidation primitive —
-  // reserved for logout when it lands; the re-auth recovery path's
-  // dead-holder release is the live session registry's own `release`
-  // (../core/session-registry.mjs, called from the session-bind route), never
-  // this function. Story 4.5's operator ban deliberately does NOT call this
-  // either: the ban holds at the resource boundary (the authz stage refuses
-  // every session-authenticated route), so a banned key's existing session is
-  // left in place and simply cannot do anything — revoking it here would add
-  // nothing and would blur where the ban's teeth live. Returns whether an
-  // entry was actually removed.
-  // The live session keys (digests), for operator diagnostics and for the
-  // server-side invalidation path. Read-only: a copy of the live key set.
   function sessionKeys() {
     const timestamp = now()
-    return [...sessions.entries()]
-      .filter(([, entry]) => timestamp < entry.expiresAt)
-      .map(([digest]) => digest)
+    const keys = []
+    for (const pool of [longLivedSessions, cliOneshotSessions]) {
+      for (const [digest, entry] of pool) {
+        if (timestamp < entry.expiresAt) keys.push(digest)
+      }
+    }
+    return keys
   }
 
   function revoke(sessionKey) {
     if (typeof sessionKey !== 'string' || sessionKey.length === 0) return false
-    return sessions.delete(sessionKey)
+    const found = lookupEntry(sessionKey)
+    if (!found) return false
+    return deleteEntry(found.pool, sessionKey, found.entry)
   }
 
-  // The handoff fence. supersede() is the ONE operation that ends a live
-  // session's authority on the caller's explicit, operator-authorized
-  // replacement: the token stops authenticating (the registry entry goes)
-  // AND the key is remembered as superseded, so every request the displaced
-  // session had in flight is refused — at the authorization stage on the way
-  // in, and at the pipeline's post-input revalidation directly before the
-  // handler. Returns whether a live session entry was actually removed.
   function supersede(sessionKey) {
     if (typeof sessionKey !== 'string' || sessionKey.length === 0) return false
-    const removed = sessions.delete(sessionKey)
+    const found = lookupEntry(sessionKey)
+    const removed = found ? deleteEntry(found.pool, sessionKey, found.entry) : false
     superseded.set(sessionKey, now())
     evictIdleTombstones()
     return removed
@@ -214,28 +276,35 @@ export function createSessionRegistry({
       return unauthorized()
     }
     const digest = sessionDigest(token)
-    const entry = sessions.get(digest)
-    if (!entry) return unauthorized()
+    const found = lookupEntry(digest)
+    if (!found) return unauthorized()
+    const { pool, entry } = found
     const timestamp = now()
     if (timestamp >= entry.expiresAt) {
-      sessions.delete(digest)
+      deleteEntry(pool, digest, entry)
       return unauthorized()
     }
     // Sliding TTL: activity refreshes the expiry.
-    entry.expiresAt = timestamp + ttlMs
+    entry.expiresAt = timestamp + ttlFor(entry.kind)
     return { actorFingerprint: entry.actorFingerprint }
   }
 
   function snapshot() {
     return {
-      sessions: new Map([...sessions].map(([k, v]) => [k, { ...v }])),
+      longLivedSessions: new Map([...longLivedSessions].map(([k, v]) => [k, { ...v }])),
+      cliOneshotSessions: new Map([...cliOneshotSessions].map(([k, v]) => [k, { ...v }])),
+      remoteCounts: new Map(remoteCounts),
       superseded: new Map(superseded),
     }
   }
 
   function restore(saved) {
-    sessions.clear()
-    for (const [k, v] of saved.sessions) sessions.set(k, { ...v })
+    longLivedSessions.clear()
+    for (const [k, v] of saved.longLivedSessions) longLivedSessions.set(k, { ...v })
+    cliOneshotSessions.clear()
+    for (const [k, v] of saved.cliOneshotSessions) cliOneshotSessions.set(k, { ...v })
+    remoteCounts.clear()
+    for (const [k, v] of saved.remoteCounts) remoteCounts.set(k, v)
     superseded.clear()
     for (const [k, v] of saved.superseded) superseded.set(k, v)
   }

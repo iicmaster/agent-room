@@ -105,7 +105,24 @@ export function protocolHeaders(bearer) {
 // is exactly the identity a takeover requires.
 // Exported for the `wait` command family (server/cli/wait-commands.mjs): the
 // same credential exchange, the same identity — THIS installation's Actor.
-export async function authenticate(target, { pluginDataDir, sharedDataDir, env = process.env } = {}) {
+function throwAuthError(response) {
+  const errCode = response.body?.error?.code ?? 'request_failed'
+  const errMsg = response.body?.error?.message ?? `the agent-room server answered ${response.status}`
+  const error = new AgentRoomRuntimeError(errCode, errMsg)
+  if (Number.isInteger(response.body?.error?.retry_after_ms)) {
+    error.retryAfterMs = response.body.error.retry_after_ms
+  }
+  throw error
+}
+
+function isUnknownSessionKindError(response) {
+  return response.status === 400
+    && response.body?.error?.code === 'unknown_field'
+    && typeof response.body?.error?.message === 'string'
+    && response.body.error.message.includes('session_kind')
+}
+
+export async function authenticate(target, { pluginDataDir, sharedDataDir, env = process.env, sessionKind = 'long_lived' } = {}) {
   const keypair = loadOrCreateKeypair(pluginDataDir)
   const declaredRemote = env[CONNECTION_MODE_ENV] === 'remote'
   if (target.kind === 'remote' || declaredRemote) {
@@ -114,35 +131,46 @@ export async function authenticate(target, { pluginDataDir, sharedDataDir, env =
     }, CLIENT_REQUEST_TIMEOUT_MS)
     const nonce = challenge.body?.result?.nonce
     if (challenge.status !== 200 || typeof nonce !== 'string' || nonce.length === 0) {
-      throw new AgentRoomRuntimeError(
-        challenge.body?.error?.code ?? 'request_failed',
-        challenge.body?.error?.message ?? `the agent-room server answered ${challenge.status}`,
-      )
+      throwAuthError(challenge)
     }
     const signature = signWithInstallationKey(pluginDataDir, Buffer.from(nonce, 'base64url')).toString('base64url')
-    const answer = await roundTrip(target, 'POST', '/api/auth/answer', protocolHeaders(), {
-      nonce,
-      signature,
-    }, CLIENT_REQUEST_TIMEOUT_MS)
+    const answerPayload = sessionKind === 'cli_oneshot'
+      ? { nonce, signature, session_kind: 'cli_oneshot' }
+      : { nonce, signature }
+    let answer = await roundTrip(target, 'POST', '/api/auth/answer', protocolHeaders(), answerPayload, CLIENT_REQUEST_TIMEOUT_MS)
+    if (sessionKind === 'cli_oneshot' && isUnknownSessionKindError(answer)) {
+      const challenge2 = await roundTrip(target, 'POST', '/api/auth/challenge', protocolHeaders(), {
+        public_key: keypair.publicKey.toString('base64url'),
+      }, CLIENT_REQUEST_TIMEOUT_MS)
+      const nonce2 = challenge2.body?.result?.nonce
+      if (challenge2.status !== 200 || typeof nonce2 !== 'string' || nonce2.length === 0) {
+        throwAuthError(challenge2)
+      }
+      const sig2 = signWithInstallationKey(pluginDataDir, Buffer.from(nonce2, 'base64url')).toString('base64url')
+      answer = await roundTrip(target, 'POST', '/api/auth/answer', protocolHeaders(), {
+        nonce: nonce2,
+        signature: sig2,
+      }, CLIENT_REQUEST_TIMEOUT_MS)
+    }
     const token = answer.body?.result?.session_token
     if (answer.status !== 200 || typeof token !== 'string' || token.length === 0) {
-      throw new AgentRoomRuntimeError(
-        answer.body?.error?.code ?? 'request_failed',
-        answer.body?.error?.message ?? `the agent-room server answered ${answer.status}`,
-      )
+      throwAuthError(answer)
     }
     return { token, fingerprint: keypair.fingerprint, transport: REMOTE_TRANSPORT }
   }
   const localToken = loadOrCreateLocalToken(sharedDataDir)
-  const exchange = await roundTrip(target, 'POST', '/api/auth/local', protocolHeaders(localToken), {
-    public_key: keypair.publicKey.toString('base64url'),
-  }, CLIENT_REQUEST_TIMEOUT_MS)
+  const localPayload = sessionKind === 'cli_oneshot'
+    ? { public_key: keypair.publicKey.toString('base64url'), session_kind: 'cli_oneshot' }
+    : { public_key: keypair.publicKey.toString('base64url') }
+  let exchange = await roundTrip(target, 'POST', '/api/auth/local', protocolHeaders(localToken), localPayload, CLIENT_REQUEST_TIMEOUT_MS)
+  if (sessionKind === 'cli_oneshot' && isUnknownSessionKindError(exchange)) {
+    exchange = await roundTrip(target, 'POST', '/api/auth/local', protocolHeaders(localToken), {
+      public_key: keypair.publicKey.toString('base64url'),
+    }, CLIENT_REQUEST_TIMEOUT_MS)
+  }
   const token = exchange.body?.result?.session_token
   if (exchange.status !== 200 || typeof token !== 'string' || token.length === 0) {
-    throw new AgentRoomRuntimeError(
-      exchange.body?.error?.code ?? 'request_failed',
-      exchange.body?.error?.message ?? `the agent-room server answered ${exchange.status}`,
-    )
+    throwAuthError(exchange)
   }
   return { token, fingerprint: keypair.fingerprint, transport: LOCAL_TRANSPORT }
 }

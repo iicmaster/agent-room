@@ -50,8 +50,8 @@ import {
   machineLabel,
   sessionScopeKey,
 } from '../client/session-state.mjs'
-import { REMOTE_TRANSPORT, applyTrustMatrix, loadAllowlist } from '../client/trust.mjs'
-import { ensureServer } from '../client/ensure-server.mjs'
+import { LOCAL_TRANSPORT, REMOTE_TRANSPORT, applyTrustMatrix, loadAllowlist } from '../client/trust.mjs'
+import { ensureServer, readRuntimeRecord } from '../client/ensure-server.mjs'
 import { loadRemoteConfig } from '../client/remote-config.mjs'
 import { authenticate, protocolHeaders, roundTrip } from './session-commands.mjs'
 
@@ -241,7 +241,7 @@ export async function runSendFamilyCommand(tokens, { pluginDataDir, sharedDataDi
     }
 
     const { target, origin } = await resolveTarget({ pluginDataDir, sharedDataDir, env })
-    const { token, transport } = await authenticate(target, { pluginDataDir, sharedDataDir, env })
+    const { token, transport } = await authenticate(target, { pluginDataDir, sharedDataDir, env, sessionKind: 'cli_oneshot' })
     const realmId = await realmIdOf(target, token)
     attempt.origin = origin
     attempt.transport = transport
@@ -369,7 +369,7 @@ export async function runReadFamilyCommand(tokens, { pluginDataDir, sharedDataDi
     }
 
     const { target, origin } = await resolveTarget({ pluginDataDir, sharedDataDir, env })
-    const { token, fingerprint, transport } = await authenticate(target, { pluginDataDir, sharedDataDir, env })
+    const { token, fingerprint, transport } = await authenticate(target, { pluginDataDir, sharedDataDir, env, sessionKind: 'cli_oneshot' })
     const realmId = await realmIdOf(target, token)
     const params = new URLSearchParams({
       after_seq: String(afterSeq),
@@ -445,7 +445,10 @@ export async function runSessionVerify(deps, rawChatId) {
     }
     const { target, origin } = await resolveTarget(deps)
     const { token, fingerprint } = await authenticate(target, {
-      pluginDataDir: deps.pluginDataDir, sharedDataDir: deps.sharedDataDir, env: deps.env,
+      pluginDataDir: deps.pluginDataDir,
+      sharedDataDir: deps.sharedDataDir,
+      env: deps.env,
+      sessionKind: 'cli_oneshot',
     })
     const realmId = await realmIdOf(target, token)
     // The probe's cleanup, bounded and verified (the round-5 gate): a bind
@@ -698,7 +701,7 @@ async function runAddressedSend({
     attempt.clientMessageId = clientMessageId
 
     const { target, origin } = await resolveTarget({ pluginDataDir, sharedDataDir, env })
-    const { token, transport } = await authenticate(target, { pluginDataDir, sharedDataDir, env })
+    const { token, transport } = await authenticate(target, { pluginDataDir, sharedDataDir, env, sessionKind: 'cli_oneshot' })
     const realmId = await realmIdOf(target, token)
     attempt.origin = origin
     attempt.transport = transport
@@ -795,16 +798,45 @@ export async function runDmCommand(tokens, deps) {
   }
 }
 
-// `agent-room sessions` — the explicit realm listing (CAP-3). Enumeration is
-// THIS command's job: a send to an unresolvable address refuses quietly and
-// never names anything; this listing is where a caller looks on purpose.
+function formatSessionsTable(rows, truncated) {
+  const headers = ['AGENT_ID', 'ADDRESS', 'MACHINE', 'LOCALITY', 'PRESENCE', 'LAST_SEEN']
+  const data = rows.map(row => [
+    String(row.base_name ?? ''),
+    String(row.address ?? ''),
+    String(row.machine ?? ''),
+    String(row.locality ?? 'remote'),
+    String(row.presence ?? 'offline'),
+    String(row.last_heartbeat_at ?? ''),
+  ])
+  const widths = headers.map((header, index) => Math.max(
+    header.length,
+    ...data.map(cells => cells[index].length),
+  ))
+  const formatRow = cells => cells.map((cell, index) => cell.padEnd(widths[index])).join('  ').trimEnd()
+  const lines = [formatRow(headers), ...data.map(formatRow)]
+  if (truncated) {
+    lines.push(`... output truncated (showing ${rows.length} entries)`)
+  }
+  return lines
+}
+
+// `agent-room sessions [--json]` — the explicit realm listing (CAP-3).
 export async function runSessionsCommand(tokens, deps) {
   const command = 'sessions'
   try {
-    if (tokens.length > 0) return usage(command, 'agent-room sessions takes no options')
+    let jsonMode = false
+    for (const token of tokens) {
+      if (token === '--json') jsonMode = true
+      else return usage(command, `unknown option "${token}"; expected: agent-room sessions [--json]`)
+    }
     const { pluginDataDir, sharedDataDir, env } = deps
     const { target, origin } = await resolveTarget({ pluginDataDir, sharedDataDir, env })
-    const { token, transport } = await authenticate(target, { pluginDataDir, sharedDataDir, env })
+    const { token, fingerprint, transport } = await authenticate(target, {
+      pluginDataDir,
+      sharedDataDir,
+      env,
+      sessionKind: 'cli_oneshot',
+    })
     const realmId = await realmIdOf(target, token)
     const list = await roundTrip(target, 'GET', '/api/session-principals', protocolHeaders(token), undefined, CLIENT_REQUEST_TIMEOUT_MS)
     if (list.status !== 200) {
@@ -813,17 +845,38 @@ export async function runSessionsCommand(tokens, deps) {
         list.body?.error?.message ?? `the agent-room server answered ${list.status}`,
       )
     }
+    const runtimeRecord = transport === LOCAL_TRANSPORT ? readRuntimeRecord(sharedDataDir) : null
+    const sameRealm = Boolean(runtimeRecord?.realm_id && runtimeRecord.realm_id === realmId)
+    const rawSessions = Array.isArray(list.body?.result?.sessions) ? list.body.result.sessions : []
+    const truncated = Boolean(list.body?.result?.truncated)
+    const sessions = rawSessions.map(row => {
+      const isLocal = transport === LOCAL_TRANSPORT
+        && sameRealm
+        && (row.enrolled_via === 'local' || row.fingerprint === fingerprint)
+      return {
+        ...row,
+        locality: isLocal ? 'local' : 'remote',
+      }
+    })
+    if (jsonMode) {
+      return {
+        status: 'ok',
+        command,
+        lines: [JSON.stringify({
+          ok: true,
+          command,
+          realm_id: realmId,
+          origin,
+          transport,
+          truncated,
+          sessions,
+        })],
+      }
+    }
     return {
       status: 'ok',
       command,
-      lines: [JSON.stringify({
-        ok: true,
-        command,
-        realm_id: realmId,
-        origin,
-        transport,
-        sessions: list.body.result.sessions,
-      })],
+      lines: formatSessionsTable(sessions, truncated),
     }
   } catch (error) {
     return refusal(command, error)

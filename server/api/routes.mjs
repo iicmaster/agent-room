@@ -122,7 +122,7 @@ export const ROUTE_TABLE = Object.freeze([
   // time: the answer's frozen field set carries no public_key, so the
   // signature always verifies against the key the nonce was issued to.
   Object.freeze({ method: 'POST', path: '/api/auth/challenge', class: 'pre-auth', implemented: true, requestFields: Object.freeze(['public_key']) }),
-  Object.freeze({ method: 'POST', path: '/api/auth/answer', class: 'pre-auth', implemented: true, requestFields: Object.freeze(['nonce', 'signature']) }),
+  Object.freeze({ method: 'POST', path: '/api/auth/answer', class: 'pre-auth', implemented: true, requestFields: Object.freeze(['nonce', 'signature', 'session_kind']) }),
   // Story 1.4: the local credential path is live (issuer/verifier wiring in
   // server.mjs). `implemented` marks registration status for the frozen
   // table's readers; unmarked routes stay unregistered until their stories.
@@ -131,7 +131,7 @@ export const ROUTE_TABLE = Object.freeze([
   // local token remains the bootstrap credential; presentation is not
   // possession proof (no signature check locally; challenge-response is
   // Epic 4's remote path).
-  Object.freeze({ method: 'POST', path: '/api/auth/local', class: 'pre-auth', implemented: true, requestFields: Object.freeze(['public_key']) }),
+  Object.freeze({ method: 'POST', path: '/api/auth/local', class: 'pre-auth', implemented: true, requestFields: Object.freeze(['public_key', 'session_kind']) }),
 
   // viewer (AD-8): GET /viewer/auth · GET /viewer/ + static assets ·
   // GET /viewer/api/rooms/:id/messages · GET /viewer/api/rooms/:id/events (SSE)
@@ -219,6 +219,7 @@ export const REQUEST_FIELD_VOCABULARY = Object.freeze([
   'generation',
   'reason',
   'recovery_id',
+  'session_kind',
 ])
 
 export const RESPONSE_FIELD_VOCABULARY = Object.freeze([
@@ -283,6 +284,8 @@ export const RESPONSE_FIELD_VOCABULARY = Object.freeze([
   'created_at',
   'peer',
   'write_queue',
+  'truncated',
+  'enrolled_via',
 ])
 
 // Matching: specific patterns first, wildcard (`/viewer/` + static assets)
