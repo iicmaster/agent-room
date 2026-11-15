@@ -51,9 +51,8 @@ import {
   HELD_CACHE_MAX,
   HELD_STATE_MAX_BYTES,
   IDENTIFIER_MAX,
-  REALM_KEY_PATTERN,
 } from '../constants.mjs'
-import { AgentRoomRuntimeError, atomicWriteJson, readJsonFile } from '../runtime.mjs'
+import { AgentRoomRuntimeError, assertSafePathKey, atomicWriteJson, readJsonFile } from '../runtime.mjs'
 
 // --- State shape ----------------------------------------------------------------
 //
@@ -75,13 +74,7 @@ import { AgentRoomRuntimeError, atomicWriteJson, readJsonFile } from '../runtime
 // }
 
 function assertRealmKey(realmId) {
-  if (typeof realmId !== 'string' || !REALM_KEY_PATTERN.test(realmId)) {
-    throw new AgentRoomRuntimeError(
-      'invalid_request',
-      'the agent-room realm id is not a safe state key; refusing to build a held-state path from it',
-    )
-  }
-  return realmId
+  return assertSafePathKey(realmId, { label: 'realm id' })
 }
 
 function assertRoomId(roomId) {

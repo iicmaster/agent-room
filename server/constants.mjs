@@ -781,3 +781,16 @@ export const RETENTION_PRUNE_INTERVAL_MS = 300_000
 export const RETENTION_SWEEP_BATCH_MAX = 500
 export const SESSION_PRINCIPAL_RETENTION_GRACE_MS = 60 * 60 * 1000
 export const POOL_QUEUE_FULL_RETRY_AFTER_MS = 250
+
+// Story 1.5: bootstrap, scope bindings, SessionStart hook, and centralized path-key bounds.
+export const REALM_KEY_MAX = 128
+export const SESSION_SCOPE_BINDINGS_MAX_BYTES = 1024 * 1024
+export const SESSION_SCOPE_BINDINGS_MAX_ENTRIES = 1024
+export const SESSION_SCOPE_BINDING_LOCK_STALE_MS = 5000
+export const SESSION_SCOPE_BINDING_LOCK_HARD_STALE_MS = 60_000
+export const HOOK_STDIN_MAX_BYTES = 64 * 1024
+export const HOOK_STDIN_TIMEOUT_MS = 500
+export const CLAUDE_ENV_FILE_MAX_BYTES = 64 * 1024
+export const NOFILE_RECOMMENDED = 4096
+export const NOFILE_PROBE_TIMEOUT_MS = 1000
+export const BOOTSTRAP_READINESS_TIMEOUT_MS = 10_000

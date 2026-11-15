@@ -204,8 +204,9 @@ export async function runRemoteEnroll({ pluginDataDir }, rawToken) {
   })
   if (response.status !== 200 || response.body?.ok !== true) {
     const code = response.body?.error?.code
+    const redact = text => String(text ?? '').replace(/ar_inv1_[A-Za-z0-9_-]{43}/g, 'ar_inv1_<redacted>')
     if (typeof code === 'string' && code.length > 0) {
-      throw new AgentRoomRuntimeError(code, response.body?.error?.message ?? 'the enrollment was refused')
+      throw new AgentRoomRuntimeError(code, redact(response.body?.error?.message ?? 'the enrollment was refused'))
     }
     throw new AgentRoomRuntimeError('request_failed', `the enrollment request answered ${response.status}`)
   }

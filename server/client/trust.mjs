@@ -54,8 +54,8 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 
-import { FINGERPRINT_PATTERN, REALM_KEY_PATTERN } from '../constants.mjs'
-import { AgentRoomRuntimeError, atomicWriteJson, readJsonFile } from '../runtime.mjs'
+import { FINGERPRINT_PATTERN } from '../constants.mjs'
+import { AgentRoomRuntimeError, assertSafePathKey, atomicWriteJson, readJsonFile } from '../runtime.mjs'
 
 // The two transports a receiving installation can have, from its own
 // connection mode: 'local' — the session was authenticated through the local
@@ -202,13 +202,7 @@ export function applyTrustMatrix(page, { ownFingerprint, transport, allowlist } 
 // --- Storage (the cursor machinery's discipline, applied to the allowlist) ----
 
 function assertRealmKey(realmId) {
-  if (typeof realmId !== 'string' || !REALM_KEY_PATTERN.test(realmId)) {
-    throw new AgentRoomRuntimeError(
-      'invalid_request',
-      'the agent-room realm id is not a safe state key; refusing to build an allowlist path from it',
-    )
-  }
-  return realmId
+  return assertSafePathKey(realmId, { label: 'realm id' })
 }
 
 export function allowlistFilePath(pluginData, realmId) {

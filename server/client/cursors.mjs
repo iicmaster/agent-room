@@ -13,21 +13,14 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 
-import { REALM_KEY_PATTERN } from '../constants.mjs'
-import { AgentRoomRuntimeError, readJsonFile } from '../runtime.mjs'
-import { sessionScopeKey } from './session-state.mjs'
+import { AgentRoomRuntimeError, assertSafePathKey, readJsonFile } from '../runtime.mjs'
+import { assertSafeSessionScope, sessionScopeKey } from './session-state.mjs'
 
 // The same path-escape guard the writer applies: the realm id keys
 // directories under PLUGIN_DATA, so its shape is verified before any path is
 // built from it.
 export function assertRealmKey(realmId) {
-  if (typeof realmId !== 'string' || !REALM_KEY_PATTERN.test(realmId)) {
-    throw new AgentRoomRuntimeError(
-      'invalid_request',
-      'the agent-room realm id is not a safe cursor key; refusing to build a cursor path from it',
-    )
-  }
-  return realmId
+  return assertSafePathKey(realmId, { label: 'realm id' })
 }
 
 export function persistedCursorPath(pluginDataDir, realmId) {
@@ -39,8 +32,8 @@ export function persistedCursorPath(pluginDataDir, realmId) {
 // so a reader in-process (the notifier's catch-up) reads exactly the
 // position the writer advances.
 export function sessionCursorPath(pluginDataDir, { env = process.env } = {}) {
-  const scope = sessionScopeKey({ env })
-  return join(pluginDataDir, 'sessions', assertRealmKey(scope), 'cursors.json')
+  const scope = sessionScopeKey({ env, pluginDataDir })
+  return join(pluginDataDir, 'sessions', assertSafeSessionScope(scope), 'cursors.json')
 }
 
 // Map roomId -> after_seq for one realm. Only safe, non-negative integers

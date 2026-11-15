@@ -2,6 +2,7 @@ import {
   chmodSync,
   closeSync,
   existsSync,
+  fsyncSync,
   lstatSync,
   mkdirSync,
   openSync,
@@ -15,7 +16,14 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { homedir, platform } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 
-import { DISPLAY_NAME_MAX, IDENTIFIER_MAX, STATE_FILE_MAX_BYTES, VIEWER_TOKEN_PATTERN } from './constants.mjs'
+import {
+  DISPLAY_NAME_MAX,
+  IDENTIFIER_MAX,
+  REALM_KEY_MAX,
+  REALM_KEY_PATTERN,
+  STATE_FILE_MAX_BYTES,
+  VIEWER_TOKEN_PATTERN,
+} from './constants.mjs'
 
 export const APP_VERSION = '0.9.0'
 export const DAEMON_PROTOCOL_VERSION = 1
@@ -145,15 +153,46 @@ export function readJsonFile(path, { maxBytes = 64 * 1024 } = {}) {
   }
 }
 
+export function assertSafePathKey(
+  key,
+  { maxLength = REALM_KEY_MAX, pattern = REALM_KEY_PATTERN, label = 'realm id' } = {},
+) {
+  if (
+    typeof key !== 'string'
+    || key.length === 0
+    || key.length > maxLength
+    || key === '.'
+    || key === '..'
+    || key.includes('/')
+    || key.includes('\\')
+    || /[\u0000-\u001f\u007f]/.test(key)
+    || !pattern.test(key)
+  ) {
+    throw new AgentRoomRuntimeError(
+      'invalid_request',
+      `the agent-room ${label} is not a safe path key (must be 1-${maxLength} safe characters; never ".", "..", or path separators)`,
+    )
+  }
+  return key
+}
+
 export function atomicWriteJson(path, value, mode = 0o600) {
   const directory = ensurePrivateDirectory(dirname(path))
   const temporary = join(directory, `.${randomUUID()}.tmp`)
+  let descriptor
   try {
-    writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { flag: 'wx', mode })
+    descriptor = openSync(temporary, 'wx', mode)
+    writeSync(descriptor, `${JSON.stringify(value, null, 2)}\n`)
+    fsyncSync(descriptor)
+    closeSync(descriptor)
+    descriptor = undefined
     chmodSync(temporary, mode)
     renameSync(temporary, path)
     chmodSync(path, mode)
   } finally {
+    if (descriptor !== undefined) {
+      try { closeSync(descriptor) } catch { /* ignore */ }
+    }
     try { unlinkSync(temporary) } catch { /* renamed or never created */ }
   }
 }

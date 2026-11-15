@@ -23,10 +23,19 @@
 // grammar. A hostname change mid-session never relocates an address — the
 // label was captured at allocation and rides the principal.
 
-import { randomBytes } from 'node:crypto'
-import { existsSync, unlinkSync } from 'node:fs'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
+import {
+  closeSync,
+  existsSync,
+  openSync,
+  realpathSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeSync,
+} from 'node:fs'
 import { hostname } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 
 import {
   CLIENT_CONFIG_MAX_BYTES,
@@ -36,11 +45,16 @@ import {
   SESSION_MACHINE_MAX,
   SESSION_MACHINE_PATTERN,
   SESSION_RECOVERY_ID_PATTERN,
+  SESSION_SCOPE_BINDINGS_MAX_BYTES,
+  SESSION_SCOPE_BINDINGS_MAX_ENTRIES,
+  SESSION_SCOPE_BINDING_LOCK_HARD_STALE_MS,
+  SESSION_SCOPE_BINDING_LOCK_STALE_MS,
   SESSION_SCOPE_MAX,
   SESSION_SCOPE_PATTERN,
 } from '../constants.mjs'
 import {
   AgentRoomRuntimeError,
+  assertSafePathKey,
   atomicWriteJson,
   ensurePrivateDirectory,
   readJsonFile,
@@ -60,13 +74,218 @@ export function sessionPrincipalEnabled(env = process.env) {
   return env?.[SESSION_PRINCIPAL_ENV] !== 'off'
 }
 
-// The derived per-process scope key: parent pid + own pid. Both are plain
-// integers, so the key always satisfies the safe-key grammar; the harness
-// scope (when provided) is validated before any path is built from it.
-export function sessionScopeKey({ env = process.env, ppid = process.ppid, pid = process.pid } = {}) {
+export const SCOPE_BINDINGS_FILENAME = 'scope-bindings.json'
+export const SCOPE_BINDINGS_LOCK_FILENAME = 'scope-bindings.lock'
+
+export function hashHostSessionId(prefix, rawId) {
+  const digest = createHash('sha256').update(String(rawId)).digest('hex').slice(0, 16)
+  return `${prefix}-${digest}`
+}
+
+function safeRealpath(target) {
+  try {
+    return realpathSync(target)
+  } catch {
+    return resolve(target)
+  }
+}
+
+export function resolveHostPid(env = process.env, ppid = process.ppid) {
+  const rawClaudePid = env?.CLAUDE_PID
+  if (typeof rawClaudePid === 'string' && /^\d+$/.test(rawClaudePid.trim())) {
+    const parsed = Number(rawClaudePid.trim())
+    if (Number.isSafeInteger(parsed) && parsed > 1) return parsed
+  }
+  return Number(ppid)
+}
+
+function isPidAlive(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 1) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return error?.code === 'EPERM'
+  }
+}
+
+function readScopeBindingsRaw(pluginDataDir) {
+  const path = join(pluginDataDir, SCOPE_BINDINGS_FILENAME)
+  if (!existsSync(path)) return { version: 1, bindings: [] }
+  try {
+    const value = readJsonFile(path, { maxBytes: SESSION_SCOPE_BINDINGS_MAX_BYTES })
+    if (value && typeof value === 'object' && value.version === 1 && Array.isArray(value.bindings)) {
+      return {
+        version: 1,
+        bindings: value.bindings.filter(entry =>
+          entry
+          && typeof entry === 'object'
+          && typeof entry.scope === 'string'
+          && Number.isSafeInteger(entry.parent_host_pid)
+          && typeof entry.realpath_cwd === 'string'
+        ),
+      }
+    }
+  } catch {
+    // fall through to corrupt backup
+  }
+  try {
+    renameSync(path, join(pluginDataDir, `scope-bindings.corrupt-${Date.now()}.json`))
+  } catch { /* best-effort */ }
+  return { version: 1, bindings: [] }
+}
+
+function tryReclaimStaleScopeLock(lockPath, nowMs) {
+  let info
+  try {
+    info = statSync(lockPath)
+  } catch {
+    return false
+  }
+  const ageMs = nowMs() - info.mtimeMs
+  if (ageMs < SESSION_SCOPE_BINDING_LOCK_STALE_MS) return false
+  let lockPid = null
+  try {
+    const parsed = readJsonFile(lockPath, { maxBytes: 4096 })
+    if (Number.isSafeInteger(parsed?.pid)) lockPid = parsed.pid
+  } catch { /* treat unreadable stale lock as reclaimable after hard stale */ }
+  const canReclaim = (lockPid !== null && !isPidAlive(lockPid)) || ageMs >= SESSION_SCOPE_BINDING_LOCK_HARD_STALE_MS
+  if (!canReclaim) return false
+  const stalePath = `${lockPath}.stale-${randomUUID()}`
+  try {
+    renameSync(lockPath, stalePath)
+    unlinkSync(stalePath)
+    return true
+  } catch {
+    return false
+  }
+}
+
+export function writeScopeBinding({
+  pluginDataDir,
+  scope,
+  env = process.env,
+  ppid = process.ppid,
+  cwd = process.cwd(),
+  nowMs = () => Date.now(),
+}) {
+  const safeScope = assertSafeSessionScope(scope)
+  const dir = ensurePrivateDirectory(pluginDataDir)
+  const lockPath = join(dir, SCOPE_BINDINGS_LOCK_FILENAME)
+  const bindingsPath = join(dir, SCOPE_BINDINGS_FILENAME)
+  const hostPid = resolveHostPid(env, ppid)
+  const realCwd = safeRealpath(cwd)
+
+  let locked = false
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    let fd
+    try {
+      fd = openSync(lockPath, 'wx', 0o600)
+      writeSync(fd, `${JSON.stringify({ pid: process.pid, created_at: new Date(nowMs()).toISOString() })}\n`)
+      closeSync(fd)
+      fd = undefined
+      locked = true
+      break
+    } catch (error) {
+      if (fd !== undefined) {
+        try { closeSync(fd) } catch { /* ignore */ }
+      }
+      if (error?.code !== 'EEXIST') throw error
+      tryReclaimStaleScopeLock(lockPath, nowMs)
+    }
+  }
+  if (!locked) {
+    throw new AgentRoomRuntimeError('state_locked', 'scope-bindings.lock is held by another process')
+  }
+
+  try {
+    const current = readScopeBindingsRaw(dir)
+    const nowIso = new Date(nowMs()).toISOString()
+    const filtered = current.bindings.filter(entry =>
+      isPidAlive(entry.parent_host_pid)
+      && !(entry.parent_host_pid === hostPid && entry.realpath_cwd === realCwd)
+    )
+    filtered.unshift({
+      scope: safeScope,
+      parent_host_pid: hostPid,
+      realpath_cwd: realCwd,
+      updated_at: nowIso,
+    })
+    atomicWriteJson(bindingsPath, {
+      version: 1,
+      bindings: filtered.slice(0, SESSION_SCOPE_BINDINGS_MAX_ENTRIES),
+    })
+  } finally {
+    try { unlinkSync(lockPath) } catch { /* ignore */ }
+  }
+}
+
+export function lookupScopeBinding({
+  pluginDataDir,
+  env = process.env,
+  ppid = process.ppid,
+  cwd = process.cwd(),
+}) {
+  if (!pluginDataDir) return null
+  const dir = resolve(pluginDataDir)
+  const path = join(dir, SCOPE_BINDINGS_FILENAME)
+  if (!existsSync(path)) return null
+  const hostPid = resolveHostPid(env, ppid)
+  if (!isPidAlive(hostPid)) return null
+  const realCwd = safeRealpath(cwd)
+  const realPluginData = safeRealpath(dir)
+  const data = readScopeBindingsRaw(dir)
+  const exact = data.bindings.find(entry =>
+    entry.parent_host_pid === hostPid && entry.realpath_cwd === realCwd
+  )
+  if (exact) {
+    try { return assertSafeSessionScope(exact.scope) } catch { return null }
+  }
+  if (realCwd === realPluginData) {
+    const byHost = data.bindings.find(entry => entry.parent_host_pid === hostPid)
+    if (byHost) {
+      try { return assertSafeSessionScope(byHost.scope) } catch { return null }
+    }
+  }
+  return null
+}
+
+// 5-step Session Scope resolution:
+// (1) explicit --scope / hook mapping
+// (2) AGENT_ROOM_SESSION_SCOPE
+// (3) hashed host ID (CLAUDE_CODE_SESSION_ID | CLAUDE_SESSION_ID | ANTIGRAVITY_CONVERSATION_ID | CODEX_THREAD_ID)
+// (4) PLUGIN_DATA/scope-bindings.json (parent_host_pid, realpath_cwd)
+// (5) fallback p<ppid>.<pid>
+export function sessionScopeKey({
+  explicitScope,
+  env = process.env,
+  pluginDataDir,
+  cwd = process.cwd(),
+  ppid = process.ppid,
+  pid = process.pid,
+} = {}) {
+  if (typeof explicitScope === 'string' && explicitScope.length > 0) {
+    return assertSafeSessionScope(explicitScope)
+  }
   const declared = env?.AGENT_ROOM_SESSION_SCOPE
   if (typeof declared === 'string' && declared.length > 0) {
     return assertSafeSessionScope(declared)
+  }
+  const claudeId = env?.CLAUDE_CODE_SESSION_ID || env?.CLAUDE_SESSION_ID
+  if (typeof claudeId === 'string' && claudeId.length > 0) {
+    return hashHostSessionId('claude', claudeId)
+  }
+  const agyId = env?.ANTIGRAVITY_CONVERSATION_ID
+  if (typeof agyId === 'string' && agyId.length > 0) {
+    return hashHostSessionId('agy', agyId)
+  }
+  const codexId = env?.CODEX_THREAD_ID
+  if (typeof codexId === 'string' && codexId.length > 0) {
+    return hashHostSessionId('codex', codexId)
+  }
+  if (pluginDataDir) {
+    const bound = lookupScopeBinding({ pluginDataDir, env, ppid, cwd })
+    if (bound !== null) return bound
   }
   return `p${Number(ppid)}.${Number(pid)}`
 }
@@ -76,13 +295,11 @@ export function sessionScopeKey({ env = process.env, ppid = process.ppid, pid = 
 // '..' scope (a malformed AGENT_ROOM_SESSION_SCOPE) is a coded refusal before
 // any path is built, never a traversal.
 export function assertSafeSessionScope(scope) {
-  if (typeof scope !== 'string' || scope === '.' || scope === '..' || !SESSION_SCOPE_PATTERN.test(scope)) {
-    throw new AgentRoomRuntimeError(
-      'invalid_request',
-      `the agent-room session scope must be 1-${SESSION_SCOPE_MAX} safe characters (letters, numbers, dot, underscore, hyphen; never "." or "..")`,
-    )
-  }
-  return scope
+  return assertSafePathKey(scope, {
+    maxLength: SESSION_SCOPE_MAX,
+    pattern: SESSION_SCOPE_PATTERN,
+    label: 'session scope',
+  })
 }
 
 export function sessionsDirectoryPath(pluginDataDir) {
@@ -214,6 +431,8 @@ export function sessionCursorSeedState({
   legacyCursorsReader = defaultLegacyCursorsReader,
   now = () => new Date().toISOString(),
 }) {
+  assertSafePathKey(realmId, { label: 'realm id' })
+  assertSafeSessionScope(scope)
   const sessionsDir = ensurePrivateDirectory(sessionsDirectoryPath(pluginDataDir))
   const cursorPath = join(sessionsDir, assertSafeSessionScope(scope), 'cursors.json')
   const markerPath = join(sessionsDir, SESSION_CURSOR_SEED_MARKER_FILENAME)

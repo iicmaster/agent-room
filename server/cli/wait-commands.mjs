@@ -57,9 +57,9 @@ import { performance } from 'node:perf_hooks'
 
 import {
   READ_HOLD_MAX_MS,
-  REALM_KEY_PATTERN,
+  SESSION_SCOPE_PATTERN,
 } from '../constants.mjs'
-import { AgentRoomRuntimeError, readJsonFile } from '../runtime.mjs'
+import { AgentRoomRuntimeError, assertSafePathKey, readJsonFile } from '../runtime.mjs'
 import { CONNECTION_MODE_ENV, loadChatIdConfig } from '../client/api-client.mjs'
 import { REMOTE_TRANSPORT } from '../client/trust.mjs'
 import { createDeliveryClassifier } from '../notification/delivery.mjs'
@@ -330,17 +330,12 @@ function releaseWaitLock(path, token) {
 // position is the one actually consumed, so already-read history stays quiet
 // instead of re-hinting forever.
 function loadBaselineCursors(pluginDataDir, realmId) {
-  if (typeof realmId !== 'string' || !REALM_KEY_PATTERN.test(realmId)) {
-    throw new AgentRoomRuntimeError(
-      'invalid_request',
-      'the agent-room realm id is not a safe cursor key; refusing to build a cursor path from it',
-    )
-  }
+  assertSafePathKey(realmId, { label: 'realm id' })
   const candidates = []
   const sessionsDir = join(pluginDataDir, 'sessions')
   if (existsSync(sessionsDir)) {
     for (const scope of readdirSync(sessionsDir)) {
-      if (scope.startsWith('.') || !REALM_KEY_PATTERN.test(scope)) continue
+      if (scope === '.' || scope === '..' || scope.startsWith('.') || !SESSION_SCOPE_PATTERN.test(scope)) continue
       const path = join(sessionsDir, scope, 'cursors.json')
       if (existsSync(path)) candidates.push({ path, mtimeMs: statSync(path).mtimeMs, sessionScoped: true })
     }

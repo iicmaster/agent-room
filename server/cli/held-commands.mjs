@@ -65,10 +65,9 @@ import {
   FINGERPRINT_PATTERN,
   FINGERPRINT_PREFIX,
   IDENTIFIER_MAX,
-  REALM_KEY_PATTERN,
   chatIdForms,
 } from '../constants.mjs'
-import { AgentRoomRuntimeError } from '../runtime.mjs'
+import { AgentRoomRuntimeError, assertSafePathKey } from '../runtime.mjs'
 import { loadOrCreateKeypair } from '../keys.mjs'
 import { loadOrCreateLocalToken } from '../api/local-token.mjs'
 import { ensureServer } from '../client/ensure-server.mjs'
@@ -129,14 +128,7 @@ export async function resolveRealmId({ port, target, sessionToken }) {
       status.body?.error?.message ?? `the agent-room status call answered ${status.status}`,
     )
   }
-  const realmId = status.body.result.realm_id
-  if (typeof realmId !== 'string' || !REALM_KEY_PATTERN.test(realmId)) {
-    throw new AgentRoomRuntimeError(
-      'invalid_request',
-      'the agent-room realm id is not a safe state key; refusing to build a realm state path from it',
-    )
-  }
-  return realmId
+  return assertSafePathKey(status.body.result.realm_id, { label: 'realm id' })
 }
 
 // One target shape out of the two call conventions the family supports: the

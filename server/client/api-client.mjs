@@ -737,7 +737,7 @@ export function createAgentRoomClient({
   // re-allocates so the process stays addressable, while a transport failure
   // leaves local belief untouched (an unacknowledged beat never extends the
   // lease, so at worst the principal drops to offline and resumes later).
-  const sessionScope = declaredSessionScope ?? sessionScopeKey({ env })
+  const sessionScope = declaredSessionScope ?? sessionScopeKey({ env, pluginDataDir })
   let sessionPrincipal = null
   let sessionEnsurePromise = null
   let heartbeatTimer = null

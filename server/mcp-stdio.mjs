@@ -74,13 +74,13 @@ import {
   READ_HOLD_MAX_MS,
   READ_PAGE_DEFAULT,
   READ_PAGE_MAX,
-  REALM_KEY_PATTERN,
   SESSION_ADDRESS_INVALID_MESSAGE,
   SESSION_ADDRESS_PATTERN,
 } from './constants.mjs'
 import {
   APP_VERSION,
   AgentRoomRuntimeError,
+  assertSafePathKey,
   assertSupportedRuntime,
   atomicWriteJson,
   instanceDataDirectory,
@@ -88,7 +88,7 @@ import {
   sharedDataDirectory,
 } from './runtime.mjs'
 import { createAgentRoomClient } from './client/api-client.mjs'
-import { sessionCursorSeedState, sessionPrincipalEnabled, sessionScopeKey } from './client/session-state.mjs'
+import { assertSafeSessionScope, sessionCursorSeedState, sessionPrincipalEnabled, sessionScopeKey } from './client/session-state.mjs'
 import { CLIENT_RELEASE_TIMEOUT_MS } from './constants.mjs'
 
 // One wall-clock pause (the shutdown budget's timer).
@@ -391,13 +391,7 @@ function validateArguments(name, args) {
 // a path segment under PLUGIN_DATA/realms/.
 
 function assertCursorKeyRealm(realmId) {
-  if (typeof realmId !== 'string' || !REALM_KEY_PATTERN.test(realmId)) {
-    throw new AgentRoomRuntimeError(
-      'invalid_request',
-      'the agent-room realm id is not a safe cursor key; refusing to build a cursor path from it',
-    )
-  }
-  return realmId
+  return assertSafePathKey(realmId, { label: 'realm id' })
 }
 
 function cursorFilePath(pluginData, realmId) {
@@ -485,7 +479,7 @@ function queueCursorPersist(pluginData, realmId, roomId, afterSeq) {
 // keeps the legacy paths below, byte-for-byte.
 
 function sessionCursorFilePath(pluginData, scope) {
-  return join(pluginData, 'sessions', assertCursorKeyRealm(scope), 'cursors.json')
+  return join(pluginData, 'sessions', assertSafeSessionScope(scope), 'cursors.json')
 }
 
 const sessionCursorMemory = new Map()
@@ -555,7 +549,7 @@ function writeSessionCursors(pluginData, realmId, scope, roomId, afterSeq) {
 
 function queueSessionCursorPersist(pluginData, realmId, scope, roomId, afterSeq) {
   assertCursorKeyRealm(realmId)
-  assertCursorKeyRealm(scope)
+  assertSafeSessionScope(scope)
   const chainKey = `${scope}\u0000${realmId}`
   const previous = sessionCursorChains.get(chainKey) ?? Promise.resolve()
   const next = previous
@@ -584,7 +578,7 @@ export function createMcpServer({
   // The v0.9.0 session scope: one process start = one addressable session.
   // The SAME key selects the client's credential file and this adapter's
   // per-session cursor file, so the pair never disagree.
-  const sessionScope = sessionScopeKey({ env })
+  const sessionScope = sessionScopeKey({ env, pluginDataDir: pluginData, cwd })
 
   const write = message => output.write(`${JSON.stringify(message)}\n`)
   // In-flight tool calls, keyed by their MCP request id: a cancelled
@@ -696,15 +690,7 @@ export function createMcpServer({
     if (realmId !== null) return realmId
     const readyClient = await getClient()
     const status = await readyClient.status()
-    // Path-escape guard: the realm id keys directories under PLUGIN_DATA, so
-    // its shape is verified before any cursor path is built from it.
-    if (typeof status.realm_id !== 'string' || !REALM_KEY_PATTERN.test(status.realm_id)) {
-      throw new AgentRoomRuntimeError(
-        'invalid_request',
-        'the agent-room realm id is not a safe cursor key; refusing to build a cursor path from it',
-      )
-    }
-    realmId = status.realm_id
+    realmId = assertSafePathKey(status.realm_id, { label: 'realm id' })
     return realmId
   }
 

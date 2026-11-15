@@ -46,8 +46,8 @@ const expectedMcpConfig = {
   },
 };
 
-const portableEntries = ['plugin.json', 'mcp.json', 'server', 'web', 'README.md', 'LICENSE', 'CHANGELOG.md', 'package.json'];
-const sharedEntries = ['server', 'web', 'README.md', 'LICENSE', 'CHANGELOG.md', 'package.json'];
+const portableEntries = ['plugin.json', 'mcp.json', 'server', 'web', 'skills', 'BOOTSTRAP.md', 'README.md', 'LICENSE', 'CHANGELOG.md', 'package.json'];
+const sharedEntries = ['server', 'web', 'skills', 'BOOTSTRAP.md', 'README.md', 'LICENSE', 'CHANGELOG.md', 'package.json'];
 
 function isWithin(candidate, boundary) {
   const pathFromBoundary = relative(boundary, candidate);
@@ -107,7 +107,7 @@ async function resolveSafeOutput(requested) {
   if (isWithin(resolvedSourceRoot, finalOutput)) {
     throw new Error('unsafe output path: it contains the package source');
   }
-  for (const copiedDirectory of ['server', 'web']) {
+  for (const copiedDirectory of ['server', 'web', 'skills', 'hooks']) {
     if (isWithin(finalOutput, join(resolvedSourceRoot, copiedDirectory))) {
       throw new Error(`unsafe output path: it is inside source ${copiedDirectory}/`);
     }
@@ -260,6 +260,7 @@ async function buildArtifacts(tempOutput, sourceBoundary, pluginManifest) {
   for (const entry of sharedEntries) {
     await copyMaterialized(join(portableRoot, entry), join(claudeRoot, entry), portableBoundary);
   }
+  await copyMaterialized(join(sourceRoot, 'hooks'), join(claudeRoot, 'hooks'), sourceBoundary);
 }
 
 async function main() {

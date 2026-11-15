@@ -138,6 +138,7 @@ import { runSessionPrincipalsFamilyCommand } from './session-principals-commands
 import { runWaitFamilyCommand } from './wait-commands.mjs'
 import { loadRemoteConfig } from '../client/remote-config.mjs'
 import { runDmCommand, runReadFamilyCommand, runSendFamilyCommand, runSessionVerify, runSessionsCommand } from './message-commands.mjs'
+import { runBootstrapCommand } from './bootstrap-commands.mjs'
 
 const OK_STATUS = 200
 // The collision status is owned by the constants table (chat_id_taken), never restated.
@@ -526,7 +527,7 @@ Commands:
       List every session principal in the realm (the explicit enumeration —
       a refused send never names anything, this command does): session_id,
       full address (base~locator-token@machine), machine, generation,
-      presence (online iff its 30 s base lease is occupied and unexpired),
+      presence (online iff its 45 s base lease is occupied and unexpired),
       and the lease/retention dispositions. Use an address from this listing
       as dm --to / send --to / message_send to.
 
@@ -814,7 +815,11 @@ export async function main(argv = process.argv.slice(2), {
   // this printer. (Capacity's refuse state keeps its report on stdout and
   // exits 1 through the outcome's exitCode — the report IS the answer, and
   // the exit code is the severity a script keys on.)
-  if (command === 'invite' || command === 'remote' || command === 'ban' || command === 'unban' || command === 'capacity' || command === 'viewer' || command === 'session' || command === 'session-principals' || command === 'wait' || command === 'send' || command === 'read' || command === 'dm' || command === 'sessions') {
+  if (command === 'hook' && subcommand === 'session-start') {
+    const { runHookSessionStart } = await import('./hook-session-start.mjs')
+    return await runHookSessionStart({ input, env, pluginDataDir })
+  }
+  if (command === 'invite' || command === 'remote' || command === 'ban' || command === 'unban' || command === 'capacity' || command === 'viewer' || command === 'session' || command === 'session-principals' || command === 'wait' || command === 'send' || command === 'read' || command === 'dm' || command === 'sessions' || command === 'bootstrap') {
     const outcome = command === 'invite'
       ? await runInviteFamilyCommand(subcommand, argv.slice(2), deps)
       : command === 'remote'
@@ -839,7 +844,9 @@ export async function main(argv = process.argv.slice(2), {
                       ? await runDmCommand(argv.slice(1), deps)
                       : command === 'sessions'
                         ? await runSessionsCommand(argv.slice(1), deps)
-                        : await runBanFamilyCommand(command, argv.slice(1), deps)
+                        : command === 'bootstrap'
+                          ? await runBootstrapCommand(argv.slice(1), deps)
+                          : await runBanFamilyCommand(command, argv.slice(1), deps)
     if (outcome.status === 'ok') {
       for (const line of outcome.lines) output.write(`${line}\n`)
       if (outcome.exitCode === 1) process.exitCode = 1

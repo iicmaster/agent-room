@@ -39,7 +39,7 @@ import {
   chatIdForms,
   sessionAddressForms,
 } from '../constants.mjs'
-import { AgentRoomRuntimeError } from '../runtime.mjs'
+import { AgentRoomRuntimeError, assertSafePathKey } from '../runtime.mjs'
 import {
   CONNECTION_MODE_ENV,
   applyUntrustedEnvelope,
@@ -117,7 +117,7 @@ async function realmIdOf(target, token) {
       status.body?.error?.message ?? `the agent-room server answered ${status.status}`,
     )
   }
-  return realmId
+  return assertSafePathKey(realmId, { label: 'realm id' })
 }
 
 // The send failure receipt: a refusal that still names the attempted
@@ -711,7 +711,7 @@ async function runAddressedSend({
     // principal unless --name overrides it, else allocating --name once or
     // auto-minting <role>-<shortToken> up to 3 attempts), act with its Session
     // capability, then release the base lease best-effort in finally.
-    const sessionScope = sessionScopeKey({ env })
+    const sessionScope = sessionScopeKey({ env, pluginDataDir })
     const machine = machineLabel({ env })
     const roundTripOrThrow = async (method, path, headers, body) => {
       const response = await roundTrip(target, method, path, headers, body, CLIENT_REQUEST_TIMEOUT_MS)
@@ -767,7 +767,7 @@ async function runAddressedSend({
         await roundTrip(target, 'DELETE', '/api/session-principals/current', sessionHeadersOf(capability), undefined, CLIENT_REQUEST_TIMEOUT_MS)
       } catch {
         // The release is best-effort: the durable principal and mailbox
-        // persist; only the 30 s base lease may remain.
+        // persist; only the 45 s base lease may remain.
       }
     }
   } catch (error) {

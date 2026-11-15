@@ -121,9 +121,20 @@ export function loadRemoteConfig(pluginDataDir) {
     )
   }
   const setAt = typeof value.set_at === 'string' ? value.set_at : undefined
+  const enrolled = value.enrolled && typeof value.enrolled === 'object'
+    && typeof value.enrolled.fingerprint === 'string'
+    && typeof value.enrolled.server_url === 'string'
+    && typeof value.enrolled.token_digest_prefix === 'string'
+    ? Object.freeze({
+      fingerprint: value.enrolled.fingerprint,
+      server_url: value.enrolled.server_url,
+      token_digest_prefix: value.enrolled.token_digest_prefix,
+    })
+    : undefined
   return Object.freeze({
     serverUrl: validateRemoteServerUrl(value.server_url),
     ...(setAt === undefined ? {} : { setAt }),
+    ...(enrolled === undefined ? {} : { enrolled }),
     path,
   })
 }
@@ -132,12 +143,20 @@ export function loadRemoteConfig(pluginDataDir) {
 // the ONE active server (AC-1). Setting again replaces (and reports the
 // replacement to the caller); the per-realm state of a replaced server stays
 // on disk under its realm id, inert, as documented in the module header.
-export function saveRemoteConfig(pluginDataDir, { serverUrl } = {}) {
+export function saveRemoteConfig(pluginDataDir, { serverUrl, enrolled } = {}) {
   const origin = validateRemoteServerUrl(serverUrl)
   const path = remoteConfigPath(pluginDataDir)
   const setAt = new Date().toISOString()
-  atomicWriteJson(path, { server_url: origin, set_at: setAt })
-  return Object.freeze({ serverUrl: origin, setAt, path })
+  const payload = { server_url: origin, set_at: setAt }
+  if (enrolled && typeof enrolled === 'object') {
+    payload.enrolled = {
+      fingerprint: enrolled.fingerprint,
+      server_url: enrolled.server_url,
+      token_digest_prefix: enrolled.token_digest_prefix,
+    }
+  }
+  atomicWriteJson(path, payload)
+  return Object.freeze({ serverUrl: origin, setAt, ...(enrolled ? { enrolled } : {}), path })
 }
 
 // Remove the configuration — back to the Local Mode default. Idempotent:
