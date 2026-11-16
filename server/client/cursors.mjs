@@ -58,6 +58,10 @@ import { sessionScopeFilePath, sessionScopeKey } from './session-state.mjs'
 export const CURSORS_SCHEMA_VERSION = 2
 export const CURSORS_FILENAME = 'cursors.json'
 export const CURSOR_LOCK_FILENAME = 'cursors.lock'
+// Story 3.3: the inbox writer takes the SAME lock primitive with a different
+// filename — there is no fourth lock implementation. `withCursorLock` is
+// parameterized by lock filename; the default stays cursors.lock.
+export const INBOX_LOCK_FILENAME = 'inbox.lock'
 
 const ROOM_KEY_MAX = 200
 
@@ -77,9 +81,10 @@ export function scopeCursorsPath(pluginDataDir, { env = process.env } = {}) {
   return sessionScopeFilePath(pluginDataDir, sessionScopeKey({ env, pluginDataDir }), CURSORS_FILENAME)
 }
 
-export function cursorLockPath(pluginDataDir, { env = process.env, scope = null } = {}) {
-  if (scope !== null) return sessionScopeFilePath(pluginDataDir, scope, CURSOR_LOCK_FILENAME)
-  return sessionScopeFilePath(pluginDataDir, sessionScopeKey({ env, pluginDataDir }), CURSOR_LOCK_FILENAME)
+export function cursorLockPath(pluginDataDir, { env = process.env, scope = null, lockFilename = CURSOR_LOCK_FILENAME } = {}) {
+  const filename = lockFilename === INBOX_LOCK_FILENAME ? INBOX_LOCK_FILENAME : CURSOR_LOCK_FILENAME
+  if (scope !== null) return sessionScopeFilePath(pluginDataDir, scope, filename)
+  return sessionScopeFilePath(pluginDataDir, sessionScopeKey({ env, pluginDataDir }), filename)
 }
 
 // The legacy installation-wide file, still read ONLY as a first-session seed.
@@ -120,8 +125,8 @@ function reclaimLock(lockPath) {
 // Acquire the scope's cursor lock. Waits up to CURSOR_LOCK_WAIT_MS, then
 // refuses loudly: a caller that cannot take the lock must not write a
 // position on top of another process's.
-export async function withCursorLock(pluginDataDir, fn, { env = process.env, scope = null } = {}) {
-  const lockPath = cursorLockPath(pluginDataDir, { env, scope })
+export async function withCursorLock(pluginDataDir, fn, { env = process.env, scope = null, lockFilename = CURSOR_LOCK_FILENAME } = {}) {
+  const lockPath = cursorLockPath(pluginDataDir, { env, scope, lockFilename })
   const deadline = Date.now() + CURSOR_LOCK_WAIT_MS
   for (;;) {
     let descriptor
@@ -131,7 +136,7 @@ export async function withCursorLock(pluginDataDir, fn, { env = process.env, sco
       if (error?.code !== 'EEXIST') throw error
       if (lockIsStale(lockPath)) reclaimLock(lockPath)
       if (Date.now() >= deadline) {
-        throw new AgentRoomRuntimeError(CLI_ERROR_CURSORS_LOCK_BUSY, 'cursors.lock busy')
+        throw new AgentRoomRuntimeError(CLI_ERROR_CURSORS_LOCK_BUSY, `${lockFilename} busy`)
       }
       await sleepMs(10)
       continue
