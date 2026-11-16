@@ -1391,6 +1391,7 @@ export function openRoomLog({
   storageWarn = defaultStorageWarn,
   maxPageCount,
   storageNowMs,
+  postCommitBus = null,
 } = {}) {
   if (typeof dataDir !== 'string' || dataDir.trim().length === 0) {
     fail('data_directory_invalid', 'dataDir must be a non-empty path')
@@ -1673,6 +1674,14 @@ export function openRoomLog({
     // line whose transaction then rolled back is dropped: nothing committed,
     // so nothing warns — conservative for the rate limit, never the reverse.
     let deferredStorageWarn = null
+    // Story 3.1: the post-commit event accumulator. The messaging layer calls
+    // collect() at the single INSERT point, once per genuinely new row. The
+    // array is batch-scoped: executeWriteBatch installs a fresh one, only
+    // publishes it AFTER COMMIT FULL, and discards it on rollback. No event
+    // can escape a rolled-back or duplicate-dropped send.
+    let collectedCommits = null
+    const collectPostCommit = event => { if (collectedCommits !== null) collectedCommits.push(event) }
+
     const storageGate = createStorageAdmissionGate({
       dataDir: directory,
       warnFreeBytes: validStorageThresholds.warnFreeBytes,
@@ -1688,6 +1697,7 @@ export function openRoomLog({
       storageGate,
       duplicateWindowMs: validDuplicateWindowMs,
       storageNowMs,
+      collectPostCommit,
       resetStorageWarning() { deferredStorageWarn = null },
       takeStorageWarning() { const line = deferredStorageWarn; deferredStorageWarn = null; return line },
       storageWarn,
@@ -1723,6 +1733,10 @@ export function openRoomLog({
       const deferredWarnLines = []
       const batchUndos = []
       let activeUndo = null
+      // Story 3.1: a fresh collector per batch. Only rows inserted in THIS
+      // batch and surviving to COMMIT are published; rollback drops them.
+      const batchEvents = postCommitBus !== null ? [] : null
+      collectedCommits = batchEvents
       try {
         for (let index = 0; index < batch.length; index += 1) {
           const entry = batch[index]
@@ -1779,6 +1793,7 @@ export function openRoomLog({
         }
         database.exec('COMMIT')
       } catch (batchError) {
+        collectedCommits = null
         try {
           if (database.isTransaction) database.exec('ROLLBACK')
         } catch {
@@ -1808,6 +1823,15 @@ export function openRoomLog({
         throw batchError
       }
 
+      collectedCommits = null
+      // Publish AFTER COMMIT FULL. One event per genuinely new insert. Each
+      // publish is isolated: a listener fault (or a slow-consumer eviction)
+      // can never roll back the receipt we just committed.
+      if (batchEvents !== null) {
+        for (const event of batchEvents) {
+          try { postCommitBus.publish(event) } catch { /* after-commit, never a rollback */ }
+        }
+      }
       for (const warnLine of deferredWarnLines) {
         try { storageWarn(warnLine) } catch { /* committed batch remains committed */ }
       }

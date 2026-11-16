@@ -173,6 +173,7 @@ import {
   sendToForms,
 } from '../constants.mjs'
 import { openRoomLog } from '../store/room-log.mjs'
+import { createPostCommitBus } from '../notification/post-commit-bus.mjs'
 import { resolveStorageThresholds, storageThresholdsFromEnv } from '../store/storage-gate.mjs'
 import { migrateV1InPlace } from '../store/migrate-v1.mjs'
 import { bootstrapRealm } from '../core/realm.mjs'
@@ -2726,10 +2727,14 @@ export async function startServer({
   // non-v1 foreign schema.
   await migrateV1InPlace({ dataDir })
 
+    // Story 3.1: one bus per server. The store publishes into it after every
+    // committed message insert; the watch handler subscribes streams to it.
+    const postCommitBus = createPostCommitBus()
   const store = openRoomLog({
     dataDir,
     role: 'server',
     duplicateWindowMs,
+    postCommitBus,
     // Story 4.6: the storage admission reserves and their seams ride through
     // (undefined triggers openRoomLog's declared defaults for the two
     // injectable functions).
