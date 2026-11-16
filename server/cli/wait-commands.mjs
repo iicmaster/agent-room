@@ -52,21 +52,21 @@
 
 import { existsSync, linkSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { performance } from 'node:perf_hooks'
 
 import {
   READ_HOLD_MAX_MS,
   SESSION_SCOPE_PATTERN,
 } from '../constants.mjs'
-import { AgentRoomRuntimeError, assertSafePathKey, isPidAlive, readJsonFile } from '../runtime.mjs'
-import { CURSORS_FILENAME, persistedCursorPath, readCursorsDocument } from '../client/cursors.mjs'
+import { AgentRoomRuntimeError, assertSafePathKey, ensurePrivateDirectory, isPidAlive, readJsonFile } from '../runtime.mjs'
+import { CURSORS_FILENAME, cursorLockPath, persistedCursorPath, readCursorsDocument, withCursorLock } from '../client/cursors.mjs'
 import { CONNECTION_MODE_ENV, loadChatIdConfig } from '../client/api-client.mjs'
 import { REMOTE_TRANSPORT } from '../client/trust.mjs'
 import { createDeliveryClassifier } from '../notification/delivery.mjs'
 import { ensureServer } from '../client/ensure-server.mjs'
 import { loadRemoteConfig } from '../client/remote-config.mjs'
-import { SESSIONS_DIRECTORY_NAME } from '../client/session-state.mjs'
+import { sessionScopeKey, sessionsDirectoryPath, sessionScopeFilePath } from '../client/session-state.mjs'
 import { authenticate, protocolHeaders, roundTrip } from './session-commands.mjs'
 import { decideHeldWake, loadWakePolicy, policyIdentity } from '../notification/wake-policy.mjs'
 
@@ -319,7 +319,7 @@ function releaseWaitLock(path, token) {
 // legacy realms/<realm>/ file as a candidate too. The most recently written
 // position is the one actually consumed, so already-read history stays quiet
 // instead of re-hinting forever.
-function loadBaselineCursors(pluginDataDir, realmId) {
+async function loadBaselineCursors(pluginDataDir, realmId, env) {
   assertSafePathKey(realmId, { label: 'realm id' })
   // Story 2.1: v2 is the only schema, and read_seq is the only position a
   // delivered message advances (notified_seq belongs to Story 3.2's wake
@@ -328,35 +328,46 @@ function loadBaselineCursors(pluginDataDir, realmId) {
   // the most recently written position is the one actually consumed, so
   // already-read history stays quiet instead of re-hinting forever.
   const candidates = []
-  const sessionsDir = join(pluginDataDir, SESSIONS_DIRECTORY_NAME)
+  // E2/P13: use the one sessions-directory builder (Epic 1 retro F-4). The
+  // candidate's `scope` is only ever a lock key, never a stored field.
+  const sessionsDir = sessionsDirectoryPath(pluginDataDir)
   if (existsSync(sessionsDir)) {
     for (const scope of readdirSync(sessionsDir)) {
       if (scope === '.' || scope === '..' || scope.startsWith('.') || !SESSION_SCOPE_PATTERN.test(scope)) continue
       const path = sessionScopeFilePath(pluginDataDir, scope, CURSORS_FILENAME)
-      if (existsSync(path)) candidates.push({ path, scope, mtimeMs: statSync(path).mtimeMs, sessionScoped: true })
+      if (existsSync(path)) candidates.push({ path, scope, mtimeMs: statSync(path).mtimeMs })
     }
   }
   const legacyPath = persistedCursorPath(pluginDataDir, realmId)
-  if (existsSync(legacyPath)) candidates.push({ path: legacyPath, scope: null, mtimeMs: statSync(legacyPath).mtimeMs, sessionScoped: false })
+  if (existsSync(legacyPath)) candidates.push({ path: legacyPath, scope: null, mtimeMs: statSync(legacyPath).mtimeMs })
   candidates.sort((left, right) => right.mtimeMs - left.mtimeMs)
+  // E2: a candidate with no scope (legacy realms/<realm>/ path) locks under
+  // this process's derived scope — the same key cursorLockPath would pick.
+  const processScope = sessionScopeKey({ env, pluginDataDir })
   for (const candidate of candidates) {
-    try {
-      // The v2 reader owns migration and the loud refusals; a document that
-      // cannot be read is simply not this baseline's source and the next
-      // candidate is tried. A v1 or corrupt file never stops the wait.
-      const { document } = readCursorsDocument(pluginDataDir, {
-        realmId,
-        path: candidate.path,
-      })
-      const rooms = document.realms[realmId]?.rooms ?? {}
-      const baselines = new Map()
-      for (const [roomId, entry] of Object.entries(rooms)) {
-        if (Number.isSafeInteger(entry?.read_seq) && entry.read_seq >= 0) baselines.set(roomId, entry.read_seq)
-      }
-      return baselines
-    } catch {
-      continue
+    // P8: re-throw the LOUD refusals (oversize, invalid schema, lock busy) —
+    // they are never "this candidate is unreadable, try the next". Only a
+    // genuine shape/realm miss advances to the next candidate.
+    // E2: readCursorsDocument can quarantine a corrupt v1 file WITHOUT the
+    // lock; taking the SAME lock as the adapter's writer first closes the race
+    // where a "read-only" baseline resets positions behind a live writer.
+    const lockScope = candidate.scope ?? processScope
+    // The lock file lives under sessions/<scope>/; that directory may not
+    // exist yet for a process-derived scope with no stored session state.
+    // Create it owner-only before openSync('wx') (the cursor writer's own
+    // discipline) so a legacy/foreign baseline never dies with ENOENT.
+    ensurePrivateDirectory(dirname(cursorLockPath(pluginDataDir, { scope: lockScope })))
+    const { document } = await withCursorLock(
+      pluginDataDir,
+      () => readCursorsDocument(pluginDataDir, { realmId, path: candidate.path, scope: candidate.scope }),
+      { scope: lockScope },
+    )
+    const rooms = document.realms[realmId]?.rooms ?? {}
+    const baselines = new Map()
+    for (const [roomId, entry] of Object.entries(rooms)) {
+      if (Number.isSafeInteger(entry?.read_seq) && entry.read_seq >= 0) baselines.set(roomId, entry.read_seq)
     }
+    return baselines
   }
   return new Map()
 }
@@ -487,7 +498,7 @@ export async function runWaitFamilyCommand(tokens, { sharedDataDir, pluginDataDi
         status.body?.error?.message ?? 'the agent-room server answered an unreadable status',
       )
     }
-    const baselines = loadBaselineCursors(pluginDataDir, realmId)
+    const baselines = await loadBaselineCursors(pluginDataDir, realmId, env)
     // The wait reads raw HTTP rows. Apply this receiving installation's local
     // trust matrix before wake policy; row.held is not present on server rows.
     // A fresh allowlist read per row observes an allow/revoke while the wait

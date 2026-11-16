@@ -735,3 +735,18 @@ test('wait race: a losing held room does not spend its sender wake grant', async
   assert.equal(next.status, 'new_messages', 'the losing sender still has its first-contact wake grant')
   assert.equal(next.seq, loserSeq)
 })
+
+test('P8: an oversize cursor baseline is a LOUD refusal — wait never silently treats it as empty', async t => {
+  const world = makeWorld(t)
+  const record = await world.waitReady()
+  await prepareWaitInstallation(record.port, world.sharedData, world.pluginData, 'Watcher')
+  const { realmId } = await realmFacts(record.port, world.sharedData)
+  // Only the legacy realms/<realm>/cursors.json candidate exists; make it
+  // oversize. The baseline must refuse loudly, not fall through to empty.
+  const realmsDir = join(world.pluginData, 'realms', realmId)
+  mkdirSync(realmsDir, { recursive: true, mode: 0o700 })
+  writeFileSync(join(realmsDir, 'cursors.json'), 'x'.repeat(1024 * 1024 + 1), { mode: 0o600 })
+  const outcome = await wait(world, ['--timeout', '2'])
+  assert.equal(outcome.status, 'refusal')
+  assert.equal(outcome.code, 'cursors_file_too_large', 'P8: the loud refusal propagates out of the baseline')
+})
