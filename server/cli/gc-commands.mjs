@@ -108,12 +108,18 @@ export function classifyScope({
   const ageMs = nowMs - dirMtimeMs
   // Positive server evidence: an explicit revoke, or a successful snapshot
   // that no longer retains this session AND the scope is past 30 days.
+  // A snapshot that RETAINS the session is positive evidence of life — it
+  // suppresses every local fallback (never delete a scope the server says is
+  // still held).
+  const sessionId = readSessionId(pluginDataDir, scope, readFile)
   if (server.available) {
-    const sessionId = readSessionId(pluginDataDir, scope, readFile)
     if (sessionId !== null && server.revoked.has(sessionId)) {
       return { collect: true, reason: 'server_revoked' }
     }
-    if ((sessionId === null || !server.retained.has(sessionId)) && ageMs >= GC_RETENTION_MS) {
+    if (sessionId !== null && server.retained.has(sessionId)) {
+      return { collect: false, reason: 'server_retained' }
+    }
+    if (ageMs >= GC_RETENTION_MS) {
       return { collect: true, reason: 'server_expired' }
     }
   }

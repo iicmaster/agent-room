@@ -428,10 +428,11 @@ async function enumerateRooms({ target, token, capability }) {
 // never commits notified_seq. Self-skip uses ownSessionId/ownSessionAddress
 // ONLY — a sibling session on this installation still wakes us. Ban/revoke /
 // superseded are terminal: stop reconnecting at once.
-async function waitOverWatch({
+export async function waitOverWatch({
   target, capability, scope, rooms, roomFilter, ownSessionId, ownSessionAddress,
   wakeDispatcher, decideHeld, ledger, policy, config, startedMs, deadlineAt,
-  signal, appendEntry, nowMs = () => performance.now(),
+  signal, appendEntry, nowMs = () => performance.now(), connect: connectOverride = null,
+  backoffMs = watchBackoffMs, sleepFn = null,
 }) {
   let trustedCount = 0
   let heldCount = 0
@@ -446,7 +447,7 @@ async function waitOverWatch({
   const deadlineTimer = setTimeout(() => wallSignal.abort(), remainingWallMs)
   deadlineTimer.unref()
 
-  const connect = ({ signal: connectSignal }) => openWatchStream({
+  const connect = connectOverride ?? (({ signal: connectSignal }) => openWatchStream({
     ...(target.kind === 'remote' ? { url: target.serverUrl } : { port: target.port }),
     path: `/api/watch?cursors=${encodeURIComponent(JSON.stringify({}))}`,
     headers: {
@@ -455,7 +456,13 @@ async function waitOverWatch({
       accept: 'application/x-ndjson',
     },
     signal: connectSignal,
-  })
+  }))
+  const backoff = delay => sleepFn
+    ? sleepFn(delay)
+    : new Promise(resolvePromise => {
+      const timer = setTimeout(resolvePromise, delay)
+      wallSignal.signal.addEventListener('abort', () => { clearTimeout(timer); resolvePromise() }, { once: true })
+    })
 
   try {
     while (!wallSignal.signal.aborted) {
@@ -465,12 +472,9 @@ async function waitOverWatch({
       } catch (error) {
         if (wallSignal.signal.aborted) break
         retry += 1
-        const delay = Math.min(watchBackoffMs(retry), Math.max(0, deadlineAt - nowMs()))
+        const delay = Math.min(backoffMs(retry), Math.max(0, deadlineAt - nowMs()))
         if (delay <= 0) break
-        await new Promise(resolvePromise => {
-          const timer = setTimeout(resolvePromise, delay)
-          wallSignal.signal.addEventListener('abort', () => { clearTimeout(timer); resolvePromise() }, { once: true })
-        })
+        await backoff(delay)
         continue
       }
       retry = 0
@@ -550,12 +554,9 @@ async function waitOverWatch({
       }
       if (terminal || wallSignal.signal.aborted) break
       retry += 1
-      const delay = Math.min(watchBackoffMs(retry), Math.max(0, deadlineAt - nowMs()))
+      const delay = Math.min(backoffMs(retry), Math.max(0, deadlineAt - nowMs()))
       if (delay <= 0) break
-      await new Promise(resolvePromise => {
-        const timer = setTimeout(resolvePromise, delay)
-        wallSignal.signal.addEventListener('abort', () => { clearTimeout(timer); resolvePromise() }, { once: true })
-      })
+      await backoff(delay)
     }
     return {
       status: 'ok', command: 'wait',
