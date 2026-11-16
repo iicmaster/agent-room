@@ -25,7 +25,7 @@ import {
   VIEWER_TOKEN_PATTERN,
 } from './constants.mjs'
 
-export const APP_VERSION = '0.9.0'
+export const APP_VERSION = '1.0.0'
 export const DAEMON_PROTOCOL_VERSION = 1
 export const MIN_NODE_VERSION = '24.15'
 export const MIN_SQLITE_VERSION = '3.51.3'
