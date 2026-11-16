@@ -60,11 +60,20 @@ import {
   PROTOCOL_VERSION,
   READ_HOLD_MAX_MS,
   SESSION_SCOPE_PATTERN,
+  WAIT_DEFAULT_TIMEOUT_S,
+  WAIT_MAX_TIMEOUT_S,
+  WATCH_RECONNECT_BASE_MS,
+  WATCH_RECONNECT_MAX_MS,
 } from '../constants.mjs'
 // Story 3.2: the two-phase wake guard rides this long-poll. The transport
 // stays the v0.9 long-poll in this story (3.3 swaps it for /api/watch).
 import { createScopeLedger } from '../client/scope-ledger.mjs'
 import { createWakeDispatcher, pauseHint } from '../notification/wake-dispatcher.mjs'
+// Story 3.3: watches via the 3.1 client (already on Session capability), and
+// appends each wake to the bounded, allowlisted inbox under inbox.lock. Both
+// reuse existing primitives — no fourth lock, no fourth path builder.
+import { openWatchStream, watchBackoffMs } from '../client/watch-client.mjs'
+import { appendInboxEntry } from '../client/inbox.mjs'
 import { AgentRoomRuntimeError, assertSafePathKey, ensurePrivateDirectory, isPidAlive, readJsonFile } from '../runtime.mjs'
 import { CURSORS_FILENAME, cursorLockPath, persistedCursorPath, readCursorsDocument, withCursorLock } from '../client/cursors.mjs'
 import { CONNECTION_MODE_ENV, loadChatIdConfig } from '../client/api-client.mjs'
@@ -80,11 +89,10 @@ import { decideHeldWake, loadWakePolicy, policyIdentity } from '../notification/
 // hold that is ≈3 requests/min per watched room — 18/min at the fence —
 // against the 120/min/key budget, leaving the burst untouched.
 const WAIT_CONCURRENCY_MAX = 6
-// The outer deadline: default and hard maximum in seconds. The deadline is
-// monotonic (performance.now) and covers auth, discovery, and holds — it
-// never resets mid-wait.
-const WAIT_DEFAULT_TIMEOUT_S = 300
-const WAIT_MAX_TIMEOUT_S = 600
+// The outer deadline: default and hard maximum in seconds now come from the
+// single AD-9 source (server/constants.mjs). The deadline is monotonic
+// (performance.now) and covers auth, discovery, watch and every reconnect —
+// it never resets mid-wait.
 // The wait reads full pages so own-fingerprint rows (issue #4) can be skipped
 // inside one response instead of one request per row.
 const WAIT_PAGE_LIMIT = 200
@@ -248,54 +256,59 @@ async function holdForRoom({ target, token, capability, roomId, afterSeq, holdMs
 // refuses the newcomer — two waiters on one installation would double the
 // request budget and race each other's hints. Release is owner-checked: a
 // lock whose recorded token is not ours is never removed.
-function acquireWaitLock(pluginDataDir, timeoutMs, { reclaim = false } = {}) {
-  const path = join(pluginDataDir, 'wait.lock')
+function acquireWaitLock(pluginDataDir, timeoutMs, { scope = null, reclaim = false } = {}) {
+  // Story 3.3: the fence is per SESSION SCOPE, built by the one path builder —
+  // never at pluginDataDir root. O_CREAT|O_EXCL is enforced by linkSync's
+  // hard-link creation (atomic: exactly one contender wins the name).
+  const key = scope ?? sessionScopeKey({ pluginDataDir })
+  const path = sessionScopeFilePath(pluginDataDir, key, 'wait.lock')
+  ensurePrivateDirectory(dirname(path))
   for (let attempt = 0; attempt < 8; attempt += 1) {
     const token = randomUUID()
-    const temporary = join(pluginDataDir, `.wait.lock.${randomUUID()}.tmp`)
+    const temporary = join(dirname(path), `.wait.lock.${randomUUID()}.tmp`)
     writeFileSync(temporary, `${JSON.stringify({
       pid: process.pid,
       token,
       started_at: new Date().toISOString(),
+      scope: key,
       timeout_ms: timeoutMs,
     }, null, 2)}\n`, { flag: 'wx', mode: 0o600 })
     try {
       linkSync(temporary, path)
       try { unlinkSync(temporary) } catch { /* already unlinked */ }
-      return { acquired: true, path, token }
+      return { acquired: true, path, token, scope: key }
     } catch (error) {
       try { unlinkSync(temporary) } catch { /* nothing to clean */ }
       if (error?.code !== 'EEXIST') throw error
     }
-    if (!reclaim) {
-      // The fail-closed auto path: report what holds the fence and stop.
-      let existing = null
-      try {
-        existing = readJsonFile(path)
-      } catch {
-        existing = null
+    // Read the incumbent. A LIVE pid refuses; a DEAD pid is reclaimed in
+    // place (rename is the atomic steal), which is the frozen 3.3 behavior —
+    // no operator --reclaim needed for a crashed waiter.
+    let existing = null
+    try { existing = readJsonFile(path) } catch { existing = null }
+    const pid = Number.isSafeInteger(existing?.pid) && existing.pid > 1 ? existing.pid : null
+    const live = pid !== null && isPidAlive(pid)
+    if (live && !reclaim) {
+      return {
+        acquired: false, path, token: null, scope: key,
+        holder: `another agent-room wait holds this session scope (pid ${pid})`,
+        code: 'wait_already_active', reclaimable: false,
       }
-      const pid = typeof existing?.pid === 'number' && Number.isSafeInteger(existing.pid) && existing.pid > 0
-        ? existing.pid
-        : null
-      const holder = pid !== null && pid !== process.pid && isPidAlive(pid)
-        ? `a live process (pid ${pid})`
-        : pid !== null
-          ? `a stale lock whose pid ${pid} is no longer running`
-          : 'a lock file this installation cannot read'
-      return { acquired: false, path, token: null, holder, reclaimable: pid === null || !isPidAlive(pid) }
     }
-    // The EXPLICIT take-over: one operator decision, atomic at the link.
+    // Dead pid (or explicit force): atomic steal via rename, then unlink.
     const reclaimed = `${path}.reclaimed.${randomUUID()}`
     try {
       renameSync(path, reclaimed)
     } catch (error) {
-      if (error?.code === 'ENOENT') continue // someone else already took it
+      if (error?.code === 'ENOENT') continue // someone else took it first
       throw error
     }
-    try { unlinkSync(reclaimed) } catch { /* debris limitation: see above */ }
+    try { unlinkSync(reclaimed) } catch { /* debris beside the authority path */ }
   }
-  return { acquired: false, path, token: null, holder: 'another process won the take-over race', reclaimable: false }
+  return {
+    acquired: false, path, token: null, scope: key,
+    holder: 'another process won the take-over race', code: 'wait_already_active', reclaimable: false,
+  }
 }
 
 function releaseWaitLock(path, token) {
@@ -407,6 +420,157 @@ async function enumerateRooms({ target, token, capability }) {
     .map(room => room.room_id)
 }
 
+// Story 3.3: wait over /api/watch. One unpooled stream (3.1 client) carries
+// every message event; a dropped stream reconnects with the SAME jittered
+// backoff (250/500/1000/2000 ms ±20%) until the ONE monotonic deadline. Each
+// event runs through the 3.2 dispatcher (trust gate, two-phase guard) and the
+// bounded inbox writer; a write failure makes dispatch return false so Phase C
+// never commits notified_seq. Self-skip uses ownSessionId/ownSessionAddress
+// ONLY — a sibling session on this installation still wakes us. Ban/revoke /
+// superseded are terminal: stop reconnecting at once.
+async function waitOverWatch({
+  target, capability, scope, rooms, roomFilter, ownSessionId, ownSessionAddress,
+  wakeDispatcher, decideHeld, ledger, policy, config, startedMs, deadlineAt,
+  signal, appendEntry, nowMs = () => performance.now(),
+}) {
+  let trustedCount = 0
+  let heldCount = 0
+  let retry = 0
+  const terminalEvents = new Set(['session_superseded', 'actor_banned', 'session_revoked'])
+  const wallSignal = new AbortController()
+  const relayAbort = () => wallSignal.abort()
+  signal.addEventListener('abort', relayAbort, { once: true })
+  // A watchdog aborts the current stream exactly at the outer deadline, so a
+  // dropped stream's backoff never extends past --timeout and does not reset.
+  const remainingWallMs = Math.max(0, deadlineAt - nowMs())
+  const deadlineTimer = setTimeout(() => wallSignal.abort(), remainingWallMs)
+  deadlineTimer.unref()
+
+  const connect = ({ signal: connectSignal }) => openWatchStream({
+    ...(target.kind === 'remote' ? { url: target.serverUrl } : { port: target.port }),
+    path: `/api/watch?cursors=${encodeURIComponent(JSON.stringify({}))}`,
+    headers: {
+      [PROTOCOL_HEADER]: PROTOCOL_VERSION,
+      authorization: `Session ${capability}`,
+      accept: 'application/x-ndjson',
+    },
+    signal: connectSignal,
+  })
+
+  try {
+    while (!wallSignal.signal.aborted) {
+      let stream
+      try {
+        stream = await connect({ signal: wallSignal.signal })
+      } catch (error) {
+        if (wallSignal.signal.aborted) break
+        retry += 1
+        const delay = Math.min(watchBackoffMs(retry), Math.max(0, deadlineAt - nowMs()))
+        if (delay <= 0) break
+        await new Promise(resolvePromise => {
+          const timer = setTimeout(resolvePromise, delay)
+          wallSignal.signal.addEventListener('abort', () => { clearTimeout(timer); resolvePromise() }, { once: true })
+        })
+        continue
+      }
+      retry = 0
+      let terminal = false
+      try {
+        for await (const event of stream.frames) {
+          if (wallSignal.signal.aborted || terminal) break
+          if (event?.event === 'message') {
+            // Self-skip ONLY by this session's own identity. A sibling session
+            // on this Installation carries a different address/id and is NOT
+            // skipped, so two sessions of one key still wake each other.
+            const own = (typeof event.chat_id === 'string' && event.chat_id === ownSessionAddress)
+              || (typeof event.session_id === 'string' && event.session_id === ownSessionId)
+            if (own) continue
+            if (roomFilter !== null && !roomFilter.has(event.room_id)) continue
+            const row = {
+              room_id: event.room_id, seq: event.seq, chat_id: event.chat_id,
+              text: event.text, actor_fingerprint: event.fingerprint, created_at: event.created_at,
+            }
+            const candidate = wakeDispatcher.gate(row)
+            if (candidate.held) {
+              const hit = decideHeldWake({
+                pluginData: ledger.pluginData, realmId: ledger.realmId,
+                identity: ledger.identity, fingerprint: candidate.actor_fingerprint, policy,
+              })
+              if (hit === false) continue
+              let written = true
+              try { await appendEntry({ ...row, trusted: false }) } catch { written = false }
+              if (!written) continue // never suppress a held watermark on a failed write
+              wakeDispatcher.dispatchHeld({ room_id: candidate.room_id, seq: candidate.seq, actor_fingerprint: candidate.actor_fingerprint })
+              heldCount += 1
+            } else {
+              const local = config?.chat_id ?? scope
+              const peer = candidate.actor_fingerprint ?? 'unknown'
+              // Phase B dispatch: write the ALLOWLISTED inbox line first. A
+              // write/rotation failure returns false -> dispatcher releases the
+              // lease and does NOT commit notified_seq (ENOSPC ordering).
+              const dispatch = async () => {
+                try {
+                  await appendEntry({ ...row, trusted: true })
+                  return true
+                } catch {
+                  return false
+                }
+              }
+              const result = await wakeDispatcher.dispatchTrusted(
+                { room_id: candidate.room_id, seq: candidate.seq, actor_fingerprint: peer, held: false },
+                { local, peer, dispatch },
+              )
+              if (result.action === 'paused') {
+                return {
+                  status: 'ok', command: 'wait',
+                  lines: [JSON.stringify({
+                    ok: true, command: 'wait', status: 'paused',
+                    message: pauseHint(result.reason, peer), room_id: candidate.room_id,
+                    seq: candidate.seq, elapsed_ms: Math.round(nowMs() - startedMs),
+                  })],
+                }
+              }
+              if (result.ok === true) trustedCount += 1
+            }
+            return {
+              status: 'ok', command: 'wait',
+              lines: [JSON.stringify({
+                ok: true, command: 'wait', status: 'new_messages',
+                message: `woke: ${trustedCount} trusted, ${heldCount} held`,
+                room_id: candidate.room_id, seq: candidate.seq,
+                elapsed_ms: Math.round(nowMs() - startedMs),
+              })],
+            }
+          }
+          if (terminalEvents.has(event?.event)) terminal = true
+        }
+      } catch (error) {
+        if (wallSignal.signal.aborted) break
+        // stream fault: reconnect unless terminal
+      }
+      if (terminal || wallSignal.signal.aborted) break
+      retry += 1
+      const delay = Math.min(watchBackoffMs(retry), Math.max(0, deadlineAt - nowMs()))
+      if (delay <= 0) break
+      await new Promise(resolvePromise => {
+        const timer = setTimeout(resolvePromise, delay)
+        wallSignal.signal.addEventListener('abort', () => { clearTimeout(timer); resolvePromise() }, { once: true })
+      })
+    }
+    return {
+      status: 'ok', command: 'wait',
+      lines: [JSON.stringify({
+        ok: true, command: 'wait', status: 'timeout',
+        message: 'timeout: no new messages',
+        elapsed_ms: Math.round(nowMs() - startedMs), watched: rooms,
+      })],
+    }
+  } finally {
+    clearTimeout(deadlineTimer)
+    signal.removeEventListener('abort', relayAbort)
+  }
+}
+
 // `agent-room wait [--room <room_id>]... [--timeout <seconds>]` — the
 // companion notifier. Repeated --room narrows the watch; the default watches
 // every room of this Actor.
@@ -428,7 +592,7 @@ export async function runWaitFamilyCommand(tokens, { sharedDataDir, pluginDataDi
     if (token === '--timeout') {
       const value = tokens[index + 1]
       if (value === undefined || value.startsWith('--') || !/^[0-9]+$/.test(value)) {
-        return usageMessage('--timeout needs an integer number of seconds (1 to 600)')
+        return usageMessage(`--timeout needs an integer number of seconds (1 to ${WAIT_MAX_TIMEOUT_S})`)
       }
       timeoutSeconds = Number(value)
       index += 1
@@ -478,7 +642,8 @@ export async function runWaitFamilyCommand(tokens, { sharedDataDir, pluginDataDi
   const declaredRemote = env[CONNECTION_MODE_ENV] === REMOTE_TRANSPORT
   const startedMs = performance.now()
   const deadlineAt = startedMs + timeoutSeconds * 1000
-  const lock = acquireWaitLock(pluginDataDir, timeoutSeconds * 1000, { reclaim })
+  const scope = sessionScopeKey({ env, pluginDataDir })
+  const lock = acquireWaitLock(pluginDataDir, timeoutSeconds * 1000, { scope, reclaim })
   if (!lock.acquired) {
     const guidance = lock.reclaimable === true
       ? ` The lock is held by ${lock.holder}. If you have confirmed no wait is running, take the fence with the force reset: agent-room wait --reclaim (it removes whatever holds the fence and starts — run it only with every waiter and competing launcher quiesced).`
@@ -490,7 +655,28 @@ export async function runWaitFamilyCommand(tokens, { sharedDataDir, pluginDataDi
       message: `agent-room wait did not start: the fence at ${lock.path} did not open.${guidance}`,
     }
   }
+  // SIGINT/SIGTERM: abort every in-flight hold/watch and let the `finally`
+  // release wait.lock cleanly. A repeated signal escalates to the default
+  // termination, so a stuck process can still be killed by an operator.
+  const signalController = new AbortController()
+  const installSignalRelease = () => {
+    let interrupted = false
+    const handler = () => {
+      signalController.abort(new AgentRoomRuntimeError('request_cancelled', 'wait interrupted by signal'))
+      releaseWaitLock(lock.path, lock.token)
+      if (interrupted) process.exit(130)
+      interrupted = true
+    }
+    process.once('SIGINT', handler)
+    process.once('SIGTERM', handler)
+    return () => {
+      process.removeListener('SIGINT', handler)
+      process.removeListener('SIGTERM', handler)
+    }
+  }
+  let removeSignalRelease = () => {}
   try {
+    removeSignalRelease = installSignalRelease()
     // The transport: a configured remote origin is the remote lane; otherwise
     // the shared local server (which the wait boots if it is not running).
     const remote = loadRemoteConfig(pluginDataDir)
@@ -512,8 +698,13 @@ export async function runWaitFamilyCommand(tokens, { sharedDataDir, pluginDataDi
     // `ssession:` pair rooms; the unbound Bearer token alone does not. Missing
     // or unusable state simply keeps the Bearer path.
     const waitScope = sessionScopeKey({ env, pluginDataDir })
-    let capability = null
-    try { capability = loadSessionState(pluginDataDir, waitScope)?.capability ?? null } catch { /* Bearer fallback */ }
+    let storedSession = null
+    try { storedSession = loadSessionState(pluginDataDir, waitScope) } catch { /* Bearer fallback */ }
+    const capability = storedSession?.capability ?? null
+    // Self-skip identity: ONLY this session's own id/address. A sibling session
+    // of this installation is a different principal and is never skipped.
+    const ownSessionId = storedSession?.sessionId ?? null
+    const ownSessionAddress = storedSession?.address ?? null
     const status = await roundTrip(target, 'GET', '/api/status', protocolHeaders(token), undefined)
     const realmId = status.body?.result?.realm_id
     if (status.status !== 200 || typeof realmId !== 'string') {
@@ -581,6 +772,24 @@ export async function runWaitFamilyCommand(tokens, { sharedDataDir, pluginDataDi
         }
       }
       fixedRooms = rooms
+    }
+
+    // Story 3.3: when this scope holds a Session capability, wait over the
+    // single /api/watch stream (fast, idle-query-free, sees `ssession:` pair
+    // rooms — closing the Bearer gap). Without a capability (setup-less or an
+    // installation that never allocated a session) keep the v0.9 long-poll;
+    // the two share the SAME 3.2 guard and the same exit/envelope contract.
+    if (capability !== null) {
+      const roomFilter = fixedRooms === null ? null : new Set(fixedRooms)
+      const appendEntry = row => appendInboxEntry(pluginDataDir, waitScope, row)
+      const watchOutcome = await waitOverWatch({
+        target, capability, scope: waitScope,
+        rooms: fixedRooms ?? firstRooms, roomFilter, ownSessionId, ownSessionAddress,
+        wakeDispatcher, decideHeld, ledger, policy, config,
+        startedMs, deadlineAt, signal: signalController.signal, appendEntry,
+      })
+      loopLedger.close()
+      return watchOutcome
     }
 
     let watched = fixedRooms ?? firstRooms
@@ -713,6 +922,7 @@ export async function runWaitFamilyCommand(tokens, { sharedDataDir, pluginDataDi
       message: error?.message ?? String(error),
     }
   } finally {
+    removeSignalRelease()
     releaseWaitLock(lock.path, lock.token)
   }
 }
