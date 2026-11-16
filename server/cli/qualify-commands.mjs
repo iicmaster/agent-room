@@ -22,7 +22,7 @@
 //   - Logic is REUSED: pipeline is the real CLI bin; runtime/sha/bounds come
 //     from the shipped modules; burst/watch use the booted server.
 
-import { execFile as execFileCallback, spawn } from 'node:child_process'
+import { execFile as execFileCallback, execFileSync, spawn } from 'node:child_process'
 import { createHash, randomBytes } from 'node:crypto'
 import {
   existsSync, lstatSync, readFileSync, readdirSync, realpathSync,
@@ -113,30 +113,75 @@ const REQUIRED_CANDIDATE_FILES = [
   'skills/agent-room/SKILL.md',
 ]
 
-function digestCandidate(root = PLUGIN_ROOT) {
+// E5-A2: digest TRACKED files only. `git ls-files` never returns ignored
+// clutter, so an operator's `.vendor-lab/` symlink cannot break a release gate.
+// lstat also excludes symlinks (lstat().isFile() is false for them) — never throw.
+// No git -> deterministic bounded walk that skips .gitignore directories.
+export function digestCandidate(root = PLUGIN_ROOT) {
+  let tracked = null
+  let digestSource = 'git-ls-files'
+  try {
+    const listed = execFileSync('git', ['ls-files', '-z'], {
+      cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 15_000, maxBuffer: WRITE_QUEUE_MAX_BYTES,
+    })
+    tracked = listed.split('\0').filter(path => path.length > 0 && !isAbsolute(path) && !path.startsWith('..')).sort()
+  } catch {
+    digestSource = 'fallback-walk'
+  }
+
   const fold = createHash('sha256')
   let files = 0
   let bytes = 0
-  const walk = (relativePath) => {
-    const absolute = relativePath.length === 0 ? root : join(root, relativePath)
-    const info = lstatSync(absolute)
-    if (info.isSymbolicLink()) throw new Error(`candidate contains a symlink: ${relativePath}`)
-    if (info.isDirectory()) {
-      for (const name of readdirSync(absolute).sort()) {
-        if (DIGEST_SKIP.has(name)) continue
-        walk(relativePath.length === 0 ? name : join(relativePath, name))
-      }
-      return
-    }
-    if (!info.isFile()) return
-    const content = readFileSync(absolute)
+  const addFile = (relativePath) => {
+    let info
+    let content
+    try {
+      info = lstatSync(join(root, relativePath))
+      if (info.isSymbolicLink() || !info.isFile()) return
+      content = readFileSync(join(root, relativePath))
+    } catch { return } // vanished/racy clutter — never break the gate
     files += 1
     bytes += content.length
     fold.update(`${createHash('sha256').update(relativePath).digest('hex')}\n`)
     fold.update(`${createHash('sha256').update(content).digest('hex')}\n`)
   }
-  walk('')
-  return { files, bytes, sha256: fold.digest('hex'), root }
+
+  if (tracked !== null) {
+    for (const path of tracked) addFile(path)
+  } else {
+    const skip = gitignoredDirNames(root)
+    const walk = (relativePath) => {
+      const absolute = relativePath.length === 0 ? root : join(root, relativePath)
+      let info
+      try { info = lstatSync(absolute) } catch { return }
+      if (info.isSymbolicLink()) return
+      if (info.isDirectory()) {
+        for (const name of readdirSync(absolute).sort()) {
+          if (skip.has(name)) continue
+          walk(relativePath.length === 0 ? name : join(relativePath, name))
+        }
+        return
+      }
+      if (info.isFile()) addFile(relativePath)
+    }
+    walk('')
+  }
+  return { files, bytes, sha256: fold.digest('hex'), root, digest_source: digestSource }
+}
+
+// Plain directory patterns from .gitignore, plus the hard-coded always-skips.
+// Sufficient for the no-git fallback; a real git client remains authoritative.
+function gitignoredDirNames(root) {
+  const names = new Set(DIGEST_SKIP)
+  try {
+    for (const line of readFileSync(join(root, '.gitignore'), 'utf8').split(/\r?\n/)) {
+      const pattern = line.trim().replace(/^\/+|\/+$/g, '')
+      if (!pattern || pattern.startsWith('#') || pattern.startsWith('!') || /[*?[\]]/.test(pattern)) continue
+      names.add(pattern.split('/')[0])
+    }
+  } catch { /* no .gitignore */ }
+  return names
 }
 
 // --- Bounded subprocess ------------------------------------------------------------
@@ -714,10 +759,35 @@ async function cellFullSuite() {
 }
 
 // --- Strict packaging validator ----------------------------------------------------
-async function cellPackaging(env) {
+// E5-A1: grade the FULL strict-validate report exactly like tests/package.test.mjs.
+// A partial check on manifest.errors alone could PASS on warnings/contents/
+// strict:false/wrong-target — a fake pass on the release-readiness command.
+// All four report arrays must be present AND empty, strict and success true,
+// and target must be THIS candidate's materialized manifest (never another path).
+export function evaluateValidateReport(report, validate, expectedTarget) {
+  const manifest = report?.manifest
+  const arraysOk = validate.code === 0
+    && report !== null && typeof report === 'object' && !Array.isArray(report)
+    && manifest !== null && typeof manifest === 'object' && !Array.isArray(manifest)
+    && ['errors', 'warnings', 'notes'].every(field => Array.isArray(manifest[field]))
+    && Array.isArray(report.contents)
+  if (!arraysOk) return { ok: false, reason: 'validate report shape invalid: manifest.errors/warnings/notes and contents must all be arrays' }
+  if (report.success !== true) return { ok: false, reason: 'validate report success !== true' }
+  if (report.strict !== true) return { ok: false, reason: 'validate report strict !== true (--strict not honored)' }
+  const dirty = ['errors', 'warnings', 'notes'].filter(field => manifest[field].length > 0)
+  if (dirty.length > 0 || report.contents.length > 0) {
+    return { ok: false, reason: `validate report not clean: non-empty ${[...dirty, ...(report.contents.length > 0 ? ['contents'] : [])].join(', ')}` }
+  }
+  if (report.target !== expectedTarget) return { ok: false, reason: `validate report target mismatch: expected ${expectedTarget}, got ${report.target}` }
+  return { ok: true }
+}
+
+export async function cellPackaging(env, {
+  run = runSubprocess, validatorBinary = null, pluginRoot = PLUGIN_ROOT, packageScript = PACKAGE_SCRIPT,
+} = {}) {
   const override = (env[VALIDATOR_ENV] ?? '').trim()
   const candidates = override.length > 0 ? [override] : (env.PATH || '').split(delimiter).filter(Boolean).map(dir => join(dir, 'claude'))
-  let binary = null
+  let binary = validatorBinary
   for (const candidate of candidates) {
     try { if (existsSync(resolve(candidate)) && statSync(resolve(candidate)).isFile()) { binary = resolve(candidate); break } } catch { /* next */ }
   }
@@ -727,15 +797,17 @@ async function cellPackaging(env) {
   const parent = mkdtempSync(join(tmpdir(), 'agent-room-qualify-pkg-'))
   try {
     const out = join(parent, 'release')
-    const pack = await runSubprocess(process.execPath, [PACKAGE_SCRIPT, '--out', out], { cwd: PLUGIN_ROOT, timeoutMs: CLI_DEADLINE_MS })
+    const claudeRoot = join(out, 'agent-room-claude-code')
+    const pack = await run(process.execPath, [packageScript, '--out', out], { cwd: pluginRoot, timeoutMs: CLI_DEADLINE_MS })
     if (pack.code !== 0) return { status: STATUS.FAILED, reason: `packager failed: ${pack.stderr.slice(0, 300)}` }
-    const validate = await runSubprocess(binary, ['plugin', 'validate', join(out, 'agent-room-claude-code'), '--strict', '--json'], { cwd: PLUGIN_ROOT, timeoutMs: CLI_DEADLINE_MS })
+    const validate = await run(binary, ['plugin', 'validate', claudeRoot, '--strict', '--json'], { cwd: pluginRoot, timeoutMs: CLI_DEADLINE_MS })
     let report = null
     try { report = JSON.parse(validate.stdout) } catch { /* below */ }
-    const ok = validate.code === 0 && report?.success === true && Array.isArray(report?.manifest?.errors) && report.manifest.errors.length === 0
+    const expectedTarget = join(claudeRoot, '.claude-plugin', 'plugin.json')
+    const graded = evaluateValidateReport(report, validate, expectedTarget)
     return {
-      status: ok ? STATUS.QUALIFIED : STATUS.FAILED,
-      reason: ok ? undefined : `claude plugin validate --strict did not pass: ${validate.stdout.slice(0, 300)}${validate.stderr.slice(0, 200)}`,
+      status: graded.ok ? STATUS.QUALIFIED : STATUS.FAILED,
+      reason: graded.ok ? undefined : `claude plugin validate --strict did not pass: ${graded.reason}; ${validate.stdout.slice(0, 300)}${validate.stderr.slice(0, 200)}`,
       strict: report?.strict ?? null,
     }
   } finally {
