@@ -789,12 +789,6 @@ export const SESSION_SCOPE_PATTERN = new RegExp(
   `^[A-Za-z0-9_.-]{1,${SESSION_SCOPE_MAX}}$`,
 )
 
-// The v0.8 → v0.9 cursor migration seed marker filename: one per
-// installation, recording that the first v0.9 session already seeded from the
-// legacy realms/<realm>/cursors.json. Later sessions start at 0; re-runs are
-// no-ops.
-export const SESSION_CURSOR_SEED_MARKER_FILENAME = '.cursor_seed_done'
-
 // Story 1.3: crash-safe resume, takeover, and host revoke bounds.
 export const SESSION_RECOVERY_ID_PATTERN = /^[A-Za-z0-9_-]{22,64}$/
 export const CONFLICT_TICKET_MAX_CHARS = 256

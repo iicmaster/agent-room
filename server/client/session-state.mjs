@@ -41,7 +41,6 @@ import {
   CLIENT_CONFIG_MAX_BYTES,
   SESSION_ADDRESS_PATTERN,
   SESSION_CAPABILITY_PATTERN,
-  SESSION_CURSOR_SEED_MARKER_FILENAME,
   SESSION_MACHINE_MAX,
   SESSION_MACHINE_PATTERN,
   SESSION_RECOVERY_ID_PATTERN,
@@ -433,61 +432,3 @@ export function machineLabel({ env = process.env, host = hostname() } = {}) {
   return bounded.length > 0 && SESSION_MACHINE_PATTERN.test(bounded) ? bounded : 'localhost'
 }
 
-// The v0.8 → v0.9 per-session cursor migration (CAP-7, cursor-only seed).
-// The FIRST v0.9 session of an installation seeds its cursor file from the
-// legacy realms/<realm>/cursors.json; every later session starts at 0; a
-// re-run is a no-op. A legacy file that exists but cannot be read refuses
-// LOUDLY with the coded migration_source_unreadable — a corrupt cursor
-// position is never silently reset (failure-modes U2).
-export function sessionCursorSeedState({
-  pluginDataDir,
-  realmId,
-  scope,
-  legacyCursorsReader = defaultLegacyCursorsReader,
-  now = () => new Date().toISOString(),
-}) {
-  assertSafePathKey(realmId, { label: 'realm id' })
-  assertSafeSessionScope(scope)
-  const sessionsDir = ensurePrivateDirectory(sessionsDirectoryPath(pluginDataDir))
-  const cursorPath = join(sessionsDir, assertSafeSessionScope(scope), 'cursors.json')
-  const markerPath = join(sessionsDir, SESSION_CURSOR_SEED_MARKER_FILENAME)
-  if (existsSync(cursorPath)) {
-    let stored = {}
-    try {
-      const value = readJsonFile(cursorPath)
-      if (value && typeof value === 'object' && value.realm_id === realmId
-        && value.cursors && typeof value.cursors === 'object') {
-        stored = value.cursors
-      }
-    } catch {
-      stored = {}
-    }
-    return { cursorPath, cursors: stored, seeded: false }
-  }
-  let cursors = {}
-  let seeded = false
-  if (!existsSync(markerPath)) {
-    const legacyPath = join(pluginDataDir, 'realms', realmId, 'cursors.json')
-    if (existsSync(legacyPath)) {
-      let legacy
-      try {
-        legacy = legacyCursorsReader(legacyPath)
-      } catch (error) {
-        throw new AgentRoomRuntimeError(
-          'migration_source_unreadable',
-          `the v0.8 cursor state at ${legacyPath} exists but cannot be read: ${error?.code ?? error?.message ?? 'unusable'} — fix or remove it; the session cursor was not reset`,
-        )
-      }
-      if (legacy && typeof legacy.cursors === 'object' && legacy.cursors !== null) {
-        cursors = legacy.cursors
-      }
-      seeded = true
-      atomicWriteJson(markerPath, { seeded_at: now(), realm_id: realmId, from: 'realms/<realm>/cursors.json' })
-    }
-  }
-  return { cursorPath, cursors, seeded }
-}
-
-function defaultLegacyCursorsReader(path) {
-  return readJsonFile(path, { maxBytes: CLIENT_CONFIG_MAX_BYTES })
-}

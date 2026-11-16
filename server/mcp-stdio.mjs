@@ -59,8 +59,6 @@
 // ID choice) belongs to the separate `agent-room setup` command.
 
 import { realpathSync } from 'node:fs'
-import { existsSync } from 'node:fs'
-import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import {
@@ -82,14 +80,12 @@ import {
   AgentRoomRuntimeError,
   assertSafePathKey,
   assertSupportedRuntime,
-  atomicWriteJson,
   instanceDataDirectory,
-  readJsonFile,
   sharedDataDirectory,
 } from './runtime.mjs'
 import { createAgentRoomClient } from './client/api-client.mjs'
-import { assertSafeSessionScope, sessionCursorSeedState, sessionPrincipalEnabled, sessionScopeFilePath, sessionScopeKey } from './client/session-state.mjs'
-import { CURSORS_FILENAME } from './client/cursors.mjs'
+import { sessionPrincipalEnabled, sessionScopeKey } from './client/session-state.mjs'
+import { advanceCursor, loadCursors } from './client/cursors.mjs'
 import { CLIENT_RELEASE_TIMEOUT_MS } from './constants.mjs'
 
 // One wall-clock pause (the shutdown budget's timer).
@@ -367,198 +363,15 @@ function validateArguments(name, args) {
 
 // --- Client-owned cursors -----------------------------------------------------
 
-// Cursor state lives per (installation, realm, room) under
-// PLUGIN_DATA/realms/<realm_id>/cursors.json — one bounded, atomically
-// rewritten 0600 file per realm. A missing or unusable file means "no cursor
-// yet"; a corrupt file never blocks a read (it falls back to the beginning
-// and is overwritten on the next advance).
-//
-// Discipline:
-//   - The realm id is validated against a safe-key shape before any path is
-//     built from it — a malformed realm id is a coded refusal, never a path
-//     escape.
-//   - A write never moves a room's cursor backwards: the persisted value is
-//     max(existing, next_after_seq), so an explicit low after_seq read
-//     re-consumes history without regressing the durable cursor.
-//   - Read-modify-write cycles are serialized through a per-realm promise
-//     chain, so concurrent reads of different rooms can never lose each
-//     other's updates.
-//   - A failed cursor write is reported back on the read result
-//     (cursor_persisted: false plus a coded note) — the consumed page is
-//     never discarded because the disk write failed.
+// Story 2.1: cursors are the per-session schema-v2 file owned by
+// server/client/cursors.mjs — TWO positions per (realm, room) at
+// PLUGIN_DATA/sessions/<scope>/cursors.json, written reload-modify-Math.max-
+// atomic under sessions/<scope>/cursors.lock. This adapter keeps NO in-process
+// cursor memory any more: the file is the only position (a fresh process
+// resumes exactly where the last one stopped, and two processes of one scope
+// cannot diverge). read_seq advances after a successful message_read;
+// notified_seq belongs to Story 3.2 and nothing here writes it.
 
-// Safe cursor-key shape for a realm id (shared with the allowlist paths):
-// REALM_KEY_PATTERN from the constants module is the only shape allowed into
-// a path segment under PLUGIN_DATA/realms/.
-
-function assertCursorKeyRealm(realmId) {
-  return assertSafePathKey(realmId, { label: 'realm id' })
-}
-
-function cursorFilePath(pluginData, realmId) {
-  return join(pluginData, 'realms', assertCursorKeyRealm(realmId), 'cursors.json')
-}
-
-// In-process cursor memory: the durable file is the source of truth across
-// restarts, but a file that cannot be read (or a write that failed) must
-// never rewind THIS process's read position — doing so re-delivers messages
-// the caller already consumed. Memory is merged OVER the file's values.
-const cursorMemory = new Map()
-
-function cursorMemoryKey(realmId, roomId) {
-  return `${realmId}\u0000${roomId}`
-}
-
-function loadCursors(pluginData, realmId) {
-  const path = cursorFilePath(pluginData, realmId)
-  let stored = {}
-  if (existsSync(path)) {
-    try {
-      const value = readJsonFile(path)
-      stored = plainObject(value) && plainObject(value.cursors) ? value.cursors : {}
-    } catch {
-      stored = {}
-    }
-  }
-  const merged = { ...stored }
-  const prefix = `${realmId}\u0000`
-  for (const [key, entry] of cursorMemory) {
-    if (key.startsWith(prefix) && plainObject(entry) && typeof entry.after_seq === 'number') {
-      merged[key.slice(prefix.length)] = entry
-    }
-  }
-  return merged
-}
-
-function writeCursors(pluginData, realmId, roomId, afterSeq) {
-  const cursors = loadCursors(pluginData, realmId)
-  const previous = cursors[roomId]?.after_seq
-  // A cursor is monotonic per room: an explicit low after_seq read must
-  // never move the durable cursor backwards.
-  const next = typeof previous === 'number'
-    && Number.isSafeInteger(previous)
-    && previous >= 0
-    && previous > afterSeq
-    ? previous
-    : afterSeq
-  const entry = { after_seq: next, updated_at: new Date().toISOString() }
-  cursors[roomId] = entry
-  // Memory is updated FIRST: even if the durable write throws, this process
-  // keeps the advanced position and the read result is returned with
-  // cursor_persisted: false rather than re-delivering the consumed page.
-  cursorMemory.set(cursorMemoryKey(realmId, roomId), entry)
-  atomicWriteJson(cursorFilePath(pluginData, realmId), { version: 1, cursors })
-  return next
-}
-
-// One serialized read-modify-write chain per realm: cursor writes across
-// concurrent reads (different rooms, one realm) queue behind each other in
-// arrival order, so a later write never races an earlier one's read.
-const cursorChains = new Map()
-
-function queueCursorPersist(pluginData, realmId, roomId, afterSeq) {
-  assertCursorKeyRealm(realmId)
-  const previous = cursorChains.get(realmId) ?? Promise.resolve()
-  const next = previous
-    .catch(() => { /* a failed write must not poison the chain */ })
-    .then(() => writeCursors(pluginData, realmId, roomId, afterSeq))
-  cursorChains.set(realmId, next)
-  return next
-}
-
-// --- v0.9.0: per-session cursors ---------------------------------------------
-//
-// When this process holds a session principal, message_read's cursor lives
-// in PLUGIN_DATA/sessions/<scope>/cursors.json — one cursor namespace per
-// session principal, so ten processes of one installation never advance each
-// other's read positions (CAP-6). The FIRST v0.9 session of an installation
-// seeds from the legacy realms/<realm>/cursors.json (CAP-7's cursor-only
-// migration: identical position, originals untouched); every later session
-// starts at 0; a re-run is a no-op. A legacy file that exists but cannot be
-// read refuses LOUDLY with the coded migration_source_unreadable — a corrupt
-// position is never silently reset. A process without a session principal
-// keeps the legacy paths below, byte-for-byte.
-
-function sessionCursorFilePath(pluginData, scope) {
-  return sessionScopeFilePath(pluginData, scope, CURSORS_FILENAME)
-}
-
-const sessionCursorMemory = new Map()
-const sessionCursorChains = new Map()
-
-function loadSessionCursors(pluginData, realmId, scope) {
-  const path = sessionCursorFilePath(pluginData, scope)
-  let stored = {}
-  if (existsSync(path)) {
-    try {
-      const value = readJsonFile(path)
-      if (plainObject(value) && value.realm_id === realmId && plainObject(value.cursors)) {
-        stored = value.cursors
-      }
-    } catch {
-      stored = {}
-    }
-  } else {
-    // First use for this scope: run the seed (marker semantics live there —
-    // the first session copies the legacy position, later sessions start at
-    // 0, re-runs are no-ops, and an unreadable legacy file throws the coded
-    // migration_source_unreadable instead of resetting anything). The seed
-    // materializes a file ONLY when a legacy position actually existed: a
-    // fresh installation writes nothing here, so a session whose reads all
-    // fail (an ACL denial, a crash) persists no cursor at all — the old
-    // discipline that a cursor file appears only through a consumed page.
-    const seed = sessionCursorSeedState({ pluginDataDir: pluginData, realmId, scope })
-    if (seed.seeded) {
-      atomicWriteJson(seed.cursorPath, {
-        version: 1,
-        realm_id: realmId,
-        seeded_at: new Date().toISOString(),
-        cursors: seed.cursors,
-      })
-    }
-    stored = seed.cursors
-  }
-  const merged = { ...stored }
-  const prefix = `${scope}\u0000${realmId}\u0000`
-  for (const [key, entry] of sessionCursorMemory) {
-    if (key.startsWith(prefix) && plainObject(entry) && typeof entry.after_seq === 'number') {
-      merged[key.slice(prefix.length)] = entry
-    }
-  }
-  return merged
-}
-
-function writeSessionCursors(pluginData, realmId, scope, roomId, afterSeq) {
-  const cursors = loadSessionCursors(pluginData, realmId, scope)
-  const previous = cursors[roomId]?.after_seq
-  const next = typeof previous === 'number'
-    && Number.isSafeInteger(previous)
-    && previous >= 0
-    && previous > afterSeq
-    ? previous
-    : afterSeq
-  const entry = { after_seq: next, updated_at: new Date().toISOString() }
-  cursors[roomId] = entry
-  sessionCursorMemory.set(`${scope}\u0000${realmId}\u0000${roomId}`, entry)
-  atomicWriteJson(sessionCursorFilePath(pluginData, scope), {
-    version: 1,
-    realm_id: realmId,
-    cursors,
-  })
-  return next
-}
-
-function queueSessionCursorPersist(pluginData, realmId, scope, roomId, afterSeq) {
-  assertCursorKeyRealm(realmId)
-  assertSafeSessionScope(scope)
-  const chainKey = `${scope}\u0000${realmId}`
-  const previous = sessionCursorChains.get(chainKey) ?? Promise.resolve()
-  const next = previous
-    .catch(() => { /* a failed write must not poison the chain */ })
-    .then(() => writeSessionCursors(pluginData, realmId, scope, roomId, afterSeq))
-  sessionCursorChains.set(chainKey, next)
-  return next
-}
 
 // --- The MCP server -------------------------------------------------------------
 
@@ -811,39 +624,35 @@ export function createMcpServer({
         }))
       }
       if (name === 'message_read') {
-        // Cursor discipline: an omitted after_seq resumes from the persisted
-        // cursor (0 on first read); the durable cursor is advanced to
-        // max(existing, next_after_seq) — monotonic, serialized per realm —
-        // and a failed write is reported on the result instead of discarding
-        // the consumed page. v0.9.0: when this process holds a session
-        // principal the cursor namespace is PER SESSION
-        // (sessions/<scope>/cursors.json, seeded once from the legacy
-        // realms/<realm>/ file); otherwise the legacy realm file is used,
-        // byte-for-byte as before.
+        // Cursor discipline (Story 2.1): an omitted after_seq resumes from the
+        // per-session schema-v2 position (0 on first read). The file IS the
+        // position — there is no in-process memory to fall back on, so a new
+        // process and a long-lived one read the same truth. The advance is
+        // max(existing, next_after_seq) under sessions/<scope>/cursors.lock,
+        // and a failed write is reported on the result rather than discarding
+        // the consumed page.
+        //
+        // The session principal is ensured BEFORE the cursor read: the
+        // capability decides which pair rooms this process may read at all,
+        // so a process that needs a resume to learn its own position must not
+        // read the old one first. A capability that is genuinely gone
+        // (revoked, expired, invalid, name taken) propagates; any other
+        // failure still leaves a readable cursor, since the read itself will
+        // surface the real problem with its own code.
         const realm = await realmIdOf()
-        // The cursor namespace is chosen DETERMINISTICALLY: when this
-        // installation can hold a session principal, the per-session file is
-        // the namespace (the single-flight ensure resolves instantly once
-        // armed); when it definitively cannot (nothing set up, an old
-        // server), the legacy realm file is used, byte-for-byte as before.
-        let sessionActive = sessionPrincipalOn
-        try {
-          if (sessionPrincipalOn && shutdownPromise === null) {
+        if (sessionPrincipalOn && shutdownPromise === null) {
+          try {
             await readyClient.ensureSessionPrincipal()
-            sessionActive = true
+          } catch (error) {
+            if (
+              error instanceof AgentRoomRuntimeError
+              && ['session_revoked', 'session_expired', 'session_credential_invalid', 'agent_id_taken'].includes(error.code)
+            ) {
+              throw error
+            }
           }
-        } catch (error) {
-          if (
-            error instanceof AgentRoomRuntimeError
-            && ['session_revoked', 'session_expired', 'session_credential_invalid', 'agent_id_taken'].includes(error.code)
-          ) {
-            throw error
-          }
-          sessionActive = false
         }
-        const stored = sessionActive
-          ? loadSessionCursors(pluginData, realm, sessionScope)[args.room_id]?.after_seq
-          : loadCursors(pluginData, realm)[args.room_id]?.after_seq
+        const stored = loadCursors(pluginData, realm)[args.room_id]?.read_seq
         const afterSeq = args.after_seq !== undefined
           ? args.after_seq
           : (typeof stored === 'number' && Number.isSafeInteger(stored) && stored >= 0 ? stored : 0)
@@ -898,11 +707,11 @@ export function createMcpServer({
         let cursorPersisted = true
         const notes = []
         try {
-          if (sessionActive) {
-            await queueSessionCursorPersist(pluginData, realm, sessionScope, args.room_id, result.next_after_seq)
-          } else {
-            await queueCursorPersist(pluginData, realm, args.room_id, result.next_after_seq)
-          }
+          await advanceCursor(
+            pluginData,
+            { realmId: realm, roomId: args.room_id, seq: result.next_after_seq, field: 'read_seq' },
+            { env },
+          )
         } catch (error) {
           cursorPersisted = false
           notes.push(`cursor not persisted: ${error?.code ?? 'write_failed'}`)
