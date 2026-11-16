@@ -174,6 +174,7 @@ import {
 } from '../constants.mjs'
 import { openRoomLog } from '../store/room-log.mjs'
 import { createPostCommitBus } from '../notification/post-commit-bus.mjs'
+import { createWatchManager } from './watch.mjs'
 import { resolveStorageThresholds, storageThresholdsFromEnv } from '../store/storage-gate.mjs'
 import { migrateV1InPlace } from '../store/migrate-v1.mjs'
 import { bootstrapRealm } from '../core/realm.mjs'
@@ -2273,6 +2274,16 @@ registerHandler('POST /api/messages', async function addressedSendRoute(context)
   }
 }, 'actor')
 
+// Story 3.1: the multiplexed watch stream. Runs on the Session capability
+// (SESSION_CAPABILITY_ROUTES); the manager owns admission, catch-up, framing,
+// per-stream timers and the one central reconciler. Returns HANDLER_STREAMED
+// so the pipeline never writes a JSON envelope over the event stream.
+registerHandler('GET /api/watch', function watch(context) {
+  const manager = context.watchManager
+  if (manager === null) return reject('request_failed')
+  return manager.handleWatch(context)
+}, 'actor')
+
 // --- Story 5.1 + 5.2: the viewer surface (FR-18/HCI-5) --------------------------
 //
 // Four frozen routes, cookie-authenticated through the viewer verifier slot
@@ -2412,6 +2423,8 @@ async function handleRequest(request, response, options) {  let pathname = null
     challengeRegistry: options.challengeRegistry,
     viewerSessions: options.viewerSessions,
     store: options.store,
+    postCommitBus: options.postCommitBus ?? null,
+    watchManager: options.watchManager ?? null,
     shutdownSignal: options.shutdownSignal ?? null,
   }
 
@@ -2746,6 +2759,18 @@ export async function startServer({
     storageNowMs,
   })
 
+  // Story 3.1: the watch manager owns all long-lived streams + the ONE
+  // central reconciler. It reads only through the store facade; its idle
+  // reconciler stats the DB/WAL files and issues no SQL. Created lazily here
+  // so the shutdown path below always has a handle to close.
+  const watchManager = createWatchManager({
+    bus: postCommitBus,
+    store,
+    databasePath: store.databasePath,
+    sessionRegistry: effectiveRegistry,
+    shutdownSignal: null,
+  })
+
   // Story 1.6: one liveness mechanism. The actor-class auth stage already
   // slides the 12 h auth TTL on every successful verify (the documented
   // zero-state boundary exception); the same event now refreshes presence
@@ -2786,6 +2811,10 @@ export async function startServer({
     // exact frozen answer.
     ['/api/rooms', new Set(['GET'])],
     ['/api/status', new Set(['GET'])],
+    // Story 3.1: the multiplexed watch stream runs on the Session capability,
+    // never Bearer — this is what closes the Bearer-loses-ssession: gap for
+    // watch's consumers (notifier rewiring is Story 3.2/3.3).
+    ['/api/watch', new Set(['GET'])],
   ])
   const sessionCapabilityVerifier = context => {
     const presented = sessionCapabilityFromHeaders(context.headers)
@@ -2980,6 +3009,8 @@ export async function startServer({
         enrollRateLimiter: effectiveEnrollRateLimiter,
         trustedProxy,
         store,
+        postCommitBus,
+        watchManager,
         shutdownSignal: shutdownController.signal,
       }).catch(() => {
         response.destroy()
@@ -3015,6 +3046,7 @@ export async function startServer({
     let closePromise = null
     const closeServerAndStore = async () => {
       shutdownController.abort()
+      watchManager.close()
       if (pruneTimer !== null) clearInterval(pruneTimer)
       if (retentionPruneTimer !== null) clearInterval(retentionPruneTimer)
       const httpClosed = new Promise(resolvePromise => {
