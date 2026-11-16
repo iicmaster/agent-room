@@ -286,6 +286,10 @@ export const PUBLIC_ERRORS = Object.freeze({
   // session, no count, no hint (CAP-3).
   name_taken: 'this session address is held by a live principal',
   peer_not_found: 'no session principal resolves to this address',
+  // Story 2.2: a bare-ID send found retained principals but none occupying the
+  // lease. The 409 carries a bounded `candidates` list (client-side filtered
+  // before render); it is NEVER converted to the quiet 404 peer_not_found.
+  peer_offline: 'the peer is not online right now',
   // Story 4.1: the answer route's enrollment gate — a key that holds no
   // durable enrollment record can prove possession and still mint no session.
   not_enrolled: 'this public key is not enrolled on this server',
@@ -418,6 +422,7 @@ export const PUBLIC_ERROR_STATUS = Object.freeze({
   // in this map.
   name_taken: 409,
   peer_not_found: 404,
+  peer_offline: 409,
   not_enrolled: 403,
   protocol_required: 400,
   queue_full: 503,
@@ -767,6 +772,31 @@ export function sessionAddressForms(value) {
   if (typeof value !== 'string' || !SESSION_ADDRESS_PATTERN.test(value)) return null
   return Object.freeze({ address: value })
 }
+
+// --- Story 2.2: locality-aware bare-ID direct send ----------------------------
+
+// The `to` discriminator: a full Session Address carries `~`; a bare Agent ID
+// does not. Both grammars are declared above; the length bound is the address
+// maximum, stated once (AD-9), and every entry point cites sendToForms instead
+// of restating the rule.
+export const SEND_TO_MAX_CHARS = SESSION_ADDRESS_MAX_CHARS
+export function sendToForms(value) {
+  if (typeof value !== 'string' || value.length === 0 || value.length > SEND_TO_MAX_CHARS) return null
+  if (value.includes('~')) {
+    return SESSION_ADDRESS_PATTERN.test(value) ? { kind: 'address', value } : null
+  }
+  return CHAT_ID_PATTERN.test(value) ? { kind: 'agent_id', baseName: value.toLowerCase(), value } : null
+}
+
+// Story 2.2: `peer_offline` is the 409 a bare-ID send answers when no peer holds
+// the Agent ID's occupied lease but at least one retained principal does. Its
+// `candidates` list is bounded and ordered last_heartbeat_at DESC (freshest
+// first) so a caller can retry with an address without unbounded enumeration.
+export const PEER_OFFLINE_CANDIDATES_MAX = 20
+// The note a filtered peer_offline carries when every candidate was removed by
+// the receiving installation's trust filter (Allowlist / ownFingerprint / local)
+// before render. It names the condition and NEVER a candidate address.
+export const PEER_OFFLINE_FILTERED_NOTE = 'the peer is offline and outside this installation\'s Allowlist'
 
 // The widest attribution chat_id a message row may carry: a DR-1 chat id
 // (1-32) or a full session address (up to SESSION_ADDRESS_MAX_CHARS) — the

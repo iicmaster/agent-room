@@ -365,6 +365,7 @@ test('every v0.1 public error code has an HTTP status declared once', () => {
     'node_version_unsupported',
     'not_enrolled',
     'peer_not_found',
+    'peer_offline',
     'protocol_required',
     'queue_full',
     'rate_limited',
@@ -466,6 +467,7 @@ test('every v0.1 public error code has an HTTP status declared once', () => {
     // make it valid again), and the migration seeder's loud refusal 500.
     name_taken: 409,
     peer_not_found: 404,
+    peer_offline: 409,
     session_capability_required: 401,
     session_credential_invalid: 401,
     session_expired: 409,

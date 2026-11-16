@@ -81,6 +81,15 @@ import {
 import { createMessagingRoomOperations } from '../messaging/rooms.mjs'
 import { createMessagingMessageOperations } from '../messaging/messages.mjs'
 import {
+  BARE_ID_DEDUP_COLUMNS,
+  BARE_ID_DEDUP_INDEX,
+  BARE_ID_DEDUP_TABLE,
+  bareIdSendDedupIndexDdl,
+  bareIdSendDedupTableDdl,
+  createBareIdDedupOperations,
+} from '../messaging/bare-id-dedup.mjs'
+import { createBareIdSendOperations } from '../messaging/bare-id-send.mjs'
+import {
   SESSION_PAIR_MEMBERS_COLUMNS,
   SESSION_PAIR_KEY_PREFIX,
   createSessionPairOperations,
@@ -712,15 +721,18 @@ function withCliBusyRetry(operation) {
   }
 }
 
-function verifyStrictTables(database) {
+function verifyStrictTables(database, { dedupConverged = true } = {}) {
   const strictTables = database.prepare(`
     SELECT name, strict
     FROM pragma_table_list
     WHERE schema = 'main'
-      AND name IN ('rooms', 'direct_members', 'messages', 'realms', 'chat_id_claims', 'enrolled_actors', 'invites', 'invite_consumptions', 'banned_actors', 'session_principals', 'session_pair_members')
+      AND name IN ('rooms', 'direct_members', 'messages', 'realms', 'chat_id_claims', 'enrolled_actors', 'invites', 'invite_consumptions', 'banned_actors', 'session_principals', 'session_pair_members', 'bare_id_send_dedup')
   `).all()
   const strictByName = new Map(strictTables.map(row => [row.name, Number(row.strict)]))
-  for (const name of ['rooms', 'direct_members', 'messages', 'realms', 'chat_id_claims', 'enrolled_actors', 'invites', 'invite_consumptions', 'banned_actors', 'session_principals', 'session_pair_members']) {
+  for (const name of ['rooms', 'direct_members', 'messages', 'realms', 'chat_id_claims', 'enrolled_actors', 'invites', 'invite_consumptions', 'banned_actors', 'session_principals', 'session_pair_members', BARE_ID_DEDUP_TABLE]) {
+    // A full disk deferred the additive dedup table; do not fail the open for
+    // its absence — the next open with room re-runs ensureBareIdSendDedup.
+    if (name === BARE_ID_DEDUP_TABLE && !dedupConverged) continue
     if (strictByName.get(name) !== 1) {
       fail('database_schema_invalid', `database table ${name} is missing or is not STRICT`)
     }
@@ -1165,6 +1177,48 @@ function ensureSessionPairMembersTable(database) {
   database.exec(sessionPairMembersTableDdl({ ifNotExists: true }))
 }
 
+// Story 2.2: the durable bare-ID send dedup table joins the additive open-path
+// convergence family (IF NOT EXISTS on every open, no user_version bump — the
+// claims/index precedent). A dropped index is recreated; a drifted column set
+// is a loud schema refusal, never silently ignored.
+//
+// Unlike the store's other additive DDL, this one is DEFERABLE on a full disk:
+// the storage gate's contract is that opening a page-ceilinged (full) database
+// SUCCEEDS so the SEND can answer the coded storage_low, never a raw error. The
+// dedup table's two CREATEs are the first statements in the open sequence that
+// need fresh pages on such a fixture, so a raw SQLITE_FULL here would break that
+// contract (tests/storage-gates.test.mjs). On FULL we defer — the next open
+// with room re-runs this and converges (healthy-store reopen still requires the
+// table, per tests/bare-id-direct-send.test.mjs). Column/index drift is still a
+// loud refusal; only the full-disk allocation is deferred.
+// Returns true when converged, false when deferred for lack of pages.
+function ensureBareIdSendDedup(database) {
+  try {
+    database.exec(bareIdSendDedupTableDdl({ ifNotExists: true }))
+    database.exec(bareIdSendDedupIndexDdl())
+  } catch (error) {
+    if ((Number(error?.errcode) & 0xff) === SQLITE_FULL) return false
+    throw error
+  }
+  const columns = database
+    .prepare(`SELECT name FROM pragma_table_info('${BARE_ID_DEDUP_TABLE}') ORDER BY cid`)
+    .all()
+    .map(row => row.name)
+  if (
+    columns.length !== BARE_ID_DEDUP_COLUMNS.length
+    || BARE_ID_DEDUP_COLUMNS.some((name, index) => columns[index] !== name)
+  ) {
+    fail('database_schema_invalid', 'database table bare_id_send_dedup has a divergent column set')
+  }
+  const indexRow = database.prepare(
+    "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
+  ).get(BARE_ID_DEDUP_INDEX)
+  if (!indexRow || typeof indexRow.sql !== 'string' || !/created_at/i.test(indexRow.sql)) {
+    fail('database_schema_invalid', 'bare_id_send_dedup lookup index did not converge')
+  }
+  return true
+}
+
 function verifySessionPairMembersColumns(database) {
   const columns = database
     .prepare(`SELECT name FROM pragma_table_info('session_pair_members') ORDER BY cid`)
@@ -1455,7 +1509,8 @@ export function openRoomLog({
         verifySessionPrincipalLiveBaseIndex(database, { role })
         verifySessionPrincipalCapabilityIndexes(database, { role })
         verifySessionPairMembersColumns(database)
-        verifyStrictTables(database)
+        const dedupConverged = ensureBareIdSendDedup(database)
+        verifyStrictTables(database, { dedupConverged })
         return { ...connection, reportedVersion: probedVersion }
       }
 
@@ -1484,7 +1539,8 @@ export function openRoomLog({
       verifySessionPrincipalCapabilityIndexes(database, { role })
       ensureSessionPairMembersTable(database)
       verifySessionPairMembersColumns(database)
-      verifyStrictTables(database)
+      const dedupConverged = ensureBareIdSendDedup(database)
+      verifyStrictTables(database, { dedupConverged })
 
       // Report the file's actual version, never the compiled constant.
       const reportedVersion = Number(pragmaValue(database, 'PRAGMA user_version'))
@@ -1635,6 +1691,21 @@ export function openRoomLog({
       resetStorageWarning() { deferredStorageWarn = null },
       takeStorageWarning() { const line = deferredStorageWarn; deferredStorageWarn = null; return line },
       storageWarn,
+    })
+
+    // Story 2.2: the durable bare-ID dedup ledger and the all-in-one send op
+    // share this connection. The send op's four steps run inside the SAME
+    // per-op SAVEPOINT that executeWriteBatch opens; it is exposed to the route
+    // through enqueueWrite().execute(tx), never as a standalone mutator.
+    const bareIdDedupOperations = createBareIdDedupOperations({
+      database: cachedDatabase,
+      nowMsFn: storageNowMs,
+    })
+    const bareIdSendOperations = createBareIdSendOperations({
+      dedup: bareIdDedupOperations,
+      identity: identityOperations,
+      pairRooms: sessionPairOperations,
+      messages: messagingMessageOperations,
     })
 
     function executeWriteBatch(batch) {
@@ -2139,6 +2210,16 @@ export function openRoomLog({
       appendSessionPairMessageInTx(...args) {
         assertOpen()
         return messagingMessageOperations.appendSessionPairMessageInTx(...args)
+      },
+
+      // Story 2.2: the all-in-one bare-ID send. Called from a route's
+      // enqueueWrite().execute(tx); the four steps share the per-op SAVEPOINT.
+      sendBareIdMessageInTx(...args) {
+        assertOpen()
+        if (!database.isTransaction) {
+          fail('invalid_argument', 'sendBareIdMessageInTx requires an active transaction')
+        }
+        return bareIdSendOperations.sendInTx(...args)
       },
 
       heartbeatSessionPrincipalInTx(...args) {

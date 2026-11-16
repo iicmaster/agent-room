@@ -33,6 +33,7 @@ import {
   CLI_ERROR_PEER_AMBIGUOUS,
   CLI_ERROR_PEER_LIST_TRUNCATED,
   MESSAGE_TEXT_MAX,
+  PEER_OFFLINE_FILTERED_NOTE,
   PROTOCOL_HEADER,
   PROTOCOL_VERSION,
   READ_HOLD_MAX_MS,
@@ -41,6 +42,7 @@ import {
   SESSION_ADDRESS_INVALID_MESSAGE,
   SESSION_ADDRESS_MAX_CHARS,
   chatIdForms,
+  sendToForms,
   sessionAddressForms,
 } from '../constants.mjs'
 import { AgentRoomRuntimeError, assertSafePathKey } from '../runtime.mjs'
@@ -55,7 +57,7 @@ import {
   sessionScopeKey,
 } from '../client/session-state.mjs'
 import { advanceCursor, loadCursors } from '../client/cursors.mjs'
-import { LOCAL_TRANSPORT, REMOTE_TRANSPORT, applyTrustMatrix, evaluateSender, loadAllowlist } from '../client/trust.mjs'
+import { LOCAL_TRANSPORT, REMOTE_TRANSPORT, applyTrustMatrix, evaluateSender, filterPeerOfflineCandidates, loadAllowlist } from '../client/trust.mjs'
 import { ensureServer, readRuntimeRecord } from '../client/ensure-server.mjs'
 import { loadRemoteConfig } from '../client/remote-config.mjs'
 import { authenticate, protocolHeaders, roundTrip } from './session-commands.mjs'
@@ -158,6 +160,28 @@ export async function sendWithRetry(sendOnce, attempt) {
   }
 }
 
+// Story 2.2 (AC3): filter peer_offline candidates through this installation's
+// trust matrix BEFORE they reach any receipt, stderr, or log. Uses the SAME
+// evaluateSender decision as the read gate; own/local/allowlisted fingerprints
+// survive, everything else is dropped. When the filter empties the list the
+// 409 code is KEPT with `candidates: []` plus an "offline outside Allowlist"
+// note — never a 404, never an address.
+function filterOfflineCandidates(candidates, { pluginDataDir, realmId, fingerprint, transport }) {
+  if (!Array.isArray(candidates)) return { candidates: [], note: null }
+  const allowlist = realmId === undefined || realmId === null
+    ? undefined
+    : loadAllowlist(pluginDataDir, realmId)
+  const filtered = filterPeerOfflineCandidates(candidates, {
+    ownFingerprint: fingerprint,
+    transport,
+    allowlist,
+  })
+  return {
+    candidates: filtered,
+    note: filtered.length === 0 ? PEER_OFFLINE_FILTERED_NOTE : null,
+  }
+}
+
 function sendFailureReceipt(command, error, { clientMessageId, room, realmId, origin, transport, provablyNotSent = false }) {
   const message = String(error?.message ?? error)
   // The round-5 rule: a failure AFTER the request was written is
@@ -178,6 +202,12 @@ function sendFailureReceipt(command, error, { clientMessageId, room, realmId, or
       ...(realmId === undefined ? {} : { realm_id: realmId }),
       ...(origin === undefined ? {} : { origin }),
       ...(transport === undefined ? {} : { transport }),
+      ...(error?.code === 'peer_offline'
+        ? {
+          candidates: error.candidates ?? [],
+          ...(error.offlineNote === null || error.offlineNote === undefined ? {} : { note: error.offlineNote }),
+        }
+        : {}),
       outcome_unknown: outcomeUnknown,
     },
   }
@@ -244,7 +274,7 @@ export async function runSendFamilyCommand(tokens, { pluginDataDir, sharedDataDi
     }
 
     const { target, origin } = await resolveTarget({ pluginDataDir, sharedDataDir, env })
-    const { token, transport } = await authenticate(target, { pluginDataDir, sharedDataDir, env, sessionKind: 'cli_oneshot' })
+    const { token, transport, fingerprint } = await authenticate(target, { pluginDataDir, sharedDataDir, env, sessionKind: 'cli_oneshot' })
     const realmId = await realmIdOf(target, token)
     attempt.origin = origin
     attempt.transport = transport
@@ -948,9 +978,14 @@ async function runAddressedSend({
 }) {
   const { pluginDataDir, sharedDataDir, env } = deps
   try {
-    if (to === undefined) return usage(command, '--to is required: the peer session\u0027s full address (base~locator-token@machine); see "agent-room sessions"')
-    const address = sessionAddressForms(to)
-    if (address === null) return usage(command, `"${String(to).slice(0, 96)}" is not a valid session address: ${SESSION_ADDRESS_INVALID_MESSAGE}`)
+    if (to === undefined) return usage(command, '--to is required: a peer session\u0027s full address (base~locator-token@machine) or a bare Agent ID; see "agent-room sessions"')
+    // Story 2.2: `to` with `~` is a full address, without is a bare Agent ID.
+    // The server repeats this discriminator (and self-target refusal) at its
+    // trust boundary; the CLI validates here too so a bad `to` never leaves
+    // the process and every error names the field.
+    const toForms = sendToForms(to)
+    if (toForms === null) return usage(command, `"${String(to).slice(0, 96)}" is not a valid --to: expected a full session address (${SESSION_ADDRESS_INVALID_MESSAGE}) or a bare Agent ID (${CHAT_ID_INVALID_MESSAGE})`)
+    const wireTo = toForms.value
     if (agentName !== undefined && !CHAT_ID_PATTERN.test(agentName)) {
       return usage(command, `--name: ${CHAT_ID_INVALID_MESSAGE}`)
     }
@@ -972,7 +1007,7 @@ async function runAddressedSend({
     attempt.clientMessageId = clientMessageId
 
     const { target, origin } = await resolveTarget({ pluginDataDir, sharedDataDir, env })
-    const { token, transport } = await authenticate(target, { pluginDataDir, sharedDataDir, env, sessionKind: 'cli_oneshot' })
+    const { token, transport, fingerprint } = await authenticate(target, { pluginDataDir, sharedDataDir, env, sessionKind: 'cli_oneshot' })
     const realmId = await realmIdOf(target, token)
     attempt.origin = origin
     attempt.transport = transport
@@ -1015,7 +1050,7 @@ async function runAddressedSend({
     const capability = principal.capability
     {
       const sendBody = {
-        to: address.address,
+        to: wireTo,
         client_message_id: clientMessageId,
         text,
         ...(replyToSeq === undefined ? {} : { reply_to_seq: replyToSeq }),
@@ -1025,13 +1060,22 @@ async function runAddressedSend({
       const sent = await sendWithRetry(sendOnce, attempt)
       if (sent.status === 'refusal') return sent
       if (sent.status !== 200) {
-        throw new AgentRoomRuntimeError(
+        const thrown = new AgentRoomRuntimeError(
           sent.body?.error?.code ?? 'request_failed',
           sent.body?.error?.message ?? `the agent-room server answered ${sent.status}`,
         )
+        if (thrown.code === 'peer_offline') {
+          const { candidates, note } = filterOfflineCandidates(sent.body?.error?.candidates, { pluginDataDir, realmId, fingerprint, transport })
+          // Candidates and the note are attached to the coded error and flow to
+          // sendFailureReceipt's stderr extra ONLY after filtering. The raw
+          // server candidates never reach stdout/stderr/log.
+          thrown.candidates = candidates
+          thrown.offlineNote = note
+        }
+        throw thrown
       }
       return addressedResultReceipt({
-        command, to: address.address, result: sent.body.result, clientMessageId, realmId, origin, transport,
+        command, to: wireTo, result: sent.body.result, clientMessageId, realmId, origin, transport,
       })
     }
     // Story 2.1 (retro F-10): no `finally` release. This command used to

@@ -199,6 +199,25 @@ export function applyTrustMatrix(page, { ownFingerprint, transport, allowlist } 
   return { ...page, messages }
 }
 
+// Story 2.2 (AC3): filter a 409 peer_offline candidate list through the SAME
+// trust matrix that governs delivery, BEFORE anything renders or logs it. A
+// candidate is kept only when the receiving installation would deliver from
+// that fingerprint (own Actor, local transport, allowlisted key, or accept-all)
+// — the exact evaluateSender decision, so the offline filter cannot diverge
+// from the read-time trust gate. Non-array input degrades to [] (fail-closed):
+// no candidate can ever leak through a malformed envelope. The caller keeps the
+// 409 code with the (possibly empty) filtered list; it never converts to a 404
+// and never renders a dropped candidate's `address`.
+export function filterPeerOfflineCandidates(candidates, { ownFingerprint, transport, allowlist = emptyAllowlist() } = {}) {
+  if (!Array.isArray(candidates)) return Object.freeze([])
+  return Object.freeze(candidates.filter(candidate => evaluateSender({
+    senderFingerprint: candidate && typeof candidate === 'object' ? candidate.fingerprint : undefined,
+    ownFingerprint,
+    transport,
+    allowlist,
+  }).decision === 'deliver'))
+}
+
 // --- Storage (the cursor machinery's discipline, applied to the allowlist) ----
 
 function assertRealmKey(realmId) {
