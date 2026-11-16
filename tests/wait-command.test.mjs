@@ -406,6 +406,32 @@ test('wait: the per-scope fence — a live waiter refuses, a crashed lock is rec
   assert.equal(existsSync(lockPath), false, 'and the lock is released on exit')
 })
 
+test('wait: SIGINT releases the per-scope lock (clean unlock)', async t => {
+  const world = makeWorld(t)
+  const record = await world.waitReady()
+  await prepareWaitInstallation(record.port, world.sharedData, world.pluginData, 'Watcher')
+  const scope = sessionScopeKey({ env: process.env, pluginDataDir: world.pluginData })
+  const lockPath = join(world.pluginData, 'sessions', scope, 'wait.lock')
+  const waiter = spawn(process.execPath, [join(ROOT, 'server', 'cli', 'agent-room.mjs'), 'wait', '--timeout', '60'], {
+    env: { ...process.env, PLUGIN_DATA: world.pluginData, AGENT_ROOM_DATA_DIR: world.sharedData },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  t.after(async () => {
+    if (waiter.exitCode === null && waiter.signalCode === null) {
+      waiter.kill('SIGKILL')
+      await once(waiter, 'exit').catch(() => {})
+    }
+  })
+  // Wait until the lock actually appears, then signal.
+  const deadline = Date.now() + 5000
+  while (!existsSync(lockPath) && Date.now() < deadline) await sleep(50)
+  assert.equal(existsSync(lockPath), true, 'the waiter took the fence')
+  waiter.kill('SIGINT')
+  const exit = await once(waiter, 'exit')
+  assert.equal(exit[0], 0, 'SIGINT exits cleanly (0), not a crash')
+  assert.equal(existsSync(lockPath), false, 'SIGINT released wait.lock')
+})
+
 // Send as the wait installation itself (its own keypair, a temporary session
 // released right after): the row `message_send` allocates without ever
 // advancing the MCP read cursor — the issue #4 shape.
