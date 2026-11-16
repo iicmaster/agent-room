@@ -705,14 +705,18 @@ test('client cursors: persisted per session at 0600, seeded per the migration ru
   assert.notEqual(armedStatus.session_address, null)
 
   const cursorPath = join(world.pluginData, 'sessions', scope, 'cursors.json')
+  // Story 2.1: schema v2 — per realm, then per room, with read_seq and
+  // notified_seq. These helpers read one position by its own name.
+  const roomsIn = doc => doc.realms[realmId]?.rooms ?? {}
   assert.ok(existsSync(cursorPath), 'the cursor file exists under PLUGIN_DATA/sessions/<scope>/')
   const cursorFile = statSync(cursorPath)
   assert.equal(cursorFile.mode & 0o777, 0o600, 'the cursor file is 0600')
   const scopeDir = statSync(join(world.pluginData, 'sessions', scope))
   assert.equal(scopeDir.mode & 0o777, 0o700, 'the session scope directory is 0700')
   const cursorJson = JSON.parse(readFileSync(cursorPath, 'utf8'))
-  assert.equal(cursorJson.version, 1)
-  assert.equal(cursorJson.cursors[roomId].after_seq, 2)
+  assert.equal(cursorJson.version, 2)
+  assert.equal(roomsIn(cursorJson)[roomId].read_seq, 2)
+  assert.equal(roomsIn(cursorJson)[roomId].notified_seq, 0, 'nothing in Story 2.1 advances notified_seq')
 
   // A resumed read (still no after_seq) returns only what is new.
   await peerSend(record.port, peer.sessionToken, roomId, 'p-3', 'three', 'Peer')
@@ -748,11 +752,12 @@ test('client cursors: persisted per session at 0600, seeded per the migration ru
   const explicit = structured(await second.tool('message_read', { room_id: roomId, after_seq: 0 }))
   assert.deepEqual(explicit.messages.map(message => message.seq), [1, 2, 3, 4])
   const cursorAfter = JSON.parse(readFileSync(join(world.pluginData, 'sessions', secondScope, 'cursors.json'), 'utf8'))
-  assert.equal(cursorAfter.cursors[roomId].after_seq, 4)
+  assert.equal(cursorAfter.version, 2)
+  assert.equal(cursorAfter.realms[realmId].rooms[roomId].read_seq, 4)
   // The first session's cursor file is untouched by the new session's reads:
   // it stays exactly where that session stopped (seq 3).
   const firstSessionJson = JSON.parse(readFileSync(cursorPath, 'utf8'))
-  assert.equal(firstSessionJson.cursors[roomId].after_seq, 3)
+  assert.equal(firstSessionJson.realms[realmId].rooms[roomId].read_seq, 3)
 
   await second.close()
   void record
@@ -1575,7 +1580,10 @@ test('cursor discipline: an explicit low after_seq read never moves the durable 
   const roomId = structured(await mcp.tool('room_direct_open', { chat_id: 'Peer' })).room_id
   structured(await mcp.tool('room_status')).realm_id
   const cursorPath = join(world.pluginData, 'sessions', structured(await mcp.tool('room_status')).session_scope, 'cursors.json')
-  const cursorValue = () => JSON.parse(readFileSync(cursorPath, 'utf8')).cursors[roomId].after_seq
+  const cursorValue = () => {
+    const doc = JSON.parse(readFileSync(cursorPath, 'utf8'))
+    return doc.realms[doc.realms && Object.keys(doc.realms)[0]].rooms[roomId].read_seq
+  }
 
   for (const id of ['p-1', 'p-2', 'p-3', 'p-4']) {
     const sent = await peerSend(record.port, peer.sessionToken, roomId, id, id, 'Peer')
@@ -1626,9 +1634,10 @@ test('cursor discipline: concurrent reads of two rooms serialize and both cursor
   assert.equal(structured(broadcastRead).next_after_seq, 1)
 
   const cursors = JSON.parse(readFileSync(cursorPath, 'utf8'))
-  assert.equal(cursors.realm_id, realmId)
-  assert.equal(cursors.cursors[pairRoom].after_seq, 1)
-  assert.equal(cursors.cursors[broadcastRoom].after_seq, 1)
+  assert.equal(cursors.version, 2)
+  assert.deepEqual(Object.keys(cursors.realms), [realmId], 'the document is keyed by its realm')
+  assert.equal(cursors.realms[realmId].rooms[pairRoom].read_seq, 1)
+  assert.equal(cursors.realms[realmId].rooms[broadcastRoom].read_seq, 1)
 
   await mcp.close()
 })
@@ -1656,10 +1665,15 @@ test('cursor discipline: a failed cursor write returns the consumed page with cu
 
   await peerSend(record.port, peer.sessionToken, roomId, 'p-2', 'two', 'Peer')
   const second = structured(await mcp.tool('message_read', { room_id: roomId }))
-  // The consumed page is NOT discarded — it returns with the failure noted.
-  assert.deepEqual(second.messages.map(message => message.seq), [2])
+  // Story 2.1: the v2 file is the ONLY position — there is no in-process
+  // memory to fall back on — so an unreadable file means "no position yet"
+  // and the room reads from 0 again. The result stays usable (the page is
+  // returned, never discarded) and BOTH failures are named: the unreadable
+  // position and the unwritable one.
+  assert.deepEqual(second.messages.map(message => message.seq), [1, 2])
   assert.equal(second.next_after_seq, 2)
   assert.equal(second.cursor_persisted, false)
+  assert.match(second.note, /cursor not readable/)
   assert.match(second.note, /cursor not persisted/)
 
   await mcp.close()
@@ -1702,10 +1716,12 @@ test('cursor discipline: cursors are isolated per installation AND per realm AND
   // one room cursor for its own realm and room — no cross-tuple leakage.
   const cursorsOne = JSON.parse(readFileSync(join(worldOne.pluginData, 'sessions', statusOne.session_scope, 'cursors.json'), 'utf8'))
   const cursorsTwo = JSON.parse(readFileSync(join(worldTwo.pluginData, 'sessions', statusTwo.session_scope, 'cursors.json'), 'utf8'))
-  assert.equal(cursorsOne.realm_id, realmOne)
-  assert.equal(cursorsTwo.realm_id, realmTwo)
-  assert.deepEqual(Object.keys(cursorsOne.cursors), [roomOne])
-  assert.deepEqual(Object.keys(cursorsTwo.cursors), [roomTwo])
+  assert.equal(cursorsOne.version, 2)
+  assert.equal(cursorsTwo.version, 2)
+  assert.deepEqual(Object.keys(cursorsOne.realms), [realmOne], 'one realm per document')
+  assert.deepEqual(Object.keys(cursorsTwo.realms), [realmTwo])
+  assert.deepEqual(Object.keys(cursorsOne.realms[realmOne].rooms), [roomOne])
+  assert.deepEqual(Object.keys(cursorsTwo.realms[realmTwo].rooms), [roomTwo])
   assert.deepEqual(await readdirSync(join(worldOne.pluginData, 'sessions')).sort(), [statusOne.session_scope])
   assert.deepEqual(await readdirSync(join(worldTwo.pluginData, 'sessions')).sort(), [statusTwo.session_scope])
 

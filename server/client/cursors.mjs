@@ -31,8 +31,10 @@
 // refuses loudly instead of silently resetting a live position.
 
 import {
+  chmodSync,
   closeSync,
   existsSync,
+  lstatSync,
   openSync,
   readFileSync,
   renameSync,
@@ -40,9 +42,16 @@ import {
   unlinkSync,
   writeSync,
 } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
-import { CURSOR_FILE_MAX_BYTES, CURSOR_LOCK_STALE_MS, CURSOR_LOCK_WAIT_MS } from '../constants.mjs'
+import {
+  CLI_ERROR_CURSORS_FILE_TOO_LARGE,
+  CLI_ERROR_CURSORS_LOCK_BUSY,
+  CLI_ERROR_CURSORS_SCHEMA_INVALID,
+  CURSOR_FILE_MAX_BYTES,
+  CURSOR_LOCK_STALE_MS,
+  CURSOR_LOCK_WAIT_MS,
+} from '../constants.mjs'
 import { AgentRoomRuntimeError, assertSafePathKey, atomicWriteJson, isPidAlive, readJsonFile } from '../runtime.mjs'
 import { sessionScopeFilePath, sessionScopeKey } from './session-state.mjs'
 
@@ -68,7 +77,8 @@ export function scopeCursorsPath(pluginDataDir, { env = process.env } = {}) {
   return sessionScopeFilePath(pluginDataDir, sessionScopeKey({ env, pluginDataDir }), CURSORS_FILENAME)
 }
 
-export function cursorLockPath(pluginDataDir, { env = process.env } = {}) {
+export function cursorLockPath(pluginDataDir, { env = process.env, scope = null } = {}) {
+  if (scope !== null) return sessionScopeFilePath(pluginDataDir, scope, CURSOR_LOCK_FILENAME)
   return sessionScopeFilePath(pluginDataDir, sessionScopeKey({ env, pluginDataDir }), CURSOR_LOCK_FILENAME)
 }
 
@@ -110,8 +120,8 @@ function reclaimLock(lockPath) {
 // Acquire the scope's cursor lock. Waits up to CURSOR_LOCK_WAIT_MS, then
 // refuses loudly: a caller that cannot take the lock must not write a
 // position on top of another process's.
-export async function withCursorLock(pluginDataDir, fn, { env = process.env } = {}) {
-  const lockPath = cursorLockPath(pluginDataDir, { env })
+export async function withCursorLock(pluginDataDir, fn, { env = process.env, scope = null } = {}) {
+  const lockPath = cursorLockPath(pluginDataDir, { env, scope })
   const deadline = Date.now() + CURSOR_LOCK_WAIT_MS
   for (;;) {
     let descriptor
@@ -121,7 +131,7 @@ export async function withCursorLock(pluginDataDir, fn, { env = process.env } = 
       if (error?.code !== 'EEXIST') throw error
       if (lockIsStale(lockPath)) reclaimLock(lockPath)
       if (Date.now() >= deadline) {
-        throw new AgentRoomRuntimeError('cursors_lock_busy', 'cursors.lock busy')
+        throw new AgentRoomRuntimeError(CLI_ERROR_CURSORS_LOCK_BUSY, 'cursors.lock busy')
       }
       await sleepMs(10)
       continue
@@ -183,17 +193,55 @@ export function migrateV1Cursors(value, realmId) {
 // Read the scope's cursor document, migrating or quarantining a v1 file.
 // A MISSING file is an empty document and is never written here — a cursor
 // file appears only through an actual position.
-export function readCursorsDocument(pluginDataDir, { realmId = null, env = process.env } = {}) {
-  const path = scopeCursorsPath(pluginDataDir, { env })
+export function readCursorsDocument(pluginDataDir, { realmId = null, env = process.env, scope = null, path: explicitPath = null } = {}) {
+  const path = explicitPath !== null
+    ? explicitPath
+    : scope === null
+      ? scopeCursorsPath(pluginDataDir, { env })
+      : sessionScopeFilePath(pluginDataDir, scope, CURSORS_FILENAME)
   if (!existsSync(path)) return { document: emptyDocument(), path, migrated: false }
+  // Oversize is a LOUD refusal, never a quarantine: a file past the cap is
+  // not evidence of corruption, and moving it aside would silently reset a
+  // reader's live positions behind a diagnostic nobody reads. Checked before
+  // the read so the refusal never depends on how the read happens to fail.
+  let size = 0
+  try {
+    size = lstatSync(path).size
+  } catch { /* vanished between exists and stat: treat as absent */ }
+  if (size > CURSOR_FILE_MAX_BYTES) {
+    throw new AgentRoomRuntimeError(
+      CLI_ERROR_CURSORS_FILE_TOO_LARGE,
+      `${path} is ${size} bytes, past the ${CURSOR_FILE_MAX_BYTES}-byte cap — shrink or remove it; nothing was reset`,
+    )
+  }
   let raw
   try {
     raw = readJsonFile(path, { maxBytes: CURSOR_FILE_MAX_BYTES })
-  } catch {
-    // Unparsable: a corrupt v1 file is repaired around, never a stopped
-    // reader. Move it aside and start clean.
-    const backup = `${path}.v1.corrupt-${Date.now()}.json`
-    try { renameSync(path, backup) } catch { /* best-effort */ }
+  } catch (error) {
+    if (error?.code === CLI_ERROR_CURSORS_FILE_TOO_LARGE) throw error
+    // Only a REGULAR file is quarantined. Anything else at this path — a
+    // directory, a symlink, a device — is not a corrupt cursor document and
+    // deserves no rename: moving a user's directory aside would be a far
+    // worse outcome than a loud refusal.
+    let isRegularFile = false
+    try {
+      const info = lstatSync(path)
+      isRegularFile = info.isFile() && !info.isSymbolicLink()
+    } catch { /* vanished */ }
+    if (!isRegularFile) {
+      throw new AgentRoomRuntimeError(
+        CLI_ERROR_CURSORS_SCHEMA_INVALID,
+        `${path} is not a readable cursor file (${error?.code ?? 'unusable'}) — fix or remove it; nothing was moved or reset`,
+      )
+    }
+    // Unparsable regular file: a corrupt v1 document is repaired around,
+    // never a stopped reader. Move it aside (AC3's literal name) and start
+    // clean.
+    const backup = recoveryScopePath(pluginDataDir, path, scope)
+    try {
+      renameSync(path, backup)
+      chmodSync(backup, 0o600)
+    } catch { /* best-effort */ }
     return { document: emptyDocument(), path, migrated: false, quarantined: backup }
   }
   if (raw && typeof raw === 'object' && raw.version === CURSORS_SCHEMA_VERSION) {
@@ -204,14 +252,26 @@ export function readCursorsDocument(pluginDataDir, { realmId = null, env = proce
     return { document: migrateV1Cursors(raw, sourceRealm), path, migrated: true }
   }
   throw new AgentRoomRuntimeError(
-    'cursors_schema_invalid',
+    CLI_ERROR_CURSORS_SCHEMA_INVALID,
     `cursors.json version ${raw?.version ?? 'unknown'} is not supported (expected ${CURSORS_SCHEMA_VERSION})`,
   )
 }
 
-// roomId -> {read_seq, notified_seq} for one realm, read-only.
-export function loadCursors(pluginDataDir, realmId, { env = process.env } = {}) {
-  const { document } = readCursorsDocument(pluginDataDir, { realmId, env })
+// The corrupt-v1 backup's path: AC3's literal `cursors.v1.corrupt-<ts>.json`.
+// When the caller named its scope, the sibling rides sessionScopeFilePath
+// (the one builder); otherwise it is derived beside the resolved file.
+function recoveryScopePath(pluginDataDir, cursorPath, scope) {
+  const name = `cursors.v1.corrupt-${Date.now()}.json`
+  if (scope !== null) return sessionScopeFilePath(pluginDataDir, scope, name)
+  return join(dirname(cursorPath), name)
+}
+
+// roomId -> {read_seq, notified_seq} for one realm, read-only. `scope` is the
+// caller's resolved session scope when it already has one (the MCP adapter
+// resolves with its own cwd/pid inputs, so re-deriving here could land on a
+// DIFFERENT directory); omitted, the process key is derived as before.
+export function loadCursors(pluginDataDir, realmId, { env = process.env, scope = null } = {}) {
+  const { document } = readCursorsDocument(pluginDataDir, { realmId, env, scope })
   const rooms = document.realms[assertRealmKey(realmId)]?.rooms ?? {}
   const cursors = new Map()
   for (const [roomId, entry] of Object.entries(rooms)) cursors.set(roomId, { ...entry })
@@ -240,7 +300,7 @@ export const sessionCursorPath = scopeCursorsPath
 export async function advanceCursor(
   pluginDataDir,
   { realmId, roomId, seq, field = 'read_seq' },
-  { env = process.env } = {},
+  { env = process.env, scope = null } = {},
 ) {
   const validRealm = assertRealmKey(realmId)
   const validRoom = assertRoomKey(roomId)
@@ -251,7 +311,7 @@ export async function advanceCursor(
     throw new AgentRoomRuntimeError('invalid_request', 'seq must be a non-negative safe integer')
   }
   return withCursorLock(pluginDataDir, () => {
-    const { document, path } = readCursorsDocument(pluginDataDir, { realmId: validRealm, env })
+    const { document, path } = readCursorsDocument(pluginDataDir, { realmId: validRealm, env, scope })
     const realm = document.realms[validRealm] ?? { rooms: {} }
     const entry = realm.rooms[validRoom] ?? { read_seq: 0, notified_seq: 0, updated_at: null }
     const updated = { ...entry, [field]: Math.max(entry[field], seq), updated_at: new Date().toISOString() }
@@ -259,5 +319,5 @@ export async function advanceCursor(
     document.realms[validRealm] = realm
     atomicWriteJson(path, document)
     return updated
-  }, { env })
+  }, { env, scope })
 }

@@ -618,10 +618,16 @@ test('the client lifecycle end to end: ensure, addressed send, offline peer resu
   assert.ok(senderRow, 'the sender’s principal appears in the listing')
   assert.equal(senderRow.presence, 'online', 'the beat renewed the lease across one full interval')
 
-  // And the peer client reads the pair room through the listing + capability.
+  // Story 2.1 AC1 inverted this: a Bearer no longer discovers `ssession:` pair
+  // rooms. Discovery moved to a `Session <capability>` caller, which is what
+  // `agent-room read --peer` presents. This client still holds only a Bearer,
+  // so the pair room MUST be absent — that absence is the isolation guarantee,
+  // not a regression. (The peer can still READ the room directly by id, which
+  // the next assertion proves — the ACL is per-session membership, and the
+  // listing is merely the discovery surface AC1 narrowed.)
   const rooms = await peerClient.listRooms()
   const pair = rooms.rooms.find(row => row.room_id === sent.room_id)
-  assert.ok(pair, 'the pair room is discoverable through the installation listing')
+  assert.equal(pair, undefined, 'a Bearer must NOT discover ssession: pair rooms (Story 2.1 AC1)')
   const page = await peerClient.readMessage({ roomId: sent.room_id, afterSeq: 0 })
   const texts = page.messages.map(row => row.text).slice(0, 2)
   assert.match(texts[0], /by address/)

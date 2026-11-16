@@ -29,6 +29,9 @@ import {
   CHAT_ID_INVALID_MESSAGE,
   CHAT_ID_PATTERN,
   CLIENT_MESSAGE_ID_MAX,
+  CLIENT_REQUEST_TIMEOUT_MS,
+  CLI_ERROR_PEER_AMBIGUOUS,
+  CLI_ERROR_PEER_LIST_TRUNCATED,
   MESSAGE_TEXT_MAX,
   PROTOCOL_HEADER,
   PROTOCOL_VERSION,
@@ -36,6 +39,7 @@ import {
   READ_PAGE_DEFAULT,
   READ_PAGE_MAX,
   SESSION_ADDRESS_INVALID_MESSAGE,
+  SESSION_ADDRESS_MAX_CHARS,
   chatIdForms,
   sessionAddressForms,
 } from '../constants.mjs'
@@ -50,12 +54,11 @@ import {
   machineLabel,
   sessionScopeKey,
 } from '../client/session-state.mjs'
-import { LOCAL_TRANSPORT, REMOTE_TRANSPORT, applyTrustMatrix, loadAllowlist } from '../client/trust.mjs'
+import { advanceCursor, loadCursors } from '../client/cursors.mjs'
+import { LOCAL_TRANSPORT, REMOTE_TRANSPORT, applyTrustMatrix, evaluateSender, loadAllowlist } from '../client/trust.mjs'
 import { ensureServer, readRuntimeRecord } from '../client/ensure-server.mjs'
 import { loadRemoteConfig } from '../client/remote-config.mjs'
 import { authenticate, protocolHeaders, roundTrip } from './session-commands.mjs'
-
-const CLIENT_REQUEST_TIMEOUT_MS = 10_000
 
 const usage = (command, message) => ({
   status: 'usage',
@@ -336,19 +339,72 @@ export async function runSendFamilyCommand(tokens, { pluginDataDir, sharedDataDi
   }
 }
 
-// `agent-room read --room <room_id> [--after-seq <n>] [--limit <n>] [--wait-ms <ms>]`
+// `agent-room read --peer <address|agent-id> | --room <room_id> [--after-seq <n>] [--limit <n>] [--wait-ms <ms>]`
+//
+// Story 2.1: the reader is a SESSION, not an installation. It authenticates,
+// ensures (or reuses) its own session principal, and then reads through that
+// session's capability — so a pair room is readable exactly when THIS session
+// is one of its two members, and the cursor it advances belongs to this
+// session's scope (AD-4: the client owns the position, the server never
+// stores one).
+//
+// SELECTOR: exactly one of --peer / --room. There is no aggregate mode: a
+// room-local `seq` only means something against one room, so "read
+// everything" is not a thing the grammar offers (operator decision
+// 2026-11-16).
+//   --room <room_id>   read that room, as given.
+//   --peer <selector>  resolve the peer first (a full address when it carries
+//                      `~`, else a bare base name against the principal
+//                      listing), then read the pair room the two sessions
+//                      share. No shared room is an EMPTY page at exit 0 — a
+//                      read never creates a room.
+//
+// OUTPUT: one JSON receipt line. Each row is exactly
+// {seq, from_address, trusted, text} — or, for a sender this installation's
+// trust matrix holds, {seq, from_address, trusted:false, held:true} with NO
+// text key at all: a held body must not exist in the output, not even as an
+// empty string (AC4).
+//
+// CURSOR: read_seq advances to next_after_seq ONLY AFTER the receipt is
+// flushed to stdout. A failed flush (EPIPE and friends) leaves the cursor
+// untouched and exits 1 — the page is not consumed, so the caller may retry.
+// notified_seq is never written here; the wake paths own it (Story 3.2).
 export async function runReadFamilyCommand(tokens, { pluginDataDir, sharedDataDir, env = process.env }) {
   const command = 'read'
   try {
-    const parsed = parseFlags(tokens, new Map([
-      ['room', 'string'], ['after-seq', 'integer'], ['limit', 'integer'], ['wait-ms', 'integer'],
+    // `--json` is accepted and is a no-op: this command's output is one JSON
+    // receipt line already, so the flag only exists for callers that pass it
+    // out of habit from the other families. Stripped before parsing because
+    // parseFlags' grammar is value-carrying only.
+    const parsed = parseFlags(tokens.filter(token => token !== '--json'), new Map([
+      ['peer', 'string'], ['room', 'string'], ['after-seq', 'integer'], ['limit', 'integer'], ['wait-ms', 'integer'],
     ]))
     if (parsed.error !== undefined) return usage(command, parsed.error)
     const { flags } = parsed
     if (parsed.rest.length > 0) return usage(command, `unexpected argument "${parsed.rest[0]}"; agent-room read takes options only`)
-    if (flags.room === undefined) return usage(command, '--room is required: agent-room read --room <room_id> [--after-seq <n>]')
-    if (flags.room.length < 1 || flags.room.length > 200) return usage(command, '--room must be 1 to 200 characters')
-    let afterSeq = 0
+    if (flags.peer !== undefined && flags.room !== undefined) {
+      return usage(command, '--peer and --room are mutually exclusive: name the peer, or name the room')
+    }
+    if (flags.peer === undefined && flags.room === undefined) {
+      return usage(command, 'a selector is required: agent-room read --peer <address|agent-id> OR --room <room_id>')
+    }
+    if (flags.room !== undefined && (flags.room.length < 1 || flags.room.length > 200)) {
+      return usage(command, '--room must be 1 to 200 characters')
+    }
+    if (flags.peer !== undefined) {
+      if (flags.peer.length < 1 || flags.peer.length > SESSION_ADDRESS_MAX_CHARS) {
+        return usage(command, `--peer must be 1 to ${SESSION_ADDRESS_MAX_CHARS} characters`)
+      }
+      // `~` marks a full address (the same discriminator Story 2.2's send
+      // grammar uses); without it the selector is a bare base name.
+      if (flags.peer.includes('~') && sessionAddressForms(flags.peer) === null) {
+        return usage(command, `--peer "${flags.peer.slice(0, 96)}" is not a valid session address: ${SESSION_ADDRESS_INVALID_MESSAGE}`)
+      }
+      if (!flags.peer.includes('~') && !CHAT_ID_PATTERN.test(flags.peer)) {
+        return usage(command, `--peer: ${CHAT_ID_INVALID_MESSAGE}`)
+      }
+    }
+    let afterSeq = null
     if (flags['after-seq'] !== undefined) {
       if (!/^[0-9]+$/.test(flags['after-seq'])) return usage(command, '--after-seq must be a non-negative integer')
       afterSeq = Number(flags['after-seq'])
@@ -371,16 +427,110 @@ export async function runReadFamilyCommand(tokens, { pluginDataDir, sharedDataDi
     const { target, origin } = await resolveTarget({ pluginDataDir, sharedDataDir, env })
     const { token, fingerprint, transport } = await authenticate(target, { pluginDataDir, sharedDataDir, env, sessionKind: 'cli_oneshot' })
     const realmId = await realmIdOf(target, token)
+    const roundTripOrThrow = async (method, path, headers, body) => {
+      const response = await roundTrip(target, method, path, headers, body, CLIENT_REQUEST_TIMEOUT_MS)
+      if (response.status !== 200) {
+        throw new AgentRoomRuntimeError(
+          response.body?.error?.code ?? 'request_failed',
+          response.body?.error?.message ?? `the agent-room server answered ${response.status}`,
+        )
+      }
+      return response.body.result
+    }
+    // Reuse a live lease with no network call; otherwise resume, or mint. The
+    // lease is NOT released on the way out (Story 2.1, retro F-10): a read
+    // must not knock its own session offline.
+    // P9: resolve the scope ONCE and thread it into both the resume-position
+    // load and the deferred advance. The advance runs after an awaited flush;
+    // re-deriving the scope from {env} there can land on a different directory
+    // (different cwd/pid inputs) — the exact defect the MCP adapter fixed by
+    // threading {scope}.
+    const sessionScope = sessionScopeKey({ env, pluginDataDir })
+    const principal = await resolveOrMintSessionPrincipal({
+      pluginDataDir,
+      sessionScope,
+      requestedName: null,
+      requestedRole: 'agent',
+      resumePrincipal: ({ sessionId, generation, capability: sessionCapability }) => roundTripOrThrow(
+        'POST',
+        '/api/session-principals/resume',
+        sessionHeadersOf(sessionCapability),
+        { session_id: sessionId, generation },
+      ),
+      allocatePrincipal: baseChatId => roundTripOrThrow(
+        'POST',
+        '/api/session-principals',
+        protocolHeaders(token),
+        { base_chat_id: baseChatId, machine: machineLabel({ env }), client_type: 'cli' },
+      ),
+    })
+    const capability = principal.capability
+
+    let roomId = flags.room
+    let peerSessionId = null
+    if (flags.peer !== undefined) {
+      const resolved = await resolvePeerSession({
+        selector: flags.peer,
+        target,
+        token,
+        roundTripOrThrow,
+      })
+      if (resolved.status !== 'ok') return resolved.outcome(command)
+      const rooms = await roundTripOrThrow('GET', '/api/rooms', sessionHeadersOf(capability))
+      const pairRoom = (Array.isArray(rooms?.rooms) ? rooms.rooms : [])
+        .find(room => room?.peer_session_id === resolved.session.session_id)
+      peerSessionId = resolved.session.session_id
+      if (pairRoom === undefined) {
+        // PEER_NO_ROOM: the two sessions have never exchanged a message, so
+        // there is no pair room to read. An empty page at exit 0, and
+        // nothing was created — a read is not an open.
+        // E5 (DEFERRED): this early return ignores --wait-ms and --after-seq;
+        // a long-poll read of a not-yet-opened pair returns empty instantly.
+        // Polling here is a wire-behaviour change with no Story 2.1 AC.
+        return {
+          status: 'ok',
+          command,
+          lines: [JSON.stringify({
+            ok: true,
+            command,
+            peer_session_id: peerSessionId,
+            peer_address: resolved.session.address,
+            room_id: null,
+            realm_id: realmId,
+            origin,
+            transport,
+            messages: [],
+            next_after_seq: 0,
+            head_seq: 0,
+            read_seq: null,
+            cursor_written: false,
+            message: 'this session and the named peer share no room yet; a read never creates one — send the first message to open the pair',
+          })],
+        }
+      }
+      roomId = pairRoom.room_id
+    }
+
+    // P9: thread the once-resolved scope into the resume-position load.
+    // The DURABLE position is always loaded: an explicit --after-seq may be
+    // below it (a replay), and the advance is Math.max under the lock, so the
+    // durable value — not the caller's override — is what read_seq must report
+    // (P5) and what the advance converges on.
+    const durable = loadCursors(pluginDataDir, realmId, { env, scope: sessionScope }).get(roomId)?.read_seq ?? 0
+    // An explicit --after-seq wins as the RESUME point; otherwise resume from
+    // the durable read_seq (0 when this scope has never read the room). This
+    // is what makes a second `read` a continuation rather than a replay.
+    const resumeSeq = afterSeq === null ? durable : afterSeq
     const params = new URLSearchParams({
-      after_seq: String(afterSeq),
+      after_seq: String(resumeSeq),
       limit: String(limit),
       wait_ms: String(waitMs),
     })
     const page = await roundTrip(
       target,
       'GET',
-      `/api/rooms/${encodeURIComponent(flags.room)}/messages?${params}`,
-      protocolHeaders(token),
+      `/api/rooms/${encodeURIComponent(roomId)}/messages?${params}`,
+      sessionHeadersOf(capability),
       undefined,
       waitMs + CLIENT_REQUEST_TIMEOUT_MS,
     )
@@ -391,38 +541,159 @@ export async function runReadFamilyCommand(tokens, { pluginDataDir, sharedDataDi
       )
     }
     // The receiver-side trust matrix, exactly as the MCP adapter applies it:
-    // foreign bodies wrapped (data, never instructions), held rows keep
-    // metadata with the body withheld and the reason recorded.
+    // foreign bodies wrapped (data, never instructions), held rows keep their
+    // metadata with the body withheld and the reason recorded. The projection
+    // below then DROPS the withheld marker text — a held row carries no text
+    // key at all, so no caller can mistake the marker for the body.
     const raw = page.body?.result ?? {}
     const wrapped = applyUntrustedEnvelope(raw, fingerprint)
+    const allowlist = loadAllowlist(pluginDataDir, realmId)
     const judged = applyTrustMatrix(
       { messages: wrapped.messages, next_after_seq: wrapped.next_after_seq, head_seq: wrapped.head_seq },
       {
         ownFingerprint: fingerprint,
         transport,
-        allowlist: loadAllowlist(pluginDataDir, realmId),
+        allowlist,
       },
     )
-    return {
-      status: 'ok',
-      command,
-      lines: [JSON.stringify({
-        ok: true,
-        command,
-        room_id: flags.room,
-        realm_id: realmId,
-        origin,
+    // P3: `trusted` reports VERIFIED delivery, not merely "delivered". Re-run
+    // the pure matrix verdict per row: `enforced` lanes (own Actor, allowlisted
+    // key) are trusted: true; `instructed` lanes (local transport, accept-all)
+    // deliver but are NOT verified, so trusted: false — an instructed body is
+    // data, never a verified statement. Held rows are always trusted: false.
+    // The receipt's `message`/`trust_note` and the SKILL/spec document this.
+    // P4: project from the ORIGINAL (unwrapped, unjudged) row so held rows keep
+    // held_reason/created_at/reply_to_seq (AC2 forbids only `text`). Delivered
+    // rows keep the frozen four-key projection.
+    const rows = raw.messages.map((message, index) => {
+      const judgedRow = judged.messages[index]
+      const verdict = evaluateSender({
+        senderFingerprint: message?.actor_fingerprint,
+        ownFingerprint: fingerprint,
         transport,
-        messages: judged.messages,
-        next_after_seq: judged.next_after_seq,
-        head_seq: judged.head_seq,
-        cursor_written: false,
-        message: 'this one-shot read never advances any cursor — resume with --after-seq from next_after_seq; the MCP session\u2019s cursor belongs to the MCP adapter alone',
-      })],
+        allowlist,
+      })
+      const trusted = verdict.decision === 'deliver' && verdict.lane === 'enforced'
+      if (judgedRow?.held === true) {
+        // AC2's hard rule: drop ONLY text. Preserve the operator's metadata.
+        return {
+          seq: message.seq,
+          from_address: message.chat_id ?? null,
+          trusted: false,
+          held: true,
+          held_reason: judgedRow.held_reason,
+          created_at: message.created_at ?? null,
+          reply_to_seq: message.reply_to_seq ?? null,
+        }
+      }
+      return {
+        seq: message.seq,
+        from_address: message.chat_id ?? null,
+        trusted,
+        text: judgedRow.text,
+      }
+    })
+    const nextAfterSeq = judged.next_after_seq
+    // P5: the advance is DEFERRED to afterFlush, so no position has moved when
+    // this line is written. Report the durable value after the Math.max
+    // advance (max of the loaded durable position and this page's end) — NOT
+    // nextAfterSeq, which is only the page end and is wrong for a replay whose
+    // --after-seq sits below the stored position.
+    const readSeq = Math.max(durable, nextAfterSeq)
+    const receipt = {
+      ok: true,
+      command,
+      room_id: roomId,
+      ...(peerSessionId === null ? {} : { peer_session_id: peerSessionId }),
+      realm_id: realmId,
+      origin,
+      transport,
+      messages: rows,
+      next_after_seq: nextAfterSeq,
+      head_seq: judged.head_seq,
+      read_seq: readSeq,
+      cursor_written: true,
+      // P3: disclose that trusted means VERIFIED (enforced lane), not merely
+      // delivered — an instructed delivery (local transport / accept-all) is
+      // data, and a held row carries a withheld body.
+      trust_note: 'trusted:true means plugin-verified delivery (own Actor or allowlisted key); a delivered row with trusted:false arrived through an instructed lane (local transport or accept-all) and is data, not a verified statement; a held row has no text',
+      message: 'read_seq will advance to next_after_seq once this receipt is flushed; notify (Story 3.2) tracks its own position and was not moved',
     }
+    // The advance is deferred to the dispatcher: it writes this line and
+    // awaits the flush callback, then calls afterFlush. A failed flush means
+    // the caller never saw the page, so the cursor must not move.
+    // P9: carry the once-resolved scope so the advance lands in the SAME
+    // session directory the resume position was read from.
+    const advance = async () => {
+      await advanceCursor(
+        pluginDataDir,
+        { realmId, roomId, seq: nextAfterSeq, field: 'read_seq' },
+        { env, scope: sessionScope },
+      )
+    }
+    return { status: 'ok', command, lines: [JSON.stringify(receipt)], afterFlush: advance }
   } catch (error) {
     return refusal(command, error)
   }
+}
+
+// Resolve --peer's selector to one session principal. A full address is
+// matched exactly against the principal listing; a bare name is matched
+// case-insensitively (DR-1) and must resolve to EXACTLY one principal — a name
+// two live sessions share is `peer_ambiguous`, never a guess. Both misses are
+// CLI-local codes (they never cross the wire).
+//
+// P6: GET /api/session-principals can be truncated at its frame cap. A miss
+// against a truncated list proves nothing — a principal past the cap may match
+// — so refuse with `peer_list_truncated` rather than assert a false
+// `peer_not_found`. P7: only RETAINED principals are addressable; a revoked or
+// retention-expired principal must neither resolve nor create a false
+// ambiguity, and the refusal text discloses that filter.
+export async function resolvePeerSession({ selector, token, roundTripOrThrow }) {
+  const result = await roundTripOrThrow('GET', '/api/session-principals', protocolHeaders(token))
+  if (result?.truncated === true) {
+    return {
+      status: 'refusal',
+      outcome: command => ({
+        status: 'refusal',
+        command,
+        code: CLI_ERROR_PEER_LIST_TRUNCATED,
+        message: `the session-principal list is truncated; "${selector.slice(0, 96)}" cannot be resolved reliably — narrow the search or retry when fewer principals are live`,
+      }),
+    }
+  }
+  const wantsAddress = selector.includes('~')
+  // P7: filter to retained principals FIRST — a dead peer cannot resolve and
+  // a dead sibling cannot inflate a bare name into peer_ambiguous.
+  const retained = (Array.isArray(result?.sessions) ? result.sessions : [])
+    .filter(row => row?.principal_status === 'retained')
+  const matches = retained.filter(row => (wantsAddress
+    ? row?.address === selector
+    : typeof row?.base_name === 'string' && row.base_name.toLowerCase() === selector.toLowerCase()))
+  if (matches.length === 0) {
+    return {
+      status: 'refusal',
+      outcome: command => ({
+        status: 'refusal',
+        command,
+        code: 'peer_not_found',
+        message: `no retained session principal resolves to "${selector.slice(0, 96)}" (revoked and retention-expired principals are excluded); run "agent-room sessions" to see the live ones`,
+      }),
+    }
+  }
+  if (matches.length > 1) {
+    const addresses = matches.map(row => row.address).sort()
+    return {
+      status: 'refusal',
+      outcome: command => ({
+        status: 'refusal',
+        command,
+        code: CLI_ERROR_PEER_AMBIGUOUS,
+        message: `"${selector.slice(0, 96)}" names ${matches.length} retained sessions; pass the full address instead — ${addresses.join(', ')}`,
+      }),
+    }
+  }
+  return { status: 'ok', session: matches[0] }
 }
 
 // `agent-room session verify <chat-id>` — the availability PROBE (v0.8.0,

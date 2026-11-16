@@ -9,15 +9,20 @@
 // address fits as a message attribution.
 
 import assert from 'node:assert/strict'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import test from 'node:test'
 
 import { openRoomLog } from '../server/store/room-log.mjs'
-import { sessionCursorSeedState } from '../server/client/session-state.mjs'
+import { sessionScopeFilePath } from '../server/client/session-state.mjs'
+import { CURSORS_FILENAME, advanceCursor, readCursorsDocument } from '../server/client/cursors.mjs'
 import {
+  CLI_ERROR_CURSORS_FILE_TOO_LARGE,
+  CLI_ERROR_CURSORS_LOCK_BUSY,
+  CLI_ERROR_CURSORS_SCHEMA_INVALID,
+  CURSOR_FILE_MAX_BYTES,
   MESSAGE_TEXT_MAX,
   SESSION_BASE_LEASE_MS,
   SESSION_PRINCIPAL_RETENTION_MS,
@@ -27,6 +32,7 @@ const FINGERPRINT_A = 'sha256:' + 'a'.repeat(64)
 const FINGERPRINT_B = 'sha256:' + 'b'.repeat(64)
 const T0 = 1_000_000_000_000
 const MIGRATION_REALM = 'm0a1b2c3-d4e5-4f6a-8b9c-0d1e2f3a4b5c'
+const keysOf = value => Object.keys(value ?? {})
 
 function makeStore(t) {
   const dataDir = mkdtempSync(join(tmpdir(), 'agent-room-session-principals-'))
@@ -554,46 +560,111 @@ test('MIGRATION (additive convergence): a pre-v0.9 v2 file rebuilds in place, ke
   reopened.close()
 })
 
-// --- MIGRATION_SEED: the first v0.9 session seeds the legacy cursor; later ones start at 0 ---
+// --- CURSORS v2: the per-session schema, the v1 migration, and the two loud refusals ---
 
-test('MIGRATION_SEED: first session seeds the legacy cursor, later sessions start at 0, re-runs are no-ops, an unreadable legacy file refuses loudly', t => {
-  const parent = mkdtempSync(join(tmpdir(), 'agent-room-migration-seed-'))
+test('cursors v2: one file holds BOTH positions per room, a v1 file migrates once, and nothing advances notified_seq', async t => {
+  const parent = mkdtempSync(join(tmpdir(), 'agent-room-cursors-v2-'))
   t.after(() => rmSync(parent, { recursive: true, force: true }))
   const pluginData = join(parent, 'plugin-data')
-  mkdirSync(join(pluginData, 'realms', MIGRATION_REALM), { recursive: true, mode: 0o700 })
-  const legacyPath = join(pluginData, 'realms', MIGRATION_REALM, 'cursors.json')
-  writeFileSync(legacyPath, `${JSON.stringify({ version: 1, cursors: { 'room-a': { after_seq: 12 } } })}\n`, { mode: 0o600 })
-
-  const first = sessionCursorSeedState({ pluginDataDir: pluginData, realmId: MIGRATION_REALM, scope: 'scope-one' })
-  assert.equal(first.seeded, true, 'the first session performs the seed')
-  assert.deepEqual(first.cursors, { 'room-a': { after_seq: 12 } }, 'the first session inherits the legacy position')
-  // The caller (the adapter's cursor loader) materializes the seeded position:
-  // write it exactly as loadSessionCursors does, so the re-run reads the file.
   mkdirSync(join(pluginData, 'sessions', 'scope-one'), { recursive: true, mode: 0o700 })
-  writeFileSync(join(first.cursorPath), `${JSON.stringify({ version: 1, realm_id: MIGRATION_REALM, cursors: first.cursors })}\n`, { mode: 0o600 })
+  const cursorPath = sessionScopeFilePath(pluginData, 'scope-one', CURSORS_FILENAME)
+  const env = { AGENT_ROOM_SESSION_SCOPE: 'scope-one' }
 
-  const second = sessionCursorSeedState({ pluginDataDir: pluginData, realmId: MIGRATION_REALM, scope: 'scope-two' })
-  assert.equal(second.seeded, false, 'the second session does not re-seed')
-  assert.deepEqual(second.cursors, {}, 'the second session starts at 0')
+  // A v1 document migrates in memory: after_seq becomes read_seq, and
+  // notified_seq starts at 0 — never inherited, never guessed.
+  writeFileSync(cursorPath, `${JSON.stringify({
+    version: 1,
+    realm_id: MIGRATION_REALM,
+    cursors: { 'room-a': { after_seq: 12, updated_at: '2026-01-01T00:00:00.000Z' } },
+  })}\n`, { mode: 0o600 })
+  const migrated = readCursorsDocument(pluginData, { realmId: MIGRATION_REALM, env })
+  assert.equal(migrated.document.version, 2)
+  assert.equal(migrated.migrated, true)
+  assert.deepEqual(migrated.document.realms[MIGRATION_REALM].rooms['room-a'], {
+    read_seq: 12, notified_seq: 0, updated_at: null,
+  })
 
-  const again = sessionCursorSeedState({ pluginDataDir: pluginData, realmId: MIGRATION_REALM, scope: 'scope-one' })
-  assert.equal(again.seeded, false, 'a re-run is a no-op')
-  assert.deepEqual(again.cursors, { 'room-a': { after_seq: 12 } }, 'the seeded position survives the re-run')
+  // A write lands v2 on disk and moves ONLY the named field; a lower seq can
+  // never move a position backwards.
+  const advanced = await advanceCursor(pluginData, {
+    realmId: MIGRATION_REALM, roomId: 'room-a', seq: 20,
+  }, { env })
+  assert.deepEqual([advanced.read_seq, advanced.notified_seq], [20, 0])
+  await advanceCursor(pluginData, { realmId: MIGRATION_REALM, roomId: 'room-a', seq: 3 }, { env })
+  const stored = JSON.parse(readFileSync(cursorPath, 'utf8'))
+  assert.deepEqual(keysOf(stored).sort(), ['realms', 'version'])
+  assert.equal(stored.version, 2)
+  assert.deepEqual(stored.realms[MIGRATION_REALM].rooms['room-a'].read_seq, 20, 'Math.max keeps the higher position')
+  assert.equal(stored.realms[MIGRATION_REALM].rooms['room-a'].notified_seq, 0, 'nothing in this story advances notified_seq')
+  assert.equal(statSync(cursorPath).mode & 0o777, 0o600)
 })
 
-test('MIGRATION_SEED: an unreadable legacy cursor file refuses with migration_source_unreadable', t => {
-  const parent = mkdtempSync(join(tmpdir(), 'agent-room-migration-seed-bad-'))
+test('cursors v2: a live lock held by another writer refuses with cursors_lock_busy and writes no cursor', async t => {
+  const parent = mkdtempSync(join(tmpdir(), 'agent-room-cursors-lock-'))
   t.after(() => rmSync(parent, { recursive: true, force: true }))
   const pluginData = join(parent, 'plugin-data')
-  mkdirSync(join(pluginData, 'realms', MIGRATION_REALM), { recursive: true, mode: 0o700 })
-  const legacyPath = join(pluginData, 'realms', MIGRATION_REALM, 'cursors.json')
-  writeFileSync(legacyPath, '{}', { mode: 0o000 })
+  const scope = 'locked-scope'
+  mkdirSync(join(pluginData, 'sessions', scope), { recursive: true, mode: 0o700 })
+  const cursorPath = sessionScopeFilePath(pluginData, scope, CURSORS_FILENAME)
 
-  assert.throws(
-    () => sessionCursorSeedState({ pluginDataDir: pluginData, realmId: MIGRATION_REALM, scope: 'scope-bad' }),
-    error => error?.code === 'migration_source_unreadable',
-    'the unreadable authority refuses the seed',
+  // A regular lock file whose holder is THIS live process: lockIsStale() sees
+  // a fresh mtime and an alive pid, so it cannot be reclaimed inside the wait.
+  const lockPath = sessionScopeFilePath(pluginData, scope, 'cursors.lock')
+  writeFileSync(lockPath, `${JSON.stringify({ pid: process.pid })}\n`, { mode: 0o600 })
+  t.after(() => { try { rmSync(lockPath, { force: true }) } catch { /* best-effort */ } })
+
+  await assert.rejects(
+    () => advanceCursor(pluginData, {
+      realmId: MIGRATION_REALM, roomId: 'room-a', seq: 5, field: 'read_seq',
+    }, { env: { AGENT_ROOM_SESSION_SCOPE: scope } }),
+    error => error?.code === CLI_ERROR_CURSORS_LOCK_BUSY,
   )
-  assert.equal(existsSync(join(pluginData, 'sessions', 'scope-bad', 'cursors.json')), false, 'no false cursor was materialized')
-  chmodSync(legacyPath, 0o600)
+  assert.equal(existsSync(cursorPath), false, 'a refused write creates no cursor file')
+})
+
+test('cursors v2: an oversize file is a LOUD refusal (no backup, no reset) and a wrong version is schema-invalid', async t => {
+  const parent = mkdtempSync(join(tmpdir(), 'agent-room-cursors-refuse-'))
+  t.after(() => rmSync(parent, { recursive: true, force: true }))
+  const pluginData = join(parent, 'plugin-data')
+  mkdirSync(join(pluginData, 'sessions', 'scope-one'), { recursive: true, mode: 0o700 })
+  const cursorPath = sessionScopeFilePath(pluginData, 'scope-one', CURSORS_FILENAME)
+  const env = { AGENT_ROOM_SESSION_SCOPE: 'scope-one' }
+
+  // Oversize: refuse, and leave the file exactly where it was — the file is
+  // not evidence of corruption, and a silent quarantine would reset a live
+  // reader's positions behind a diagnostic nobody reads.
+  writeFileSync(cursorPath, 'x'.repeat(CURSOR_FILE_MAX_BYTES + 1), { mode: 0o600 })
+  assert.throws(
+    () => readCursorsDocument(pluginData, { realmId: MIGRATION_REALM, env }),
+    error => error?.code === CLI_ERROR_CURSORS_FILE_TOO_LARGE,
+  )
+  assert.equal(statSync(cursorPath).size, CURSOR_FILE_MAX_BYTES + 1, 'the oversize file is untouched')
+  assert.equal(readdirSync(join(pluginData, 'sessions', 'scope-one')).filter(name => name.includes('corrupt')).length, 0, 'no backup was taken')
+
+  // A v2-shaped file whose version is not ours refuses with the coded name.
+  writeFileSync(cursorPath, `${JSON.stringify({ version: 3, realms: {} })}\n`, { mode: 0o600 })
+  assert.throws(
+    () => readCursorsDocument(pluginData, { realmId: MIGRATION_REALM, env }),
+    error => error?.code === CLI_ERROR_CURSORS_SCHEMA_INVALID,
+  )
+  assert.equal(JSON.parse(readFileSync(cursorPath, 'utf8')).version, 3, 'the version-3 file was not touched either')
+})
+
+test('cursors v1 CORRUPT: the file is moved aside as cursors.v1.corrupt-<ts>.json (0600) and the reader starts empty', async t => {
+  const parent = mkdtempSync(join(tmpdir(), 'agent-room-cursors-corrupt-'))
+  t.after(() => rmSync(parent, { recursive: true, force: true }))
+  const pluginData = join(parent, 'plugin-data')
+  mkdirSync(join(pluginData, 'sessions', 'scope-one'), { recursive: true, mode: 0o700 })
+  const cursorPath = sessionScopeFilePath(pluginData, 'scope-one', CURSORS_FILENAME)
+  const env = { AGENT_ROOM_SESSION_SCOPE: 'scope-one' }
+  writeFileSync(cursorPath, 'not json at all', { mode: 0o600 })
+
+  const read = readCursorsDocument(pluginData, { realmId: MIGRATION_REALM, env })
+  assert.deepEqual(read.document.realms, {}, 'a corrupt file starts the scope empty')
+  assert.equal(existsSync(cursorPath), false, 'the corrupt file is gone from its own name')
+  const backups = readdirSync(join(pluginData, 'sessions', 'scope-one')).filter(name => /^cursors\.v1\.corrupt-\d+\.json$/.test(name))
+  assert.equal(backups.length, 1, 'AC3 literal name: cursors.v1.corrupt-<ts>.json')
+  const backupPath = join(pluginData, 'sessions', 'scope-one', backups[0])
+  assert.equal(statSync(backupPath).mode & 0o777, 0o600, 'the backup is 0600')
+  assert.equal(readFileSync(backupPath, 'utf8'), 'not json at all', 'the backup keeps the bytes verbatim')
 })

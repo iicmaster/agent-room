@@ -313,14 +313,12 @@ export const PUBLIC_ERRORS = Object.freeze({
   // v0.9.0 session credentials: a session-scoped operation presented without
   // the per-session capability header, with a capability that does not resolve
   // to a retained principal bound to the presented selectors, or against a
-  // principal an operator revoked. The client-side counterpart — a migration
-  // source the seeder cannot read — refuses loudly rather than resetting a
-  // cursor silently (CAP-7 / failure-modes U2).
+  // principal an operator revoked (CAP-7 / failure-modes U2). The former
+  // v0.9 seeder's migration-source refusal was retired with Story 2.1.
   session_capability_required: 'this operation requires the per-session capability (Authorization: Session <capability>)',
   session_credential_invalid: 'the session capability is missing, invalid, or does not match this session',
   session_expired: 'session principal is expired, retention-expired, or fenced by a newer generation',
   session_revoked: 'session principal was revoked by the operator',
-  migration_source_unreadable: 'the migration source state is unreadable; refusing to seed without it',
   // Story 4.6: the storage admission gate's refusal — free space below the
   // configured refuse reserve, or the disk-full write itself. The send route
   // answers the FR-17 status (a 200 result {status:'storage_low'} naming a
@@ -414,8 +412,10 @@ export const PUBLIC_ERROR_STATUS = Object.freeze({
   // to an unresolvable address is a quiet 404 miss (peer_not_found); the
   // session credential family is credential-class (401) except the fenced or
   // retention-expired principal, which is a conflicted state (409 — the
-  // capability can never become valid again by retrying); and the migration
-  // seeder's refusal is local-state corruption answered 500.
+  // capability can never become valid again by retrying). The v0.9 seeder's
+  // `migration_source_unreadable` code was retired with Story 2.1 (its only
+  // thrower, sessionCursorSeedState, was deleted); no migration code remains
+  // in this map.
   name_taken: 409,
   peer_not_found: 404,
   not_enrolled: 403,
@@ -437,7 +437,6 @@ export const PUBLIC_ERROR_STATUS = Object.freeze({
   session_credential_invalid: 401,
   session_expired: 409,
   session_revoked: 401,
-  migration_source_unreadable: 500,
   sqlite_version_unsupported: 500,
   // Story 4.6: the storage admission gate's coded face, reserved for the
   // store's storage_low refusal should it ever surface outside the send route
@@ -476,9 +475,30 @@ export const INTERNAL_ERROR_CODES = Object.freeze([
 // set.
 export const CLI_ERROR_TIMEOUT = 'timeout'
 export const CLI_ERROR_SESSION_NOT_FOUND = 'session_not_found'
+// Story 2.1: the cursor-file and peer-resolution codes a `server/cli/*` or MCP
+// adapter command surfaces on its own receipt. They stay CLI-local — the
+// cursor file lives in PLUGIN_DATA and never crosses the wire — but they are
+// named here so a loud cursor refusal is not a coinage at its throw site.
+export const CLI_ERROR_CURSORS_LOCK_BUSY = 'cursors_lock_busy'
+export const CLI_ERROR_CURSORS_SCHEMA_INVALID = 'cursors_schema_invalid'
+export const CLI_ERROR_CURSORS_FILE_TOO_LARGE = 'cursors_file_too_large'
+export const CLI_ERROR_PEER_AMBIGUOUS = 'peer_ambiguous'
+// Story 2.1 review P6: GET /api/session-principals can be truncated at the
+// frame cap. A bare-name peer beyond that cap is UNKNOWN, not absent — refuse
+// loudly rather than answer a false peer_not_found.
+export const CLI_ERROR_PEER_LIST_TRUNCATED = 'peer_list_truncated'
+// Story 2.1 review P10: the dispatcher's failed-stdout refusal. Named here so
+// the code is not a coinage at the write callback's throw site.
+export const CLI_ERROR_WRITE_FAILED = 'write_failed'
 export const CLI_ERROR_CODES = Object.freeze([
   CLI_ERROR_SESSION_NOT_FOUND,
   CLI_ERROR_TIMEOUT,
+  CLI_ERROR_CURSORS_LOCK_BUSY,
+  CLI_ERROR_CURSORS_SCHEMA_INVALID,
+  CLI_ERROR_CURSORS_FILE_TOO_LARGE,
+  CLI_ERROR_PEER_AMBIGUOUS,
+  CLI_ERROR_PEER_LIST_TRUNCATED,
+  CLI_ERROR_WRITE_FAILED,
 ])
 
 // --- Schema-v2 store internals -------------------------------------------------
@@ -776,12 +796,6 @@ export const SESSION_SCOPE_MAX = 64
 export const SESSION_SCOPE_PATTERN = new RegExp(
   `^[A-Za-z0-9_.-]{1,${SESSION_SCOPE_MAX}}$`,
 )
-
-// The v0.8 → v0.9 cursor migration seed marker filename: one per
-// installation, recording that the first v0.9 session already seeded from the
-// legacy realms/<realm>/cursors.json. Later sessions start at 0; re-runs are
-// no-ops.
-export const SESSION_CURSOR_SEED_MARKER_FILENAME = '.cursor_seed_done'
 
 // Story 1.3: crash-safe resume, takeover, and host revoke bounds.
 export const SESSION_RECOVERY_ID_PATTERN = /^[A-Za-z0-9_-]{22,64}$/

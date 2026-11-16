@@ -2,9 +2,10 @@
 // and `agent-room session verify` against a real spawned server. Covered:
 // the trust matrix applied exactly as message_read applies it (foreign bodies
 // wrapped, a declared-remote reader holds non-allowlisted senders to
-// metadata), the no-write contract (no cursor, no held registration, nothing
-// under realms/), and the read-only name verdicts (unclaimed /
-// claimed_by_self / claimed_by_other) against the active target.
+// metadata-only rows with NO text key), Story 2.1's cursor contract (read_seq
+// advances to next_after_seq; notified_seq is never touched; no held
+// registration and nothing under realms/), and the read-only name verdicts
+// (unclaimed / claimed_by_self / claimed_by_other) against the active target.
 //
 // `agent-room send` is decided by the codex round-table (round 3): the send
 // route requires a live-bound session, which collides with the live MCP
@@ -12,7 +13,7 @@
 
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { once } from 'node:events'
 import http from 'node:http'
 import { generateKeyPairSync } from 'node:crypto'
@@ -27,7 +28,7 @@ import { loadOrCreateLocalToken } from '../server/api/local-token.mjs'
 import { fingerprintFromPublicKey, loadOrCreateKeypair, signWithInstallationKey } from '../server/keys.mjs'
 import { openRoomLog } from '../server/store/room-log.mjs'
 import { main as cliMain } from '../server/cli/agent-room.mjs'
-import { runReadFamilyCommand, runSendFamilyCommand, runSessionVerify, sendWithRetry } from '../server/cli/message-commands.mjs'
+import { resolvePeerSession, runReadFamilyCommand, runSendFamilyCommand, runSessionVerify, sendWithRetry } from '../server/cli/message-commands.mjs'
 import { AgentRoomRuntimeError } from '../server/runtime.mjs'
 import { authenticate } from '../server/cli/session-commands.mjs'
 
@@ -120,6 +121,10 @@ async function connectInstallation(port, sharedData, chatId) {
   return { sessionToken, fingerprint }
 }
 
+// The cursor file's scope directory: one-shot CLI runs derive it from the
+// parent pid and this process's pid, and only one exists per test world.
+const receiptScope = pluginData => readdirSync(join(pluginData, 'sessions')).filter(name => !name.startsWith('.'))[0]
+
 const parseOne = outcome => {
   assert.equal(outcome.status, 'ok', JSON.stringify(outcome))
   assert.equal(outcome.lines.length, 1)
@@ -144,25 +149,47 @@ test('read: the trust matrix applies as in message_read, and a one-shot read wri
   })
 
   const deps = { pluginDataDir: world.pluginData, sharedDataDir: world.sharedData, env: {} }
+  assert.equal((await runReadFamilyCommand([], deps)).status, 'usage', 'a selector is required')
+  assert.equal(
+    (await runReadFamilyCommand(['--peer', 'a', '--room', broadcast], deps)).status,
+    'usage',
+    '--peer and --room are mutually exclusive',
+  )
   const outcome = await runReadFamilyCommand(['--room', broadcast, '--after-seq', '0'], deps)
   const receipt = parseOne(outcome)
   assert.equal(receipt.ok, true)
   assert.equal(receipt.room_id, broadcast)
-  assert.equal(receipt.cursor_written, false, 'the receipt states the no-write contract')
-  assert.match(receipt.message, /never advances any cursor/)
+  assert.equal(receipt.cursor_written, true, 'Story 2.1: the read advances read_seq')
+  assert.match(receipt.message, /read_seq will advance.*once this receipt is flushed/, 'P5: the advance is deferred to afterFlush')
+  assert.equal(receipt.read_seq, 2, 'P5: read_seq reports the durable post-advance value')
+  assert.match(receipt.trust_note, /trusted:true means plugin-verified delivery/, 'P3: trusted means verified, not merely delivered')
   assert.equal(receipt.messages.length, 2)
   // Both rows are foreign (the peer's fingerprint): local transport delivers
-  // them, wrapped in the untrusted envelope — data, never instructions.
+  // them, wrapped in the untrusted envelope — data, never instructions. The
+  // projection is exactly {seq, from_address, trusted, text}.
   for (const row of receipt.messages) {
-    assert.equal(row.held, undefined, 'local-transport senders deliver')
+    assert.deepEqual(Object.keys(row).sort(), ['from_address', 'seq', 'text', 'trusted'])
+    assert.equal(row.trusted, false, 'P3: local-transport delivery is instructed, not verified')
     assert.ok(row.text.startsWith('<untrusted_message '), 'foreign bodies are wrapped')
     assert.ok(row.text.includes('from peer'), 'the body rides inside the wrapper')
   }
   assert.equal(receipt.next_after_seq, 2)
   assert.equal(receipt.head_seq, 2)
 
-  // The no-write contract, on disk: nothing under realms/ was created —
-  // no cursors.json, no allowlist.json, no held.json.
+  // The cursor contract, on disk: read_seq advanced in this scope's v2
+  // document and notified_seq did NOT — nothing in Story 2.1 writes it. The
+  // advance is the dispatcher's post-flush step, so this direct call runs it
+  // explicitly (the flush-ordering tests below drive the real dispatcher).
+  assert.equal(typeof outcome.afterFlush, 'function', 'the advance rides the post-flush hook')
+  await outcome.afterFlush()
+  const scope = receiptScope(world.pluginData)
+  const document = JSON.parse(readFileSync(join(world.pluginData, 'sessions', scope, 'cursors.json'), 'utf8'))
+  assert.equal(document.version, 2)
+  assert.equal(document.realms[receipt.realm_id].rooms[broadcast].read_seq, 2)
+  assert.equal(document.realms[receipt.realm_id].rooms[broadcast].notified_seq, 0, 'notified_seq is never advanced by a read')
+
+  // Still nothing under realms/: held registration is the MCP adapter's, and
+  // the allowlist this read consulted does not exist (the default is empty).
   assert.equal(existsSync(join(world.pluginData, 'realms')), false, 'a one-shot read creates no per-realm state')
 })
 
@@ -205,7 +232,14 @@ test('read: a declared-remote reader holds non-allowlisted senders to metadata �
   assert.equal(receipt.messages.length, 1)
   const [row] = receipt.messages
   assert.equal(row.held, true, 'a non-allowlisted remote sender is held')
-  assert.equal(typeof row.held_reason, 'string', 'the matrix reason rides the row')
+  assert.equal(row.trusted, false, 'the row states the verdict plainly')
+  assert.equal(Object.hasOwn(row, 'text'), false, 'AC4: a held row has NO text key at all')
+  // P4: a held row keeps its operator metadata; only `text` is forbidden.
+  assert.deepEqual(Object.keys(row).sort(), ['created_at', 'from_address', 'held', 'held_reason', 'reply_to_seq', 'seq', 'trusted'])
+  assert.equal(row.held_reason, 'not_allowlisted', 'P4: the matrix reason survives on the held row')
+  assert.equal(typeof row.created_at, 'string', 'P4: created_at survives on the held row')
+  assert.equal(row.reply_to_seq, null, 'P4: reply_to_seq survives on the held row')
+  assert.equal(typeof row.from_address, 'string', 'the sender stays identifiable for allowlisting')
   assert.equal(JSON.stringify(receipt.messages).includes('secret plan'), false, 'no held body byte reaches the receipt')
   assert.equal(existsSync(join(world.pluginData, 'realms')), false, 'still nothing written')
 })
@@ -251,9 +285,22 @@ test('usage grammar: missing --room, a bad chat id, and an unknown option are co
   await world.waitReady()
   const deps = { pluginDataDir: world.pluginData, sharedDataDir: world.sharedData, env: {} }
 
+  // Operator decision 2026-11-16: no selector is a usage error naming both
+  // flags — there is no aggregate-all-rooms mode.
   const noRoom = await runReadFamilyCommand(['--after-seq', '0'], deps)
   assert.equal(noRoom.status, 'usage')
-  assert.match(noRoom.message, /--room is required/)
+  assert.match(noRoom.message, /--peer/)
+  assert.match(noRoom.message, /--room/)
+
+  const both = await runReadFamilyCommand(['--peer', 'peer', '--room', 'r1'], deps)
+  assert.equal(both.status, 'usage')
+  assert.match(both.message, /mutually exclusive/)
+
+  for (const badLimit of ['0', '201', 'x']) {
+    const outcome = await runReadFamilyCommand(['--room', 'r1', '--limit', badLimit], deps)
+    assert.equal(outcome.status, 'usage', `--limit ${badLimit} is a usage error`)
+    assert.match(outcome.message, /--limit/, 'the refusal names the flag')
+  }
 
   const badFlag = await runReadFamilyCommand(['--room', 'b', '--bogus', 'x'], deps)
   assert.equal(badFlag.status, 'usage')
@@ -678,4 +725,32 @@ test('round-6 verify: a bind committed behind a 502 runs the bounded cleanup wit
   assert.equal(failed.probe, 'cleanup-unconfirmed')
   assert.equal(JSON.stringify(failed).includes('most likely free'), false, 'an unconfirmed release never claims free')
   assert.match(failed.message, /session replace/)
+})
+
+// --- Story 2.1 review P6/P7: peer resolution refuses a truncated principal
+// list and excludes non-retained principals. These drive the exported pure
+// resolver with an injected list result — no server needed.
+test('resolvePeerSession: a truncated principal list refuses peer_list_truncated, never a false peer_not_found', async () => {
+  const roundTripOrThrow = async () => ({ sessions: [], truncated: true })
+  const resolved = await resolvePeerSession({ selector: 'ghost', token: 't', roundTripOrThrow })
+  assert.equal(resolved.status, 'refusal')
+  const outcome = resolved.outcome('read')
+  assert.equal(outcome.code, 'peer_list_truncated')
+  assert.match(outcome.message, /truncated/)
+})
+
+test('resolvePeerSession: revoked / retention-expired principals cannot resolve or create false ambiguity', async () => {
+  const principals = [
+    { address: 'alive~tok@box', base_name: 'peer', principal_status: 'retained' },
+    { address: 'dead~tok@box', base_name: 'peer', principal_status: 'revoked' },
+    { address: 'gone~tok@box', base_name: 'peer', principal_status: 'retention_expired' },
+  ]
+  const roundTripOrThrow = async () => ({ sessions: principals, truncated: false })
+  const byName = await resolvePeerSession({ selector: 'peer', token: 't', roundTripOrThrow })
+  assert.equal(byName.status, 'ok', 'only the retained principal matches a bare name')
+  assert.equal(byName.session.address, 'alive~tok@box')
+  const byDeadAddress = await resolvePeerSession({ selector: 'dead~tok@box', token: 't', roundTripOrThrow })
+  assert.equal(byDeadAddress.status, 'refusal')
+  assert.equal(byDeadAddress.outcome('read').code, 'peer_not_found')
+  assert.match(byDeadAddress.outcome('read').message, /retained/)
 })

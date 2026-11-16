@@ -281,8 +281,13 @@ function cursorValue(pluginData, realmId, roomId) {
   const scopes = readdirSync(sessionsDir).filter(name => !name.startsWith('.'))
   assert.equal(scopes.length, 1, 'exactly one session scope directory')
   const doc = JSON.parse(readFileSync(join(sessionsDir, scopes[0], 'cursors.json'), 'utf8'))
-  assert.equal(doc.realm_id, realmId, 'the cursor document names its realm')
-  return doc.cursors[roomId].after_seq
+  // Story 2.1 cursor schema v2 (AC3): the document is keyed by realm in a
+  // `realms` map and each room carries read_seq/notified_seq. The v1 shape
+  // (`realm_id` + `cursors[room].after_seq`) is migrated on first read, so
+  // asserting it here would pin the format this story replaced.
+  assert.equal(doc.version, 2, 'the cursor document is schema v2')
+  assert.ok(doc.realms[realmId], 'the cursor document is keyed by its realm')
+  return doc.realms[realmId].rooms[roomId].read_seq
 }
 
 // The real MCP adapter, driven in-process over real JSON-RPC streams: the
