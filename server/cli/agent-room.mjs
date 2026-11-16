@@ -359,6 +359,14 @@ const HELP_TEXT = `agent-room — the human side of your Agent Room installation
 
 Commands:
 
+  agent-room bootstrap [--remote <https-origin> --invite <token>] [--harness <name>] [--scope <key>] [--json]
+      Initialize private state and bind the session scope (idempotent). HARNESS
+      is claude|codex|antigravity|opencode|generic. Add --install or --print to
+      wire host MCP config instead: --print writes nothing and shows the snippet,
+      install guide, and real gate label; --install backs up and merges only the
+      required key into the target settings path. --install and --print are
+      mutually exclusive; --json emits one machine-readable line.
+
   agent-room setup [--chat-id <chat-id>] [--overwrite]
       Choose this installation's Chat ID (one-time). Interactive when run in a
       terminal; with --chat-id (or AGENT_ROOM_CHAT_ID) it needs no terminal and
