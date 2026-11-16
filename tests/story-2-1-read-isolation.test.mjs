@@ -415,6 +415,57 @@ test('STDOUT_FAIL: a failing stdout (EPIPE) exits 1 and leaves read_seq untouche
   )
 })
 
+// --- AC3: CURSOR_WRITE_FAIL — flushed page, cursor write refused -------------
+
+test('CURSOR_WRITE_FAIL: a cursor write failure after a successful flush exits 0 and reports "cursor was not advanced"', async t => {
+  const world = makeWorld(t)
+  const record = await world.waitReady()
+  const port = record.port
+
+  const peerRaw = newKey()
+  const peerBearer = await installationBearer(port, world.sharedData, peerRaw)
+  const peer = await allocateSession(port, peerBearer, 'peer')
+  const env = { AGENT_ROOM_SESSION_SCOPE: 'cursor-squat-scope' }
+  const deps = { pluginDataDir: world.pluginData, sharedDataDir: world.sharedData, env }
+  const readerAddress = await primeReaderSession({ ...deps, peer, port })
+  await sendAddressed(port, peer.session_capability, readerAddress, 'delivered', 'p-1')
+
+  // The read loads its resume position from cursors.json BEFORE the dispatcher
+  // flushes. Squat that path only DURING the flush (after load, before
+  // afterFlush): a directory there makes advanceCursor refuse loudly, while
+  // leaving the read itself free to build a receipt with a working flush.
+  const cursorDir = join(world.pluginData, 'sessions', env.AGENT_ROOM_SESSION_SCOPE, 'cursors.json')
+  const errors = []
+  const previousExitCode = process.exitCode
+  process.exitCode = undefined
+  try {
+    const outcome = await cliMain(['read', '--peer', peer.address], {
+      input: { setEncoding() {}, on() {}, once() {}, removeListener() {} },
+      output: {
+        write(_text, callback) {
+          mkdirSync(cursorDir)
+          if (typeof callback === 'function') callback()
+          return true
+        },
+      },
+      errorOutput: { write: text => errors.push(text) },
+      sharedDataDir: world.sharedData,
+      pluginDataDir: world.pluginData,
+      env,
+    })
+    assert.equal(outcome.status, 'ok', 'the page was delivered to a working stdout')
+    assert.equal(process.exitCode, undefined, 'delivered-but-not-recorded keeps exit 0')
+    assert.equal(errors.length, 1, 'one coded stderr diagnostic')
+    const coded = JSON.parse(errors[0])
+    assert.equal(coded.code, 'cursors_schema_invalid', 'the refusal names the unusable cursor destination')
+    assert.match(coded.message, /cursor was not advanced/)
+  } finally {
+    process.exitCode = previousExitCode
+  }
+
+  assert.ok(existsSync(cursorDir), 'the squatter directory was not overwritten')
+})
+
 // --- AC3: the selector grammar and the exit-2 usage errors ------------------
 
 test('usage: no selector exits 2 naming both flags; both selectors, a bad --limit and a missing peer are refused', async t => {

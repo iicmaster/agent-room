@@ -20,6 +20,7 @@ import { sessionScopeFilePath } from '../server/client/session-state.mjs'
 import { CURSORS_FILENAME, advanceCursor, readCursorsDocument } from '../server/client/cursors.mjs'
 import {
   CLI_ERROR_CURSORS_FILE_TOO_LARGE,
+  CLI_ERROR_CURSORS_LOCK_BUSY,
   CLI_ERROR_CURSORS_SCHEMA_INVALID,
   CURSOR_FILE_MAX_BYTES,
   MESSAGE_TEXT_MAX,
@@ -596,6 +597,29 @@ test('cursors v2: one file holds BOTH positions per room, a v1 file migrates onc
   assert.deepEqual(stored.realms[MIGRATION_REALM].rooms['room-a'].read_seq, 20, 'Math.max keeps the higher position')
   assert.equal(stored.realms[MIGRATION_REALM].rooms['room-a'].notified_seq, 0, 'nothing in this story advances notified_seq')
   assert.equal(statSync(cursorPath).mode & 0o777, 0o600)
+})
+
+test('cursors v2: a live lock held by another writer refuses with cursors_lock_busy and writes no cursor', async t => {
+  const parent = mkdtempSync(join(tmpdir(), 'agent-room-cursors-lock-'))
+  t.after(() => rmSync(parent, { recursive: true, force: true }))
+  const pluginData = join(parent, 'plugin-data')
+  const scope = 'locked-scope'
+  mkdirSync(join(pluginData, 'sessions', scope), { recursive: true, mode: 0o700 })
+  const cursorPath = sessionScopeFilePath(pluginData, scope, CURSORS_FILENAME)
+
+  // A regular lock file whose holder is THIS live process: lockIsStale() sees
+  // a fresh mtime and an alive pid, so it cannot be reclaimed inside the wait.
+  const lockPath = sessionScopeFilePath(pluginData, scope, 'cursors.lock')
+  writeFileSync(lockPath, `${JSON.stringify({ pid: process.pid })}\n`, { mode: 0o600 })
+  t.after(() => { try { rmSync(lockPath, { force: true }) } catch { /* best-effort */ } })
+
+  await assert.rejects(
+    () => advanceCursor(pluginData, {
+      realmId: MIGRATION_REALM, roomId: 'room-a', seq: 5, field: 'read_seq',
+    }, { env: { AGENT_ROOM_SESSION_SCOPE: scope } }),
+    error => error?.code === CLI_ERROR_CURSORS_LOCK_BUSY,
+  )
+  assert.equal(existsSync(cursorPath), false, 'a refused write creates no cursor file')
 })
 
 test('cursors v2: an oversize file is a LOUD refusal (no backup, no reset) and a wrong version is schema-invalid', async t => {
