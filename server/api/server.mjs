@@ -915,14 +915,69 @@ registerHandler('GET /api/status', async function status(context) {
 // shape directOpen returns): pair_key embeds both member fingerprints, and
 // title, created_by_fingerprint, and created_at serve no discovery purpose —
 // they never leave the store layer.
+//
+// Story 2.1 splits the enumeration by CREDENTIAL KIND. A `Session
+// <capability>` caller is a session-scoped principal, and its answer is
+// exactly the session-pair rooms its OWN session holds a
+// session_pair_members row in, projected with peer_session_id (the other
+// session of the pair) — a sibling session of one installation is a
+// different principal and reads a different list (AC1). A Bearer caller keeps
+// the frozen Actor-wide enumeration and sees NO `ssession:` row at all: an
+// installation-wide credential must never enumerate the private pairs the
+// sessions of that installation happen to hold (AC2).
+//
+// The filtering lives here rather than in a new store facade method: the
+// per-room membership read the read route already trusts
+// (sessionPairMembership) plus the routing shape (roomRouting) are the two
+// facts this branch needs, and the store's own enumeration bounds the list.
+// The Story 2.1 Spec Change Log records the substitution.
+//
+// DECLARED CONSEQUENCE (operator decision 2026-11-16): a Bearer caller loses
+// `ssession:` visibility here, and the notifier's and `wait`'s room lists ride
+// this same endpoint with a Bearer — so private pair rooms stay unwatched
+// until Story 3.1 adds the PostCommitBus and the session-scoped watch. Do not
+// compensate in notifier.mjs or wait-commands.mjs; Story 3.1 is the resolver.
 registerHandler('GET /api/rooms', function listRooms(context) {
   const principal = sessionPrincipalOf(context)
   if (principal.ok === false) return principal
   const rooms = context.store.listRoomsForActor(principal.actorFingerprint)
-  return {
-    rooms: rooms.map(room => ({ room_id: room.id, kind: room.kind })),
+  const sessionRow = principal.sessionPrincipal ?? null
+  if (sessionRow !== null) {
+    const visible = []
+    for (const room of rooms) {
+      const routing = context.store.roomRouting({ roomId: room.id })
+      if (routing === null || typeof routing.pair_key !== 'string' || !routing.pair_key.startsWith('ssession:')) continue
+      if (!context.store.sessionPairMembership({ roomId: room.id, sessionId: sessionRow.session_id })) continue
+      const peerSessionId = peerSessionIdOf(routing.pair_key, sessionRow.session_id)
+      visible.push({
+        room_id: room.id,
+        kind: room.kind,
+        ...(peerSessionId === null ? {} : { peer_session_id: peerSessionId }),
+      })
+    }
+    return { rooms: visible }
   }
+  const actorRooms = []
+  for (const room of rooms) {
+    const routing = context.store.roomRouting({ roomId: room.id })
+    if (routing !== null && typeof routing.pair_key === 'string' && routing.pair_key.startsWith('ssession:')) continue
+    actorRooms.push({ room_id: room.id, kind: room.kind })
+  }
+  return { rooms: actorRooms }
 }, 'actor')
+
+// The other session of an `ssession:<min>:<max>` pair key, given one member's
+// session id. Session ids are server-minted UUIDs (no ':' inside), so the
+// canonical key splits unambiguously. A key that does not name this session
+// answers null — the caller then omits peer_session_id rather than guess one.
+function peerSessionIdOf(pairKey, sessionId) {
+  const parts = pairKey.slice('ssession:'.length).split(':')
+  if (parts.length !== 2) return null
+  const [first, second] = parts
+  if (first === sessionId) return second
+  if (second === sessionId) return first
+  return null
+}
 
 // Story 1.7 conversation surface. Identity discipline (NFR-3) holds across
 // all three handlers: the caller's Actor fingerprint and Chat ID come only
@@ -2651,6 +2706,11 @@ export async function startServer({
     ['/api/session-principals', new Set(['GET'])],
     ['/api/messages', new Set(['POST'])],
     ['/api/rooms/:id/messages', new Set(['GET'])],
+    // Story 2.1: the enumeration joins the Session-scheme branch so a
+    // session-scoped principal can ask what THIS session belongs to. The
+    // handler branches on the resolved principal kind; a Bearer keeps its
+    // exact frozen answer.
+    ['/api/rooms', new Set(['GET'])],
     ['/api/status', new Set(['GET'])],
   ])
   const sessionCapabilityVerifier = context => {

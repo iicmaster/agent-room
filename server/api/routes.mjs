@@ -294,6 +294,13 @@ export const RESPONSE_FIELD_VOCABULARY = Object.freeze([
   'ops_total',
   'rejected_queue_full_total',
   'last_batch_ms',
+  // Story 2.1 (additive, dated spine amendment): the peer session id a
+  // session-capability caller sees on each of its own private pair rooms —
+  // GET /api/rooms answers such a caller its own session-pair rooms only, and
+  // this field names the OTHER session of the pair so a reply is addressable
+  // without a second lookup. A Bearer caller's rows never carry it (that
+  // caller sees no session-pair room at all).
+  'peer_session_id',
 ])
 
 // Matching: specific patterns first, wildcard (`/viewer/` + static assets)
