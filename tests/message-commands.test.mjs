@@ -28,7 +28,7 @@ import { loadOrCreateLocalToken } from '../server/api/local-token.mjs'
 import { fingerprintFromPublicKey, loadOrCreateKeypair, signWithInstallationKey } from '../server/keys.mjs'
 import { openRoomLog } from '../server/store/room-log.mjs'
 import { main as cliMain } from '../server/cli/agent-room.mjs'
-import { runReadFamilyCommand, runSendFamilyCommand, runSessionVerify, sendWithRetry } from '../server/cli/message-commands.mjs'
+import { resolvePeerSession, runReadFamilyCommand, runSendFamilyCommand, runSessionVerify, sendWithRetry } from '../server/cli/message-commands.mjs'
 import { AgentRoomRuntimeError } from '../server/runtime.mjs'
 import { authenticate } from '../server/cli/session-commands.mjs'
 
@@ -169,7 +169,7 @@ test('read: the trust matrix applies as in message_read, and a one-shot read wri
   // projection is exactly {seq, from_address, trusted, text}.
   for (const row of receipt.messages) {
     assert.deepEqual(Object.keys(row).sort(), ['from_address', 'seq', 'text', 'trusted'])
-    assert.equal(row.trusted, true, 'local-transport senders deliver')
+    assert.equal(row.trusted, false, 'P3: local-transport delivery is instructed, not verified')
     assert.ok(row.text.startsWith('<untrusted_message '), 'foreign bodies are wrapped')
     assert.ok(row.text.includes('from peer'), 'the body rides inside the wrapper')
   }
@@ -725,4 +725,32 @@ test('round-6 verify: a bind committed behind a 502 runs the bounded cleanup wit
   assert.equal(failed.probe, 'cleanup-unconfirmed')
   assert.equal(JSON.stringify(failed).includes('most likely free'), false, 'an unconfirmed release never claims free')
   assert.match(failed.message, /session replace/)
+})
+
+// --- Story 2.1 review P6/P7: peer resolution refuses a truncated principal
+// list and excludes non-retained principals. These drive the exported pure
+// resolver with an injected list result — no server needed.
+test('resolvePeerSession: a truncated principal list refuses peer_list_truncated, never a false peer_not_found', async () => {
+  const roundTripOrThrow = async () => ({ sessions: [], truncated: true })
+  const resolved = await resolvePeerSession({ selector: 'ghost', token: 't', roundTripOrThrow })
+  assert.equal(resolved.status, 'refusal')
+  const outcome = resolved.outcome('read')
+  assert.equal(outcome.code, 'peer_list_truncated')
+  assert.match(outcome.message, /truncated/)
+})
+
+test('resolvePeerSession: revoked / retention-expired principals cannot resolve or create false ambiguity', async () => {
+  const principals = [
+    { address: 'alive~tok@box', base_name: 'peer', principal_status: 'retained' },
+    { address: 'dead~tok@box', base_name: 'peer', principal_status: 'revoked' },
+    { address: 'gone~tok@box', base_name: 'peer', principal_status: 'retention_expired' },
+  ]
+  const roundTripOrThrow = async () => ({ sessions: principals, truncated: false })
+  const byName = await resolvePeerSession({ selector: 'peer', token: 't', roundTripOrThrow })
+  assert.equal(byName.status, 'ok', 'only the retained principal matches a bare name')
+  assert.equal(byName.session.address, 'alive~tok@box')
+  const byDeadAddress = await resolvePeerSession({ selector: 'dead~tok@box', token: 't', roundTripOrThrow })
+  assert.equal(byDeadAddress.status, 'refusal')
+  assert.equal(byDeadAddress.outcome('read').code, 'peer_not_found')
+  assert.match(byDeadAddress.outcome('read').message, /retained/)
 })

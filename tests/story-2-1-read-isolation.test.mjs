@@ -333,7 +333,8 @@ test('AC3/AC4: read --peer answers the pair page, advances read_seq (never notif
   assert.equal(heldRow.held, true, 'a non-allowlisted remote sender is held')
   assert.equal(heldRow.trusted, false)
   assert.equal(Object.hasOwn(heldRow, 'text'), false, 'AC4: a held row has NO text key at all')
-  assert.deepEqual(Object.keys(heldRow).sort(), ['from_address', 'held', 'seq', 'trusted'])
+  // P4: only `text` is dropped; the operator metadata survives.
+  assert.deepEqual(Object.keys(heldRow).sort(), ['created_at', 'from_address', 'held', 'held_reason', 'reply_to_seq', 'seq', 'trusted'])
   assert.equal(JSON.stringify(remoteReceipt.messages).includes('secret plan'), false, 'no body byte leaves')
 })
 

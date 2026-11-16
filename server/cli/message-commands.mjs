@@ -649,7 +649,7 @@ export async function runReadFamilyCommand(tokens, { pluginDataDir, sharedDataDi
 // `peer_not_found`. P7: only RETAINED principals are addressable; a revoked or
 // retention-expired principal must neither resolve nor create a false
 // ambiguity, and the refusal text discloses that filter.
-async function resolvePeerSession({ selector, token, roundTripOrThrow }) {
+export async function resolvePeerSession({ selector, token, roundTripOrThrow }) {
   const result = await roundTripOrThrow('GET', '/api/session-principals', protocolHeaders(token))
   if (result?.truncated === true) {
     return {
