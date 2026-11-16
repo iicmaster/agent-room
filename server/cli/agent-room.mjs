@@ -865,8 +865,8 @@ export async function main(argv = process.argv.slice(2), {
                 ? await runSessionPrincipalsFamilyCommand(subcommand, argv.slice(2), deps)
                 : command === 'wait'
                 ? await runWaitFamilyCommand(argv.slice(1), deps)
-              : first === 'wake-reset'
-                ? await runWakeResetCommand(argv.slice(1), deps)
+                : command === 'wake-reset'
+                  ? await runWakeResetCommand(argv.slice(1), deps)
                 : command === 'send'
                   ? await runSendFamilyCommand(argv.slice(1), deps)
                   : command === 'read'
