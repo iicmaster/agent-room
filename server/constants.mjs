@@ -914,6 +914,17 @@ export const SESSION_SCOPE_BINDING_LOCK_STALE_MS = 5000
 export const SESSION_SCOPE_BINDING_LOCK_HARD_STALE_MS = 60_000
 export const HOOK_STDIN_MAX_BYTES = 64 * 1024
 export const HOOK_STDIN_TIMEOUT_MS = 500
+// Story 4.2 (AD-9): lifecycle hook contract limits. One total handler budget,
+// one human-vs-auto-wake grace boundary, bounded PostToolUse summaries, and the
+// two auto-wake prompt markers that must NOT reset G1/G2.
+export const HOOK_TOTAL_BUDGET_MS = 1500
+export const USER_PROMPT_WAKE_GRACE_MS = 5_000
+export const HOOK_SUMMARY_MAX_BYTES = 2 * 1024
+export const HOOK_SUMMARY_MAX_MSGS = 5
+export const AUTO_WAKE_MARKERS = Object.freeze([
+  '<channel source="agent-room"',
+  '[agent-room-wake]',
+])
 export const CLAUDE_ENV_FILE_MAX_BYTES = 64 * 1024
 export const NOFILE_RECOMMENDED = 4096
 export const NOFILE_PROBE_TIMEOUT_MS = 1000
