@@ -16,6 +16,22 @@ agent-room bootstrap --remote https://room.example.com --invite ar_inv1_<token> 
 
 Re-running `agent-room bootstrap` is idempotent: existing credentials and online session state are preserved without overwriting keys or tokens.
 
+## Cross-Harness Install (v1.0)
+
+Wire the MCP entrypoint into a host's settings with one non-destructive command. `--harness` is a closed enum: `claude|codex|antigravity|opencode|generic`.
+
+```sh
+# Print the snippet + install guide + real gate label — writes NOTHING:
+agent-room bootstrap --harness claude --print
+agent-room bootstrap --harness generic --print   # prints CLI dm/read/wait setup
+
+# Install into the target path (JSON or TOML as appropriate):
+agent-room bootstrap --harness claude --install --json
+agent-room bootstrap --harness codex --install
+```
+
+Target paths: `claude` → `~/.claude/settings.json`; `codex` → `~/.codex/config.toml`; `antigravity` → `~/.gemini/settings.json`; `opencode` → `~/.config/opencode/opencode.json`; `generic` → `~/.agent-room/env.sh` (shell env, not a host MCP config). `--install` backs up the original as `<file>.agent-room.bak-<ts>` (`0o600`), merges ONLY the required MCP key, preserves all other keys/hooks, and is byte-identical on re-run. An unparseable config or a conflicting required key is refused with a reviewable diff (exit 1, nothing overwritten); a mid-way failure restores every file from backup. No `invite_token`/`session_token` is ever written to host config; paths containing spaces are shell-quoted. `--install` and `--print` are mutually exclusive; an outside-enum `--harness` exits 1 listing the five valid values.
+
 ## Session Scope & Subshells
 
 Every session keeps isolated state (`session.json`, `cursors.json`) under `PLUGIN_DATA/sessions/<scope>/`. Scope resolution follows a 5-step order:
