@@ -3019,6 +3019,14 @@ export async function startServer({
     httpServer = effectiveTls === undefined
       ? createHttpServer(requestHandler)
       : createHttpsServer({ cert: effectiveTls.cert, key: effectiveTls.key }, requestHandler)
+    // Story 3.1: Node's default server.requestTimeout (300 s) would abort a
+    // watch stream exactly at its 300 s lifetime boundary, and headersTimeout
+    // (60 s) is irrelevant because the request completes at the first byte.
+    // Disable the server-level request timeout so the watch stream's own
+    // WATCH_TIMEOUT_MS timer is the single authority; the per-stream handler
+    // still calls request.setTimeout(0)/response.setTimeout(0). This also
+    // benefits the viewer's long-lived SSE stream.
+    httpServer.requestTimeout = 0
     httpServer.on('clientError', (_error, socket) => socket.destroy())
 
     await new Promise((resolvePromise, rejectPromise) => {
