@@ -568,6 +568,9 @@ export async function waitOverWatch({
     }
   } finally {
     clearTimeout(deadlineTimer)
+    // Destroy the open watch socket on EVERY exit path (wake/pause/timeout) —
+    // an un-aborted stream is a live handle that keeps the CLI process alive.
+    wallSignal.abort()
     signal.removeEventListener('abort', relayAbort)
   }
 }

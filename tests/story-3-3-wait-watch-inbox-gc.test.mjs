@@ -10,18 +10,49 @@
 //   AC4 commit->wait exit p95/p99 at 100 waiters, per-scope lock exclusivity.
 
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, lstatSync, statSync, symlinkSync, utimesSync } from 'node:fs'
+import { spawn } from 'node:child_process'
+import { generateKeyPairSync } from 'node:crypto'
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, lstatSync, statSync, symlinkSync, utimesSync } from 'node:fs'
+import { once } from 'node:events'
+import http from 'node:http'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
 import { inboxEntry, appendInboxEntry, sanitizeInboxText } from '../server/client/inbox.mjs'
 import { classifyScope, runGcCommand } from '../server/cli/gc-commands.mjs'
 import { waitOverWatch } from '../server/cli/wait-commands.mjs'
 import { createWakeDispatcher } from '../server/notification/wake-dispatcher.mjs'
+import { loadOrCreateLocalToken } from '../server/api/local-token.mjs'
+import { fingerprintFromPublicKey } from '../server/keys.mjs'
+import { atomicWriteJson } from '../server/runtime.mjs'
+import { saveSessionState } from '../server/client/session-state.mjs'
+
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+const SERVER_ENTRY = join(ROOT, 'server', 'api', 'server.mjs')
+const CLI_ENTRY = join(ROOT, 'server', 'cli', 'agent-room.mjs')
+const PK = 'agent-room-protocol'
 
 const sleep = ms => new Promise(resolvePromise => setTimeout(resolvePromise, ms))
 const NOW = 2_000_000_000_000
+
+function httpRequest(port, method, path, { headers = {}, body } = {}) {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const req = http.request({ host: '127.0.0.1', port, method, path, headers, agent: false }, response => {
+      const chunks = []
+      response.on('data', c => chunks.push(c))
+      response.on('error', rejectPromise)
+      response.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8')
+        resolvePromise({ status: response.statusCode, text, json: () => JSON.parse(text) })
+      })
+    })
+    req.on('error', rejectPromise)
+    if (body !== undefined) req.write(typeof body === 'string' ? body : JSON.stringify(body))
+    req.end()
+  })
+}
 
 function world(t) {
   const dir = mkdtempSync(join(tmpdir(), 'story33-'))
@@ -307,4 +338,139 @@ test('AC4: 100 concurrent wait wakes exit within p95<=250 ms / p99<=1000 ms', as
   t.diagnostic(`100-waiter p95=${p95}ms p99=${p99}ms wall=${Date.now() - started}ms`)
   assert.ok(p95 <= 250, `p95 ${p95}ms exceeds 250 ms`)
   assert.ok(p99 <= 1000, `p99 ${p99}ms exceeds 1000 ms`)
+})
+
+// --- AC1/4 (black-box): real server, Session capability, ssession: room --------
+
+test('E2E: wait over /api/watch wakes on a private ssession: room (Bearer gap closed)', async t => {
+  const parent = mkdtempSync(join(tmpdir(), 'story33-e2e-'))
+  t.after(() => rmSync(parent, { recursive: true, force: true }))
+  const sharedData = join(parent, 'shared')
+  const pluginDataA = join(parent, 'pluginA') // the waiter
+  const pluginDataB = join(parent, 'pluginB') // the sender
+  for (const dir of [sharedData, pluginDataA, pluginDataB]) mkdirSync(dir, { mode: 0o700 })
+
+  const server = spawn(process.execPath, [SERVER_ENTRY], {
+    env: { ...process.env, AGENT_ROOM_DATA_DIR: sharedData },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  let stderr = ''
+  server.stderr.on('data', c => { stderr += c.toString('utf8') })
+  t.after(async () => {
+    if (server.exitCode === null && server.signalCode === null) {
+      server.kill('SIGKILL')
+      await once(server, 'exit').catch(() => {})
+    }
+  })
+  const recordPath = join(sharedData, 'runtime.json')
+  const deadline = Date.now() + 10_000
+  let port = null
+  while (Date.now() < deadline) {
+    if (server.exitCode !== null) throw new Error(`server exited: ${stderr}`)
+    try {
+      const record = JSON.parse(readFileSync(recordPath, 'utf8'))
+      if (Number.isInteger(record.port) && record.port > 0) { port = record.port; break }
+    } catch { /* retry */ }
+    await sleep(25)
+  }
+  assert.ok(port, `server never became ready: ${stderr}`)
+
+  const hdr = (token, capability) => ({
+    [PK]: '1',
+    'content-type': 'application/json; charset=utf-8',
+    ...(token ? { authorization: `Bearer ${token}` } : {}),
+    ...(capability ? { authorization: `Session ${capability}` } : {}),
+  })
+  // Each installation: local auth auto-enrolls, then allocate a Session
+  // principal. The waiter's capability+address are persisted to session.json
+  // so `wait` takes the /api/watch path for this scope.
+  async function install(pluginData, base) {
+    const localToken = loadOrCreateLocalToken(sharedData)
+    const { publicKey } = generateKeyPairSync('ed25519')
+    const raw = publicKey.export({ type: 'spki', format: 'der' }).subarray(-32)
+    const auth = await httpRequest(port, 'POST', '/api/auth/local', {
+      headers: hdr(localToken), body: { public_key: raw.toString('base64url') },
+    })
+    assert.equal(auth.status, 200, auth.text)
+    const token = auth.json().result.session_token
+    const allocated = await httpRequest(port, 'POST', '/api/session-principals', {
+      headers: hdr(token), body: { base_chat_id: base, machine: 'mac', client_type: 'api' },
+    })
+    assert.equal(allocated.status, 200, allocated.text)
+    return { token, principal: allocated.json().result, fingerprint: fingerprintFromPublicKey(raw) }
+  }
+  const a = await install(pluginDataA, 'WaiterA')
+  const b = await install(pluginDataB, 'SenderB')
+
+  // Persist the waiter's Session state under the scope wait will derive.
+  const scope = `p${process.ppid}.${process.pid}`
+  atomicWriteJson(join(pluginDataA, 'config.json'), { chat_id: 'WaiterA', set_up_at: new Date().toISOString() })
+  saveSessionState(pluginDataA, scope, {
+    sessionId: a.principal.session_id,
+    generation: a.principal.generation,
+    address: a.principal.address,
+    baseName: a.principal.base_name,
+    machine: a.principal.machine,
+    capability: a.principal.session_capability,
+  })
+
+  // Launch the real CLI wait (watch path), then send a DM from B to A's full
+  // Session address. This opens an ssession: pair room and publishes a message.
+  const wait = spawn(process.execPath, [CLI_ENTRY, 'wait', '--timeout', '15'], {
+    env: {
+      ...process.env,
+      PLUGIN_DATA: pluginDataA,
+      AGENT_ROOM_DATA_DIR: sharedData,
+      AGENT_ROOM_SESSION_SCOPE: scope,
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  t.after(async () => {
+    if (wait.exitCode === null && wait.signalCode === null) {
+      wait.kill('SIGKILL')
+      await once(wait, 'exit').catch(() => {})
+    }
+  })
+  let waitStdout = ''
+  let waitStderr = ''
+  wait.stdout.setEncoding('utf8')
+  wait.stderr.setEncoding('utf8')
+  wait.stdout.on('data', c => { waitStdout += c })
+  wait.stderr.on('data', c => { waitStderr += c })
+
+  // Wait until the CLI took the fence AND the watch stream subscribed, then
+  // send. The lock file is proof the wait got past setup/auth.
+  const scopeLock = join(pluginDataA, 'sessions', scope, 'wait.lock')
+  const waitReadyAt = Date.now() + 8000
+  while (!existsSync(scopeLock) && Date.now() < waitReadyAt) await sleep(25)
+  assert.ok(existsSync(scopeLock), `wait never took the fence; stderr=${waitStderr}`)
+  await sleep(400) // let /api/watch open and subscribe before the publish
+  const sent = await httpRequest(port, 'POST', '/api/messages', {
+    headers: hdr(null, b.principal.session_capability),
+    body: { to: a.principal.address, client_message_id: 'ssession-e2e-1', text: 'wake me' },
+  })
+  assert.equal(sent.status, 200, `send failed: ${sent.text}`)
+  const roomId = sent.json().result.room_id
+  // A Session-capability room listing names this room with peer_session_id —
+  // proof it is the private ssession: pair a Bearer could not enumerate.
+  const listed = await httpRequest(port, 'GET', '/api/rooms', {
+    headers: hdr(null, a.principal.session_capability),
+  })
+  assert.equal(listed.status, 200, listed.text)
+  const pairRoom = listed.json().result.rooms.find(r => r.room_id === roomId)
+  assert.ok(pairRoom, 'the private room is visible to the Session capability')
+  assert.ok(typeof pairRoom.peer_session_id === 'string' && pairRoom.peer_session_id.length > 0,
+    'the room carries peer_session_id — an ssession: pair room, not an Actor-wide direct room')
+
+  const waitExit = await Promise.race([
+    once(wait, 'exit').then(args => args),
+    sleep(8000).then(() => null),
+  ])
+  assert.ok(waitExit, `wait did not exit after 8s; stderr=${waitStderr}; stdout=${waitStdout}; sentRoom=${roomId}; testPort=${port}`)
+  assert.equal(waitExit[0], 0, `wait exited 0; stderr=${waitStderr}`)
+  const hint = JSON.parse(waitStdout.trim().split('\n').pop())
+  assert.equal(hint.status, 'new_messages', 'wait woke on the ssession: room over /api/watch')
+  assert.equal(hint.room_id, roomId)
+  assert.ok(hint.message.startsWith('woke: '), `woke summary present: ${hint.message}`)
+  t.diagnostic(`E2E ssession: commit->wait exit elapsed_ms=${hint.elapsed_ms}`)
 })
