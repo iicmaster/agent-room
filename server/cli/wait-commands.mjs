@@ -56,9 +56,15 @@ import { dirname, join } from 'node:path'
 import { performance } from 'node:perf_hooks'
 
 import {
+  PROTOCOL_HEADER,
+  PROTOCOL_VERSION,
   READ_HOLD_MAX_MS,
   SESSION_SCOPE_PATTERN,
 } from '../constants.mjs'
+// Story 3.2: the two-phase wake guard rides this long-poll. The transport
+// stays the v0.9 long-poll in this story (3.3 swaps it for /api/watch).
+import { createScopeLedger } from '../client/scope-ledger.mjs'
+import { createWakeDispatcher, pauseHint } from '../notification/wake-dispatcher.mjs'
 import { AgentRoomRuntimeError, assertSafePathKey, ensurePrivateDirectory, isPidAlive, readJsonFile } from '../runtime.mjs'
 import { CURSORS_FILENAME, cursorLockPath, persistedCursorPath, readCursorsDocument, withCursorLock } from '../client/cursors.mjs'
 import { CONNECTION_MODE_ENV, loadChatIdConfig } from '../client/api-client.mjs'
@@ -66,7 +72,7 @@ import { REMOTE_TRANSPORT } from '../client/trust.mjs'
 import { createDeliveryClassifier } from '../notification/delivery.mjs'
 import { ensureServer } from '../client/ensure-server.mjs'
 import { loadRemoteConfig } from '../client/remote-config.mjs'
-import { sessionScopeKey, sessionsDirectoryPath, sessionScopeFilePath } from '../client/session-state.mjs'
+import { sessionScopeKey, sessionsDirectoryPath, sessionScopeFilePath, loadSessionState } from '../client/session-state.mjs'
 import { authenticate, protocolHeaders, roundTrip } from './session-commands.mjs'
 import { decideHeldWake, loadWakePolicy, policyIdentity } from '../notification/wake-policy.mjs'
 
@@ -160,7 +166,7 @@ function firstCandidate(attempts, controller) {
 // FIRST wakeable unread sequence from someone else; an unread backlog of
 // any size fires the same way — the full catch-up read is message_read's
 // job, not the hint's.
-async function holdForRoom({ target, token, roomId, afterSeq, holdMs, ownFingerprint, baselines, classifyRow, decideHeld, suppressedSenders, signal }) {
+async function holdForRoom({ target, token, capability, roomId, afterSeq, holdMs, ownFingerprint, baselines, classifyRow, decideHeld, suppressedSenders, signal }) {
   const holdDeadline = performance.now() + holdMs
   let cursor = Math.max(afterSeq, baselines.get(roomId) ?? 0)
   for (;;) {
@@ -176,7 +182,7 @@ async function holdForRoom({ target, token, roomId, afterSeq, holdMs, ownFingerp
       target,
       'GET',
       `/api/rooms/${encodeURIComponent(roomId)}/messages?after_seq=${cursor}&limit=${WAIT_PAGE_LIMIT}&wait_ms=${hold}`,
-      protocolHeaders(token),
+      roomHeaders({ token, capability }),
       undefined,
       hold + WAIT_HOLD_TIMEOUT_MARGIN_MS,
       { signal },
@@ -372,8 +378,20 @@ async function loadBaselineCursors(pluginDataDir, realmId, env) {
   return new Map()
 }
 
-async function enumerateRooms({ target, token }) {
-  const response = await roundTrip(target, 'GET', '/api/rooms', protocolHeaders(token), undefined)
+// Gap 2.1: Bearer no longer sees `ssession:` pair rooms. When this scope has a
+// stored Session capability, use `Authorization: Session <capability>` for room
+// enumeration and long-polls; otherwise keep the Bearer path (a setup-less
+// waiter has no capability to use). Stored capability is client-side state; no
+// new session is minted here, so this adds no presence/lease footprint.
+function roomHeaders({ token, capability }) {
+  if (typeof capability === 'string' && capability.length > 0) {
+    return { [PROTOCOL_HEADER]: PROTOCOL_VERSION, authorization: `Session ${capability}` }
+  }
+  return protocolHeaders(token)
+}
+
+async function enumerateRooms({ target, token, capability }) {
+  const response = await roundTrip(target, 'GET', '/api/rooms', roomHeaders({ token, capability }), undefined)
   if (response.status !== 200) {
     throw new AgentRoomRuntimeError(
       response.body?.error?.code ?? 'request_failed',
@@ -490,6 +508,12 @@ export async function runWaitFamilyCommand(tokens, { sharedDataDir, pluginDataDi
       target,
       { pluginDataDir, sharedDataDir, env },
     )
+    // Gap 2.1: a stored Session capability (if this installation has one) sees
+    // `ssession:` pair rooms; the unbound Bearer token alone does not. Missing
+    // or unusable state simply keeps the Bearer path.
+    const waitScope = sessionScopeKey({ env, pluginDataDir })
+    let capability = null
+    try { capability = loadSessionState(pluginDataDir, waitScope)?.capability ?? null } catch { /* Bearer fallback */ }
     const status = await roundTrip(target, 'GET', '/api/status', protocolHeaders(token), undefined)
     const realmId = status.body?.result?.realm_id
     if (status.status !== 200 || typeof realmId !== 'string') {
@@ -519,11 +543,31 @@ export async function runWaitFamilyCommand(tokens, { sharedDataDir, pluginDataDi
     // newly armed wait re-evaluates against the persistent cooldown/allowlist.
     const suppressedSenders = new Set()
 
+    // Story 3.2: one loop ledger for this session scope, one dispatcher. The
+    // trust matrix above has ALREADY run (delivery.classifyRow); the dispatcher
+    // routes the winning candidate through Phase A reserve → Phase B (this wake
+    // IS the dispatch — the wait returning to its caller) → Phase C CAS to both
+    // the ledger and cursors.json v2. A hard pause returns exit 0 with a LOCAL
+    // message and posts nothing to chat. The guard is client-side state only.
+    const loopLedger = createScopeLedger(pluginDataDir, waitScope)
+    const wakeDispatcher = createWakeDispatcher({
+      ledger: loopLedger,
+      pluginDataDir,
+      realmId,
+      scope: waitScope,
+      // The trust matrix has ALREADY run via decideDelivery (gate before
+      // ledger). The candidate arrives classified; these seams exist so the
+      // dispatcher owns the two-phase protocol without re-classifying. Held
+      // rows never reach dispatchTrusted — they keep the wake-ledger cooldown.
+      classifyRow: row => ({ held: row?.held === true, actor_fingerprint: row?.actor_fingerprint }),
+      decideHeld: () => true,
+    })
+
     // Fixed rooms (--room) are validated against the enumeration once; the
     // all-rooms default re-enumerates every cycle so a DM opened mid-wait is
     // discovered (an unknown --room is a coded refusal, never a silent
     // watch of nothing).
-    const firstRooms = await enumerateRooms({ target, token })
+    const firstRooms = await enumerateRooms({ target, token, capability })
     let fixedRooms = null
     if (rooms.length > 0) {
       const known = new Set(firstRooms)
@@ -544,7 +588,7 @@ export async function runWaitFamilyCommand(tokens, { sharedDataDir, pluginDataDi
       const remainingMs = deadlineAt - performance.now()
       if (remainingMs <= 0) break
       if (fixedRooms === null) {
-        watched = await enumerateRooms({ target, token })
+        watched = await enumerateRooms({ target, token, capability })
       }
       const holdMs = Math.min(READ_HOLD_MAX_MS, Math.floor(remainingMs))
       const held = watched.slice(0, WAIT_CONCURRENCY_MAX)
@@ -553,7 +597,7 @@ export async function runWaitFamilyCommand(tokens, { sharedDataDir, pluginDataDi
       const attempts = []
       for (const roomId of held) {
         attempts.push(holdForRoom({
-          target, token, roomId, holdMs, ownFingerprint, baselines,
+          target, token, capability, roomId, holdMs, ownFingerprint, baselines,
           classifyRow: decideDelivery, decideHeld, suppressedSenders,
           signal: cycleController.signal,
           afterSeq: baselines.get(roomId) ?? 0,
@@ -573,11 +617,64 @@ export async function runWaitFamilyCommand(tokens, { sharedDataDir, pluginDataDi
       // returning output, or releasing wait.lock. Losers never run policy.
       await Promise.allSettled(attempts)
       if (candidate === null) continue
-      const hit = candidate.verdict?.held === true
-        ? decideHeldWake({ ...ledger, fingerprint: candidate.verdict.actor_fingerprint, policy })
-        : true
-      if (hit === false) {
-        suppressedSenders.add(candidate.verdict.actor_fingerprint)
+      const isHeld = candidate.verdict?.held === true
+      if (isHeld) {
+        // Held: keep the existing 300 s / 10-per-60 s wake-ledger cooldown.
+        // No loop-ledger reserve, no G1/G2, no notified_seq; the dispatcher
+        // records a SEPARATE suppressed_held_seq so a later Trusted row is
+        // never hidden (Held 10 cannot mask Trusted 9).
+        const hit = decideHeldWake({ ...ledger, fingerprint: candidate.verdict.actor_fingerprint, policy })
+        if (hit === false) {
+          suppressedSenders.add(candidate.verdict.actor_fingerprint)
+          continue
+        }
+        wakeDispatcher.dispatchHeld({
+          room_id: candidate.room_id,
+          seq: candidate.seq,
+          actor_fingerprint: candidate.verdict.actor_fingerprint,
+        })
+        baselines.set(candidate.room_id, Math.max(baselines.get(candidate.room_id) ?? 0, candidate.seq))
+        return {
+          status: 'ok',
+          command: 'wait',
+          lines: [JSON.stringify({
+            ok: true,
+            command: 'wait',
+            status: 'new_messages',
+            room_id: candidate.room_id,
+            seq: candidate.seq,
+            elapsed_ms: Math.round(performance.now() - startedMs),
+          })],
+        }
+      }
+
+      // Trusted: the two-phase guard. Phase B is the wait itself returning to
+      // its caller — dispatch() succeeds only when we actually emit the wake.
+      const local = config?.chat_id ?? waitScope
+      const peer = candidate.verdict?.actor_fingerprint ?? 'unknown'
+      const wakeResult = await wakeDispatcher.dispatchTrusted(
+        { room_id: candidate.room_id, seq: candidate.seq, actor_fingerprint: peer, held: false },
+        { local, peer, dispatch: () => true },
+      )
+      loopLedger.drainDiagnostics().forEach(line => process.stderr.write(`${line}\n`))
+      if (wakeResult.action === 'paused') {
+        // Hard Pause: exit 0, LOCAL message only, NOTHING posted to chat.
+        return {
+          status: 'ok',
+          command: 'wait',
+          lines: [JSON.stringify({
+            ok: true,
+            command: 'wait',
+            status: 'paused',
+            message: pauseHint(wakeResult.reason, peer),
+            room_id: candidate.room_id,
+            seq: candidate.seq,
+            elapsed_ms: Math.round(performance.now() - startedMs),
+          })],
+        }
+      }
+      if (wakeResult.action === 'skipped' && wakeResult.reason === 'ledger_busy') {
+        // SQLITE_BUSY > 5 s: skip this wake round with diagnostics, never crash.
         continue
       }
       baselines.set(candidate.room_id, Math.max(baselines.get(candidate.room_id) ?? 0, candidate.seq))
