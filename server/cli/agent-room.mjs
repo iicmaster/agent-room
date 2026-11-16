@@ -711,6 +711,14 @@ export async function main(argv = process.argv.slice(2), {
   pluginDataDir = instanceDataDirectory(),
   env = process.env,
 } = {}) {
+  // E9: a closed pipe (EPIPE) emits a stream `error` IN ADDITION to the write
+  // callback. Without a listener that becomes an uncaught exception and can
+  // replace the coded write_failed line. The write callback path still owns
+  // the refusal — this listener only keeps EPIPE non-fatal. Test doubles may
+  // not be real streams, so attach only where `.on` exists.
+  for (const stream of [output, errorOutput]) {
+    if (typeof stream?.on === 'function') stream.on('error', () => {})
+  }
   const [command, subcommand] = argv
   if (command === 'help' || command === '--help' || command === '-h') {
     output.write(HELP_TEXT)
@@ -830,7 +838,7 @@ export async function main(argv = process.argv.slice(2), {
     return await runHookSessionStart({ input, env, pluginDataDir })
   }
   if (command === 'invite' || command === 'remote' || command === 'ban' || command === 'unban' || command === 'capacity' || command === 'viewer' || command === 'session' || command === 'session-principals' || command === 'wait' || command === 'send' || command === 'read' || command === 'dm' || command === 'sessions' || command === 'bootstrap') {
-    const outcome = command === 'invite'
+    let outcome = command === 'invite'
       ? await runInviteFamilyCommand(subcommand, argv.slice(2), deps)
       : command === 'remote'
         ? await runRemoteFamilyCommand(subcommand, argv.slice(2), deps)
@@ -871,34 +879,45 @@ export async function main(argv = process.argv.slice(2), {
             })
           }
         } catch (error) {
-          errorOutput.write(`${JSON.stringify({
-            ok: false,
+          // E9: output.errorOutput already carry no-op `error` listeners, so an
+          // EPIPE here reaches THIS callback and no uncaught stream error can
+          // replace the coded refusal line below.
+          // P10: fall through to the one common refusal emitter, which sets
+          // exitCode once from the returned status — no duplicate assignment.
+          outcome = {
+            status: 'refusal',
             command: outcome.command,
-            code: error?.code ?? 'write_failed',
+            code: error?.code ?? CLI_ERROR_WRITE_FAILED,
             message: `the ${outcome.command} receipt could not be written to stdout (${error?.code ?? error?.message ?? 'write failed'}); nothing was consumed and the cursor was not advanced`,
-          })}\n`)
-          process.exitCode = 1
-          return { status: 'refusal', command: outcome.command, code: error?.code ?? 'write_failed' }
+          }
         }
-        try {
-          await outcome.afterFlush()
-        } catch (error) {
-          // The page WAS delivered but the position could not be recorded.
-          // Say so loudly on stderr and keep exit 0: the data reached the
-          // caller, and a non-zero code would invite a re-read of a page
-          // already seen.
-          errorOutput.write(`${JSON.stringify({
-            ok: false,
-            command: outcome.command,
-            code: error?.code ?? 'write_failed',
-            message: `the receipt was delivered but the cursor was not advanced (${error?.code ?? error?.message}); the next read re-delivers this page`,
-          })}\n`)
+        if (outcome.status === 'ok') {
+          try {
+            await outcome.afterFlush()
+          } catch (error) {
+            // The page WAS delivered but the position could not be recorded.
+            // Say so loudly on stderr and keep exit 0: the data reached the
+            // caller, and a non-zero code would invite a re-read of a page
+            // already seen.
+            errorOutput.write(`${JSON.stringify({
+              ok: false,
+              command: outcome.command,
+              code: error?.code ?? CLI_ERROR_WRITE_FAILED,
+              message: `the receipt was delivered but the cursor was not advanced (${error?.code ?? error?.message}); the next read re-delivers this page`,
+            })}\n`)
+          }
+          return outcome
         }
+        // Write failure: drop through to the common coded refusal + exit-code
+        // assignment below. Cursor advance was skipped (page never delivered).
+      }
+      if (outcome.status === 'ok') {
+        for (const line of outcome.lines) output.write(`${line}\n`)
+        if (outcome.exitCode === 1) process.exitCode = 1
         return outcome
       }
-      for (const line of outcome.lines) output.write(`${line}\n`)
-      if (outcome.exitCode === 1) process.exitCode = 1
-      return outcome
+      // else: write failure — fall through to the common refusal emitter,
+      // which writes the coded line and sets exitCode exactly once.
     }
     errorOutput.write(`${JSON.stringify({
       ok: false,
