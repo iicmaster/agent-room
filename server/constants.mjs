@@ -929,3 +929,25 @@ export const BOOTSTRAP_READINESS_TIMEOUT_MS = 10_000
 export const CURSOR_FILE_MAX_BYTES = 1024 * 1024
 export const CURSOR_LOCK_STALE_MS = 5000
 export const CURSOR_LOCK_WAIT_MS = 2000
+
+// --- Story 4.1: verified Claude channel + passive MCP notices (AD-9) ---------
+// MCP protocol negotiation: we speak 2025-06-18. A host asking for a newer
+// version we announce supporting (2025-11-25 / 2026-07-28) cleanly downgrades;
+// an unsupported version answers a JSON-RPC error. All live here, once.
+export const MCP_PROTOCOL_VERSION = '2025-06-18'
+export const MCP_PROTOCOL_DOWNGRADE_FROM = Object.freeze(['2025-11-25', '2026-07-28'])
+// resources.subscribe capability: one client may hold at most this many
+// agent-room:// rooms before further subscribe requests are refused.
+export const MCP_RESOURCE_SUBSCRIPTIONS_MAX = 20
+// Outbound channel transport: a frame larger than this backlog is backpressure
+// (Phase B failure → release lease, do NOT move notified_seq, degrade to 1B).
+export const MCP_CHANNEL_OUTBOUND_MAX_BYTES = 64 * 1024
+// Commit -> wake latency budget (p95) and the wait.lock yield budget.
+export const MCP_WAKE_P95_MS = 250
+export const MCP_WAIT_YIELD_MS = 1000
+// Bounded unread piggyback in passive tool results (never a body, never moves
+// notified_seq): at most this many room summaries per result.
+export const MCP_PIGGYBACK_MAX_ROOMS = 20
+// The agent-room resource URI scheme, anchored: agent-room://rooms/<room_id>.
+export const MCP_RESOURCE_URI_PREFIX = 'agent-room://rooms/'
+export const MCP_CHANNEL_SOURCE = 'agent-room'
