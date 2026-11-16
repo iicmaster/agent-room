@@ -103,6 +103,22 @@ test('AC1 sensitive text in prompt never reaches diagnostics', async t => {
 
 // --- AC2: exact 5000 vs 5001 boundary; markers --------------------------------
 
+test('E4-A1: summary clips by UTF-8 BYTES, not UTF-16 chars', () => {
+  // The Epic 4 retrospective reproduced a 4218-byte violation against the
+  // 2048-byte ceiling when a preview contained multibyte characters: the old
+  // `safe.slice(0, budget)` counted UTF-16 code units. Each Thai char is 3
+  // bytes, so 2048 chars would be 6144 bytes.
+  const multibyte = 'ก'.repeat(3000)
+  const state = {
+    heldEligible: [],
+    eligibleTrusted: [{ room_id: 'r', seq: 1, from: 'peer', preview: multibyte }],
+  }
+  const lines = buildHookSummary(state, { maxBytes: 2048, maxMsgs: 5 })
+  for (const line of lines) {
+    assert.ok(Buffer.byteLength(line, 'utf8') <= 2048, `line is ${Buffer.byteLength(line, 'utf8')} bytes`)
+  }
+})
+
 test('AC2 pure boundary: === 5000 no reset, 5001 reset; markers never reset', () => {
   const base = { prompt: 'plain human prompt', lastWakeAtMs: NOW, graceMs: USER_PROMPT_WAKE_GRACE_MS }
   assert.equal(shouldResetOnHumanPrompt({ ...base, nowMs: NOW + 4999 }), false)

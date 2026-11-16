@@ -198,7 +198,20 @@ export function buildHookSummary(state, {
     const safe = sanitizeInboxText(line)
     const budget = maxBytes - total
     if (budget <= 0) break
-    const clipped = safe.slice(0, budget)
+    // AC 4.2-3 budgets BYTES, not UTF-16 code units. `slice(0, budget)` can
+    // emit `budget` multibyte characters = up to 4x the allowed bytes (Epic 4
+    // retro E4-A1: 4218 bytes measured against a 2048 ceiling). Clip on the
+    // UTF-8 byte length instead, and never split a multibyte sequence.
+    const bytes = Buffer.from(safe, 'utf8')
+    let clipped = safe
+    if (bytes.length > budget) {
+      let end = budget
+      // A byte budget may land inside a multibyte sequence; back off to the
+      // nearest UTF-8 boundary rather than emitting a replacement character
+      // (which itself costs bytes and broke the 2048 ceiling by 1).
+      while (end > 0 && (bytes[end] & 0b11000000) === 0b10000000) end -= 1
+      clipped = bytes.subarray(0, end).toString('utf8')
+    }
     out.push(clipped)
     total += Buffer.byteLength(clipped, 'utf8')
   }
