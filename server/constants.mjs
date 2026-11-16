@@ -320,7 +320,6 @@ export const PUBLIC_ERRORS = Object.freeze({
   session_credential_invalid: 'the session capability is missing, invalid, or does not match this session',
   session_expired: 'session principal is expired, retention-expired, or fenced by a newer generation',
   session_revoked: 'session principal was revoked by the operator',
-  migration_source_unreadable: 'the migration source state is unreadable; refusing to seed without it',
   // Story 4.6: the storage admission gate's refusal — free space below the
   // configured refuse reserve, or the disk-full write itself. The send route
   // answers the FR-17 status (a 200 result {status:'storage_low'} naming a
@@ -437,7 +436,6 @@ export const PUBLIC_ERROR_STATUS = Object.freeze({
   session_credential_invalid: 401,
   session_expired: 409,
   session_revoked: 401,
-  migration_source_unreadable: 500,
   sqlite_version_unsupported: 500,
   // Story 4.6: the storage admission gate's coded face, reserved for the
   // store's storage_low refusal should it ever surface outside the send route
