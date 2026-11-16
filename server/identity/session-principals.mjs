@@ -35,7 +35,9 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypt
 
 import { AgentRoomRuntimeError } from '../runtime.mjs'
 import {
+  CHAT_ID_PATTERN,
   CONFLICT_TICKET_TTL_MS,
+  PEER_OFFLINE_CANDIDATES_MAX,
   RETENTION_SWEEP_BATCH_MAX,
   SESSION_ADDRESS_MAX_CHARS,
   SESSION_BASE_LEASE_MS,
@@ -316,6 +318,26 @@ export function createSessionPrincipalOperations({ database, withImmediateTransa
       LIMIT 1
     `)
     .get(baseName)
+
+  // Story 2.2 (the peer_offline candidate source): retained principals with the
+  // given lower(base_name) that are NOT currently occupying a live lease,
+  // freshest heartbeat first. `nowMs` is EXPLICIT (never defaulted) so replayed
+  // clocks and the resolver-retention sharp edge (F-12) cannot silently filter
+  // the row out. The `lower(base_name) = ?` predicate rides the partial
+  // idx_session_principals_live_base index; LIMIT is bounded and over-fetches
+  // by one so the caller can detect truncation without a full scan.
+  const selectRetiredByBaseForCandidates = (baseNameLower, nowMs, limit) => database
+    .prepare(`
+      SELECT ${PRINCIPAL_COLUMNS}
+      FROM session_principals
+      WHERE lower(base_name) = ?
+        AND principal_status = 'retained'
+        AND principal_retention_expires_at > ?
+        AND NOT (base_lease_status = 'occupied' AND base_lease_expires_at > ?)
+      ORDER BY last_heartbeat_at DESC
+      LIMIT ?
+    `)
+    .all(baseNameLower, new Date(nowMs).toISOString(), new Date(nowMs).toISOString(), limit)
 
   const failAgentIdTaken = (baseName, holder) => {
     const error = new AgentRoomRuntimeError(
@@ -699,6 +721,47 @@ export function createSessionPrincipalOperations({ database, withImmediateTransa
         LIMIT 1
       `).get(validBase, cutoff)
       return row ? plainPrincipal(row) : null
+    },
+
+    // Story 2.2: find the OCCUPYING peer for a bare Agent ID (case-insensitive
+    // lower(base_name)). Uses the explicit nowMs (never the retention-filtering
+    // default of resolveSessionPrincipalByAddress). At most one row can be
+    // occupied per base under the partial unique index; a second occupied row
+    // would be a schema violation, so the first is authoritative.
+    findOccupiedByBaseInTx(baseName, nowMs) {
+      assertOpen()
+      if (!database.isTransaction) {
+        fail('invalid_argument', 'findOccupiedByBaseInTx requires an active transaction')
+      }
+      const validBase = requireChatId(baseName)
+      requireNow(nowMs)
+      const row = database.prepare(`
+        SELECT ${PRINCIPAL_COLUMNS}
+        FROM session_principals
+        WHERE principal_status = 'retained'
+          AND base_lease_status = 'occupied'
+          AND base_lease_expires_at > ?
+          AND lower(base_name) = lower(?)
+        LIMIT 1
+      `).get(new Date(nowMs).toISOString(), validBase)
+      return row ? plainPrincipal(row) : null
+    },
+
+    // Story 2.2: the retained-but-not-occupied peers for a bare Agent ID, used
+    // to build the 409 peer_offline candidates. `nowMs` explicit; the query is
+    // indexed and bounded (PEER_OFFLINE_CANDIDATES_MAX + 1 lets the caller see
+    // truncation). Returns plainPrincipal projections ordered freshest-first.
+    listRetiredByBaseForCandidatesInTx(baseNameLower, nowMs) {
+      assertOpen()
+      if (!database.isTransaction) {
+        fail('invalid_argument', 'listRetiredByBaseForCandidatesInTx requires an active transaction')
+      }
+      if (typeof baseNameLower !== 'string' || !CHAT_ID_PATTERN.test(baseNameLower)) {
+        fail('invalid_request', 'baseNameLower must be a lower-cased Agent ID')
+      }
+      requireNow(nowMs)
+      const rows = selectRetiredByBaseForCandidates(baseNameLower, nowMs, PEER_OFFLINE_CANDIDATES_MAX + 1)
+      return rows.map(plainPrincipal)
     },
 
     allocateSessionPrincipalInTx(options) {
