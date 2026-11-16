@@ -507,25 +507,29 @@ test('trust chain end-to-end: stranger hold with zero body bytes, cursor persist
   // Cursor snapshots for the monotonicity link, taken at every step.
   let previousCursors = null
   let previousCursorBytes = null
+  // Story 2.1: the document is schema v2 — per-realm, then per-room entries
+  // carrying read_seq AND notified_seq. This helper exposes the realm's rooms
+  // so every assertion below reads one position by its own name.
   const readCursorDoc = () => JSON.parse(readFileSync(cursorsPath, 'utf8'))
+  const roomsOf = doc => doc.realms?.[realmId]?.rooms ?? {}
   const assertCursorsFile = label => {
     assert.equal(existsSync(cursorsPath), true, `${label}: cursors.json exists`)
     assert.equal(statSync(cursorsPath).mode & 0o777, 0o600, `${label}: cursors.json is 0600`)
     return readCursorDoc()
   }
   const assertMonotonic = (label, doc) => {
-    const cursors = doc.cursors
-    for (const [roomId, entry] of Object.entries(cursors)) {
-      const afterSeq = entry.after_seq
-      assert.equal(Number.isSafeInteger(afterSeq) && afterSeq >= 0, true, `${label}: ${roomId} cursor is a non-negative integer`)
+    const rooms = roomsOf(doc)
+    for (const [roomId, entry] of Object.entries(rooms)) {
+      assert.equal(Number.isSafeInteger(entry.read_seq) && entry.read_seq >= 0, true, `${label}: ${roomId} read_seq is a non-negative integer`)
+      assert.equal(Number.isSafeInteger(entry.notified_seq) && entry.notified_seq >= 0, true, `${label}: ${roomId} notified_seq is a non-negative integer`)
       if (previousCursors !== null && previousCursors.has(roomId)) {
         assert.ok(
-          afterSeq >= previousCursors.get(roomId),
-          `${label}: the ${roomId} cursor never moves backward (${previousCursors.get(roomId)} -> ${afterSeq})`,
+          entry.read_seq >= previousCursors.get(roomId),
+          `${label}: the ${roomId} cursor never moves backward (${previousCursors.get(roomId)} -> ${entry.read_seq})`,
         )
       }
     }
-    previousCursors = new Map(Object.entries(cursors).map(([roomId, entry]) => [roomId, entry.after_seq]))
+    previousCursors = new Map(Object.entries(rooms).map(([roomId, entry]) => [roomId, entry.read_seq]))
     previousCursorBytes = readFileSync(cursorsPath)
   }
 
@@ -591,13 +595,14 @@ test('trust chain end-to-end: stranger hold with zero body bytes, cursor persist
   // --- Link 2: the cursor advanced and persisted; ingestion stays separate -----
 
   const cursorsAfterHold = assertCursorsFile('after the held read')
-  assert.deepEqual(keysOf(cursorsAfterHold).filter(name => name !== 'seeded_at').sort(), ['cursors', 'realm_id', 'version'])
-  assert.equal(cursorsAfterHold.realm_id, realmId)
-  assert.equal(cursorsAfterHold.version, 1)
-  assert.deepEqual(keysOf(cursorsAfterHold.cursors), [dmId], 'exactly the pair room entry')
-  assert.deepEqual(keysOf(cursorsAfterHold.cursors[dmId]), ['after_seq', 'updated_at'])
-  assert.equal(cursorsAfterHold.cursors[dmId].after_seq, 1, 'the cursor advanced past the held seq 1')
-  assert.equal(Number.isFinite(Date.parse(cursorsAfterHold.cursors[dmId].updated_at)), true)
+  assert.deepEqual(keysOf(cursorsAfterHold).sort(), ['realms', 'version'])
+  assert.equal(cursorsAfterHold.version, 2)
+  const heldRooms = roomsOf(cursorsAfterHold)
+  assert.deepEqual(keysOf(heldRooms), [dmId], 'exactly the pair room entry')
+  assert.deepEqual(keysOf(heldRooms[dmId]).sort(), ['notified_seq', 'read_seq', 'updated_at'])
+  assert.equal(heldRooms[dmId].read_seq, 1, 'read_seq advanced past the held seq 1')
+  assert.equal(heldRooms[dmId].notified_seq, 0, 'notified_seq is never advanced by a read')
+  assert.equal(Number.isFinite(Date.parse(heldRooms[dmId].updated_at)), true)
   assert.equal(existsSync(heldPath), true, 'held ingestion state exists')
   assert.notEqual(cursorsPath, heldPath)
   // v0.9.0: cursors live per session (sessions/<scope>/cursors.json); held
@@ -656,9 +661,9 @@ test('trust chain end-to-end: stranger hold with zero body bytes, cursor persist
   assert.equal(typeof dmRecord.cached_at, 'undefined')
 
   const cursorsAfterFill = assertCursorsFile('after the fill read')
-  assert.equal(cursorsAfterFill.cursors[dmId].after_seq, 1)
-  assert.equal(cursorsAfterFill.cursors[broadcastRoomId].after_seq, HELD_CACHE_MAX + 2, 'the fill room cursor landed at head')
-  assert.deepEqual(keysOf(cursorsAfterFill.cursors).sort(), [broadcastRoomId, dmId].sort())
+  assert.equal(roomsOf(cursorsAfterFill)[dmId].read_seq, 1)
+  assert.equal(roomsOf(cursorsAfterFill)[broadcastRoomId].read_seq, HELD_CACHE_MAX + 2, 'the fill room cursor landed at head')
+  assert.deepEqual(keysOf(roomsOf(cursorsAfterFill)).sort(), [broadcastRoomId, dmId].sort())
   assertMonotonic('after the fill read', cursorsAfterFill)
 
   // The human surface, link A: the listing shows every record, metadata only.
@@ -764,7 +769,7 @@ test('trust chain end-to-end: stranger hold with zero body bytes, cursor persist
   assertBodyPresent('post-allow delivery result', deliveredRead, DELIVERED_FRAGMENTS)
 
   const cursorsAfterAllow = assertCursorsFile('after the delivered read')
-  assert.equal(cursorsAfterAllow.cursors[dmId].after_seq, 2, 'the delivered seq consumed like any other')
+  assert.equal(roomsOf(cursorsAfterAllow)[dmId].read_seq, 2, 'the delivered seq consumed like any other')
   assertMonotonic('after the delivered read', cursorsAfterAllow)
 
   // --- Link 5: --remove holds the future without touching the past -------------
@@ -810,8 +815,8 @@ test('trust chain end-to-end: stranger hold with zero body bytes, cursor persist
   assert.equal(countAfterRemove.held_count, 1)
 
   const cursorsAfterRemove = assertCursorsFile('after the re-held read')
-  assert.equal(cursorsAfterRemove.cursors[dmId].after_seq, 3, 'the re-held seq is consumed by the cursor too')
-  assert.equal(cursorsAfterRemove.cursors[broadcastRoomId].after_seq, HELD_CACHE_MAX + 2)
+  assert.equal(roomsOf(cursorsAfterRemove)[dmId].read_seq, 3, 'the re-held seq is consumed by the cursor too')
+  assert.equal(roomsOf(cursorsAfterRemove)[broadcastRoomId].read_seq, HELD_CACHE_MAX + 2)
   assertMonotonic('after the re-held read', cursorsAfterRemove)
 
   const dmLogAfterChain = messageRows(join(world.sharedData, DATABASE_FILENAME), dmId)

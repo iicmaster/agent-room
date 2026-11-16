@@ -652,7 +652,17 @@ export function createMcpServer({
             }
           }
         }
-        const stored = loadCursors(pluginData, realm)[args.room_id]?.read_seq
+        // An unreadable cursor file must never lose the page: the read
+        // proceeds from position 0 and the failure is reported on the result
+        // (cursor_persisted false plus a coded note) — the same discipline the
+        // advance failure below has always had.
+        const notes = []
+        let stored
+        try {
+          stored = loadCursors(pluginData, realm, { env, scope: sessionScope }).get(args.room_id)?.read_seq
+        } catch (error) {
+          notes.push(`cursor not readable: ${error?.code ?? 'read_failed'}`)
+        }
         const afterSeq = args.after_seq !== undefined
           ? args.after_seq
           : (typeof stored === 'number' && Number.isSafeInteger(stored) && stored >= 0 ? stored : 0)
@@ -705,12 +715,11 @@ export function createMcpServer({
         // registration failure can never block the consumed page, and a
         // cursor failure can never lose the held record.
         let cursorPersisted = true
-        const notes = []
         try {
           await advanceCursor(
             pluginData,
             { realmId: realm, roomId: args.room_id, seq: result.next_after_seq, field: 'read_seq' },
-            { env },
+            { env, scope: sessionScope },
           )
         } catch (error) {
           cursorPersisted = false
