@@ -686,6 +686,28 @@ export const HELD_WAKE_COOLDOWN_MS = 300_000
 export const HELD_WAKE_BUDGET = 10
 export const HELD_WAKE_BUDGET_WINDOW_MS = 60_000
 
+// --- Story 3.2: wake loop guard, two-phase wake, and wake reset (AD-9) --------
+// The two-phase wake's lease: Phase A reserves (room, inflight_seq,
+// inflight_until_ms = now + WAKE_INFLIGHT_MS); a Phase B crash leaves the lease
+// to expire within this bound, during which seq may be retried exactly once.
+export const WAKE_INFLIGHT_MS = 2000
+// G1 per-pair limit: warn at the 6th wake, allow through the 8th, hard-pause
+// from the 9th; counters expire LOOP_TTL_MS after the first wake in the window.
+export const LOOP_WARN_AT = 6
+export const LOOP_PAIR_LIMIT = 8
+// G2 is the whole Session Scope's shared budget across every room: the shared
+// BEGIN IMMEDIATE reservation must never let two rooms read 24 and both spend
+// the 25th wake.
+export const LOOP_GLOBAL_LIMIT = 25
+// Both G1 and G2 counters are silent for this window after their first wake.
+export const LOOP_TTL_MS = 1_800_000
+// G3 leading-edge 0 ms on idle, trailing coalesce of a burst. 50 peers in one
+// burst collapse to one wake cycle (+1 per G2 crossing, +1 per pair in batch).
+export const TRAILING_COALESCE_MS = 150
+// SQLITE_BUSY past this budget skips the wake round with diagnostics instead of
+// crashing wait. Distinct from the wake ledger's short busy_timeout/retries.
+export const LEDGER_BUSY_MAX_MS = 5000
+
 // Story 7.2 (the observed incumbent): the conflict ticket's lifetime and
 // bounds. The TTL is the operator's confirmation window — fixed
 // (non-sliding), 120 s: the CAS comparison makes staleness safe, so the

@@ -137,6 +137,7 @@ import { runViewerFamilyCommand } from './viewer-commands.mjs'
 import { runSessionFamilyCommand } from './session-commands.mjs'
 import { runSessionPrincipalsFamilyCommand } from './session-principals-commands.mjs'
 import { runWaitFamilyCommand } from './wait-commands.mjs'
+import { runWakeResetCommand } from './wake-reset-commands.mjs'
 import { loadRemoteConfig } from '../client/remote-config.mjs'
 import { runDmCommand, runReadFamilyCommand, runSendFamilyCommand, runSessionVerify, runSessionsCommand } from './message-commands.mjs'
 import { runBootstrapCommand } from './bootstrap-commands.mjs'
@@ -601,10 +602,20 @@ Commands:
       included) and starts — run it only with every waiter, launcher and
       competing reclaim quiesced; it is a manual recovery contract, not a
       concurrency-safe protocol. Creates no setup or identity: setup must be complete first (not_set_up
-      otherwise), and the wait never claims the Chat ID, never writes
-      cursors, and never changes trust. Honest scope: this wakes a LIVE host
-      session; an agent with no live session is woken by nothing — the
+      otherwise), and the wait never claims the Chat ID, never moves read_seq,
+      and never changes trust. Each successful trusted wake advances notified_seq
+      (the wake watermark) through the loop guard; a hard pause at 8 wakes per
+      pair / 25 per scope returns {status:"paused", message:"... run agent-room
+      wake-reset ..."} and posts nothing to chat. Honest scope: this wakes a
+      LIVE host session; an agent with no live session is woken by nothing — the
       durable log makes the catch-up exact when it returns.
+
+  agent-room wake-reset (--peer <address|agent-id> | --all) [--scope <scope>] [--json]
+      Re-enable a hard-paused auto-wake pair (--peer: the same selector as
+      read/dm) or every pair in this scope (--all). --all affects the CURRENT
+      session scope only; use --scope <k> explicitly for another scope. Exactly
+      one of --peer and --all is required (neither/both is a usage error, exit
+      2). Clears G1/G2 counters only; never touches notified_seq or Held state.
 
   agent-room help
       Show this help.
@@ -837,7 +848,7 @@ export async function main(argv = process.argv.slice(2), {
     const { runHookSessionStart } = await import('./hook-session-start.mjs')
     return await runHookSessionStart({ input, env, pluginDataDir })
   }
-  if (command === 'invite' || command === 'remote' || command === 'ban' || command === 'unban' || command === 'capacity' || command === 'viewer' || command === 'session' || command === 'session-principals' || command === 'wait' || command === 'send' || command === 'read' || command === 'dm' || command === 'sessions' || command === 'bootstrap') {
+  if (command === 'invite' || command === 'remote' || command === 'ban' || command === 'unban' || command === 'capacity' || command === 'viewer' || command === 'session' || command === 'session-principals' || command === 'wait' || command === 'wake-reset' || command === 'send' || command === 'read' || command === 'dm' || command === 'sessions' || command === 'bootstrap') {
     let outcome = command === 'invite'
       ? await runInviteFamilyCommand(subcommand, argv.slice(2), deps)
       : command === 'remote'
@@ -854,6 +865,8 @@ export async function main(argv = process.argv.slice(2), {
                 ? await runSessionPrincipalsFamilyCommand(subcommand, argv.slice(2), deps)
                 : command === 'wait'
                 ? await runWaitFamilyCommand(argv.slice(1), deps)
+                : command === 'wake-reset'
+                  ? await runWakeResetCommand(argv.slice(1), deps)
                 : command === 'send'
                   ? await runSendFamilyCommand(argv.slice(1), deps)
                   : command === 'read'
