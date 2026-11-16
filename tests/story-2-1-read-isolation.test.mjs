@@ -427,6 +427,11 @@ test('usage: no selector exits 2 naming both flags; both selectors, a bad --limi
   assert.equal(missing.status, 'refusal')
   assert.equal(missing.code, 'peer_not_found')
 
+  // `--json` is accepted as a no-op (the receipt is JSON already), so a
+  // script written against the documented grammar is not refused.
+  const withJson = await runReadFamilyCommand(['--room', 'room-x', '--json'], deps)
+  assert.notEqual(withJson.status, 'usage', '--json is accepted')
+
   // The dispatcher maps usage to exit 2 and refusal to exit 1.
   const previousExitCode = process.exitCode
   process.exitCode = undefined

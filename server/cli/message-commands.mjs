@@ -371,7 +371,11 @@ export async function runSendFamilyCommand(tokens, { pluginDataDir, sharedDataDi
 export async function runReadFamilyCommand(tokens, { pluginDataDir, sharedDataDir, env = process.env }) {
   const command = 'read'
   try {
-    const parsed = parseFlags(tokens, new Map([
+    // `--json` is accepted and is a no-op: this command's output is one JSON
+    // receipt line already, so the flag only exists for callers that pass it
+    // out of habit from the other families. Stripped before parsing because
+    // parseFlags' grammar is value-carrying only.
+    const parsed = parseFlags(tokens.filter(token => token !== '--json'), new Map([
       ['peer', 'string'], ['room', 'string'], ['after-seq', 'integer'], ['limit', 'integer'], ['wait-ms', 'integer'],
     ]))
     if (parsed.error !== undefined) return usage(command, parsed.error)
