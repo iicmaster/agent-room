@@ -686,6 +686,27 @@ export const HELD_WAKE_COOLDOWN_MS = 300_000
 export const HELD_WAKE_BUDGET = 10
 export const HELD_WAKE_BUDGET_WINDOW_MS = 60_000
 
+// --- Story 3.3: wait over watch, inbox rotation, scope GC (AD-9) ----------
+// `wait`'s single monotonic deadline bounds auth, watch subscribe and every
+// reconnect; it does NOT reset on a dropped stream. Default 600 s, hard max
+// 3600 s (the Story 3.3 bound supersedes the v0.9 300/600 pair).
+export const WAIT_DEFAULT_TIMEOUT_S = 600
+export const WAIT_MAX_TIMEOUT_S = 3600
+// Inbox JSONL resilience: rotate BEFORE an append would exceed either bound,
+// keeping at most INBOX_MAX_FILES files (active + .1 + .2). A trusted text body
+// above INBOX_TEXT_MAX_BYTES is replaced by a summary + read pointer.
+export const INBOX_MAX_BYTES = 1024 * 1024
+export const INBOX_MAX_LINES = 500
+export const INBOX_MAX_FILES = 3
+export const INBOX_TEXT_MAX_BYTES = 64 * 1024
+// Scope GC: at most GC_SCOPE_BATCH scopes per GC_SCOPE_WINDOW_MS window; a
+// dead `p*` scope is collectable after GC_PID_GRACE_MS, a server-confirmed
+// stale/revoked scope after GC_RETENTION_MS.
+export const GC_SCOPE_BATCH = 100
+export const GC_SCOPE_WINDOW_MS = 100
+export const GC_PID_GRACE_MS = 24 * 60 * 60 * 1000
+export const GC_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
+
 // --- Story 3.2: wake loop guard, two-phase wake, and wake reset (AD-9) --------
 // The two-phase wake's lease: Phase A reserves (room, inflight_seq,
 // inflight_until_ms = now + WAKE_INFLIGHT_MS); a Phase B crash leaves the lease
