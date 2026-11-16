@@ -107,6 +107,7 @@ import {
   CHAT_ID_MAX,
   CLIENT_CONFIG_MAX_BYTES,
   CLIENT_REQUEST_TIMEOUT_MS,
+  CLI_ERROR_WRITE_FAILED,
   PUBLIC_ERROR_STATUS,
   chatIdForms,
 } from '../constants.mjs'

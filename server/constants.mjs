@@ -488,6 +488,9 @@ export const CLI_ERROR_PEER_AMBIGUOUS = 'peer_ambiguous'
 // frame cap. A bare-name peer beyond that cap is UNKNOWN, not absent — refuse
 // loudly rather than answer a false peer_not_found.
 export const CLI_ERROR_PEER_LIST_TRUNCATED = 'peer_list_truncated'
+// Story 2.1 review P10: the dispatcher's failed-stdout refusal. Named here so
+// the code is not a coinage at the write callback's throw site.
+export const CLI_ERROR_WRITE_FAILED = 'write_failed'
 export const CLI_ERROR_CODES = Object.freeze([
   CLI_ERROR_SESSION_NOT_FOUND,
   CLI_ERROR_TIMEOUT,
@@ -496,6 +499,7 @@ export const CLI_ERROR_CODES = Object.freeze([
   CLI_ERROR_CURSORS_FILE_TOO_LARGE,
   CLI_ERROR_PEER_AMBIGUOUS,
   CLI_ERROR_PEER_LIST_TRUNCATED,
+  CLI_ERROR_WRITE_FAILED,
 ])
 
 // --- Schema-v2 store internals -------------------------------------------------
