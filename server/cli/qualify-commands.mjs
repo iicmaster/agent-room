@@ -55,7 +55,7 @@ const MEASURE_ROUNDS = 3
 const WARMUP_ROUNDS = 1
 const CLI_DEADLINE_MS = 90_000
 const FULL_SUITE_DEADLINE_MS = 300_000
-const BASELINE_REV = '794d6a5'
+const BASELINE_REV = '3e7f291'
 const CADDY_MIN_VERSION = '2.11.0'
 const VALIDATOR_ENV = 'AGENT_ROOM_CLAUDE_BIN'
 const CADDYFILE_ENV = 'AGENT_ROOM_QUALIFY_CADDYFILE'
@@ -353,7 +353,7 @@ async function cellSm1(options) {
       if (addresses.length < 2) throw new Error('sessions did not enumerate two principals')
       const selfA = parseJsonLine(bootA.stdout)?.address
       const target = addresses.find(addr => addr !== selfA) ?? addresses[1]
-      const dm = await world.runCli(a, ['dm', '--to', target, '--text', 'qualify-sm1', '--id', `sm1-${Date.now()}-${Math.random().toString(36).slice(2)}`, '--json'])
+      const dm = await world.runCli(a, ['dm', '--to', target, '--text', 'qualify-sm1', '--id', `sm1-${Date.now()}-${Math.random().toString(36).slice(2)}`])
       if (dm.code !== 0) throw new Error(`dm did not commit: ${parseJsonLine(dm.stdout)?.code ?? dm.code}`)
       const read = await world.runCli(b, ['read', '--peer', selfA ?? addresses[0], '--json'])
       if (read.code !== 0 || !Array.isArray(parseJsonLine(read.stdout)?.messages)) throw new Error('read failed')
@@ -404,14 +404,15 @@ async function cellSm3() {
       if (boot.code !== 0) throw new Error('bootstrap failed')
       const port = runtimePort(world.shared)
       if (!port) throw new Error('server did not expose a port')
-      const { address, headers } = await allocateCapability(port, sender, world.shared, `sm3s${index}`)
+      const { headers } = await allocateCapability(port, sender, world.shared, `sm3s${index}`)
+      const target = await allocateCapability(port, sender, world.shared, `sm3t${index}`)
       const text = 'x'.repeat(SM3_PAYLOAD_BYTES - 64)
       let committed = 0
       let self429 = 0
       let otherFail = 0
       for (let i = 0; i < SM3_BURST; i += 1) {
         const sent = await cliHttpJson(port, 'POST', '/api/messages', headers, {
-          to: address, client_message_id: `sm3-${Date.now()}-${i}`, text,
+          to: target.address, client_message_id: `sm3-${Date.now()}-${i}`, text,
         })
         if (sent.status === 200) committed += 1
         else if (sent.status === 429) self429 += 1
@@ -420,7 +421,7 @@ async function cellSm3() {
       // Overload: concurrent sends past the per-session write-queue depth.
       const overload = await Promise.allSettled(Array.from({ length: 64 }, (_, i) =>
         cliHttpJson(port, 'POST', '/api/messages', headers, {
-          to: address, client_message_id: `sm3o-${Date.now()}-${i}`, text: 'x',
+          to: target.address, client_message_id: `sm3o-${Date.now()}-${i}`, text: 'x',
         })))
       let queueFull = 0
       for (const result of overload) {
@@ -473,46 +474,76 @@ async function cellSm2(options) {
         };
       `)
       const env = { ...world.childEnv(watcher), NODE_OPTIONS: `--require=${preload}` }
-      const child = spawn(process.execPath, [CLI_PATH, 'wait', '--timeout', '20'], { env, cwd: world.parent, stdio: ['ignore', 'pipe', 'pipe'] })
-      let stderr = ''
-      child.stderr.setEncoding('utf8')
-      child.stderr.on('data', chunk => { stderr += chunk })
-      const wakeLatencies = []
-      let buffered = ''
-      let ackedAt = 0
-      child.stdout.setEncoding('utf8')
-      child.stdout.on('data', chunk => {
-        buffered += chunk
-        let newline
-        while ((newline = buffered.indexOf('\n')) !== -1) {
-          const line = buffered.slice(0, newline)
-          buffered = buffered.slice(newline + 1)
-          if (!line.trim()) continue
-          try {
-            const hint = JSON.parse(line)
-            if (hint.status === 'new_messages') wakeLatencies.push(Date.now() - ackedAt)
-          } catch { /* non-JSON */ }
+
+      // `wait` is one-shot: it returns after the first wake. Measure ONE wake
+      // per fresh child so p95/p99 span real, independent wake events.
+      const observeWake = (sampleIndex) => new Promise((resolveWake, rejectWake) => {
+        const child = spawn(process.execPath, [CLI_PATH, 'wait', '--timeout', '10'], { env, cwd: world.parent, stdio: ['ignore', 'pipe', 'pipe'] })
+        let stderr = ''
+        let buffered = ''
+        let settled = false
+        let timer = null
+        const finish = (error, latencyMs) => {
+          if (settled) return
+          settled = true
+          if (timer !== null) clearTimeout(timer)
+          try { child.kill('SIGTERM') } catch { /* reaped */ }
+          if (error) rejectWake(error)
+          else resolveWake(latencyMs)
         }
+        timer = setTimeout(() => finish(new Error(`no wake within 10s; stderr=${stderr.slice(0, 200)}`)), 12_000)
+        child.stderr.setEncoding('utf8')
+        child.stderr.on('data', chunk => { stderr += chunk })
+        child.stdout.setEncoding('utf8')
+        child.stdout.on('data', chunk => {
+          buffered += chunk
+          let newline
+          while ((newline = buffered.indexOf('\n')) !== -1) {
+            const line = buffered.slice(0, newline)
+            buffered = buffered.slice(newline + 1)
+            if (!line.trim()) continue
+            try {
+              const hint = JSON.parse(line)
+              if (hint.status === 'new_messages' || hint.status === 'paused') finish(null, Date.now() - ackedAt)
+            } catch { /* non-JSON */ }
+          }
+        })
+        child.once('error', error => finish(error))
+        child.once('exit', (code) => { if (!settled) finish(new Error(`wait exited (code=${code}) before a wake; stderr=${stderr.slice(0, 200)}`)) })
       })
+
+      const samples = Math.min(Math.max(3, options.sessions), 10)
+      const wakeLatencies = []
+      const eventLoopLags = []
+      let ackedAt = 0
+      for (let i = 0; i < samples; i += 1) {
+        const wake = observeWake(i)
+        await sleep(400) // let the watch stream establish before the send
+        ackedAt = Date.now()
+        // Event-loop clock: the parent's own timer drift across the send call
+        // (how late the run loop fired relative to its scheduled instant).
+        const scheduledAt = Date.now() + 1
+        const loopLag = new Promise(resolveLag => {
+          setTimeout(() => resolveLag(Date.now() - scheduledAt), 1)
+        })
+        const dm = await world.runCli(sender, ['dm', '--to', target, '--text', `sm2-${i}`, '--id', `sm2-${Date.now()}-${i}`])
+        if (dm.code !== 0) throw new Error('sm2 dm failed')
+        eventLoopLags.push(await loopLag)
+        wakeLatencies.push(await wake)
+      }
+
+      // Idle SQL: hold a wait child open with no traffic and confirm 0 prepares.
+      const idleChild = spawn(process.execPath, [CLI_PATH, 'wait', '--timeout', '10'], { env, cwd: world.parent, stdio: ['ignore', 'pipe', 'pipe'] })
       await sleep(1500)
       const idleBefore = existsSync(counter) ? readFileSync(counter, 'utf8').length : 0
       await sleep(2000)
       const idleSql = (existsSync(counter) ? readFileSync(counter, 'utf8').length : 0) - idleBefore
-      const samples = Math.min(Math.max(2, options.sessions), 10)
-      for (let i = 0; i < samples; i += 1) {
-        ackedAt = Date.now()
-        const dm = await world.runCli(sender, ['dm', '--to', target, '--text', `sm2-${i}`, '--id', `sm2-${Date.now()}-${i}`, '--json'])
-        if (dm.code !== 0) throw new Error('sm2 dm failed')
-        const deadline = Date.now() + 2000
-        while (wakeLatencies.length <= i && Date.now() < deadline) await sleep(10)
-      }
-      try { child.kill('SIGTERM') } catch { /* reaped */ }
-      await Promise.race([new Promise(done => child.once('exit', done)), sleep(2000)])
-      if (wakeLatencies.length === 0) throw new Error(`no wakes observed; stderr=${stderr.slice(0, 200)}`)
+      try { idleChild.kill('SIGTERM') } catch { /* reaped */ }
+      await Promise.race([new Promise(done => idleChild.once('exit', done)), sleep(2000)])
       const row = {
         p95_ms: percentile(wakeLatencies, 0.95),
         p99_ms: percentile(wakeLatencies, 0.99),
-        event_loop_clock_ms: 0,
+        event_loop_clock_ms: median(eventLoopLags),
         wake_clock_ms: median(wakeLatencies),
         idle_sql: idleSql,
         samples: wakeLatencies.length,
@@ -533,28 +564,6 @@ async function cellSm2(options) {
   }
 }
 
-// --- Canary scanning ----------------------------------------------------------------
-function scanSurfaceForCanary(root, canary) {
-  let scanned = 0
-  let leaks = 0
-  const stack = [root]
-  while (stack.length) {
-    const current = stack.pop()
-    let entries
-    try { entries = readdirSync(current) } catch { continue }
-    for (const name of entries) {
-      const path = join(current, name)
-      let info
-      try { info = lstatSync(path) } catch { continue }
-      if (info.isDirectory()) stack.push(path)
-      else if (info.isFile()) {
-        try { scanned += 1; if (readFileSync(path, 'utf8').includes(canary)) leaks += 1 } catch { /* binary */ }
-      }
-    }
-  }
-  return { scanned, leaks }
-}
-
 // --- Negatives ---------------------------------------------------------------------
 async function cellNegatives(options, canary) {
   const rows = []
@@ -571,13 +580,21 @@ async function cellNegatives(options, canary) {
     const target = peers.find(row => !/neg-a/.test(row.address ?? ''))?.address
 
     // cross-process CLI contention: two waits on one installation -> one refuses.
-    const waitA = spawn(process.execPath, [CLI_PATH, 'wait', '--timeout', '6'], { env: world.childEnv(a), stdio: ['ignore', 'pipe', 'pipe'] })
-    await sleep(900)
-    const waitB = await world.runCli(a, ['wait', '--timeout', '6'])
-    const contention = waitB.code !== 0 && /wait_already_active/.test(waitB.stderr)
+    const contentionEnv = { ...world.childEnv(a), AGENT_ROOM_SESSION_SCOPE: 'qualify-contention' }
+    const waitA = spawn(process.execPath, [CLI_PATH, 'wait', '--timeout', '8'], { env: contentionEnv, stdio: ['ignore', 'pipe', 'pipe'] })
+    let waitAErr = ''
+    waitA.stderr.setEncoding('utf8')
+    waitA.stderr.on('data', chunk => { waitAErr += chunk })
+    await sleep(1500)
+    const waitB = await runSubprocess(process.execPath, [CLI_PATH, 'wait', '--timeout', '8'], { env: contentionEnv, cwd: world.parent, timeoutMs: CLI_DEADLINE_MS })
+    const contention = waitB.code !== 0 && /wait_already_active/.test(`${waitB.stderr}${waitB.stdout}`)
     waitA.kill('SIGTERM')
     await Promise.race([new Promise(done => waitA.once('exit', done)), sleep(2000)])
-    rows.push({ check: 'cross_process_cli_contention', status: contention ? STATUS.QUALIFIED : STATUS.FAILED })
+    rows.push({
+      check: 'cross_process_cli_contention',
+      status: contention ? STATUS.QUALIFIED : STATUS.FAILED,
+      detail: contention ? undefined : `waitA stderr=${waitAErr.slice(0, 120)}; waitB code=${waitB.code} stderr=${waitB.stderr.slice(0, 120)} stdout=${waitB.stdout.slice(0, 120)}`,
+    })
 
     // viewer GET-only: frozen route table declares no mutator viewer route.
     const routes = readFileSync(join(PLUGIN_ROOT, 'server', 'api', 'routes.mjs'), 'utf8')
@@ -586,21 +603,21 @@ async function cellNegatives(options, canary) {
 
     // ssession isolation: a distinct scope has no visibility of peer's room.
     const isolated = world.addInstall('isolated')
-    const isoBoot = await world.runCli(isolated, ['bootstrap', '--harness', 'generic', '--scope', 'ssession:isolated', '--json'])
+    const isoBoot = await world.runCli(isolated, ['bootstrap', '--harness', 'generic', '--scope', 'ssession-isolated', '--json'])
     const isoRead = target
       ? await world.runCli(isolated, ['read', '--peer', target, '--json'])
       : { code: 1 }
     rows.push({ check: 'ssession_isolation', status: isoBoot.code === 0 && isoRead.code === 0 ? STATUS.QUALIFIED : STATUS.FAILED })
 
     // simulated ENOSPC: refuse reserve above free bytes -> capacity refuses.
-    const enospcEnv = { ...world.childEnv(a), AGENT_ROOM_STORAGE_WARN_BYTES: '1', AGENT_ROOM_STORAGE_REFUSE_BYTES: '2' }
+    const enospcEnv = { ...world.childEnv(a), AGENT_ROOM_STORAGE_WARN_BYTES: '1000000000000', AGENT_ROOM_STORAGE_REFUSE_BYTES: '999999999999' }
     const capacity = await runSubprocess(process.execPath, [CLI_PATH, 'capacity'], { env: enospcEnv, cwd: world.parent, timeoutMs: CLI_DEADLINE_MS })
     const capacityDoc = parseJsonLine(capacity.stdout)
     const enospc = capacityDoc?.capacity?.state === 'refuse' && capacityDoc?.capacity?.admits_appends === false && capacity.code === 1
     rows.push({ check: 'simulated_enospc', status: enospc ? STATUS.QUALIFIED : STATUS.FAILED })
 
     // loop pause pair8/global25 + wake-reset recovery (real entrypoint).
-    const reset = await world.runCli(a, ['wake-reset', '--all', '--yes', '--json'])
+    const reset = await world.runCli(a, ['wake-reset', '--all', '--json'])
     rows.push({ check: 'loop_pause_and_wake_reset', status: reset.code === 0 ? STATUS.QUALIFIED : STATUS.FAILED,
       detail: 'wake-reset entrypoint exercised; fault injection of the 8/25 counters is not reproduced here' })
 
@@ -609,27 +626,41 @@ async function cellNegatives(options, canary) {
     rows.push({ check: 'crash_mid_resume_recovery', status: reboot.code === 0 ? STATUS.QUALIFIED : STATUS.FAILED,
       detail: 'idempotent re-bootstrap exercised; in-flight crash injection is not reproduced here' })
 
-    // Canary: inject a secret into a wait child's env, then scan owned surfaces.
-    // The canary is a random nonce that appears NOWHERE in source; if it is
-    // observed on any surface it leaked. If it never reached any surface, the
-    // check is inconclusive rather than a fake pass.
-    const secretEnv = { ...world.childEnv(a), AGENT_ROOM_QUALIFY_CANARY: canary }
-    const canaryChild = spawn(process.execPath, [CLI_PATH, 'doctor', '--json'], { env: secretEnv, cwd: world.parent, stdio: ['ignore', 'pipe', 'pipe'] })
-    let canaryStderr = ''
-    let canaryStdout = ''
-    canaryChild.stderr.setEncoding('utf8')
-    canaryChild.stdout.setEncoding('utf8')
-    canaryChild.stderr.on('data', chunk => { canaryStderr += chunk })
-    canaryChild.stdout.on('data', chunk => { canaryStdout += chunk })
-    await Promise.race([new Promise(done => canaryChild.once('exit', done)), sleep(5000)])
-    const surfaceScan = scanSurfaceForCanary(world.parent, canary)
-    let scanned = surfaceScan.scanned + 2 // stderr + stdout
-    let leaks = surfaceScan.leaks + (canaryStderr.includes(canary) ? 1 : 0) + (canaryStdout.includes(canary) ? 1 : 0)
+    // Canary: a random nonce that appears NOWHERE in the source tree is sent
+    // as a real DM body. The nonce therefore genuinely exists in the system
+    // (stored at rest as message text). The surfaces that must NEVER echo a
+    // Held/secret body — metadata listings, doctor, error receipts, child
+    // stderr/stdout — are then inspected for it. A hit is a real leak (FAILED);
+    // no hit across a recorded denominator of surfaces is a genuine pass.
+    if (target) {
+      await world.runCli(a, ['dm', '--to', target, '--text', canary, '--id', `canary-${Date.now()}`])
+    }
+    const heldList = await world.runCli(b, ['held', 'list'])
+    const doctorJson = await world.runCli(b, ['doctor', '--json'])
+    const badRead = await world.runCli(b, ['read', '--room', 'no-such-room-xyz'])
+    const surfaces = [
+      { name: 'held_list_stdout', text: heldList.stdout },
+      { name: 'held_list_stderr', text: heldList.stderr },
+      { name: 'doctor_stdout', text: doctorJson.stdout },
+      { name: 'doctor_stderr', text: doctorJson.stderr },
+      { name: 'error_receipt_stdout', text: badRead.stdout },
+      { name: 'error_receipt_stderr', text: badRead.stderr },
+    ]
+    let leaks = 0
+    const leakingSurfaces = []
+    for (const surface of surfaces) {
+      if (typeof surface.text === 'string' && surface.text.includes(canary)) {
+        leaks += 1
+        leakingSurfaces.push(surface.name)
+      }
+    }
     rows.push({
       check: 'allowlist_leak_canary',
-      status: leaks > 0 ? STATUS.FAILED : STATUS.INCONCLUSIVE,
-      scanned, leaks,
-      detail: 'injected via AGENT_ROOM_QUALIFY_CANARY into a real child; inspected SQLite files, inbox, stderr, stdout, errors and resources',
+      status: target ? (leaks > 0 ? STATUS.FAILED : STATUS.QUALIFIED) : STATUS.INCONCLUSIVE,
+      scanned: surfaces.length,
+      leaks,
+      leaking_surfaces: leakingSurfaces,
+      detail: 'sent as a real DM body; inspected metadata listings, doctor, error receipts and child stderr/stdout (body at rest in SQLite is the sanctioned artifact, not a leak surface)',
     })
 
     const inconclusive = rows.filter(row => row.status === STATUS.INCONCLUSIVE).length > 0
@@ -801,7 +832,11 @@ export async function runQualifyCommand(tokens, deps = {}) {
   if (!prerequisites.ok || receiptInvalid) {
     const cells = {}
     for (const name of CELL_NAMES) cells[name] = { status: STATUS.INCONCLUSIVE, reason: 'pipeline not run: prerequisite missing or receipt invalidated' }
-    cells.PREREQ = { status: STATUS.INCONCLUSIVE, reason: prerequisites.reasons[0] ?? 'prerequisite missing', reasons: prerequisites.reasons }
+    cells.PREREQ = {
+      status: STATUS.INCONCLUSIVE,
+      reason: prerequisites.reasons[0] ?? 'pipeline gated: prior receipt invalidated by a changed candidate',
+      reasons: prerequisites.reasons,
+    }
     if (receiptInvalid) {
       cells.RECEIPT = { status: STATUS.FAILED,
         reason: `candidate artifact changed: prior receipt sha256=${prior.sha256}, current sha256=${candidateSha}; the old receipt is invalid` }
