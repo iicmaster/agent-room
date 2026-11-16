@@ -516,13 +516,13 @@ test('attach refuses a major-version-incompatible record and names both versions
   writeFileSync(join(dataDir, RUNTIME_RECORD_FILENAME), JSON.stringify({
     pid: live.record.pid, // alive
     port: live.record.port, // healthy
-    version: '1.2.3', // incompatible major
+    version: '2.0.0', // incompatible major (APP_VERSION is now 1.0.0)
   }))
 
   await assert.rejects(
     () => ensureServer({ dataDir, waitMs: 2000 }),
     error => error?.code === 'server_start_failed'
-      && error.message.includes('1.2.3')
+      && error.message.includes('2.0.0')
       && error.message.includes(APP_VERSION),
   )
 

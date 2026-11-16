@@ -22,6 +22,7 @@ import { join, resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
+import { APP_VERSION } from '../server/runtime.mjs'
 import { PROTOCOL_VERSION } from '../server/constants.mjs'
 import { CONNECTION_MODE_ENV } from '../server/client/api-client.mjs'
 import { loadOrCreateLocalToken } from '../server/api/local-token.mjs'
@@ -434,10 +435,10 @@ test('send: a lost response is an outcome_unknown refusal that names the attempt
       response.writeHead(200, { 'content-type': 'application/json' })
       response.end(JSON.stringify({ ok: true, result: payload }))
     }
-    if (request.method === 'GET' && request.url === '/health') return answer({ version: '0.8.0' })
+    if (request.method === 'GET' && request.url === '/health') return answer({ version: APP_VERSION })
     if (request.method === 'POST' && request.url === '/api/auth/local') return answer({ session_token: 'lost-lane-token' })
     if (request.method === 'GET' && request.url === '/api/status') {
-      return answer({ realm_id: 'lost-realm', version: '0.8.0', broadcast_room_id: 'b' })
+      return answer({ realm_id: 'lost-realm', version: APP_VERSION, broadcast_room_id: 'b' })
     }
     if (request.method === 'POST' && request.url.startsWith('/api/rooms/')) {
       request.resume()
@@ -451,7 +452,7 @@ test('send: a lost response is an outcome_unknown refusal that names the attempt
   const port = httpServer.address().port
   // ensure-server reuses this port as a live same-major agent-room server.
   writeFileSync(join(sharedData, 'runtime.json'),
-    `${JSON.stringify({ pid: process.pid, port, version: '0.8.0' })}\n`, { mode: 0o600 })
+    `${JSON.stringify({ pid: process.pid, port, version: APP_VERSION })}\n`, { mode: 0o600 })
 
   const deps = { pluginDataDir: pluginData, sharedDataDir: sharedData, env: {} }
   const outcome = await runSendFamilyCommand(['--room', 'b', '--text', 'may or may not have landed'], deps)
@@ -486,10 +487,10 @@ test('round-5: a committed-then-lost reply keeps the attempt id, and the identic
     let body = ''
     request.on('data', chunk => { body += chunk })
     request.on('end', () => {
-      if (request.method === 'GET' && request.url === '/health') return answer({ version: '0.8.0' })
+      if (request.method === 'GET' && request.url === '/health') return answer({ version: APP_VERSION })
       if (request.method === 'POST' && request.url === '/api/auth/local') return answer({ session_token: 'lost-lane-token' })
       if (request.method === 'GET' && request.url === '/api/status') {
-        return answer({ realm_id: 'lost-realm', version: '0.8.0', broadcast_room_id: 'b' })
+        return answer({ realm_id: 'lost-realm', version: APP_VERSION, broadcast_room_id: 'b' })
       }
       if (request.method === 'POST' && request.url.startsWith('/api/rooms/')) {
         let parsed = {}
@@ -520,7 +521,7 @@ test('round-5: a committed-then-lost reply keeps the attempt id, and the identic
   await new Promise(resolvePromise => httpServer.listen(0, '127.0.0.1', resolvePromise))
   t.after(() => httpServer.close())
   writeFileSync(join(sharedData, 'runtime.json'),
-    `${JSON.stringify({ pid: process.pid, port: httpServer.address().port, version: '0.8.0' })}\n`, { mode: 0o600 })
+    `${JSON.stringify({ pid: process.pid, port: httpServer.address().port, version: APP_VERSION })}\n`, { mode: 0o600 })
 
   const deps = { pluginDataDir: pluginData, sharedDataDir: sharedData, env: {} }
   // First attempt: the 502 after processing is outcome_unknown, and the
@@ -640,9 +641,9 @@ test('round-6 send: a 502 on the first attempt is outcome_unknown with the id ca
     let body = ''
     request.on('data', chunk => { body += chunk })
     request.on('end', () => {
-      if (request.method === 'GET' && request.url === '/health') return answer({ version: '0.8.0' })
+      if (request.method === 'GET' && request.url === '/health') return answer({ version: APP_VERSION })
       if (request.method === 'POST' && request.url === '/api/auth/local') return answer({ session_token: 'rr-token' })
-      if (request.method === 'GET' && request.url === '/api/status') return answer({ realm_id: 'rr-realm', version: '0.8.0', broadcast_room_id: 'b' })
+      if (request.method === 'GET' && request.url === '/api/status') return answer({ realm_id: 'rr-realm', version: APP_VERSION, broadcast_room_id: 'b' })
       response.writeHead(502)
       response.end()
     })
@@ -650,7 +651,7 @@ test('round-6 send: a 502 on the first attempt is outcome_unknown with the id ca
   await new Promise(resolvePromise => httpServer.listen(0, '127.0.0.1', resolvePromise))
   t.after(() => httpServer.close())
   writeFileSync(join(sharedData, 'runtime.json'),
-    `${JSON.stringify({ pid: process.pid, port: httpServer.address().port, version: '0.8.0' })}\n`, { mode: 0o600 })
+    `${JSON.stringify({ pid: process.pid, port: httpServer.address().port, version: APP_VERSION })}\n`, { mode: 0o600 })
 
   const deps = { pluginDataDir: pluginData, sharedDataDir: sharedData, env: {} }
   const outcome = await runSendFamilyCommand(['--room', 'b', '--text', 'gateway down', '--id', 'rr-1'], deps)
@@ -678,9 +679,9 @@ test('round-6 verify: a bind committed behind a 502 runs the bounded cleanup wit
       response.writeHead(200, { 'content-type': 'application/json' })
       response.end(JSON.stringify({ ok: true, result: payload }))
     }
-    if (request.method === 'GET' && request.url === '/health') return answer({ version: '0.8.0' })
+    if (request.method === 'GET' && request.url === '/health') return answer({ version: APP_VERSION })
     if (request.method === 'POST' && request.url === '/api/auth/local') return answer({ session_token: 'probe-token-1' })
-    if (request.method === 'GET' && request.url === '/api/status') return answer({ realm_id: 'v502-realm', version: '0.8.0', broadcast_room_id: 'b' })
+    if (request.method === 'GET' && request.url === '/api/status') return answer({ realm_id: 'v502-realm', version: APP_VERSION, broadcast_room_id: 'b' })
     if (request.method === 'POST' && request.url === '/api/session') {
       // The bind COMMITS upstream, but the proxy answers 502.
       events.push({ kind: 'bind', bearer })
@@ -703,7 +704,7 @@ test('round-6 verify: a bind committed behind a 502 runs the bounded cleanup wit
   await new Promise(resolvePromise => httpServer.listen(0, '127.0.0.1', resolvePromise))
   t.after(() => httpServer.close())
   writeFileSync(join(sharedData, 'runtime.json'),
-    `${JSON.stringify({ pid: process.pid, port: httpServer.address().port, version: '0.8.0' })}\n`, { mode: 0o600 })
+    `${JSON.stringify({ pid: process.pid, port: httpServer.address().port, version: APP_VERSION })}\n`, { mode: 0o600 })
 
   const deps = { pluginDataDir: pluginData, sharedDataDir: sharedData, env: {} }
   const receipt = parseOne(await runSessionVerify(deps, 'probe-name'))
