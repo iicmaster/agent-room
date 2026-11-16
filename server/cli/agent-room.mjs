@@ -138,6 +138,7 @@ import { runSessionFamilyCommand } from './session-commands.mjs'
 import { runSessionPrincipalsFamilyCommand } from './session-principals-commands.mjs'
 import { runWaitFamilyCommand } from './wait-commands.mjs'
 import { runWakeResetCommand } from './wake-reset-commands.mjs'
+import { runGcCommand } from './gc-commands.mjs'
 import { loadRemoteConfig } from '../client/remote-config.mjs'
 import { runDmCommand, runReadFamilyCommand, runSendFamilyCommand, runSessionVerify, runSessionsCommand } from './message-commands.mjs'
 import { runBootstrapCommand } from './bootstrap-commands.mjs'
@@ -617,6 +618,14 @@ Commands:
       one of --peer and --all is required (neither/both is a usage error, exit
       2). Clears G1/G2 counters only; never touches notified_seq or Held state.
 
+  agent-room gc [--json]
+      Housekeeping: collect stale per-session scopes under PLUGIN_DATA/sessions/.
+      Skips symlinks, the current scope, and any scope whose wait/cursors/inbox
+      lock names a live PID. Deletes only on positive server evidence (revoke,
+      or 30-day expiry) or a derived p<ppid>.<pid> scope whose PID is dead past
+      24 hours. Offline/401 is NOT a revoke. At most 100 scopes per 100 ms.
+      Mutating by design - doctor stays strictly read-only.
+
   agent-room help
       Show this help.
 
@@ -848,7 +857,7 @@ export async function main(argv = process.argv.slice(2), {
     const { runHookSessionStart } = await import('./hook-session-start.mjs')
     return await runHookSessionStart({ input, env, pluginDataDir })
   }
-  if (command === 'invite' || command === 'remote' || command === 'ban' || command === 'unban' || command === 'capacity' || command === 'viewer' || command === 'session' || command === 'session-principals' || command === 'wait' || command === 'wake-reset' || command === 'send' || command === 'read' || command === 'dm' || command === 'sessions' || command === 'bootstrap') {
+  if (command === 'invite' || command === 'remote' || command === 'ban' || command === 'unban' || command === 'capacity' || command === 'viewer' || command === 'session' || command === 'session-principals' || command === 'wait' || command === 'wake-reset' || command === 'gc' || command === 'send' || command === 'read' || command === 'dm' || command === 'sessions' || command === 'bootstrap') {
     let outcome = command === 'invite'
       ? await runInviteFamilyCommand(subcommand, argv.slice(2), deps)
       : command === 'remote'
@@ -867,6 +876,8 @@ export async function main(argv = process.argv.slice(2), {
                 ? await runWaitFamilyCommand(argv.slice(1), deps)
                 : command === 'wake-reset'
                   ? await runWakeResetCommand(argv.slice(1), deps)
+                : command === 'gc'
+                  ? await runGcCommand(argv.slice(1), deps)
                 : command === 'send'
                   ? await runSendFamilyCommand(argv.slice(1), deps)
                   : command === 'read'
