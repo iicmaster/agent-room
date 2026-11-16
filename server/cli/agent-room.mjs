@@ -531,13 +531,22 @@ Commands:
       and the lease/retention dispositions. Use an address from this listing
       as dm --to / send --to / message_send to.
 
-  agent-room read --room <room_id> [--after-seq <n>] [--limit <n>] [--wait-ms <ms>]
-      One-shot read: the receiver-side trust matrix applies exactly as in
-      message_read (foreign bodies wrapped, held rows metadata-only), and the
-      command NEVER writes state — no cursor advance, no held registration.
-      Resume with --after-seq from next_after_seq; the MCP session's cursor
-      belongs to the MCP adapter alone. Wake coverage is the notifier's or
-      wait's job, never a one-shot process's.
+  agent-room read --peer <address|agent-id> | --room <room_id>
+                  [--after-seq <n>] [--limit <n>] [--wait-ms <ms>]
+      Read as THIS session: name exactly one selector — the peer (a full
+      session address, or a bare Agent ID when it resolves to one session) or
+      a room id. There is no read-everything mode; a room-local seq only means
+      something against one room. The receiver-side trust matrix applies
+      exactly as in message_read: foreign bodies are wrapped, and a sender
+      this installation does not trust arrives as {seq, from_address,
+      trusted:false, held:true} with NO text key — a held body is absent, not
+      blanked. Reading --peer a session you have never exchanged a message
+      with answers an empty page at exit 0; a read never opens a room.
+      The session's own read cursor advances to next_after_seq only after the
+      receipt is flushed: if stdout fails (EPIPE) the cursor stays put and the
+      command exits 1, so a retry cannot silently skip a page. The cursor is
+      per session scope, never the MCP adapter's. Wake coverage remains the
+      notifier's or wait's job.
 
   agent-room session replace [<chat-id>] [--yes]
       Take this installation's Chat ID back from the session that still holds
@@ -848,6 +857,44 @@ export async function main(argv = process.argv.slice(2), {
                           ? await runBootstrapCommand(argv.slice(1), deps)
                           : await runBanFamilyCommand(command, argv.slice(1), deps)
     if (outcome.status === 'ok') {
+      if (typeof outcome.afterFlush === 'function') {
+        // Story 2.1's flush-then-advance contract: the receipt reaches stdout
+        // FIRST and the post-flush work (the cursor advance) runs only once
+        // the write callback fires. A failed write — an EPIPE from a closed
+        // pipe, a dead consumer — means the caller never saw this page, so the
+        // cursor must not move; exit 1 says so.
+        try {
+          for (const line of outcome.lines) {
+            await new Promise((resolveWrite, rejectWrite) => {
+              output.write(`${line}\n`, error => (error ? rejectWrite(error) : resolveWrite()))
+            })
+          }
+        } catch (error) {
+          errorOutput.write(`${JSON.stringify({
+            ok: false,
+            command: outcome.command,
+            code: error?.code ?? 'write_failed',
+            message: `the ${outcome.command} receipt could not be written to stdout (${error?.code ?? error?.message ?? 'write failed'}); nothing was consumed and the cursor was not advanced`,
+          })}\n`)
+          process.exitCode = 1
+          return { status: 'refusal', command: outcome.command, code: error?.code ?? 'write_failed' }
+        }
+        try {
+          await outcome.afterFlush()
+        } catch (error) {
+          // The page WAS delivered but the position could not be recorded.
+          // Say so loudly on stderr and keep exit 0: the data reached the
+          // caller, and a non-zero code would invite a re-read of a page
+          // already seen.
+          errorOutput.write(`${JSON.stringify({
+            ok: false,
+            command: outcome.command,
+            code: error?.code ?? 'write_failed',
+            message: `the receipt was delivered but the cursor was not advanced (${error?.code ?? error?.message}); the next read re-delivers this page`,
+          })}\n`)
+        }
+        return outcome
+      }
       for (const line of outcome.lines) output.write(`${line}\n`)
       if (outcome.exitCode === 1) process.exitCode = 1
       return outcome
