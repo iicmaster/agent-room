@@ -155,20 +155,34 @@ test('AC1: a Session sees exactly its OWN pair rooms; a sibling session of the s
   const roomsB = await roomsOf(port, sessionHeaders(b.session_capability))
   const roomsC = await roomsOf(port, sessionHeaders(c.session_capability))
 
-  assert.equal(roomsA.length, 1, 'A belongs to exactly one pair room')
-  assert.equal(roomsA[0].kind, 'direct')
-  assert.equal(roomsA[0].peer_session_id, b.session_id, 'A sees B as its peer')
-  assert.equal(roomsB.length, 1)
-  assert.equal(roomsB[0].room_id, roomsA[0].room_id, 'B sees the same room')
-  assert.equal(roomsB[0].peer_session_id, a.session_id, 'B sees A as its peer')
+  // P1: a Session now sees the Actor-wide rooms (here: the boot-minted
+  // Broadcast Room, no peer_session_id) PLUS only the ssession: rooms its own
+  // session belongs to. Peer_session_id appears ONLY on pair rows.
+  const pairOf = (rooms, peerId) => rooms.find(room => room.peer_session_id === peerId)
+  const broadcasts = rooms => rooms.filter(room => room.kind === 'broadcast')
+
+  assert.equal(broadcasts(roomsA).length, 1, 'A sees the Actor-wide Broadcast Room')
+  assert.equal(Object.hasOwn(broadcasts(roomsA)[0], 'peer_session_id'), false, 'Actor-wide rows carry no peer_session_id')
+  assert.equal(roomsA.length, 2, 'broadcast + A\'s one pair room')
+  const pairA = pairOf(roomsA, b.session_id)
+  assert.equal(pairA.kind, 'direct')
+  assert.equal(pairA.peer_session_id, b.session_id, 'A sees B as its peer')
+
+  assert.equal(broadcasts(roomsB).length, 1)
+  assert.equal(roomsB.length, 2)
+  const pairB = pairOf(roomsB, a.session_id)
+  assert.equal(pairB.room_id, pairA.room_id, 'B sees the same room')
+  assert.equal(pairB.peer_session_id, a.session_id, 'B sees A as its peer')
 
   // C is the THIRD session of the same installation: same fingerprint, same
-  // realm, zero shared rooms.
-  assert.deepEqual(roomsC, [], 'a sibling session sees no room it is not a member of')
+  // realm, no pair rooms — but it still sees the Actor-wide Broadcast Room.
+  assert.equal(roomsC.length, 1, 'a sibling session sees only the Actor-wide room')
+  assert.equal(broadcasts(roomsC).length, 1)
+  assert.equal(Object.hasOwn(roomsC[0], 'peer_session_id'), false, 'no pair row leaks to the sibling')
 
   // And the sibling cannot read A and B's room either — the isolation is in
   // the ACL, not only in the listing.
-  const denied = await httpRequest(port, 'GET', `/api/rooms/${roomsA[0].room_id}/messages?after_seq=0`, {
+  const denied = await httpRequest(port, 'GET', `/api/rooms/${pairA.room_id}/messages?after_seq=0`, {
     headers: sessionHeaders(c.session_capability),
   })
   assert.equal(denied.status, 403, denied.text)
@@ -338,11 +352,12 @@ test('PEER_NO_ROOM: --peer a session you never messaged answers an empty page at
   assert.equal(receipt.cursor_written, false)
   assert.equal(outcome.afterFlush, undefined, 'nothing to advance: no page was consumed')
 
-  // Nothing was created anywhere: the pair room does not exist, and the
-  // reading session's own room list is empty.
+  // Nothing was created anywhere: the pair room does not exist. The session
+  // still sees the Actor-wide Broadcast Room (P1) — but no ssession: pair row.
   const own = JSON.parse(readFileSync(join(world.pluginData, 'sessions', 'no-room-scope', 'session.json'), 'utf8'))
   const rooms = await roomsOf(port, sessionHeaders(own.capability))
-  assert.deepEqual(rooms, [], 'a read never opens a pair room')
+  assert.equal(rooms.filter(room => room.peer_session_id !== undefined).length, 0, 'a read never opens a pair room')
+  assert.deepEqual(rooms.map(room => room.kind), ['broadcast'], 'only the Actor-wide room remains')
 })
 
 // --- AC3: STDOUT_FAIL keeps the cursor still --------------------------------
