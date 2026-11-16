@@ -100,9 +100,9 @@ import {
 } from '../runtime.mjs'
 import { loadOrCreateKeypair, signWithInstallationKey } from '../keys.mjs'
 import { loadOrCreateLocalToken } from '../api/local-token.mjs'
-import { ensureServer, probeHealth } from './ensure-server.mjs'
+import { ensureServer, probeHealth, readRuntimeRecord } from './ensure-server.mjs'
 import { loadRemoteConfig, validateRemoteServerUrl } from './remote-config.mjs'
-import { REMOTE_TRANSPORT } from './trust.mjs'
+import { REMOTE_TRANSPORT, filterPeerOfflineCandidates, loadAllowlist } from './trust.mjs'
 import {
   clearSessionState,
   loadSessionState,
@@ -1072,7 +1072,24 @@ export function createAgentRoomClient({
     if (typeof code === 'string' && code.length > 0) {
       const error = new AgentRoomRuntimeError(code, typeof message === 'string' ? message : 'agent-room request failed')
       const candidates = response.body?.error?.candidates
-      if (candidates !== undefined) error.candidates = candidates
+      if (candidates !== undefined) {
+        // Story 2.2 (AC3): filter peer_offline candidates through this
+        // installation's trust matrix BEFORE the error is thrown (and therefore
+        // before any tool/MCP render or stderr/log write). A filter that empties
+        // the list keeps the SAME code and hands back [] — never a 404, never a
+        // leaked address. Other codes' candidates (e.g. ambiguous_chat_id) are
+        // not peer-offline disclosures and are left untouched.
+        error.candidates = response.body?.error?.code === 'peer_offline'
+          ? filterPeerOfflineCandidates(candidates, {
+            ownFingerprint: keypair.fingerprint,
+            transport: transportMode === REMOTE_TRANSPORT ? REMOTE_TRANSPORT : 'local',
+            allowlist: (() => {
+              const realm = readRuntimeRecord(dataDir)?.realm_id
+              return realm === undefined ? undefined : loadAllowlist(pluginDataDir, realm)
+            })(),
+          })
+          : candidates
+      }
       const retryAfterMs = response.body?.error?.retry_after_ms
       if (retryAfterMs !== undefined) error.retry_after_ms = retryAfterMs
       throw error

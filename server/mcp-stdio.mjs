@@ -62,6 +62,7 @@ import { realpathSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 import {
+  CHAT_ID_INVALID_MESSAGE,
   CHAT_ID_MAX,
   CHAT_ID_PATTERN,
   CLIENT_MESSAGE_ID_MAX,
@@ -73,7 +74,7 @@ import {
   READ_PAGE_DEFAULT,
   READ_PAGE_MAX,
   SESSION_ADDRESS_INVALID_MESSAGE,
-  SESSION_ADDRESS_PATTERN,
+  sendToForms,
 } from './constants.mjs'
 import {
   APP_VERSION,
@@ -163,7 +164,7 @@ const TOOL_DESCRIPTORS = Object.freeze([
       required: ['client_message_id', 'text'],
       properties: {
         room_id: { type: 'string', minLength: 1, maxLength: IDENTIFIER_MAX },
-        to: { type: 'string', pattern: SESSION_ADDRESS_PATTERN.source, description: 'The peer session\'s full address (base~locator-token@machine). Exactly one of to / room_id.' },
+        to: { type: 'string', description: 'The peer: a full session address (base~locator-token@machine) when it contains ~, otherwise a bare Agent ID. Exactly one of to / room_id.' },
         client_message_id: { type: 'string', minLength: 1, maxLength: CLIENT_MESSAGE_ID_MAX },
         text: { type: 'string', minLength: 1, maxLength: MESSAGE_TEXT_MAX },
         reply_to_seq: { type: 'integer', minimum: 1 },
@@ -333,7 +334,12 @@ function validateArguments(name, args) {
     if (args.to === undefined && typeof args.room_id !== 'string') return 'room_id is required when to is absent (or pass the peer session\'s full address as to)'
     if (args.to !== undefined) {
       if (typeof args.to !== 'string') return 'to must be a string'
-      if (!SESSION_ADDRESS_PATTERN.test(args.to)) return `to must be a full session address: ${SESSION_ADDRESS_INVALID_MESSAGE}`
+      // Story 2.2: `to` is a discriminator — a full Session Address when it
+      // contains `~`, otherwise a bare Agent ID. Both grammars are enforced by
+      // sendToForms; the name `to` is in every refusal.
+      if (sendToForms(args.to) === null) {
+        return `to must be a full session address (${SESSION_ADDRESS_INVALID_MESSAGE}) or a bare Agent ID (${CHAT_ID_INVALID_MESSAGE})`
+      }
     }
     if (typeof args.client_message_id !== 'string') return 'client_message_id must be a string'
     if (typeof args.text !== 'string') return 'text must be a string'

@@ -170,7 +170,7 @@ import {
   STORAGE_WARN_FREE_BYTES,
   TITLE_MAX,
   chatIdForms,
-  sessionAddressForms,
+  sendToForms,
 } from '../constants.mjs'
 import { openRoomLog } from '../store/room-log.mjs'
 import { resolveStorageThresholds, storageThresholdsFromEnv } from '../store/storage-gate.mjs'
@@ -2090,10 +2090,25 @@ registerHandler('POST /api/messages', async function addressedSendRoute(context)
   if (principal.ok === false) return principal
   const to = context.body?.to
   if (to === undefined || to === null || to === '') {
-    return reject('invalid_request', 'to is required: the peer session\u0027s full address (base~token@machine)')
+    return reject('invalid_request', 'to is required: the peer session\u0027s full address (base~token@machine) or a bare Agent ID')
   }
-  const addressForms = sessionAddressForms(to)
-  if (addressForms === null) return reject('invalid_chat_id', SESSION_ADDRESS_INVALID_MESSAGE)
+  // Story 2.2 discriminator: `~` present = full Session Address, absent = bare
+  // Agent ID. sendToForms enforces both grammars (and the shared length bound)
+  // and names `to` in every refusal.
+  const toForms = sendToForms(to)
+  if (toForms === null) {
+    return reject('invalid_chat_id', `to must be a full session address (${SESSION_ADDRESS_INVALID_MESSAGE}) or a bare Agent ID (${CHAT_ID_INVALID_MESSAGE})`)
+  }
+  if (toForms.kind === 'address') {
+    if (toForms.value === principal.address) {
+      return reject('invalid_request', 'to must name a different session than the sender: a session cannot send to its own address')
+    }
+  } else if (toForms.baseName === String(principal.base_name ?? '').toLowerCase()) {
+    // The occupied partial-unique index admits at most one occupied principal
+    // per lower(base_name), and the sender is occupied while sending — so a
+    // bare name equal to the sender's own IS the sender. Refuse before queueing.
+    return reject('invalid_request', 'to must name a different session than the sender: a session cannot send to its own Agent ID')
+  }
   const clientMessageIdField = requiredString(context.body?.client_message_id, 'client_message_id')
   if (clientMessageIdField.error) return clientMessageIdField.error
   const textField = requiredString(context.body?.text, 'text')
@@ -2111,7 +2126,6 @@ registerHandler('POST /api/messages', async function addressedSendRoute(context)
   const senderSessionId = principal.session_id
   const senderFingerprint = principal.installation_fingerprint
   const senderAddress = principal.address
-  const targetAddress = addressForms.address
   const clientMessageId = clientMessageIdField.value
   const text = textField.value
 
@@ -2163,7 +2177,23 @@ registerHandler('POST /api/messages', async function addressedSendRoute(context)
             capabilityDigest: context.session.presentedDigest,
           })
         }
-        const peer = tx.resolveSessionPrincipalByAddress(targetAddress, nowMs)
+        if (toForms.kind === 'agent_id') {
+          // Story 2.2: dedup -> resolve -> open -> append in this ONE savepoint.
+          // The bare-ID op throws peer_not_found (404) / conflict / invalid_request
+          // coded errors directly, and returns a discriminated result otherwise.
+          const result = tx.sendBareIdMessageInTx({
+            senderSessionId,
+            senderFingerprint,
+            senderAddress,
+            baseNameLower: toForms.baseName,
+            clientMessageId,
+            text,
+            replyToSeq,
+            nowMs,
+          })
+          return { bareId: result }
+        }
+        const peer = tx.resolveSessionPrincipalByAddress(toForms.value, nowMs)
         if (peer === null) {
           throw new AgentRoomRuntimeError('peer_not_found', PUBLIC_ERRORS.peer_not_found)
         }
@@ -2196,6 +2226,33 @@ registerHandler('POST /api/messages', async function addressedSendRoute(context)
       return { status: 'storage_low' }
     }
     throw error
+  }
+
+  // Story 2.2 bare-ID branch: the store op returns a discriminated result that
+  // maps onto the SAME wire shapes as the address path, plus the 409
+  // peer_offline (the only outcome the address path cannot produce).
+  if (committedBatchResult.bareId !== undefined) {
+    const bare = committedBatchResult.bareId
+    if (bare.kind === 'peer_offline') {
+      return reject(
+        'peer_offline',
+        `the peer is offline; ${bare.candidates.length} retained session principal(s) were found`,
+        { candidates: bare.candidates },
+      )
+    }
+    if (bare.kind === 'duplicate_dropped') {
+      return {
+        status: 'duplicate_dropped',
+        original_seq: bare.originalSeq,
+        room_id: bare.roomId,
+      }
+    }
+    return {
+      status: 'committed',
+      seq: bare.seq,
+      room_id: bare.roomId,
+      peer: bare.peer,
+    }
   }
 
   const { outcome, peerFacts } = committedBatchResult
