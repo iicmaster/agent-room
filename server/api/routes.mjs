@@ -98,6 +98,13 @@ export const ROUTE_TABLE = Object.freeze([
   // unresolvable address answers the constant quiet peer_not_found; the
   // receipt speaks only committed + peer presence (never delivered/read).
   Object.freeze({ method: 'POST', path: '/api/messages', class: 'actor', implemented: true, requestFields: Object.freeze(['client_message_id', 'reply_to_seq', 'text', 'to']) }),
+  // Story 3.1: the multiplexed watch stream — one long-lived SSE/NDJSON
+  // response per session, fed by the post-commit bus. Runs on the Session
+  // capability (SESSION_CAPABILITY_ROUTES), so it closes the Bearer-loses-
+  // ssession: gap from 2.1 for its consumers. `cursors` is the sole query
+  // field; the raw JSON is validated by the handler (byte/key/grammar bounds),
+  // not the field gate, which only checks query-key membership here.
+  Object.freeze({ method: 'GET', path: '/api/watch', class: 'actor', implemented: true, requestFields: Object.freeze(['cursors']) }),
 
   // pre-auth (AD-8): POST /api/auth/enroll · POST /api/auth/challenge ·
   // POST /api/auth/answer · POST /api/auth/local
@@ -220,6 +227,9 @@ export const REQUEST_FIELD_VOCABULARY = Object.freeze([
   'reason',
   'recovery_id',
   'session_kind',
+  // Story 3.1: the sole query field of GET /api/watch — a JSON object of
+  // room_id -> non-negative starting seq, bounded after decode by the handler.
+  'cursors',
 ])
 
 export const RESPONSE_FIELD_VOCABULARY = Object.freeze([
@@ -301,6 +311,12 @@ export const RESPONSE_FIELD_VOCABULARY = Object.freeze([
   // without a second lookup. A Bearer caller's rows never carry it (that
   // caller sees no session-pair room at all).
   'peer_session_id',
+  // Story 3.1 (additive, dated spine amendment): the watch stream's event
+  // envelope carries event (one of message/rescan_required/session_superseded/
+  // actor_banned/session_revoked/keepalive) and ts (the ISO-8601 emission
+  // time). Both are response-only; the SPINE_PATH contract parses these names.
+  'event',
+  'ts',
 ])
 
 // Matching: specific patterns first, wildcard (`/viewer/` + static assets)

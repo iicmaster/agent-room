@@ -8,7 +8,7 @@ const CLIENT_MESSAGE_ID_PATTERN = new RegExp(
   `^[A-Za-z0-9][A-Za-z0-9_.:-]{0,${CLIENT_MESSAGE_ID_MAX - 1}}$`,
 )
 
-export function createMessagingMessageOperations({ database, withImmediateTransaction, validate, helpers, storageGate, duplicateWindowMs, storageNowMs, resetStorageWarning, takeStorageWarning, storageWarn }) {
+export function createMessagingMessageOperations({ database, withImmediateTransaction, validate, helpers, storageGate, duplicateWindowMs, storageNowMs, resetStorageWarning, takeStorageWarning, storageWarn, collectPostCommit = null }) {
   const {
     assertOpen, fail, requireObject, requireRoomId, requireFingerprint,
     requireChatId, requireClientMessageId, requireMessageText,
@@ -57,6 +57,21 @@ export function createMessagingMessageOperations({ database, withImmediateTransa
         INSERT INTO messages (room_id, seq, actor_fingerprint, chat_id, client_message_id, text, reply_to_seq, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `).run(validRoomId, nextSeq, validFingerprint, validChatId, clientMessageId, validText, validReplyToSeq, createdAt)
+      // Story 3.1: collect the event at the single INSERT point — once per
+      // genuinely new row. duplicate/idempotent paths return before here, so
+      // they never collect. The store publishes only after COMMIT FULL.
+      if (collectPostCommit !== null) {
+        collectPostCommit({
+          event: 'message',
+          room_id: validRoomId,
+          seq: nextSeq,
+          chat_id: validChatId,
+          fingerprint: validFingerprint,
+          text: validText,
+          reply_to_seq: validReplyToSeq,
+          created_at: createdAt,
+        })
+      }
       return { message: selectMessage(validRoomId, nextSeq), duplicate: false, duplicateDropped: false, original: null, warnLine }
     } catch (error) {
       if (error?.errcode === 13) fail('storage_low', 'the disk holding the agent-room data directory is full; the message was not committed')

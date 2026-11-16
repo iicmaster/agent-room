@@ -10,6 +10,28 @@
 export const MESSAGE_TEXT_MAX = 32 * 1024
 export const FRAME_MAX_BYTES = 1024 * 1024
 
+// Story 3.1: the multiplexed watch stream's limits (AD-9 — named once here,
+// every enforcement point imports by name). One stream per session; a 1,501st
+// concurrent stream is refused 503 without evicting any incumbent. Catch-up
+// is bounded per stream; a backlog above the bound asks the client to rescan.
+// The cursors parameter is bounded after URL decode, in UTF-8 bytes. The
+// outbound queue is bounded per subscriber (slow consumer -> rescan_required).
+// Keepalive is a framing heartbeat on a 300 s stream held open with
+// requestTimeout=0 — never a substitute for that timeout. The reconciler
+// ticks every 1 s to close streams on ban/revoke/generation drift within 1.1 s.
+export const WATCH_CONCURRENT_MAX = 1500
+export const WATCH_CATCHUP_MAX = 200
+export const WATCH_CURSORS_PARAM_MAX_BYTES = 4096
+export const WATCH_OUTBOUND_BUFFER_MAX_BYTES = 65536
+export const WATCH_KEEPALIVE_MS = 15_000
+export const WATCH_TIMEOUT_MS = 300000
+export const WATCH_BAN_RECONCILE_MS = 1000
+// Client-side reconnect for a dropped watch: base 250 ms doubling to an
+// 8 s cap, ±20% jitter. Distinct from the Bearer reconnect schedule above.
+export const WATCH_RECONNECT_BASE_MS = 250
+export const WATCH_RECONNECT_MAX_MS = 8000
+export const WATCH_RECONNECT_JITTER = 0.2
+
 // Reads: cursor pagination and long-poll hold.
 export const READ_PAGE_MAX = 200
 export const READ_HOLD_MAX_MS = 20_000

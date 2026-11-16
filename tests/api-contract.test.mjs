@@ -255,6 +255,7 @@ test('the implemented mark covers exactly the live frozen routes', () => {
     'POST /api/session-principals/revoke',
     'GET /api/session-principals',
     'POST /api/messages',
+    'GET /api/watch',
     'POST /api/auth/enroll',
     'POST /api/auth/challenge',
     'POST /api/auth/answer',
