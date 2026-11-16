@@ -53,7 +53,7 @@ import {
   machineLabel,
   sessionScopeKey,
 } from '../client/session-state.mjs'
-import { advanceCursor } from '../client/cursors.mjs'
+import { advanceCursor, loadCursors } from '../client/cursors.mjs'
 import { LOCAL_TRANSPORT, REMOTE_TRANSPORT, applyTrustMatrix, loadAllowlist } from '../client/trust.mjs'
 import { ensureServer, readRuntimeRecord } from '../client/ensure-server.mjs'
 import { loadRemoteConfig } from '../client/remote-config.mjs'
@@ -399,7 +399,7 @@ export async function runReadFamilyCommand(tokens, { pluginDataDir, sharedDataDi
         return usage(command, `--peer: ${CHAT_ID_INVALID_MESSAGE}`)
       }
     }
-    let afterSeq = 0
+    let afterSeq = null
     if (flags['after-seq'] !== undefined) {
       if (!/^[0-9]+$/.test(flags['after-seq'])) return usage(command, '--after-seq must be a non-negative integer')
       afterSeq = Number(flags['after-seq'])
@@ -497,8 +497,15 @@ export async function runReadFamilyCommand(tokens, { pluginDataDir, sharedDataDi
       roomId = pairRoom.room_id
     }
 
+    // An explicit --after-seq wins; otherwise the session's own stored
+    // read_seq is the resume point (0 when this scope has never read the
+    // room). This is what makes a second `read` a continuation rather than a
+    // replay.
+    const stored = afterSeq === null
+      ? (loadCursors(pluginDataDir, realmId, { env }).get(roomId)?.read_seq ?? 0)
+      : afterSeq
     const params = new URLSearchParams({
-      after_seq: String(afterSeq),
+      after_seq: String(stored),
       limit: String(limit),
       wait_ms: String(waitMs),
     })
