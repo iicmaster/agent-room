@@ -452,9 +452,12 @@ test('a disk-full write at the insert (SQLITE_FULL) maps to the same coded stora
 
 test('a disk-full send over the wire answers 200 {status:storage_low}, never a raw SQLite error', async t => {
   const dataDir = makeDataDir(t)
+  // Story 2.2 adds a STRICT dedup table + index; give the fixture enough
+  // pages that the bounded 64-attempt loop still reaches SQLITE_FULL. The
+  // storage_low gate semantics under test are unchanged.
   const server = await startTestServer(t, dataDir, {
     storageFreeBytesFn: () => 2 * GIB,
-    maxPageCount: 40,
+    maxPageCount: 64,
   })
   const alice = await connectSession(server.port, dataDir, 'Alice')
   const roomId = alice.broadcastRoomId
@@ -516,7 +519,7 @@ test('the ADDRESSED send under a full disk answers the same 200 {status:storage_
   const dataDir = makeDataDir(t)
   const server = await startTestServer(t, dataDir, {
     storageFreeBytesFn: () => 2 * GIB,
-    maxPageCount: 40,
+    maxPageCount: 64,
   })
   const alice = await connectSession(server.port, dataDir, 'Alice')
 
@@ -705,6 +708,37 @@ test('openRoomLog validates the storage reserves and seams at open', t => {
   // The validated defaults pass and consume the declared constants.
   const { store } = openGatedStore(t, dataDir, { free: 2 * GIB })
   assert.ok(store.databasePath.endsWith(ROOM_LOG_DATABASE_FILENAME))
+})
+
+test('the deferred dedup DDL converges on the next open after a full-disk open', t => {
+  // Story 2.2 regression: the additive dedup table's CREATE is deferrable on a
+  // full disk (so open succeeds and the send can answer storage_low), but the
+  // next open with room MUST re-run it and leave a healthy store with the
+  // STRICT table + lookup index — never silently leave an upgraded store
+  // without them (tests/bare-id-direct-send.test.mjs queries the table).
+  const dataDir = makeDataDir(t)
+
+  const capped = openRoomLog({ dataDir, maxPageCount: DISK_FULL_PAGES })
+  capped.close()
+  const dbPath = join(dataDir, ROOM_LOG_DATABASE_FILENAME)
+  const inspect = () => {
+    const db = new DatabaseSync(dbPath, { readOnly: true })
+    try {
+      return db.prepare("SELECT name FROM sqlite_master WHERE type IN ('table','index') AND name IN ('bare_id_send_dedup','idx_bare_id_send_dedup_lookup')").all().map(row => row.name)
+    } finally { db.close() }
+  }
+  assert.deepEqual(inspect(), [], 'a full disk defers the dedup DDL; open still succeeded')
+
+  // Room returns: the very next open converges the deferred DDL, both objects.
+  const recovered = openRoomLog({ dataDir })
+  recovered.close()
+  assert.deepEqual(inspect().sort(), ['bare_id_send_dedup', 'idx_bare_id_send_dedup_lookup'])
+
+  // And the converged table is STRICT, the shape Story 2.2 relies on.
+  const db = new DatabaseSync(dbPath, { readOnly: true })
+  try {
+    assert.equal(Number(db.prepare("SELECT strict FROM pragma_table_list WHERE name = 'bare_id_send_dedup'").get().strict), 1)
+  } finally { db.close() }
 })
 
 test('storageThresholdsFromEnv parses the two knobs strictly and falls back per junk value', () => {

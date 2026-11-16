@@ -721,7 +721,7 @@ function withCliBusyRetry(operation) {
   }
 }
 
-function verifyStrictTables(database) {
+function verifyStrictTables(database, { dedupConverged = true } = {}) {
   const strictTables = database.prepare(`
     SELECT name, strict
     FROM pragma_table_list
@@ -730,6 +730,9 @@ function verifyStrictTables(database) {
   `).all()
   const strictByName = new Map(strictTables.map(row => [row.name, Number(row.strict)]))
   for (const name of ['rooms', 'direct_members', 'messages', 'realms', 'chat_id_claims', 'enrolled_actors', 'invites', 'invite_consumptions', 'banned_actors', 'session_principals', 'session_pair_members', BARE_ID_DEDUP_TABLE]) {
+    // A full disk deferred the additive dedup table; do not fail the open for
+    // its absence — the next open with room re-runs ensureBareIdSendDedup.
+    if (name === BARE_ID_DEDUP_TABLE && !dedupConverged) continue
     if (strictByName.get(name) !== 1) {
       fail('database_schema_invalid', `database table ${name} is missing or is not STRICT`)
     }
@@ -1178,9 +1181,25 @@ function ensureSessionPairMembersTable(database) {
 // convergence family (IF NOT EXISTS on every open, no user_version bump — the
 // claims/index precedent). A dropped index is recreated; a drifted column set
 // is a loud schema refusal, never silently ignored.
+//
+// Unlike the store's other additive DDL, this one is DEFERABLE on a full disk:
+// the storage gate's contract is that opening a page-ceilinged (full) database
+// SUCCEEDS so the SEND can answer the coded storage_low, never a raw error. The
+// dedup table's two CREATEs are the first statements in the open sequence that
+// need fresh pages on such a fixture, so a raw SQLITE_FULL here would break that
+// contract (tests/storage-gates.test.mjs). On FULL we defer — the next open
+// with room re-runs this and converges (healthy-store reopen still requires the
+// table, per tests/bare-id-direct-send.test.mjs). Column/index drift is still a
+// loud refusal; only the full-disk allocation is deferred.
+// Returns true when converged, false when deferred for lack of pages.
 function ensureBareIdSendDedup(database) {
-  database.exec(bareIdSendDedupTableDdl({ ifNotExists: true }))
-  database.exec(bareIdSendDedupIndexDdl())
+  try {
+    database.exec(bareIdSendDedupTableDdl({ ifNotExists: true }))
+    database.exec(bareIdSendDedupIndexDdl())
+  } catch (error) {
+    if ((Number(error?.errcode) & 0xff) === SQLITE_FULL) return false
+    throw error
+  }
   const columns = database
     .prepare(`SELECT name FROM pragma_table_info('${BARE_ID_DEDUP_TABLE}') ORDER BY cid`)
     .all()
@@ -1197,6 +1216,7 @@ function ensureBareIdSendDedup(database) {
   if (!indexRow || typeof indexRow.sql !== 'string' || !/created_at/i.test(indexRow.sql)) {
     fail('database_schema_invalid', 'bare_id_send_dedup lookup index did not converge')
   }
+  return true
 }
 
 function verifySessionPairMembersColumns(database) {
@@ -1489,8 +1509,8 @@ export function openRoomLog({
         verifySessionPrincipalLiveBaseIndex(database, { role })
         verifySessionPrincipalCapabilityIndexes(database, { role })
         verifySessionPairMembersColumns(database)
-        ensureBareIdSendDedup(database)
-        verifyStrictTables(database)
+        const dedupConverged = ensureBareIdSendDedup(database)
+        verifyStrictTables(database, { dedupConverged })
         return { ...connection, reportedVersion: probedVersion }
       }
 
@@ -1519,8 +1539,8 @@ export function openRoomLog({
       verifySessionPrincipalCapabilityIndexes(database, { role })
       ensureSessionPairMembersTable(database)
       verifySessionPairMembersColumns(database)
-      ensureBareIdSendDedup(database)
-      verifyStrictTables(database)
+      const dedupConverged = ensureBareIdSendDedup(database)
+      verifyStrictTables(database, { dedupConverged })
 
       // Report the file's actual version, never the compiled constant.
       const reportedVersion = Number(pragmaValue(database, 'PRAGMA user_version'))
