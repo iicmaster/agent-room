@@ -361,7 +361,6 @@ test('every v0.1 public error code has an HTTP status declared once', () => {
     'local_token_invalid',
     'message_frame_too_large',
     'message_not_found',
-    'migration_source_unreadable',
     'name_taken',
     'node_version_unsupported',
     'not_enrolled',
@@ -471,7 +470,6 @@ test('every v0.1 public error code has an HTTP status declared once', () => {
     session_credential_invalid: 401,
     session_expired: 409,
     session_revoked: 401,
-    migration_source_unreadable: 500,
     // Story 4.6: the storage admission gate's coded face (507 — the
     // Insufficient Storage class). The send route answers the FR-17 status
     // as a 200 result {status:'storage_low'}; this is the coded face for

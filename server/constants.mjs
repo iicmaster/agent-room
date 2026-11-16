@@ -313,9 +313,8 @@ export const PUBLIC_ERRORS = Object.freeze({
   // v0.9.0 session credentials: a session-scoped operation presented without
   // the per-session capability header, with a capability that does not resolve
   // to a retained principal bound to the presented selectors, or against a
-  // principal an operator revoked. The client-side counterpart — a migration
-  // source the seeder cannot read — refuses loudly rather than resetting a
-  // cursor silently (CAP-7 / failure-modes U2).
+  // principal an operator revoked (CAP-7 / failure-modes U2). The former
+  // v0.9 seeder's migration-source refusal was retired with Story 2.1.
   session_capability_required: 'this operation requires the per-session capability (Authorization: Session <capability>)',
   session_credential_invalid: 'the session capability is missing, invalid, or does not match this session',
   session_expired: 'session principal is expired, retention-expired, or fenced by a newer generation',
@@ -413,8 +412,10 @@ export const PUBLIC_ERROR_STATUS = Object.freeze({
   // to an unresolvable address is a quiet 404 miss (peer_not_found); the
   // session credential family is credential-class (401) except the fenced or
   // retention-expired principal, which is a conflicted state (409 — the
-  // capability can never become valid again by retrying); and the migration
-  // seeder's refusal is local-state corruption answered 500.
+  // capability can never become valid again by retrying). The v0.9 seeder's
+  // `migration_source_unreadable` code was retired with Story 2.1 (its only
+  // thrower, sessionCursorSeedState, was deleted); no migration code remains
+  // in this map.
   name_taken: 409,
   peer_not_found: 404,
   not_enrolled: 403,
