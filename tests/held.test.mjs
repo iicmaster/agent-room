@@ -780,8 +780,15 @@ test('cursor independence over the real surface: a held seq is consumed by the c
   const again = structured(await mcp.tool('message_read', { room_id: broadcastId }))
   assert.deepEqual(again.messages, [], 'the consumed page is never re-delivered')
   assert.equal(again.next_after_seq, 3)
-  const cursors = JSON.parse(readFileSync(cursorDocPath(), 'utf8'))
-  assert.equal(cursors.cursors[broadcastId].after_seq, 3, 'the cursor advanced past the held seqs and stays there')
+  // Story 2.1: the document is schema v2 — per realm, then per room.
+  const cursorValueOf = () => {
+    const doc = JSON.parse(readFileSync(cursorDocPath(), 'utf8'))
+    const realmIdInDoc = Object.keys(doc.realms)[0]
+    return doc.realms[realmIdInDoc].rooms[broadcastId]
+  }
+  const cursors = cursorValueOf()
+  assert.equal(cursors.read_seq, 3, 'read_seq advanced past the held seqs and stays there')
+  assert.equal(cursors.notified_seq, 0, 'notified_seq is never advanced by a read')
 
   // The held state survived the cursor advance, untouched.
   const listed = structured(await mcp.tool('room_held_list'))
@@ -794,8 +801,7 @@ test('cursor independence over the real surface: a held seq is consumed by the c
   const redelivered = structured(await mcp.tool('message_read', { room_id: broadcastId, after_seq: 0 }))
   assert.deepEqual(redelivered.messages.map(row => row.seq), [1, 2, 3])
   for (const row of redelivered.messages) assert.equal(row.held, undefined)
-  const cursorsAfter = JSON.parse(readFileSync(cursorDocPath(), 'utf8'))
-  assert.equal(cursorsAfter.cursors[broadcastId].after_seq, 3, 'an explicit low read never regresses the durable cursor')
+  assert.equal(cursorValueOf().read_seq, 3, 'an explicit low read never regresses the durable cursor')
   assert.deepEqual(
     loadHeldState(world.pluginData, realmId).entries.map(entry => entry.seq),
     [1, 2, 3],
