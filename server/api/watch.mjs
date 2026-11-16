@@ -35,7 +35,7 @@ function nowIso() {
 // Parse + validate the raw ?cursors= value. Returns { error } or { cursors:
 // Map<roomId, seq> }. Duplicate JSON keys are caught in the parse reviver;
 // duplicate QUERY keys are caught by the pipeline's field gate before here.
-function parseCursors(raw) {
+export function parseCursors(raw) {
   if (raw === undefined) return { cursors: new Map() }
   if (typeof raw !== 'string') return { error: reject('invalid_request', CURSORS_INVALID_MESSAGE) }
   if (Buffer.byteLength(raw, 'utf8') > WATCH_CURSORS_PARAM_MAX_BYTES) {
