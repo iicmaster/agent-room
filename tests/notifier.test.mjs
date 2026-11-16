@@ -188,10 +188,19 @@ test('the notifier writes one inbox line per foreign message, skips its own, fol
   const alicePlugin = world.pluginDataFor('alice')
   const bobPlugin = world.pluginDataFor('bob')
   const carolPlugin = world.pluginDataFor('carol')
-  // The notify hook: a no-shell executable that appends its stdin to a file.
+  // The Tier 3 notify hook: a shell-free executable that writes ONLY the
+  // metadata env it receives to a file — never the message body. Story 4.3
+  // replaces the old stdin-line hook; metadata is the entire contract.
   const hookOut = join(world.parent, 'hook.out')
   const hook = join(world.parent, 'hook.sh')
-  writeFileSync(hook, `#!/bin/sh\ncat >> '${hookOut}'\n`, { mode: 0o700 })
+  writeFileSync(hook, `#!/usr/bin/env node
+require('node:fs').appendFileSync(${JSON.stringify(hookOut)}, JSON.stringify({
+  room_id: process.env.AGENT_ROOM_ROOM_ID,
+  seq: process.env.AGENT_ROOM_SEQ,
+  chat_id: process.env.AGENT_ROOM_FROM_ADDRESS,
+  trusted: process.env.AGENT_ROOM_TRUSTED,
+}) + '\\n')
+`, { mode: 0o700 })
   chmodSync(hook, 0o700)
 
   const alice = startMcpChild(t, { pluginData: alicePlugin, sharedData: world.sharedData, env: { AGENT_ROOM_NOTIFY_CMD: hook } })
@@ -237,9 +246,16 @@ test('the notifier writes one inbox line per foreign message, skips its own, fol
   assert.equal(line.preview.includes('untrusted_message'), false)
   assert.ok(Number.isFinite(Date.parse(line.ts)), 'ts is a timestamp')
 
-  // The notify hook ran without a shell and received the same line on stdin.
+  // Story 4.3: the Tier 3 hook ran shell-free and received ONLY metadata in
+  // its env — never the message text/body. The four keys are the allowlist.
   await waitFor(() => existsSync(hookOut) && readFileSync(hookOut, 'utf8').includes('\n'), 'the notify hook output')
-  assert.deepEqual(readFileSync(hookOut, 'utf8').split('\n').filter(Boolean).map(text => JSON.parse(text)), [line])
+  const firstPoke = JSON.parse(readFileSync(hookOut, 'utf8').split('\n').filter(Boolean)[0])
+  assert.deepEqual(Object.keys(firstPoke).sort(), ['chat_id', 'room_id', 'seq', 'trusted'])
+  assert.equal(firstPoke.room_id, broadcast)
+  assert.equal(Number(firstPoke.seq), bobSent.seq)
+  assert.equal(firstPoke.chat_id, 'bob')
+  assert.equal(firstPoke.trusted, 'true')
+  assert.ok(!JSON.stringify(firstPoke).includes(line.preview), 'no message body metadata leak')
 
   // A Direct Room bob opens and writes into AFTER alice's notifier started is
   // followed from its first message — the room is new, so all of it is news.
@@ -268,7 +284,14 @@ test('the notifier writes one inbox line per foreign message, skips its own, fol
   )
   const hookLines = () => readFileSync(hookOut, 'utf8').split('\n').filter(Boolean).map(text => JSON.parse(text))
   await waitFor(() => hookLines().length === lines.length, 'the hook to see every line')
-  assert.deepEqual(hookLines(), lines, 'the hook received exactly the inbox lines, one per run')
+  // Every poke carries exactly the four allowlisted metadata keys, in arrival
+  // order. No line carries a preview/body — Tier 3 never sees message text.
+  assert.deepEqual(
+    hookLines().map(poke => [poke.room_id, Number(poke.seq), poke.chat_id]),
+    lines.map(entry => [entry.room_id, entry.seq, entry.chat_id]),
+    'the hook received exactly the metadata for each inbox line, in order',
+  )
+  assert.ok(hookLines().every(poke => Object.keys(poke).sort().join() === 'chat_id,room_id,seq,trusted'))
 
   // AGENT_ROOM_NOTIFIER=off: carol received the same broadcast but has no inbox.
   assert.equal(existsSync(join(carolPlugin, INBOX_FILENAME)), false, 'a disabled notifier writes nothing')
@@ -442,10 +465,18 @@ test('the hook queue is bounded: a burst pokes every line under normal pacing, d
   mkdirSync(pluginData, { mode: 0o700 })
 
   // The hook: slow enough that a burst would pile up behind an unbounded
-  // chain; it appends its stdin (one line per run) to a file.
+  // chain; it appends its metadata env (one line per run) to a file. Story
+  // 4.3: metadata-only, never the message body.
   const hookOut = join(parent, 'hook.out')
   const hook = join(parent, 'hook.sh')
-  writeFileSync(hook, `#!/bin/sh\nsleep 0.05\ncat >> '${hookOut}'\n`, { mode: 0o700 })
+  writeFileSync(hook, `#!/usr/bin/env node
+setTimeout(() => require('node:fs').appendFileSync(${JSON.stringify(hookOut)}, JSON.stringify({
+  room_id: process.env.AGENT_ROOM_ROOM_ID,
+  seq: process.env.AGENT_ROOM_SEQ,
+  chat_id: process.env.AGENT_ROOM_FROM_ADDRESS,
+  trusted: process.env.AGENT_ROOM_TRUSTED,
+}) + '\\n'), 50)
+`, { mode: 0o700 })
   chmodSync(hook, 0o700)
 
   const own = 'sha256:' + 'a'.repeat(64)
@@ -488,7 +519,11 @@ test('the hook queue is bounded: a burst pokes every line under normal pacing, d
   await waitFor(() => existsSync(hookOut) && readFileSync(hookOut, 'utf8').split('\n').filter(Boolean).length >= 5,
     'the hook poked every line', 10_000)
   const poked = readFileSync(hookOut, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line))
-  assert.deepEqual(poked, messageLines(pluginData), 'the hook saw exactly the inbox lines, in order')
+  assert.deepEqual(
+    poked.map(entry => [entry.room_id, Number(entry.seq), entry.chat_id]),
+    messageLines(pluginData).map(entry => [entry.room_id, entry.seq, entry.chat_id]),
+    'the hook saw exactly the metadata for each of the five lines, in order',
+  )
 })
 
 // --- round-4 gate: the offline DM, no replay on eviction, reported drops, sink honesty ---
@@ -544,7 +579,14 @@ test('round-4: a DM a peer opened while the installation was offline hints from 
   mkdirSync(pluginData, { mode: 0o700 })
   const hookFile = join(parent, 'hook.out')
   const hook = join(parent, 'hook.sh')
-  writeFileSync(hook, `#!/bin/sh\ncat >> '${hookFile}'\n`, { mode: 0o700 })
+  writeFileSync(hook, `#!/usr/bin/env node
+require('node:fs').appendFileSync(${JSON.stringify(hookFile)}, JSON.stringify({
+  room_id: process.env.AGENT_ROOM_ROOM_ID,
+  seq: process.env.AGENT_ROOM_SEQ,
+  chat_id: process.env.AGENT_ROOM_FROM_ADDRESS,
+  trusted: process.env.AGENT_ROOM_TRUSTED,
+}) + '\\n')
+`, { mode: 0o700 })
   chmodSync(hook, 0o700)
 
   const own = 'sha256:' + 'a'.repeat(64)
@@ -578,8 +620,9 @@ test('round-4: a DM a peer opened while the installation was offline hints from 
   assert.equal(hint.foreign_in_window, 2, 'both dark messages count')
   await waitFor(() => existsSync(hookFile), 'the hint poked the hook')
   const poked = readFileSync(hookFile, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line))
-  assert.ok(poked.some(entry => entry.kind === 'notifier_status' && entry.event === 'unread_backlog'),
-    'the hook received the backlog hint, not only message lines')
+  assert.ok(poked.some(entry => entry.room_id === COLD),
+    'the hook was poked with the backlog hint room metadata (only the 4 allowlisted keys; no kind/event/status text)')
+  assert.ok(poked.every(entry => Object.keys(entry).sort().join() === 'chat_id,room_id,seq,trusted'))
 })
 
 test('round-4: watch -> evict -> probe never replays delivered rows', async t => {
@@ -648,7 +691,9 @@ test('round-4: a burst past the hook cap drops the oldest pokes and reports them
   mkdirSync(pluginData, { mode: 0o700 })
   const hookOut = join(parent, 'hook.out')
   const hook = join(parent, 'hook.sh')
-  writeFileSync(hook, `#!/bin/sh\nsleep 0.02\ncat >> '${hookOut}'\n`, { mode: 0o700 })
+  writeFileSync(hook, `#!/usr/bin/env node
+setTimeout(() => require('node:fs').appendFileSync(${JSON.stringify(hookOut)}, process.env.AGENT_ROOM_SEQ + '\\n'), 20)
+`, { mode: 0o700 })
   chmodSync(hook, 0o700)
 
   const peer = 'sha256:' + 'b'.repeat(64)

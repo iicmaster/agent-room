@@ -662,7 +662,6 @@ export const NOTIFIER_REQUEST_SPACING_MS = 600
 export const NOTIFIER_ROOM_LIMIT = 20
 export const NOTIFIER_ACTIVE_WINDOW_MS = 24 * 60 * 60 * 1000
 export const NOTIFIER_PREVIEW_MAX = 160
-export const NOTIFY_CMD_TIMEOUT_MS = 10_000
 // The unwatched-room sweep (v0.8.0): rooms past the watch cap — the cold DMs
 // the active-window rule dropped — get a bounded probe per refresh cycle
 // (one head read each, round-robin), so a quiet DM's next message is
@@ -676,6 +675,38 @@ export const NOTIFIER_BACKLOG_SCAN_MAX = 200
 // poked; under a flood the queue bounds the pending work while the inbox
 // itself still carries every line.
 export const NOTIFIER_HOOK_QUEUE_MAX = 16
+
+// --- Story 4.3: Tier 3 shell-free notify + full doctor matrix (AD-9) ---------
+// TIER3_TIMEOUT_MS supersedes the retired 10 s notify-hook timeout (the old
+// runHook sent a line on stdin under a 10 s budget — a Tier 3 violation). The
+// canonical value is declared ONCE here; NOTIFY_CMD_TIMEOUT_MS remains a
+// back-compatible alias for any external caller still importing that name.
+export const TIER3_TIMEOUT_MS = 1_000
+export const NOTIFY_CMD_TIMEOUT_MS = TIER3_TIMEOUT_MS
+// The ONLY metadata a Tier 3 runner may inject. Never message text/body/token.
+export const NOTIFY_ENV_ALLOWLIST = Object.freeze([
+  'AGENT_ROOM_ROOM_ID',
+  'AGENT_ROOM_SEQ',
+  'AGENT_ROOM_FROM_ADDRESS',
+  'AGENT_ROOM_TRUSTED',
+])
+// Benign inherited variables a child needs to start (e.g. `#!/usr/bin/env
+// node` needs PATH). Every AGENT_ROOM_* variable NOT in NOTIFY_ENV_ALLOWLIST
+// is dropped, so no token or secret can ride into the child environment.
+export const NOTIFY_CHILD_ENV_ALLOWLIST = Object.freeze(['PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL'])
+export const NOTIFY_CONFIG_FILENAME = 'notify-config.json'
+// The five honestly-enforceable Gate labels (epic AQ-2, closed enum).
+export const NOTIFY_GATE_STATES = Object.freeze({
+  SERVER: 'Server-enforced',
+  PLUGIN: 'Plugin-enforced',
+  HOST_CHANNEL: 'Host-channel-enforced',
+  HOST_HOOK: 'Host-hook-enforced',
+  INSTRUCTED: 'Instructed',
+})
+export const NOTIFY_GATE_ENUM = Object.freeze(Object.values(NOTIFY_GATE_STATES))
+// Doctor's wall-clock budgets: each probe <= 1 s, the whole report <= 3 s.
+export const DOCTOR_PROBE_TIMEOUT_MS = 1_000
+export const DOCTOR_TOTAL_BUDGET_MS = 3_000
 
 // The wake policy (ratified 2026-11-01): a stranger's first HELD row wakes
 // (the open-DM journey); repeat wakes from the same untrusted sender cool

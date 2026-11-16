@@ -51,10 +51,11 @@
 //     lost — the inbox line itself was already written, so nothing is lost,
 //     but the wake did not reach the hook and this says so where a host
 //     actually looks;
-//   - optionally runs AGENT_ROOM_NOTIFY_CMD (execFile, no shell) with that
-//     line on stdin — the host-native wake (a tmux send-keys waker, a lane
-//     poker, a desktop notification). The hook queue is BOUNDED (one in
-//     flight, NOTIFIER_HOOK_QUEUE_MAX waiting, drop-oldest) — an unread
+//   - optionally runs the Tier 3 notify command (Story 4.3: verified
+//     executable, execFile shell:false timeout 1000, metadata-only argv/env —
+//     NEVER message text on stdin) as the host-native wake (a tmux send-keys
+//     waker, a lane poker, a desktop notification). The hook queue is BOUNDED
+//     (one in flight, NOTIFIER_HOOK_QUEUE_MAX waiting, drop-oldest) — an unread
 //     burst never grows unbounded pending work, and every line is in the
 //     inbox regardless;
 //   - writes nothing to cursors.json or held.json: message_read remains the
@@ -65,7 +66,6 @@
 //     on a session-level refusal (banned / not_enrolled) —
 //     the next successful tool call starts it again.
 
-import { execFile } from 'node:child_process'
 import { closeSync, constants as fsConstants, fchmodSync, openSync, writeSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -78,7 +78,6 @@ import {
   NOTIFIER_ROOM_LIMIT,
   NOTIFIER_ROOM_REFRESH_MS,
   NOTIFIER_UNWATCHED_PROBE_LIMIT,
-  NOTIFY_CMD_TIMEOUT_MS,
   READ_HOLD_MAX_MS,
   READ_PAGE_MAX,
   SESSION_ADDRESS_PATTERN,
@@ -87,6 +86,7 @@ import { reconnectDelayMs } from '../client/api-client.mjs'
 import { loadPersistedCursors } from '../client/cursors.mjs'
 import { createDeliveryClassifier } from './delivery.mjs'
 import { decideHeldWake, loadWakePolicy, policyIdentity } from './wake-policy.mjs'
+import { notifyMetadata, normalizeNotifyCommand, runTier3Notify } from './tier3-notify.mjs'
 
 export const INBOX_FILENAME = 'inbox.jsonl'
 export const NOTIFIER_ENV = 'AGENT_ROOM_NOTIFIER'
@@ -274,24 +274,40 @@ export function startNotifier({
   let hookInFlight = false
   const hookQueue = []
 
-  const runHook = line => new Promise(resolvePromise => {
-    const child = execFile(notifyCmd, [], { timeout: NOTIFY_CMD_TIMEOUT_MS, signal }, error => {
-      if (error && !signal.aborted) {
-        errorOutput.write(`agent-room notifier: ${NOTIFY_CMD_ENV} failed: ${error.code ?? error.signal ?? 'error'}\n`)
-        // The poke was lost: say so in the inbox (the line itself was already
-        // delivered there), naming the message key the hook missed.
-        const key = messageKeyOf(line)
-        appendStatusLine({
-          event: 'hook_error',
-          error: error.code ?? error.signal ?? 'error',
-          ...(key === null ? {} : { message_key: key }),
-        })
-      }
-      resolvePromise()
+  // Story 4.3: the SINGLE Tier 3 notify path. The retired runHook ran
+  // `execFile(cmd, [], {timeout:10000})` with the full inbox line on stdin —
+  // a Tier 3 violation (wrong budget + message text leaving the trust
+  // boundary). The Tier 3 runner is now the only hook: verified executable,
+  // shell-free 1 s exec, metadata-only argv/env, 0 retries, redacted failure.
+  // The inbox line itself is the bounded passive fallback — it was already
+  // written before this poke, so a failed poke loses nothing.
+  const runHook = async line => {
+    let parsed = null
+    try { parsed = JSON.parse(line) } catch { /* non-JSON: metadata all empty */ }
+    const metadata = notifyMetadata({
+      room_id: parsed?.room_id,
+      seq: parsed?.seq,
+      chat_id: parsed?.chat_id,
+      trusted: parsed?.held === true ? false : true,
     })
-    child.stdin.on('error', () => { /* a hook that ignores its stdin may close it first */ })
-    child.stdin.end(line)
-  })
+    const result = await runTier3Notify({
+      env,
+      metadata,
+      errorOutput,
+      signal,
+      config: normalizeNotifyCommand(notifyCmd),
+    })
+    if (result.ok === false && result.reason !== 'aborted') {
+      // The poke was lost: say so in the inbox with the REDACTED code only —
+      // never a raw error, argv, env, or message text.
+      const key = messageKeyOf(line)
+      appendStatusLine({
+        event: 'hook_error',
+        error: result.reason,
+        ...(key === null ? {} : { message_key: key }),
+      })
+    }
+  }
 
   const scheduleHook = line => {
     if (hookInFlight) {
