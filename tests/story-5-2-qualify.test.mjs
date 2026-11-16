@@ -6,14 +6,15 @@
 // no full pipeline, no 1000-send burst, no full-suite sweep in this file.
 
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { PassThrough } from 'node:stream'
 import test from 'node:test'
 
 import {
-  parseQualifyArgs, runQualifyCommand,
+  parseQualifyArgs, runQualifyCommand, cellPackaging, evaluateValidateReport, digestCandidate,
 } from '../server/cli/qualify-commands.mjs'
 
 const CELL_NAMES = ['PREREQ', 'RECEIPT', 'SM-1', 'SM-2', 'SM-3', 'SM-C1', 'SM-C2', 'FULL-SUITE', 'PACKAGING']
@@ -207,6 +208,14 @@ test('a matching candidate receipt is not invalidated', async () => {
 // stubbed in a way that hides their thresholds — these tests inject them via
 // the seams below and assert the aggregate verdict; the real measurement path
 // is exercised by `agent-room qualify --json` (reported separately to the PM).
+function cleanReport(target = '/release/agent-room-claude-code/.claude-plugin/plugin.json') {
+  return {
+    success: true, strict: true, target,
+    manifest: { errors: [], warnings: [], notes: [] },
+    contents: [],
+  }
+}
+
 function stubOverrides(cells) {
   return {
     sm1Fn: async () => cells['SM-1'],
@@ -222,3 +231,165 @@ function stubOverrides(cells) {
     }),
   }
 }
+
+// --- E5-A1: packaging cell grades the FULL strict-validate report ------------------
+test('E5-A1: evaluateValidateReport rejects degraded reports, accepts a clean one', () => {
+  const target = '/release/agent-room-claude-code/.claude-plugin/plugin.json'
+  const good = { code: 0 }
+  assert.equal(evaluateValidateReport(cleanReport(target), good, target).ok, true)
+
+  const degraded = [
+    ['warnings present', r => { r.manifest.warnings.push('w') }],
+    ['notes present', r => { r.manifest.notes.push('n') }],
+    ['contents non-empty', r => { r.contents.push('x') }],
+    ['strict false', r => { r.strict = false }],
+    ['success false', r => { r.success = false }],
+    ['wrong target', r => { r.target = '/somewhere/else/plugin.json' }],
+    ['errors array missing', r => { delete r.manifest.errors }],
+    ['contents missing', r => { delete r.contents }],
+  ]
+  for (const [label, mutate] of degraded) {
+    const report = cleanReport(target)
+    mutate(report)
+    assert.equal(evaluateValidateReport(report, good, target).ok, false, label)
+  }
+})
+
+test('E5-A1: packaging cell FAILS on a degraded validate report; qualify exits 1', async () => {
+  const target = '/release/agent-room-claude-code/.claude-plugin/plugin.json'
+  const degraded = cleanReport(target)
+  degraded.manifest.warnings.push('a warning the old gate ignored')
+  degraded.contents.push('unexpected file')
+  degraded.strict = false
+
+  // Invoke the REAL cellPackaging with a stubbed subprocess returning the
+  // degraded report. validatorBinary bypasses PATH discovery; run() fakes both
+  // the packager and validator. The cell must FAIL, never PASS.
+  const cell = await cellPackaging({}, {
+    validatorBinary: '/fake/claude',
+    run: async (file, args) => {
+      if (args[0] === 'plugin') return { code: 0, stdout: JSON.stringify(degraded), stderr: '' }
+      return { code: 0, stdout: '', stderr: '' } // packager
+    },
+  })
+  assert.equal(cell.status, 'failed')
+  assert.match(cell.reason, /warnings|contents|strict/)
+
+  // End-to-end: wire that degraded cell into the runner; verdict failed, exit 1.
+  const dir = tempReceiptDir()
+  const cab = capture()
+  const cells = stubCells('qualified')
+  const outcome = await runQualifyCommand(['--json'], {
+    output: cab.output, errorOutput: cab.errorOutput, pluginDataDir: dir,
+    nofileProbe: async () => ({ status: 'ok', limit: 4096 }),
+    runtimeAssert: () => ({}),
+    profileFn: async () => ({}),
+    suiteFn: async () => cells['FULL-SUITE'],
+    packagingFn: async () => cell,
+    ...stubOverrides(cells),
+  })
+  assert.equal(outcome.exitCode, 1)
+  const report = JSON.parse(cab.stdout)
+  assert.equal(report.verdict, 'failed')
+  assert.equal(report.cells.PACKAGING.status, 'failed')
+  // runQualifyCommand's emit writes process.exitCode; restore so the test
+  // runner's own exit code is not polluted by this deliberate failing run.
+  process.exitCode = 0
+})
+
+// --- E5-A2: candidate digest ignores gitignored clutter & symlinks ------------------
+test('E5-A2: digestCandidate never throws on a gitignored symlink and is stable', () => {
+  const work = mkdtempSync(join(tmpdir(), 'ar-e5a2-digest-'))
+  execFileSync('git', ['init', '-q'], { cwd: work })
+  writeFileSync(join(work, '.gitignore'), '.vendor-lab/\n')
+  writeFileSync(join(work, 'keep.txt'), 'tracked content\n')
+  execFileSync('git', ['add', '.gitignore', 'keep.txt'], { cwd: work })
+
+  // Exact reproducer: symlink inside a gitignored directory.
+  const clutterDir = join(work, '.vendor-lab', 'agy-home', '.gemini')
+  mkdirSync(clutterDir, { recursive: true })
+  symlinkSync(join(work, 'keep.txt'), join(clutterDir, 'GEMINI.md'))
+
+  const first = digestCandidate(work)
+  const second = digestCandidate(work)
+  assert.equal(first.sha256, second.sha256, 'digest must be stable across runs')
+  assert.equal(first.files, 2, 'only the 2 tracked files contribute')
+  assert.equal(first.digest_source, 'git-ls-files')
+
+  // Adding more ignored clutter does not change the digest.
+  writeFileSync(join(work, '.vendor-lab', 'random.txt'), 'clutter')
+  assert.equal(digestCandidate(work).sha256, first.sha256)
+})
+
+test('E5-A2: digestCandidate fallback skips gitignored dirs and symlinks', () => {
+  const work = mkdtempSync(join(tmpdir(), 'ar-e5a2-fallback-'))
+  writeFileSync(join(work, '.gitignore'), 'ignored/\n')
+  writeFileSync(join(work, 'keep.txt'), 'real\n')
+  const ignored = join(work, 'ignored')
+  mkdirSync(ignored, { recursive: true })
+  writeFileSync(join(ignored, 'noise.txt'), 'ignored')
+  symlinkSync(join(work, 'keep.txt'), join(work, 'link.txt'))
+
+  // No git repo here -> deterministic bounded-walk fallback. Must not throw.
+  const result = digestCandidate(work)
+  assert.equal(result.digest_source, 'fallback-walk')
+  assert.equal(result.files, 2, 'keep.txt + .gitignore; symlink and ignored/ skipped')
+  assert.equal(digestCandidate(work).sha256, result.sha256)
+})
+
+test('E5-A2: qualify completes with a stable digest in a cluttered tree', async () => {
+  const work = mkdtempSync(join(tmpdir(), 'ar-e5a2-qualify-'))
+  execFileSync('git', ['init', '-q'], { cwd: work })
+  writeFileSync(join(work, '.gitignore'), '.vendor-lab/\n')
+  const required = [
+    'server/cli/agent-room.mjs', 'server/mcp-stdio.mjs', 'server/api/server.mjs',
+    'server/store/room-log.mjs', 'plugin.json', 'mcp.json', 'web/index.html',
+    'skills/agent-room/SKILL.md',
+  ]
+  for (const file of required) {
+    const full = join(work, file)
+    mkdirSync(dirname(full), { recursive: true })
+    writeFileSync(full, `content of ${file}\n`)
+  }
+  execFileSync('git', ['add', '.'], { cwd: work })
+
+  // The exact clutter that used to throw: symlink inside a gitignored dir.
+  const clutterDir = join(work, '.vendor-lab', 'agy-home', '.gemini')
+  mkdirSync(clutterDir, { recursive: true })
+  symlinkSync(join(work, 'plugin.json'), join(clutterDir, 'GEMINI.md'))
+
+  const dir = tempReceiptDir()
+  const cab = capture()
+  const cells = stubCells('qualified')
+  const outcome = await runQualifyCommand(['--json'], {
+    output: cab.output, errorOutput: cab.errorOutput, pluginDataDir: dir,
+    candidateRoot: work,
+    nofileProbe: async () => ({ status: 'ok', limit: 4096 }),
+    runtimeAssert: () => ({}),
+    profileFn: async () => ({}),
+    suiteFn: async () => cells['FULL-SUITE'],
+    packagingFn: async () => cells.PACKAGING,
+    ...stubOverrides(cells),
+  })
+  process.exitCode = 0 // restore runner exit code polluted by emit()
+  assert.equal(outcome.exitCode, 0, 'qualify must complete in a cluttered tree')
+  const report = JSON.parse(cab.stdout)
+  assert.equal(report.candidate.digest_source, 'git-ls-files')
+  assert.match(report.candidate.sha256, /^[0-9a-f]{64}$/, 'stable digest present')
+  assert.equal(report.candidate.files, required.length + 1, '+1 for .gitignore')
+  // Re-run: identical digest (stable).
+  process.exitCode = 0
+  const cab2 = capture()
+  await runQualifyCommand(['--json'], {
+    output: cab2.output, errorOutput: cab2.errorOutput, pluginDataDir: tempReceiptDir(),
+    candidateRoot: work,
+    nofileProbe: async () => ({ status: 'ok', limit: 4096 }),
+    runtimeAssert: () => ({}),
+    profileFn: async () => ({}),
+    suiteFn: async () => cells['FULL-SUITE'],
+    packagingFn: async () => cells.PACKAGING,
+    ...stubOverrides(cells),
+  })
+  process.exitCode = 0
+  assert.equal(JSON.parse(cab2.stdout).candidate.sha256, report.candidate.sha256)
+})
