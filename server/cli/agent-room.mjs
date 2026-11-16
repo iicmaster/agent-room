@@ -618,6 +618,19 @@ Commands:
       one of --peer and --all is required (neither/both is a usage error, exit
       2). Clears G1/G2 counters only; never touches notified_seq or Held state.
 
+  agent-room hook <session-start|user-prompt-submit|post-tool-use|stop>
+      Claude Code lifecycle hook adapter (Tier 2). Reads one JSON object from
+      stdin ({event,session_id,cwd,prompt,stop_hook_active}, <= 64 KiB). All
+      four hooks fail open: malformed/oversize stdin, EOF, timeout past 1500 ms,
+      or unreadable state exits 0 with a redacted diagnostic and zero state
+      change. Unknown subcommand exits 2. session-start writes the scope binding
+      only. user-prompt-submit resets G1/G2 only for a genuine human prompt
+      (no auto-wake marker, > 5000 ms since the last wake). post-tool-use prints
+      a bounded, body-free unread summary without moving read_seq. stop exits 2
+      only when stop_hook_active is not true and a Trusted seq > max_notified
+      holds the 2-phase lease or a Held message is in budget; it never prints a
+      Held body and updates only suppressed_held_seq after Held metadata.
+
   agent-room gc [--json]
       Housekeeping: collect stale per-session scopes under PLUGIN_DATA/sessions/.
       Skips symlinks, the current scope, and any scope whose wait/cursors/inbox
@@ -853,9 +866,16 @@ export async function main(argv = process.argv.slice(2), {
   // this printer. (Capacity's refuse state keeps its report on stdout and
   // exits 1 through the outcome's exitCode — the report IS the answer, and
   // the exit code is the severity a script keys on.)
-  if (command === 'hook' && subcommand === 'session-start') {
-    const { runHookSessionStart } = await import('./hook-session-start.mjs')
-    return await runHookSessionStart({ input, env, pluginDataDir })
+  if (command === 'hook') {
+    // Story 4.2: one hook family, one grammar, one fail-open path. The hook
+    // outcome owns its exit code (2 only for unknown subcommand / a Stop
+    // block); print its bounded stdout and redacted stderr, then return.
+    const { runHookCommand } = await import('./hook-commands.mjs')
+    const outcome = await runHookCommand(subcommand, { input, env, pluginDataDir, cwd: process.cwd() })
+    for (const line of outcome.stdout ?? []) output.write(`${line}\n`)
+    for (const line of outcome.stderr ?? []) errorOutput.write(`${line}\n`)
+    if (outcome.exitCode !== undefined && outcome.exitCode !== 0) process.exitCode = outcome.exitCode
+    return outcome
   }
   if (command === 'invite' || command === 'remote' || command === 'ban' || command === 'unban' || command === 'capacity' || command === 'viewer' || command === 'session' || command === 'session-principals' || command === 'wait' || command === 'wake-reset' || command === 'gc' || command === 'send' || command === 'read' || command === 'dm' || command === 'sessions' || command === 'bootstrap') {
     let outcome = command === 'invite'
