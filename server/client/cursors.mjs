@@ -192,10 +192,12 @@ export function migrateV1Cursors(value, realmId) {
 // Read the scope's cursor document, migrating or quarantining a v1 file.
 // A MISSING file is an empty document and is never written here — a cursor
 // file appears only through an actual position.
-export function readCursorsDocument(pluginDataDir, { realmId = null, env = process.env, scope = null } = {}) {
-  const path = scope === null
-    ? scopeCursorsPath(pluginDataDir, { env })
-    : sessionScopeFilePath(pluginDataDir, scope, CURSORS_FILENAME)
+export function readCursorsDocument(pluginDataDir, { realmId = null, env = process.env, scope = null, path: explicitPath = null } = {}) {
+  const path = explicitPath !== null
+    ? explicitPath
+    : scope === null
+      ? scopeCursorsPath(pluginDataDir, { env })
+      : sessionScopeFilePath(pluginDataDir, scope, CURSORS_FILENAME)
   if (!existsSync(path)) return { document: emptyDocument(), path, migrated: false }
   // Oversize is a LOUD refusal, never a quarantine: a file past the cap is
   // not evidence of corruption, and moving it aside would silently reset a

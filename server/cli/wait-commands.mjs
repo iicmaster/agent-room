@@ -60,11 +60,13 @@ import {
   SESSION_SCOPE_PATTERN,
 } from '../constants.mjs'
 import { AgentRoomRuntimeError, assertSafePathKey, isPidAlive, readJsonFile } from '../runtime.mjs'
+import { CURSORS_FILENAME, persistedCursorPath, readCursorsDocument } from '../client/cursors.mjs'
 import { CONNECTION_MODE_ENV, loadChatIdConfig } from '../client/api-client.mjs'
 import { REMOTE_TRANSPORT } from '../client/trust.mjs'
 import { createDeliveryClassifier } from '../notification/delivery.mjs'
 import { ensureServer } from '../client/ensure-server.mjs'
 import { loadRemoteConfig } from '../client/remote-config.mjs'
+import { SESSIONS_DIRECTORY_NAME } from '../client/session-state.mjs'
 import { authenticate, protocolHeaders, roundTrip } from './session-commands.mjs'
 import { decideHeldWake, loadWakePolicy, policyIdentity } from '../notification/wake-policy.mjs'
 
@@ -319,37 +321,37 @@ function releaseWaitLock(path, token) {
 // instead of re-hinting forever.
 function loadBaselineCursors(pluginDataDir, realmId) {
   assertSafePathKey(realmId, { label: 'realm id' })
+  // Story 2.1: v2 is the only schema, and read_seq is the only position a
+  // delivered message advances (notified_seq belongs to Story 3.2's wake
+  // paths — a baseline that read it would be looking at a number nothing in
+  // this story writes). The newest readable document wins, exactly as before:
+  // the most recently written position is the one actually consumed, so
+  // already-read history stays quiet instead of re-hinting forever.
   const candidates = []
-  const sessionsDir = join(pluginDataDir, 'sessions')
+  const sessionsDir = join(pluginDataDir, SESSIONS_DIRECTORY_NAME)
   if (existsSync(sessionsDir)) {
     for (const scope of readdirSync(sessionsDir)) {
       if (scope === '.' || scope === '..' || scope.startsWith('.') || !SESSION_SCOPE_PATTERN.test(scope)) continue
-      const path = sessionScopeFilePath(pluginDataDir, scope, 'cursors.json')
-      if (existsSync(path)) candidates.push({ path, mtimeMs: statSync(path).mtimeMs, sessionScoped: true })
+      const path = sessionScopeFilePath(pluginDataDir, scope, CURSORS_FILENAME)
+      if (existsSync(path)) candidates.push({ path, scope, mtimeMs: statSync(path).mtimeMs, sessionScoped: true })
     }
   }
-  const legacyPath = join(pluginDataDir, 'realms', realmId, 'cursors.json')
-  if (existsSync(legacyPath)) candidates.push({ path: legacyPath, mtimeMs: statSync(legacyPath).mtimeMs, sessionScoped: false })
+  const legacyPath = persistedCursorPath(pluginDataDir, realmId)
+  if (existsSync(legacyPath)) candidates.push({ path: legacyPath, scope: null, mtimeMs: statSync(legacyPath).mtimeMs, sessionScoped: false })
   candidates.sort((left, right) => right.mtimeMs - left.mtimeMs)
   for (const candidate of candidates) {
     try {
-      const value = readJsonFile(candidate.path)
-      // A session-scoped document records its realm: a foreign realm's file
-      // is not this realm's position — skip to the next candidate.
-      if (candidate.sessionScoped
-        && value && typeof value === 'object'
-        && value.realm_id !== undefined && value.realm_id !== realmId) {
-        continue
-      }
-      const cursors = value && typeof value === 'object' && value.cursors && typeof value.cursors === 'object'
-        ? value.cursors
-        : {}
+      // The v2 reader owns migration and the loud refusals; a document that
+      // cannot be read is simply not this baseline's source and the next
+      // candidate is tried. A v1 or corrupt file never stops the wait.
+      const { document } = readCursorsDocument(pluginDataDir, {
+        realmId,
+        path: candidate.path,
+      })
+      const rooms = document.realms[realmId]?.rooms ?? {}
       const baselines = new Map()
-      for (const [roomId, entry] of Object.entries(cursors)) {
-        const afterSeq = entry?.after_seq
-        if (typeof afterSeq === 'number' && Number.isSafeInteger(afterSeq) && afterSeq >= 0) {
-          baselines.set(roomId, afterSeq)
-        }
+      for (const [roomId, entry] of Object.entries(rooms)) {
+        if (Number.isSafeInteger(entry?.read_seq) && entry.read_seq >= 0) baselines.set(roomId, entry.read_seq)
       }
       return baselines
     } catch {
