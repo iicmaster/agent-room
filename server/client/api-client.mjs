@@ -99,6 +99,9 @@ import {
   instanceDataDirectory,
 } from '../runtime.mjs'
 import { loadOrCreateKeypair, signWithInstallationKey } from '../keys.mjs'
+// Story 3.1: the watch client is a separate unpooled connection with its own
+// jittered backoff. Re-exported here so consumers keep one client surface.
+export { watchBackoffMs, openWatchStream, runWatchLoop, createFrameParser } from './watch-client.mjs'
 import { loadOrCreateLocalToken } from '../api/local-token.mjs'
 import { ensureServer, probeHealth, readRuntimeRecord } from './ensure-server.mjs'
 import { loadRemoteConfig, validateRemoteServerUrl } from './remote-config.mjs'

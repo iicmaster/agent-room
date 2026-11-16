@@ -26,6 +26,11 @@ export const WATCH_OUTBOUND_BUFFER_MAX_BYTES = 65536
 export const WATCH_KEEPALIVE_MS = 15_000
 export const WATCH_TIMEOUT_MS = 300000
 export const WATCH_BAN_RECONCILE_MS = 1000
+// Client-side reconnect for a dropped watch: base 250 ms doubling to an
+// 8 s cap, ±20% jitter. Distinct from the Bearer reconnect schedule above.
+export const WATCH_RECONNECT_BASE_MS = 250
+export const WATCH_RECONNECT_MAX_MS = 8000
+export const WATCH_RECONNECT_JITTER = 0.2
 
 // Reads: cursor pagination and long-poll hold.
 export const READ_PAGE_MAX = 200
