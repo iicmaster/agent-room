@@ -287,7 +287,9 @@ test('AC3/AC4: read --peer answers the pair page, advances read_seq (never notif
   assert.equal(roomEntry.notified_seq, 0, 'AC3: notified_seq === 0 — nothing in this story advances it')
   for (const row of localReceipt.messages) {
     assert.deepEqual(Object.keys(row).sort(), ['from_address', 'seq', 'text', 'trusted'], 'the projection is exactly the four declared keys')
-    assert.equal(row.trusted, true, 'local transport delivers')
+    // P3: local transport is the INSTRUCTED lane — delivered but NOT verified,
+    // so trusted:false. `trusted:true` is reserved for enforced lanes.
+    assert.equal(row.trusted, false, 'local transport delivers but is instructed, not verified')
     assert.equal(row.from_address, peer.address, 'attribution is the sender session address')
   }
 

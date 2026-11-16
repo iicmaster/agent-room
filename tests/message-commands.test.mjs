@@ -160,7 +160,9 @@ test('read: the trust matrix applies as in message_read, and a one-shot read wri
   assert.equal(receipt.ok, true)
   assert.equal(receipt.room_id, broadcast)
   assert.equal(receipt.cursor_written, true, 'Story 2.1: the read advances read_seq')
-  assert.match(receipt.message, /read_seq advanced/)
+  assert.match(receipt.message, /read_seq will advance.*once this receipt is flushed/, 'P5: the advance is deferred to afterFlush')
+  assert.equal(receipt.read_seq, 2, 'P5: read_seq reports the durable post-advance value')
+  assert.match(receipt.trust_note, /trusted:true means plugin-verified delivery/, 'P3: trusted means verified, not merely delivered')
   assert.equal(receipt.messages.length, 2)
   // Both rows are foreign (the peer's fingerprint): local transport delivers
   // them, wrapped in the untrusted envelope â€” data, never instructions. The
@@ -232,7 +234,11 @@ test('read: a declared-remote reader holds non-allowlisted senders to metadata â
   assert.equal(row.held, true, 'a non-allowlisted remote sender is held')
   assert.equal(row.trusted, false, 'the row states the verdict plainly')
   assert.equal(Object.hasOwn(row, 'text'), false, 'AC4: a held row has NO text key at all')
-  assert.deepEqual(Object.keys(row).sort(), ['from_address', 'held', 'seq', 'trusted'])
+  // P4: a held row keeps its operator metadata; only `text` is forbidden.
+  assert.deepEqual(Object.keys(row).sort(), ['created_at', 'from_address', 'held', 'held_reason', 'reply_to_seq', 'seq', 'trusted'])
+  assert.equal(row.held_reason, 'not_allowlisted', 'P4: the matrix reason survives on the held row')
+  assert.equal(typeof row.created_at, 'string', 'P4: created_at survives on the held row')
+  assert.equal(row.reply_to_seq, null, 'P4: reply_to_seq survives on the held row')
   assert.equal(typeof row.from_address, 'string', 'the sender stays identifiable for allowlisting')
   assert.equal(JSON.stringify(receipt.messages).includes('secret plan'), false, 'no held body byte reaches the receipt')
   assert.equal(existsSync(join(world.pluginData, 'realms')), false, 'still nothing written')
