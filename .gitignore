@@ -15,3 +15,6 @@ coverage/
 
 # 3-vendor tmux lab (never commit)
 .vendor-lab/
+
+# Story worktrees live in-repo so they survive /tmp cleanup
+.worktrees/
