@@ -224,6 +224,22 @@ export function mintCandidateAgentId({ role = 'agent', randomIntFn = randomInt }
   return `${prefix}-${token}`
 }
 
+// Story 2.1 (retro F-10): a stored principal whose base lease has not yet
+// expired is REUSED as-is — zero /resume calls, and the caller must not
+// release it. Without this every one-shot CLI resumed and then deleted its own
+// lease, flapping the session offline after each command and cutting any live
+// watch. A missing or unparsable expiry is treated as expired (resume), which
+// is the safe direction: resuming is idempotent, reusing a dead capability is
+// not.
+const LEASE_REUSE_SKEW_MS = 1_000
+
+export function sessionLeaseIsLive(stored, { nowMs = Date.now() } = {}) {
+  if (stored === null || stored === undefined) return false
+  const expiresAt = Date.parse(stored.baseLeaseExpiresAt ?? '')
+  if (!Number.isFinite(expiresAt)) return false
+  return expiresAt - LEASE_REUSE_SKEW_MS > nowMs
+}
+
 /** Resume a matching scope session principal, or allocate explicit / auto-minted <=3 attempts. */
 export async function resolveOrMintSessionPrincipal({
   pluginDataDir,
@@ -234,12 +250,15 @@ export async function resolveOrMintSessionPrincipal({
   allocatePrincipal,
 }) {
   const stored = loadSessionState(pluginDataDir, sessionScope)
-  if (
-    stored !== null
+  const nameMatches = stored !== null
     && (requestedName === null
       || requestedName === undefined
       || stored.baseName.toLowerCase() === requestedName.toLowerCase())
-  ) {
+  // Reuse a live lease: no network at all, and the caller keeps it.
+  if (nameMatches && sessionLeaseIsLive(stored)) {
+    return { ...stored, reuse: true }
+  }
+  if (nameMatches) {
     const recoveryId = stored.recoveryId ?? newRecoveryId()
     saveSessionState(pluginDataDir, sessionScope, { ...stored, recoveryId })
     const resumed = await resumePrincipal({
@@ -253,6 +272,7 @@ export async function resolveOrMintSessionPrincipal({
       generation: resumed.generation,
       capability: resumed.session_capability ?? stored.capability,
       recoveryId: null,
+      baseLeaseExpiresAt: resumed.base_lease_expires_at ?? stored.baseLeaseExpiresAt ?? null,
     }
     saveSessionState(pluginDataDir, sessionScope, updated)
     return updated
@@ -286,6 +306,7 @@ export async function resolveOrMintSessionPrincipal({
     baseName: allocated.base_name,
     machine: allocated.machine,
     capability: allocated.session_capability,
+    baseLeaseExpiresAt: allocated.base_lease_expires_at ?? null,
   }
   saveSessionState(pluginDataDir, sessionScope, principal)
   return principal

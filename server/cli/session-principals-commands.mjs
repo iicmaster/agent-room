@@ -10,7 +10,7 @@
 // - revokes in a single short transaction while keeping capability_digest
 //   intact so future requests answer canonical 401 session_revoked.
 
-import { SESSION_REVOKE_REASON_MAX } from '../constants.mjs'
+import { CLI_ERROR_SESSION_NOT_FOUND, SESSION_REVOKE_REASON_MAX } from '../constants.mjs'
 import { openRoomLog } from '../store/room-log.mjs'
 
 const line = object => JSON.stringify(object)
@@ -53,7 +53,7 @@ export function runSessionPrincipalsRevoke({ sharedDataDir }, target, options = 
     if (revoked === null) {
       return failure(
         'session-principals revoke',
-        'session_not_found',
+        CLI_ERROR_SESSION_NOT_FOUND,
         `no retained session principal matches ${target}`,
       )
     }

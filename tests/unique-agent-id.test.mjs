@@ -860,6 +860,9 @@ test('AC2_DIGEST_ONLY_CONFLICT_TICKET_STORE: stores sha256 digests only, enforce
     assert.ok(typeof r.ticket === 'string')
   }
   assert.equal(tickets.size(), CONFLICT_TICKET_MAX_PER_ACTOR)
+  // Story 1.1 AC4 retired post-auth 429s (Epic 1 retro F-8): a full ticket
+  // map EVICTS its oldest entry instead of refusing the mint, so the bound
+  // still holds and no caller is ever rate-limited on an authenticated bind.
   const capped = tickets.mint({
     actorFingerprint: fpA,
     chatId: 'over-cap',
@@ -867,7 +870,9 @@ test('AC2_DIGEST_ONLY_CONFLICT_TICKET_STORE: stores sha256 digests only, enforce
     incumbentSessionKey: 'inc-over',
     observedGeneration: 1,
   })
-  assert.equal(capped.rateLimited, true)
+  assert.ok(typeof capped.ticket === 'string', 'the mint succeeds at the cap')
+  assert.equal(capped.rateLimited, undefined, 'never a rate_limited refusal')
+  assert.equal(tickets.size(), CONFLICT_TICKET_MAX_PER_ACTOR, 'eviction keeps the map bounded')
 
   nowMs += CONFLICT_TICKET_TTL_MS + 1
   const afterSweep = tickets.mint({

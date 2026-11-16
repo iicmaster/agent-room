@@ -16,6 +16,7 @@ import {
   CHAT_ID_PATTERN,
   CLAIMS_TTL_MS,
   CLIENT_MESSAGE_ID_MAX,
+  CLI_SESSIONS_MAX,
   CLIENT_TYPES,
   DISPLAY_NAME_MAX,
   FINGERPRINT_PATTERN,
@@ -215,7 +216,11 @@ test('story 1.4 session and local-token limits derive from the declared values',
   assert.equal(SESSION_TTL_MS, 12 * 60 * 60 * 1000)
   assert.equal(SESSION_TOKEN_BYTES, 32)
   assert.equal(SESSION_TOKEN_MAX_CHARS, 256)
-  assert.equal(SESSIONS_MAX, 1000)
+  // Story 1.4 split the pool: SESSIONS_MAX is the non-evicting long-lived
+  // pool (2048) and CLI_SESSIONS_MAX the one-shot pool (512). This assertion
+  // kept the pre-1.4 single-pool value and was red on the Epic 1 tip.
+  assert.equal(SESSIONS_MAX, 2048)
+  assert.equal(CLI_SESSIONS_MAX, 512)
   assert.equal(LOCAL_TOKEN_MAX_BYTES, 4096)
 })
 

@@ -25,12 +25,13 @@
 // - Same-Actor confidentiality is structural: minting happens only on the
 //   same-Actor live-collision path in bindSession — a foreign collision
 //   never reaches this module, so it can leak nothing.
-// - Bounded, with the fence's lesson applied: an UNEXPIRED ticket is never
-//   evicted to make room. Re-observing the same (Actor, name) pair REPLACES
-//   that pair's outstanding ticket (per-pair slotting — one operator, one
-//   name, one live ticket); a full map refuses NEW issuance with the
-//   existing rate_limited 429 (+ retry_after_ms naming the earliest
-//   relevant expiry) rather than silently dropping anyone's observation.
+// - Bounded WITHOUT a refusal: re-observing the same (Actor, name) pair
+//   REPLACES that pair's outstanding ticket (per-pair slotting — one
+//   operator, one name, one live ticket); a full map EVICTS the oldest
+//   ticket (per-Actor scoped) rather than refusing new issuance. Refusing
+//   was this tree's last post-auth 429 and Story 1.1 AC4 retires those — see
+//   the mint() capacity note. A displaced ticket fails to redeem and its
+//   holder re-mints.
 // - TTL: fixed (non-sliding), judged with the monotonic execution-time
 //   clock — `now < deadline` at the redemption check; receiving a request's
 //   headers before the deadline reserves nothing after it.
@@ -101,6 +102,27 @@ export function createConflictTicketStore({
     return count
   }
 
+  // Remove the oldest ticket (optionally for one Actor only). Returns false
+  // when there is nothing left to evict, which is the caller's signal to stop
+  // looping — never a reason to refuse the mint.
+  function evictOldest(actorFingerprint) {
+    let oldestDigest = null
+    let oldestDeadline = Infinity
+    for (const [digest, record] of tickets) {
+      if (actorFingerprint !== undefined && record.actorFingerprint !== actorFingerprint) continue
+      if (record.deadline < oldestDeadline) {
+        oldestDeadline = record.deadline
+        oldestDigest = digest
+      }
+    }
+    if (oldestDigest === null) return false
+    const record = tickets.get(oldestDigest)
+    tickets.delete(oldestDigest)
+    const slotKey = `${record.actorFingerprint}\n${record.chatIdNormalized}\n${record.observerSessionKey}`
+    if (slots.get(slotKey) === oldestDigest) slots.delete(slotKey)
+    return true
+  }
+
   function earliestDeadline(actorFingerprint) {
     let earliest = null
     for (const record of tickets.values()) {
@@ -113,9 +135,17 @@ export function createConflictTicketStore({
   // Mint one ticket for an observed same-Actor live collision. Replaces the
   // OBSERVING SESSION's outstanding unconsumed ticket for the same name
   // (per-slot replacement — a second session of the same Actor keeps its
-  // own). Returns { ticket } — or { rateLimited: true, retryAfterMs } when
-  // a bound is full, in which case NOTHING is minted and nothing existing
-  // is evicted.
+  // own).
+  //
+  // CAPACITY (Epic 1 retro F-8): the bound is enforced by EVICTING the oldest
+  // ticket, never by refusing the mint. Refusing was the last post-auth 429 in
+  // the tree, and Story 1.1 AC4 retires those. The caps are 4,096 global /
+  // 1,024 per Actor against tickets that live 60 s — a caller cannot
+  // meaningfully exhaust them, so a refusal was a rate gate that could only
+  // ever fire under a pathological burst while denying a legitimate
+  // name-conflict recovery. Evicting the oldest instead keeps the map bounded
+  // and keeps every live collision recoverable; a displaced ticket simply
+  // fails to redeem, and its holder re-mints on the next attempt.
   function mint({ actorFingerprint, chatId, observerSessionKey, incumbentSessionKey, observedGeneration }) {
     if (typeof actorFingerprint !== 'string' || actorFingerprint.length === 0) {
       throw new AgentRoomRuntimeError('invalid_argument', 'conflict ticket mint requires the observing Actor fingerprint')
@@ -140,10 +170,13 @@ export function createConflictTicketStore({
     const existingCounted = existingDigest !== undefined && tickets.has(existingDigest) ? 1 : 0
     const outstandingAfterReplace = tickets.size - existingCounted + 1
     const actorCountAfterReplace = countForActor(actorFingerprint) - existingCounted + 1
-    if (outstandingAfterReplace > maxOutstanding || actorCountAfterReplace > maxPerActor) {
-      const earliest = earliestDeadline(actorFingerprint) ?? timestamp + ttlMs
-      const retryAfterMs = Math.max(1, Math.ceil((earliest - timestamp)))
-      return { rateLimited: true, retryAfterMs }
+    // Evict oldest-first until both bounds hold. Per-actor eviction is scoped
+    // to this Actor's tickets so one noisy Actor cannot displace another's.
+    while (tickets.size - existingCounted + 1 > maxOutstanding) {
+      if (!evictOldest()) break
+    }
+    while (countForActor(actorFingerprint) - existingCounted + 1 > maxPerActor) {
+      if (!evictOldest(actorFingerprint)) break
     }
     if (existingDigest !== undefined) {
       tickets.delete(existingDigest)

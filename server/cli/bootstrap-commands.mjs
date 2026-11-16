@@ -6,6 +6,7 @@ import { promisify } from 'node:util'
 
 import {
   BOOTSTRAP_READINESS_TIMEOUT_MS,
+  CLI_ERROR_TIMEOUT,
   INVITE_DIGEST_PREFIX_CHARS,
   INVITE_TOKEN_BYTES,
   INVITE_TOKEN_PATTERN,
@@ -114,7 +115,7 @@ function tokenDigestPrefix(inviteToken) {
 function remainingBudgetMs(deadlineMs, floorMs = 250) {
   const remaining = Math.floor(deadlineMs - performance.now())
   if (remaining <= 0) {
-    throw new AgentRoomRuntimeError('timeout', 'bootstrap exceeded the 10s readiness deadline')
+    throw new AgentRoomRuntimeError(CLI_ERROR_TIMEOUT, 'bootstrap exceeded the 10s readiness deadline')
   }
   return Math.max(floorMs, remaining)
 }

@@ -98,8 +98,15 @@ export function createWriteQueue({
   let batchesTotal = 0
   let committedTotal = 0
   let rejectedTotal = 0
+  let rejectedQueueFullTotal = 0
   let busyRetriesTotal = 0
   let coalescedTotal = 0
+  let opsTotal = 0
+  let lastBatchMs = 0
+  // When the OLDEST still-pending op was enqueued, or 0 when the queue is
+  // idle. Story 1.1 AC5 calls this oldest_age_ms; tracking the minimum
+  // enqueue timestamp (rather than each entry's) keeps it O(1) to read.
+  let oldestPendingAt = 0
 
   let running = false
   let draining = false
@@ -212,6 +219,8 @@ export function createWriteQueue({
       if (prev <= 1) sessionInFlight.delete(entry.sessionKey)
       else sessionInFlight.set(entry.sessionKey, prev - 1)
     }
+    // An empty queue has no oldest pending op; the next enqueue re-stamps it.
+    if (pendingOps === 0 && inFlightOps === 0) oldestPendingAt = 0
   }
 
   function rejectBatchEntries(batch, error) {
@@ -281,8 +290,13 @@ export function createWriteQueue({
           throw new Error('runBatch must return one outcome per queued op')
         }
         releaseBatchAccounting(batch)
+        const batchDurationMs = nowMs() - startedAt
         if (batch.some(entry => entry.trackMetrics !== false)) {
           batchesTotal += 1
+          lastBatchMs = Math.max(0, Math.round(batchDurationMs))
+          for (const entry of batch) {
+            if (entry.trackMetrics !== false) opsTotal += entry.waiters.length
+          }
         }
         for (let i = 0; i < batch.length; i += 1) {
           const entry = batch[i]
@@ -383,6 +397,7 @@ export function createWriteQueue({
 
     if (draining || closed) {
       if (track) rejectedTotal += 1
+          rejectedQueueFullTotal += 1
       return Promise.reject(createQueueFullError(retryMaxMs, 'server is shutting down; retry after backoff'))
     }
 
@@ -392,11 +407,13 @@ export function createWriteQueue({
       if (existing) {
         if (existing.waiters.length >= maxOps) {
           if (track) rejectedTotal += 1
+          rejectedQueueFullTotal += 1
           return Promise.reject(createQueueFullError(computeRetryAfterMs()))
         }
         const projectedTotalBytes = currentBytes() - existing.bytes + bytes
         if (projectedTotalBytes > maxBytes) {
           if (track) rejectedTotal += 1
+          rejectedQueueFullTotal += 1
           return Promise.reject(createQueueFullError(computeRetryAfterMs()))
         }
         pendingBytes += bytes - existing.bytes
@@ -418,7 +435,10 @@ export function createWriteQueue({
       || currentBytes() + bytes > maxBytes
       || (!isControl && sessionDepth >= perSessionMax)
     ) {
-      if (track) rejectedTotal += 1
+      if (track) {
+        rejectedTotal += 1
+        rejectedQueueFullTotal += 1
+      }
       return Promise.reject(createQueueFullError(computeRetryAfterMs()))
     }
 
@@ -445,6 +465,7 @@ export function createWriteQueue({
       }
       pendingOps += 1
       pendingBytes += bytes
+      if (oldestPendingAt === 0) oldestPendingAt = nowMs()
       updateHighWater()
       if (!running) {
         schedulePump(wasEmpty || draining || isControl || pendingOps >= batchMax)
@@ -513,15 +534,20 @@ export function createWriteQueue({
   }
 
   function getMetrics() {
+    const oldestAgeMs = oldestPendingAt === 0 ? 0 : Math.max(0, Math.round(nowMs() - oldestPendingAt))
     return {
       depth: currentDepth(),
       max_depth: maxDepth,
       bytes: currentBytes(),
+      oldest_age_ms: currentDepth() === 0 ? 0 : oldestAgeMs,
       batches_total: batchesTotal,
+      ops_total: opsTotal,
       committed_total: committedTotal,
       rejected_total: rejectedTotal,
+      rejected_queue_full_total: rejectedQueueFullTotal,
       busy_retries_total: busyRetriesTotal,
       coalesced_total: coalescedTotal,
+      last_batch_ms: lastBatchMs,
     }
   }
 

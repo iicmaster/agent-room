@@ -276,15 +276,19 @@ test('the implemented mark covers exactly the live frozen routes', () => {
   assert.deepEqual([...viewerEvents.requestFields], [])
   const viewerMessages = ROUTE_TABLE.find(route => routeKey(route) === 'GET /viewer/api/rooms/:id/messages')
   assert.deepEqual([...viewerMessages.requestFields], ['after_seq', 'limit'])
+  // Story 1.4 added the optional session_kind declaration to both local auth
+  // and the challenge answer (the CLI one-shot lane authenticates through the
+  // same routes as an interactive session). This assertion had drifted behind
+  // the frozen route table; the table is the contract, so the test follows it.
   const local = ROUTE_TABLE.find(route => routeKey(route) === 'POST /api/auth/local')
-  assert.deepEqual([...local.requestFields], ['public_key'])
+  assert.deepEqual([...local.requestFields], ['public_key', 'session_kind'])
   // Story 4.1: identity binds at challenge — the challenge takes exactly the
   // key field; the answer takes exactly nonce and signature, no public_key to
   // substitute with.
   const challenge = ROUTE_TABLE.find(route => routeKey(route) === 'POST /api/auth/challenge')
   const answer = ROUTE_TABLE.find(route => routeKey(route) === 'POST /api/auth/answer')
   assert.deepEqual([...challenge.requestFields], ['public_key'])
-  assert.deepEqual([...answer.requestFields], ['nonce', 'signature'])
+  assert.deepEqual([...answer.requestFields], ['nonce', 'signature', 'session_kind'])
   // Story 4.2: the invite-gated enrollment takes exactly the token, the raw
   // key whose DERIVED fingerprint enrolls (identity is never claimed), and
   // the possession-proof signature over the exact token bytes.

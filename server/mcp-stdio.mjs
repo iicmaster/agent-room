@@ -88,7 +88,8 @@ import {
   sharedDataDirectory,
 } from './runtime.mjs'
 import { createAgentRoomClient } from './client/api-client.mjs'
-import { assertSafeSessionScope, sessionCursorSeedState, sessionPrincipalEnabled, sessionScopeKey } from './client/session-state.mjs'
+import { assertSafeSessionScope, sessionCursorSeedState, sessionPrincipalEnabled, sessionScopeFilePath, sessionScopeKey } from './client/session-state.mjs'
+import { CURSORS_FILENAME } from './client/cursors.mjs'
 import { CLIENT_RELEASE_TIMEOUT_MS } from './constants.mjs'
 
 // One wall-clock pause (the shutdown budget's timer).
@@ -479,7 +480,7 @@ function queueCursorPersist(pluginData, realmId, roomId, afterSeq) {
 // keeps the legacy paths below, byte-for-byte.
 
 function sessionCursorFilePath(pluginData, scope) {
-  return join(pluginData, 'sessions', assertSafeSessionScope(scope), 'cursors.json')
+  return sessionScopeFilePath(pluginData, scope, CURSORS_FILENAME)
 }
 
 const sessionCursorMemory = new Map()

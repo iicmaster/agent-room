@@ -707,10 +707,10 @@ async function runAddressedSend({
     attempt.transport = transport
     attempt.realmId = realmId
 
-    // Resolve the session principal for this process scope (resuming a stored
-    // principal unless --name overrides it, else allocating --name once or
-    // auto-minting <role>-<shortToken> up to 3 attempts), act with its Session
-    // capability, then release the base lease best-effort in finally.
+    // Resolve the session principal for this process scope: REUSE a live lease
+    // with no network call, else resume a stored principal, else allocate
+    // --name once or auto-mint <role>-<shortToken> up to 3 attempts. The lease
+    // is never released here (Story 2.1, retro F-10).
     const sessionScope = sessionScopeKey({ env, pluginDataDir })
     const machine = machineLabel({ env })
     const roundTripOrThrow = async (method, path, headers, body) => {
@@ -742,7 +742,7 @@ async function runAddressedSend({
       ),
     })
     const capability = principal.capability
-    try {
+    {
       const sendBody = {
         to: address.address,
         client_message_id: clientMessageId,
@@ -762,14 +762,13 @@ async function runAddressedSend({
       return addressedResultReceipt({
         command, to: address.address, result: sent.body.result, clientMessageId, realmId, origin, transport,
       })
-    } finally {
-      try {
-        await roundTrip(target, 'DELETE', '/api/session-principals/current', sessionHeadersOf(capability), undefined, CLIENT_REQUEST_TIMEOUT_MS)
-      } catch {
-        // The release is best-effort: the durable principal and mailbox
-        // persist; only the 45 s base lease may remain.
-      }
     }
+    // Story 2.1 (retro F-10): no `finally` release. This command used to
+    // DELETE /api/session-principals/current on the way out, which dropped the
+    // session's own base lease — the session went online -> offline on every
+    // single `dm`, and any live watch on it was cut. The lease is now reused
+    // while live (resolveOrMintSessionPrincipal returns {reuse:true} without a
+    // /resume call) and lapses on its own 45 s timer when nobody renews it.
   } catch (error) {
     if (attempt.postSend) return sendFailureReceipt(command, error, attempt)
     return refusal(command, error)

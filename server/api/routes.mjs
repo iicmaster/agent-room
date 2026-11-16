@@ -286,6 +286,14 @@ export const RESPONSE_FIELD_VOCABULARY = Object.freeze([
   'write_queue',
   'truncated',
   'enrolled_via',
+  // Story 1.1 AC5, completed by the Epic 1 retrospective (action item 8,
+  // finding F-9): the write_queue telemetry's four declared names that the
+  // implementation had been missing. The DATED AMENDMENT recording this is in
+  // docs/architecture/architecture-agent-room-2026-09-20/ARCHITECTURE-SPINE.md.
+  'oldest_age_ms',
+  'ops_total',
+  'rejected_queue_full_total',
+  'last_batch_ms',
 ])
 
 // Matching: specific patterns first, wildcard (`/viewer/` + static assets)

@@ -466,6 +466,21 @@ export const INTERNAL_ERROR_CODES = Object.freeze([
   'wal_unavailable',
 ])
 
+// CLI-local error codes (Epic 1 retro F-6). These never cross the wire and so
+// are not wire codes with an HTTP status: they are the codes a `server/cli/*`
+// command puts on its own receipt when the failure is local to the command —
+// a readiness deadline it enforced, or a host revocation whose selector
+// matched no principal. Registering them here (rather than letting each module
+// coin a string) is what makes the vocabulary checkable: a CLI failure code
+// must appear in exactly one of PUBLIC_ERRORS, INTERNAL_ERROR_CODES, or this
+// set.
+export const CLI_ERROR_TIMEOUT = 'timeout'
+export const CLI_ERROR_SESSION_NOT_FOUND = 'session_not_found'
+export const CLI_ERROR_CODES = Object.freeze([
+  CLI_ERROR_SESSION_NOT_FOUND,
+  CLI_ERROR_TIMEOUT,
+])
+
 // --- Schema-v2 store internals -------------------------------------------------
 
 // Open-time busy retry for concurrent openers (server/store/room-log.mjs).

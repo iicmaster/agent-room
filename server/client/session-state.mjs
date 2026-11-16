@@ -297,11 +297,24 @@ export function sessionsDirectoryPath(pluginDataDir) {
   return join(pluginDataDir, SESSIONS_DIRECTORY_NAME)
 }
 
+// THE per-scope file path builder (Epic 1 retro F-4/#5). Four modules had each
+// written `join(pluginData, 'sessions', <scope>, <name>)` by hand — this is
+// that expression once, with the path-escape guard applied. Every per-scope
+// file (session.json, cursors.json, cursors.lock, wait.lock, inbox.jsonl,
+// loop-ledger.sqlite) goes through here, so a scope can never key a path
+// outside sessions/ by construction rather than by each caller remembering.
+export function sessionScopeFilePath(pluginDataDir, scope, filename) {
+  if (typeof filename !== 'string' || filename.length === 0 || filename.includes('/') || filename.includes('\\')) {
+    throw new AgentRoomRuntimeError('invalid_argument', `session state filename ${String(filename)} is not a plain file name`)
+  }
+  return join(pluginDataDir, SESSIONS_DIRECTORY_NAME, assertSafeSessionScope(scope), filename)
+}
+
 // Path-escape guard: the scope keys directories under PLUGIN_DATA/sessions/,
 // so its shape is verified before any path is built from it — the same
 // discipline as the realm key under realms/.
 export function sessionStatePath(pluginDataDir, scope) {
-  return join(pluginDataDir, SESSIONS_DIRECTORY_NAME, assertSafeSessionScope(scope), SESSION_STATE_FILENAME)
+  return sessionScopeFilePath(pluginDataDir, scope, SESSION_STATE_FILENAME)
 }
 
 // Load this scope's stored session principal, or null when there is none.
@@ -349,6 +362,14 @@ export function loadSessionState(pluginDataDir, scope, { onError = defaultOnSess
       ? value.recovery_id
       : null,
     savedAt: typeof value.saved_at === 'string' ? value.saved_at : null,
+    // Story 2.1 (retro F-10): the base lease's expiry as the server reported
+    // it. Persisted so a one-shot CLI can REUSE a live lease instead of
+    // resuming on every command and releasing it in `finally` — the behaviour
+    // that flapped the session offline after every `dm`.
+    baseLeaseExpiresAt: typeof value.base_lease_expires_at === 'string'
+      && Number.isFinite(Date.parse(value.base_lease_expires_at))
+      ? value.base_lease_expires_at
+      : null,
   }
 }
 
@@ -373,6 +394,9 @@ export function saveSessionState(pluginDataDir, scope, state) {
   }
   if (typeof state.recoveryId === 'string' && SESSION_RECOVERY_ID_PATTERN.test(state.recoveryId)) {
     payload.recovery_id = state.recoveryId
+  }
+  if (typeof state.baseLeaseExpiresAt === 'string' && Number.isFinite(Date.parse(state.baseLeaseExpiresAt))) {
+    payload.base_lease_expires_at = state.baseLeaseExpiresAt
   }
   atomicWriteJson(sessionStatePath(pluginDataDir, scope), payload)
 }

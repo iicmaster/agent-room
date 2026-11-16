@@ -44,9 +44,11 @@ import { join } from 'node:path'
 
 import { CURSOR_FILE_MAX_BYTES, CURSOR_LOCK_STALE_MS, CURSOR_LOCK_WAIT_MS } from '../constants.mjs'
 import { AgentRoomRuntimeError, assertSafePathKey, atomicWriteJson, isPidAlive, readJsonFile } from '../runtime.mjs'
-import { assertSafeSessionScope, sessionScopeKey } from './session-state.mjs'
+import { sessionScopeFilePath, sessionScopeKey } from './session-state.mjs'
 
 export const CURSORS_SCHEMA_VERSION = 2
+export const CURSORS_FILENAME = 'cursors.json'
+export const CURSOR_LOCK_FILENAME = 'cursors.lock'
 
 const ROOM_KEY_MAX = 200
 
@@ -63,13 +65,11 @@ const isSeq = value => Number.isSafeInteger(value) && value >= 0
 const sleepMs = ms => new Promise(resolve => { setTimeout(resolve, ms) })
 
 export function scopeCursorsPath(pluginDataDir, { env = process.env } = {}) {
-  const scope = sessionScopeKey({ env, pluginDataDir })
-  return join(pluginDataDir, 'sessions', assertSafeSessionScope(scope), 'cursors.json')
+  return sessionScopeFilePath(pluginDataDir, sessionScopeKey({ env, pluginDataDir }), CURSORS_FILENAME)
 }
 
 export function cursorLockPath(pluginDataDir, { env = process.env } = {}) {
-  const scope = sessionScopeKey({ env, pluginDataDir })
-  return join(pluginDataDir, 'sessions', assertSafeSessionScope(scope), 'cursors.lock')
+  return sessionScopeFilePath(pluginDataDir, sessionScopeKey({ env, pluginDataDir }), CURSOR_LOCK_FILENAME)
 }
 
 // The legacy installation-wide file, still read ONLY as a first-session seed.

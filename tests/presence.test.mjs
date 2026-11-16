@@ -262,6 +262,10 @@ async function captureStderr(body) {
 // Contract helper: every object key in a payload (recursively) must be a
 // frozen AD-8 response-vocabulary name — the drift class the review flagged
 // must fail tests, not ship.
+// Story 1.1 AC5's full declared field list. The four names added by the Epic 1
+// retrospective (oldest_age_ms, ops_total, rejected_queue_full_total,
+// last_batch_ms) closed finding F-9; this copy of the list had drifted with
+// the implementation's.
 const WRITE_QUEUE_METRIC_KEYS = [
   'batches_total',
   'busy_retries_total',
@@ -269,7 +273,11 @@ const WRITE_QUEUE_METRIC_KEYS = [
   'coalesced_total',
   'committed_total',
   'depth',
+  'last_batch_ms',
   'max_depth',
+  'oldest_age_ms',
+  'ops_total',
+  'rejected_queue_full_total',
   'rejected_total',
 ]
 

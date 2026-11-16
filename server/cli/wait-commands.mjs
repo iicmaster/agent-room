@@ -324,7 +324,7 @@ function loadBaselineCursors(pluginDataDir, realmId) {
   if (existsSync(sessionsDir)) {
     for (const scope of readdirSync(sessionsDir)) {
       if (scope === '.' || scope === '..' || scope.startsWith('.') || !SESSION_SCOPE_PATTERN.test(scope)) continue
-      const path = join(sessionsDir, scope, 'cursors.json')
+      const path = sessionScopeFilePath(pluginDataDir, scope, 'cursors.json')
       if (existsSync(path)) candidates.push({ path, mtimeMs: statSync(path).mtimeMs, sessionScoped: true })
     }
   }

@@ -56,6 +56,10 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const SERVER_ENTRY = join(ROOT, 'server', 'api', 'server.mjs')
 const RUNTIME_RECORD_FILENAME = 'runtime.json'
 const PROTOCOL_KEY = 'agent-room-protocol'
+// Story 1.1 AC5's declared field list, now shipped in full: the four names
+// the implementation was missing (oldest_age_ms, ops_total,
+// rejected_queue_full_total, last_batch_ms) were added by the Epic 1
+// retrospective's action item 8, closing finding F-9.
 const STATUS_METRIC_KEYS = [
   'batches_total',
   'busy_retries_total',
@@ -63,7 +67,11 @@ const STATUS_METRIC_KEYS = [
   'coalesced_total',
   'committed_total',
   'depth',
+  'last_batch_ms',
   'max_depth',
+  'oldest_age_ms',
+  'ops_total',
+  'rejected_queue_full_total',
   'rejected_total',
 ]
 
@@ -357,8 +365,13 @@ test('HAPPY_BURST: 1,000 concurrent sends across POST /api/messages and POST /ap
   assert.deepEqual(Object.keys(metrics).sort(), STATUS_METRIC_KEYS)
   assert.equal(metrics.depth, 0)
   assert.equal(metrics.bytes, 0)
-  assert.equal(metrics.committed_total, 1000)
-  assert.equal(metrics.rejected_total, 0)
+  // write_queue counters are SERVER-GLOBAL, so the burst is measured as the
+  // delta across it: authLocal/bindChatId/allocatePrincipal all commit through
+  // the same queue, and an absolute equality would count their setup writes
+  // too (retro F-13 — this assertion was red on the Epic 1 tip).
+  const burstCommitted = metrics.committed_total - statusBefore.write_queue.committed_total
+  assert.equal(burstCommitted, 1000, `the 1,000-send burst must commit exactly 1,000 ops`)
+  assert.equal(metrics.rejected_total, statusBefore.write_queue.rejected_total)
   assert.ok(metrics.batches_total >= 1 && metrics.batches_total < 1000, `expected batched commits, got ${metrics.batches_total}`)
   assert.ok(metrics.max_depth > 1, `expected queue depth > 1 during burst, got ${metrics.max_depth}`)
 
@@ -647,6 +660,9 @@ test('HB_COALESCE: 10 rapid heartbeats for one session collapse into 1 write wit
   const actor = installation()
   const token = await authLocal(server.port, dataDir, actor)
   const principal = await allocatePrincipal(server.port, token, 'hb-alice', 'cli', 'box-hb')
+  const statusBefore = await fetchStatus(server.port, bearerHeaders(token))
+  const coalescedBefore = statusBefore.write_queue.coalesced_total
+  const committedBefore = statusBefore.write_queue.committed_total
 
   const lockDb = openLockConnection(dataDir)
   t.after(() => { try { lockDb.close() } catch { /* ignore */ } })
@@ -673,11 +689,12 @@ test('HB_COALESCE: 10 rapid heartbeats for one session collapse into 1 write wit
   }
 
   const statusAfter = await fetchStatus(server.port, bearerHeaders(token))
-  assert.ok(
-    statusAfter.write_queue.coalesced_total >= 8,
-    `expected >= 8 coalesced heartbeats, got ${statusAfter.write_queue.coalesced_total}`,
-  )
-  assert.ok(statusAfter.write_queue.committed_total <= 2)
+  // Deltas, not absolutes: see HAPPY_BURST (retro F-13). The setup writes
+  // preceding the burst are what made the old absolute assertions red.
+  const coalescedDelta = statusAfter.write_queue.coalesced_total - coalescedBefore
+  const committedDelta = statusAfter.write_queue.committed_total - committedBefore
+  assert.ok(coalescedDelta >= 8, `expected >= 8 coalesced heartbeats, got ${coalescedDelta}`)
+  assert.ok(committedDelta <= 2, `expected <= 2 commits for 10 heartbeats, got ${committedDelta}`)
 })
 
 test('BUSY_RECOVER: external 300 ms SQLite write lock causes async backoff recovery while GET /health stays responsive', async t => {
