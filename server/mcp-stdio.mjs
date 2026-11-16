@@ -642,13 +642,17 @@ export function createMcpServer({
 
   // Bounded unread summary for piggyback in tool results: metadata only (held
   // rows carry no body), capped rooms, and NOTHING that moves notified_seq.
-  function passivePiggyback() {
+  // Returns a bounded, human-readable passive-notice line for tool-result
+  // content. HELD rows contribute metadata only ("body withheld"); no new
+  // structured response field is introduced, so AD-8's frozen vocabulary is
+  // unchanged. This notice never moves notified_seq.
+  function passiveNoticeText() {
     if (passiveUnread.size === 0) return null
-    const rooms = [...passiveUnread.entries()].slice(0, MCP_PIGGYBACK_MAX_ROOMS).map(([roomId, list]) => ({
-      room_id: roomId,
-      unread: list.map(entry => ({ seq: entry.seq, chat_id: entry.chat_id, held: entry.held })),
-    }))
-    return { passive_unread: rooms }
+    const rooms = [...passiveUnread.entries()].slice(0, MCP_PIGGYBACK_MAX_ROOMS).map(([roomId, list]) => {
+      const summary = list.map(entry => `${entry.seq}${entry.held ? '(held, body withheld)' : ''}`).join(', ')
+      return `room ${roomId}: unread ${summary}`
+    })
+    return `[agent-room passive notice] ${rooms.join(' | ')} — no messages were marked notified; run message_read or resources/read to advance.`
   }
 
   const startNotifierOnce = () => {
@@ -1078,12 +1082,12 @@ export function createMcpServer({
         const result = await callTool(message.params.name, message.params.arguments ?? {}, controller.signal)
         if (result.isError !== true) startNotifierOnce()
         if (result.isError !== true) startSessionPrincipalOnce()
-        // Bounded passive unread piggyback in tool results (metadata only). It
-        // is additive and never touches notified_seq — a real read does that.
-        const piggyback = passivePiggyback()
-        if (piggyback !== null && result.structuredContent && typeof result.structuredContent === 'object') {
-          const merged = { ...result.structuredContent, ...piggyback }
-          write(rpcResult(id, { ...result, structuredContent: merged, content: [{ type: 'text', text: JSON.stringify(merged) }] }))
+        // Bounded passive unread piggyback in tool results (metadata only, in
+        // the text content). Additive; never touches notified_seq. The frozen
+        // structured response shape is left untouched.
+        const notice = passiveNoticeText()
+        if (notice !== null && Array.isArray(result.content)) {
+          write(rpcResult(id, { ...result, content: [...result.content, { type: 'text', text: notice }] }))
         } else {
           write(rpcResult(id, result))
         }
