@@ -30,7 +30,6 @@ import { lstatSync, realpathSync } from 'node:fs'
 import {
   NOTIFY_CHILD_ENV_ALLOWLIST,
   NOTIFY_CONFIG_FILENAME,
-  NOTIFY_CONFIG_PATH_ENV,
   NOTIFY_ENV_ALLOWLIST,
   TIER3_TIMEOUT_MS,
 } from '../constants.mjs'
@@ -88,17 +87,12 @@ function normalizeConfig(raw, provenance) {
 }
 
 /**
- * Resolve the Tier 3 config from local sources only. The environment variable
- * wins; otherwise a local JSON config file is read. No remote/peer source is
- * ever consulted. Does NOT verify the executable (see verifyExecutable) — this
- * is the pure config-shape half reused by doctor's misconfigured detection.
+ * Read the local JSON config file (the file half of the two spec sources).
+ * No remote/peer source is ever consulted. Does NOT verify the executable
+ * (see verifyExecutable) — this is the pure config-shape half reused by
+ * doctor's misconfigured detection.
  */
-export function loadNotifyConfig({ env = process.env, pluginDataDir } = {}) {
-  const fromEnv = env[NOTIFY_CONFIG_PATH_ENV]
-  const envProvenance = `${NOTIFY_CONFIG_PATH_ENV}`
-  if (typeof fromEnv === 'string' && fromEnv.length > 0) {
-    return normalizeConfig(fromEnv, envProvenance)
-  }
+export function loadNotifyConfig({ pluginDataDir } = {}) {
   if (typeof pluginDataDir === 'string' && pluginDataDir.length > 0) {
     const configPath = `${String(pluginDataDir).replace(/\/$/, '')}/${NOTIFY_CONFIG_FILENAME}`
     let doc
@@ -117,9 +111,8 @@ export function loadNotifyConfig({ env = process.env, pluginDataDir } = {}) {
   return { status: 'none' }
 }
 
-// Detect the legacy variable name too, as a path-string source. Kept separate
-// so its empty state is honest and the two sources have distinct provenance.
-export function loadNotifyConfigFromLegacyEnv({ env = process.env } = {}) {
+// The env var source: AGENT_ROOM_NOTIFY_CMD is the spec's local user config.
+export function loadNotifyConfigFromEnv({ env = process.env } = {}) {
   return normalizeConfig(env.AGENT_ROOM_NOTIFY_CMD, 'AGENT_ROOM_NOTIFY_CMD')
 }
 
@@ -130,13 +123,13 @@ export function normalizeNotifyCommand(command) {
 }
 
 /**
- * Merge the local config sources: the primary config (env var or JSON file)
- * takes precedence, then the legacy AGENT_ROOM_NOTIFY_CMD env string.
+ * Resolve the two SPEC local sources only: AGENT_ROOM_NOTIFY_CMD (env) wins,
+ * otherwise the local JSON config file. No remote/peer source is consulted.
  */
 export function resolveNotifyConfig(options = {}) {
-  const primary = loadNotifyConfig(options)
-  if (primary.status !== 'none') return primary
-  return loadNotifyConfigFromLegacyEnv(options)
+  const fromEnv = loadNotifyConfigFromEnv(options)
+  if (fromEnv.status !== 'none') return fromEnv
+  return loadNotifyConfig(options)
 }
 
 // --- executable verification ----------------------------------------------------

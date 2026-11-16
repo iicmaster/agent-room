@@ -142,6 +142,7 @@ import { runGcCommand } from './gc-commands.mjs'
 import { loadRemoteConfig } from '../client/remote-config.mjs'
 import { runDmCommand, runReadFamilyCommand, runSendFamilyCommand, runSessionVerify, runSessionsCommand } from './message-commands.mjs'
 import { runBootstrapCommand } from './bootstrap-commands.mjs'
+import { runDoctorCommand } from './doctor-commands.mjs'
 
 const OK_STATUS = 200
 // The collision status is owned by the constants table (chat_id_taken), never restated.
@@ -639,6 +640,13 @@ Commands:
       24 hours. Offline/401 is NOT a revoke. At most 100 scopes per 100 ms.
       Mutating by design - doctor stays strictly read-only.
 
+  agent-room doctor [--json]
+      Read-only one-shot diagnosis of every notification axis (auth, send,
+      notify tiers 1A/1B/2/3 + the honest enforced gate, write_queue, nofile,
+      held count, loop pause). Each probe <= 1 s, whole report <= 3 s. Never
+      touches state — no GC, no mutator endpoints. Exit 0 healthy, 1 degraded,
+      2 usage error. Held counts are metadata only — no body text is printed.
+
   agent-room help
       Show this help.
 
@@ -875,6 +883,22 @@ export async function main(argv = process.argv.slice(2), {
     for (const line of outcome.stdout ?? []) output.write(`${line}\n`)
     for (const line of outcome.stderr ?? []) errorOutput.write(`${line}\n`)
     if (outcome.exitCode !== undefined && outcome.exitCode !== 0) process.exitCode = outcome.exitCode
+    return outcome
+  }
+  if (command === 'doctor') {
+    // Story 4.3: diagnosis only — strictly read-only, bounded, no state touched.
+    // The doctor outcome owns its exit code (0 healthy / 1 degraded / 2 usage).
+    const outcome = await runDoctorCommand(argv.slice(1), deps)
+    for (const line of outcome.lines ?? []) output.write(`${line}\n`)
+    if (outcome.status !== 'ok') {
+      errorOutput.write(`${JSON.stringify({
+        ok: false,
+        command: 'doctor',
+        code: outcome.code,
+        message: outcome.message,
+      })}\n`)
+    }
+    process.exitCode = outcome.status === 'usage' ? 2 : (outcome.exitCode ?? (outcome.status === 'ok' ? 0 : 1))
     return outcome
   }
   if (command === 'invite' || command === 'remote' || command === 'ban' || command === 'unban' || command === 'capacity' || command === 'viewer' || command === 'session' || command === 'session-principals' || command === 'wait' || command === 'wake-reset' || command === 'gc' || command === 'send' || command === 'read' || command === 'dm' || command === 'sessions' || command === 'bootstrap') {

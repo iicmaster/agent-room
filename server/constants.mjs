@@ -695,7 +695,6 @@ export const NOTIFY_ENV_ALLOWLIST = Object.freeze([
 // is dropped, so no token or secret can ride into the child environment.
 export const NOTIFY_CHILD_ENV_ALLOWLIST = Object.freeze(['PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL'])
 export const NOTIFY_CONFIG_FILENAME = 'notify-config.json'
-export const NOTIFY_CONFIG_PATH_ENV = 'AGENT_ROOM_NOTIFY_CONFIG'
 // The five honestly-enforceable Gate labels (epic AQ-2, closed enum).
 export const NOTIFY_GATE_STATES = Object.freeze({
   SERVER: 'Server-enforced',
