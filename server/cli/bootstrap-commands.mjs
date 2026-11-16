@@ -35,6 +35,12 @@ import {
 import { loadRemoteConfig, saveRemoteConfig, validateRemoteServerUrl } from '../client/remote-config.mjs'
 import { LOCAL_TRANSPORT } from '../client/trust.mjs'
 import { authenticate, protocolHeaders, roundTrip } from './session-commands.mjs'
+import {
+  buildSnippet,
+  genericCliSetup,
+  HARNESS_NAMES,
+  installHarness,
+} from './harness-installer.mjs'
 
 const execFileAsync = promisify(execFile)
 
@@ -58,12 +64,13 @@ function usage(message) {
   }
 }
 
-function refusal(code, message) {
+function refusal(code, message, extra) {
   return {
     status: 'refusal',
     command: 'bootstrap',
     code,
     message: redactInviteTokens(message),
+    ...(extra === undefined ? {} : { extra }),
   }
 }
 
@@ -74,11 +81,17 @@ function parseBootstrapArgs(tokens) {
     harness: undefined,
     scope: undefined,
     json: false,
+    install: false,
+    print: false,
   }
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index]
     if (token === '--json') {
       flags.json = true
+      continue
+    }
+    if (token === '--install' || token === '--print') {
+      flags[token.slice(2)] = true
       continue
     }
     if (token === '--remote' || token === '--invite' || token === '--harness' || token === '--scope') {
@@ -91,11 +104,32 @@ function parseBootstrapArgs(tokens) {
       continue
     }
     if (token.startsWith('--')) {
-      return { error: `unknown option "${token}"; expected: agent-room bootstrap [--remote <https-origin> --invite <token>] [--harness <name>] [--scope <key>] [--json]` }
+      return { error: `unknown option "${token}"; expected: agent-room bootstrap [--remote <https-origin> --invite <token>] [--harness ${HARNESS_NAMES.join('|')}] [--install | --print] [--scope <key>] [--json]` }
     }
     return { error: `unexpected argument "${token}"; agent-room bootstrap takes options only` }
   }
   return { flags }
+}
+
+const HARNESS_VALID_VALUES = `valid --harness values: ${HARNESS_NAMES.join(', ')}`
+
+// Validate the Story 5.1 installer mode before ANY work (no file writes, no
+// server boot). Returns a refusal message or null.
+function validateInstallerFlags(flags) {
+  if (!flags.install && !flags.print) return null
+  if (flags.install && flags.print) {
+    return `--install and --print are mutually exclusive; use one. ${HARNESS_VALID_VALUES}`
+  }
+  if (!HARNESS_NAMES.includes(flags.harness)) {
+    return `invalid or missing --harness "${flags.harness}"; ${HARNESS_VALID_VALUES}`
+  }
+  // Install/print mode is config-only; enrollment flags have no meaning here
+  // and must never influence a host config file (no token can leak in).
+  const incompatible = ['remote', 'invite', 'scope'].filter(key => flags[key] !== undefined)
+  if (incompatible.length > 0) {
+    return `--${incompatible[0]} is not valid with --install/--print (config-only mode; no token is written)`
+  }
+  return null
 }
 
 function normalizeHarnessRole(harness) {
@@ -182,6 +216,64 @@ export async function probeNofile() {
   }
 }
 
+// Story 5.1: the harness install/print mode. `--print` writes NOTHING — it
+// emits the snippet, the install guide, and the harness's real gate label.
+// `--install` writes only the documented target path. Both are closed-enum and
+// validated by validateInstallerFlags before this function is reached.
+async function runHarnessInstaller(flags, env) {
+  try {
+    if (flags.print) {
+      const info = buildSnippet(flags.harness, env)
+      const guide = [
+        `Snippet for ${flags.harness} (target: ${info.quotedPath}):`,
+        info.snippet.trimEnd(),
+        '',
+        `Install with: agent-room bootstrap --harness ${flags.harness} --install`,
+        `Host gate: ${info.gate}`,
+      ]
+      if (flags.harness === 'generic') {
+        guide.push('', genericCliSetup())
+      }
+      const result = {
+        command: 'bootstrap',
+        harness: flags.harness,
+        action: 'print',
+        gate: info.gate,
+        path: info.path,
+        format: info.format,
+        snippet: info.snippet,
+        ...(flags.harness === 'generic' ? { cli: genericCliSetup() } : {}),
+        wrote_files: [],
+      }
+      return {
+        status: 'ok',
+        command: 'bootstrap',
+        lines: flags.json ? [JSON.stringify(result)] : guide,
+      }
+    }
+
+    const outcome = await installHarness(flags.harness, env)
+    const result = {
+      command: 'bootstrap',
+      harness: flags.harness,
+      action: 'install',
+      gate: outcome.gate,
+      path: outcome.path,
+      changed: outcome.changed,
+      backup: outcome.backup,
+      wrote_files: outcome.changed ? [outcome.path] : [],
+    }
+    const lines = flags.json
+      ? [JSON.stringify(result)]
+      : [outcome.message, `host gate: ${outcome.gate}`]
+    return { status: 'ok', command: 'bootstrap', lines }
+  } catch (error) {
+    // ConfigError carries a reviewable diff / conflicting values in `extra`.
+    // Never echo a token; installer never reads one.
+    return refusal(error?.code ?? 'install_failed', error?.message ?? String(error), error?.extra)
+  }
+}
+
 export async function runBootstrapCommand(tokens, deps) {
   const { pluginDataDir, sharedDataDir, env = process.env } = deps
   const deadlineMs = performance.now() + BOOTSTRAP_READINESS_TIMEOUT_MS
@@ -195,6 +287,15 @@ export async function runBootstrapCommand(tokens, deps) {
   const parsed = parseBootstrapArgs(tokens)
   if (parsed.error !== undefined) return usage(parsed.error)
   const { flags } = parsed
+
+  // Story 5.1 installer mode. Mutually exclusive with the enrollment path:
+  // --install/--print wire host MCP config only and never boot a server or
+  // touch keys. Validation happens before any work and always exits 1.
+  const installerError = validateInstallerFlags(flags)
+  if (installerError !== null) return refusal('invalid_request', installerError)
+  if (flags.install || flags.print) {
+    return runHarnessInstaller(flags, env)
+  }
 
   const hasRemote = flags.remote !== undefined
   const hasInvite = flags.invite !== undefined
