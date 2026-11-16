@@ -20,6 +20,7 @@ import {
   WATCH_OUTBOUND_BUFFER_MAX_BYTES,
   WATCH_TIMEOUT_MS,
   IDENTIFIER_MAX,
+  READ_PAGE_MAX,
 } from '../constants.mjs'
 import { HANDLER_STREAMED, reject } from './pipeline.mjs'
 
@@ -40,16 +41,40 @@ function parseCursors(raw) {
   if (Buffer.byteLength(raw, 'utf8') > WATCH_CURSORS_PARAM_MAX_BYTES) {
     return { error: reject('invalid_request', CURSORS_INVALID_MESSAGE) }
   }
+  // JSON.parse silently collapses duplicate keys before a reviver runs, so
+  // detect them on the raw text: top-level "key": tokens at depth 1.
+  const topLevelKeys = []
+  let depth = 0
+  let inString = false
+  let escaped = false
+  let keyStart = -1
+  for (let i = 0; i < raw.length; i += 1) {
+    const ch = raw[i]
+    if (inString) {
+      if (escaped) { escaped = false; continue }
+      if (ch === '\\') { escaped = true; continue }
+      if (ch === '"') {
+        inString = false
+        if (depth === 1 && keyStart !== -1) {
+          const candidate = raw.slice(keyStart, i)
+          let j = i + 1
+          while (raw[j] === ' ' || raw[j] === '\t') j += 1
+          if (raw[j] === ':') topLevelKeys.push(candidate)
+          keyStart = -1
+        }
+      }
+      continue
+    }
+    if (ch === '"') { inString = true; keyStart = i + 1; continue }
+    if (ch === '{' || ch === '[') depth += 1
+    else if (ch === '}' || ch === ']') depth -= 1
+  }
+  if (new Set(topLevelKeys).size !== topLevelKeys.length) {
+    return { error: reject('invalid_request', CURSORS_INVALID_MESSAGE) }
+  }
   let parsed
   try {
-    const seen = new Set()
-    parsed = JSON.parse(raw, function (key, value) {
-      if (key !== '') {
-        if (seen.has(key)) throw new Error('duplicate key')
-        seen.add(key)
-      }
-      return value
-    })
+    parsed = JSON.parse(raw)
   } catch {
     return { error: reject('invalid_request', CURSORS_INVALID_MESSAGE) }
   }
@@ -278,31 +303,40 @@ export function createWatchManager({ bus, store, databasePath, sessionRegistry, 
     // flush. No await between subscribe and the synchronous page reads.
     stream.unsubscribe = bus.subscribe(sessionId, (event, control) => onBusEvent(stream, event, control))
 
-    // Catch-up: bounded total across all member rooms. One sync page read per
-    // room with a budget-aware limit; over-budget asks the client to rescan.
+    // Catch-up: bounded total across all member rooms. Page each room with a
+    // budget-aware limit; over-budget asks the client to rescan. Every read is
+    // a SYNCHRONOUS store call — no await between subscribe and catch-up.
     let collected = 0
     let overflow = false
-    for (const [roomId, seq] of memberCursors) {
-      const limit = WATCH_CATCHUP_MAX - collected + 1
-      const page = store.readSessionPairPage({ roomId, sessionId, afterSeq: seq, limit })
-      for (const message of page) {
-        const key = `${message.room_id}:${message.seq}`
-        if (!stream.seen.has(key)) {
-          stream.seen.add(key)
-          stream.buffer.push({
-            event: 'message',
-            room_id: message.room_id,
-            seq: message.seq,
-            chat_id: message.chat_id,
-            fingerprint: message.actor_fingerprint,
-            text: message.text,
-            reply_to_seq: message.reply_to_seq,
-            created_at: message.created_at,
-          })
+    outer: for (const [roomId, seq] of memberCursors) {
+      let afterSeq = seq
+      for (;;) {
+        const remaining = WATCH_CATCHUP_MAX - collected
+        // Read one over the remaining budget to detect overflow; clamp to the
+        // store's page cap so a >200 request never raises invalid_limit.
+        const limit = Math.min(remaining + 1, READ_PAGE_MAX)
+        const page = store.readSessionPairPage({ roomId, sessionId, afterSeq, limit })
+        if (page.length === 0) break
+        for (const message of page) {
+          const key = `${message.room_id}:${message.seq}`
+          if (!stream.seen.has(key)) {
+            stream.seen.add(key)
+            stream.buffer.push({
+              event: 'message',
+              room_id: message.room_id,
+              seq: message.seq,
+              chat_id: message.chat_id,
+              fingerprint: message.actor_fingerprint,
+              text: message.text,
+              reply_to_seq: message.reply_to_seq,
+              created_at: message.created_at,
+            })
+          }
+          collected += 1
+          if (collected > WATCH_CATCHUP_MAX) { overflow = true; break outer }
         }
-        collected += 1
+        afterSeq = page[page.length - 1].seq
       }
-      if (collected > WATCH_CATCHUP_MAX) { overflow = true; break }
     }
 
     // Install in the registry before any frame is written so a concurrent
