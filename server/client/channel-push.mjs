@@ -16,6 +16,7 @@ import { existsSync, lstatSync, readFileSync } from 'node:fs'
 
 import {
   IDENTIFIER_MAX,
+  MCP_WAIT_YIELD_MS,
   MCP_CHANNEL_OUTBOUND_MAX_BYTES,
   MCP_CHANNEL_SOURCE,
   MCP_RESOURCE_SUBSCRIPTIONS_MAX,
@@ -129,6 +130,27 @@ export function waitLockHeld(pluginDataDir, scope, { alive = isPidAlive, path: e
     if (Number.isSafeInteger(parsed?.pid) && parsed.pid > 1) pid = parsed.pid
   } catch { /* unreadable lock: not a live holder */ }
   return { held: pid !== null && alive(pid) === true, pid, path }
+}
+
+// A single wait.lock handoff: if a live waiter holds the scope fence, wait at
+// most MCP_WAIT_YIELD_MS for it to clear (polling), then report whether it is
+// still held. No reconnect ping-pong: the caller resumes its stream ONCE after
+// a clear. `probe` is injectable for tests; `sleep`/`now` too.
+export async function awaitWaitLockRelease(pluginDataDir, scope, {
+  probe = (dir, s) => waitLockHeld(dir, s),
+  yieldMs = MCP_WAIT_YIELD_MS,
+  sleep = ms => new Promise(resolve => { setTimeout(resolve, ms) }),
+  now = () => Date.now(),
+} = {}) {
+  if (probe(pluginDataDir, scope).held === false) return { waitedMs: 0, released: true }
+  const deadline = now() + yieldMs
+  for (;;) {
+    await sleep(Math.min(25, Math.max(0, deadline - now())))
+    if (probe(pluginDataDir, scope).held === false) {
+      return { waitedMs: Math.max(0, now() - (deadline - yieldMs)), released: true }
+    }
+    if (now() >= deadline) return { waitedMs: yieldMs, released: false }
+  }
 }
 
 // --- resource URI validation + capped subscriptions --------------------------

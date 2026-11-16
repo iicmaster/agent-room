@@ -414,6 +414,10 @@ export function createMcpServer({
   agentName = null,
   agentRole = 'agent',
   onFatalExit,
+  // Injectable output writer (Story 4.1 test seam). Production leaves it unset
+  // and gets the plain stdout write below; a harness can observe or force
+  // backpressure on the exact frames the adapter emits.
+  write: writeOverride = null,
 } = {}) {
   assertSupportedRuntime()
   const dataDir = sharedDataDirectory(env)
@@ -424,7 +428,7 @@ export function createMcpServer({
   // per-session cursor file, so the pair never disagree.
   const sessionScope = sessionScopeKey({ env, pluginDataDir: pluginData, cwd })
 
-  const write = message => output.write(`${JSON.stringify(message)}\n`)
+  const write = writeOverride ?? (message => output.write(`${JSON.stringify(message)}\n`))
   // In-flight tool calls, keyed by their MCP request id: a cancelled
   // notification (or stdin closing) aborts the call's HTTP round trip through
   // the signal the api-client threads into every request.
@@ -561,7 +565,9 @@ export function createMcpServer({
   function ensureChannelDispatch() {
     if (channelDispatcher !== null) return channelDispatcher
     channelWriter = createChannelWriter({
-      write: message => { write(message); return true },
+      // Propagate the stream's backpressure signal (false = buffer full) so a
+      // saturated stdout is a Phase B failure, never a silent "success".
+      write: message => write(message),
       output,
       maxBufferBytes: MCP_CHANNEL_OUTBOUND_MAX_BYTES,
     })

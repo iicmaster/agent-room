@@ -9,6 +9,7 @@ import test from 'node:test'
 import {
   buildChannelXml,
   channelNotification,
+  awaitWaitLockRelease,
   createChannelWriter,
   createSubscriptionRegistry,
   escapeXmlAttr,
@@ -118,4 +119,29 @@ test('subscriptions capped at 20/client; idempotent subscribe; unsubscribe', () 
   assert.equal(reg.unsubscribe('agent-room://rooms/r0').ok, true)
   assert.equal(reg.subscribe('agent-room://rooms/overflow').ok, true)
   assert.equal(reg.subscribe('agent-room://rooms/bad uri').reason, 'invalid_uri')
+})
+
+test('wait.lock handoff: absent lock yields immediately; live lock yields <= budget then gives up', async () => {
+  // Absent lock: no wait.
+  const none = await awaitWaitLockRelease('/x', 's', { probe: () => ({ held: false }), sleep: () => {} })
+  assert.deepEqual(none, { waitedMs: 0, released: true })
+
+  // Lock clears on the 3rd probe: released, no reconnect ping-pong.
+  let probes = 0
+  const cleared = await awaitWaitLockRelease('/x', 's', {
+    probe: () => ({ held: ++probes < 3 }),
+    yieldMs: 1000,
+    sleep: () => {},
+    now: (() => { let t = 0; return () => (t += 100) })(),
+  })
+  assert.equal(cleared.released, true)
+  assert.equal(probes, 3)
+
+  // Lock never clears: gives up at the budget (<= MCP_WAIT_YIELD_MS wall clock).
+  const start = Date.now()
+  const stuck = await awaitWaitLockRelease('/x', 's', {
+    probe: () => ({ held: true }), yieldMs: 60, sleep: ms => new Promise(r => setTimeout(r, ms)),
+  })
+  assert.equal(stuck.released, false)
+  assert.ok(Date.now() - start <= 200, 'handoff bounded by the yield budget')
 })
