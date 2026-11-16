@@ -145,6 +145,12 @@ export function startNotifier({
   env = process.env,
   errorOutput = process.stderr,
   onStop = () => {},
+  // Story 4.1: an OPTIONAL Tier 1A channel sink. The notifier owns the single
+  // 3.1 watch receiver; a verified host's adapter injects a callback that runs
+  // the 3.2 two-phase guard + channel write. Called per judged row (held rows
+  // carry held:true and are ignored by the channel path). When absent (every
+  // existing caller) this is a no-op — no second watch client is ever created.
+  onWake = null,
   // Harness seams (product callers use the constants): the refresh period and
   // the request spacing are injectable so tests can run the real loop fast.
   refreshMs = NOTIFIER_ROOM_REFRESH_MS,
@@ -359,6 +365,13 @@ export function startNotifier({
       const line = `${JSON.stringify(inboxEntry(roomId, row))}\n`
       deliverWakeLine(line)
       if (notifyCmd !== null) scheduleHook(line)
+      // Story 4.1: offer this judged row to the optional Tier 1A channel sink.
+      // The sink runs the 3.2 guard and XML-escapes; a held row is ignored there.
+      // Failures are swallowed here (the inbox already carried the wake) — a
+      // channel failure degrades to this passive path, it never breaks receive.
+      if (onWake !== null) {
+        try { await onWake({ roomId, row }) } catch { /* degrade to passive inbox/hook */ }
+      }
     }
   }
 

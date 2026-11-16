@@ -70,6 +70,11 @@ import {
   FRAME_MAX_BYTES,
   IDENTIFIER_MAX,
   MESSAGE_TEXT_MAX,
+  MCP_CHANNEL_OUTBOUND_MAX_BYTES,
+  MCP_PIGGYBACK_MAX_ROOMS,
+  MCP_PROTOCOL_DOWNGRADE_FROM,
+  MCP_PROTOCOL_VERSION,
+  MCP_RESOURCE_SUBSCRIPTIONS_MAX,
   READ_HOLD_MAX_MS,
   READ_PAGE_DEFAULT,
   READ_PAGE_MAX,
@@ -102,6 +107,22 @@ import {
   registerHeldMessages,
 } from './client/held.mjs'
 import { notifierEnabled, startNotifier } from './notification/notifier.mjs'
+import {
+  CHANNEL_TIER_LABEL,
+  isChannelActive,
+  verifyClaudeChannel,
+} from './client/channel-verification.mjs'
+import {
+  buildChannelXml,
+  channelNotification,
+  createChannelWriter,
+  createSubscriptionRegistry,
+  parseRoomResourceUri,
+  roomResourceUri,
+  awaitWaitLockRelease,
+} from './client/channel-push.mjs'
+import { createWakeDispatcher } from './notification/wake-dispatcher.mjs'
+import { createScopeLedger } from './client/scope-ledger.mjs'
 
 // Run the runtime gate before any other work. Direct launches report one
 // diagnosable line and exit 1 with no stack trace; importers get a catchable
@@ -117,8 +138,11 @@ try {
 }
 
 const JSONRPC_VERSION = '2.0'
-const SUPPORTED_PROTOCOLS = Object.freeze(['2025-06-18'])
-const DEFAULT_PROTOCOL = '2025-06-18'
+// Story 4.1: the canonical version plus the newer ones we accept and cleanly
+// downgrade from, all declared once in constants (AD-9). An unsupported version
+// answers a JSON-RPC error rather than being silently rewritten.
+const SUPPORTED_PROTOCOLS = Object.freeze([MCP_PROTOCOL_VERSION, ...MCP_PROTOCOL_DOWNGRADE_FROM])
+const DEFAULT_PROTOCOL = MCP_PROTOCOL_VERSION
 
 // Schema patterns derive from the constants module (each shape declared once);
 // the JSON-schema form anchors the shared source expression.
@@ -390,6 +414,10 @@ export function createMcpServer({
   agentName = null,
   agentRole = 'agent',
   onFatalExit,
+  // Injectable output writer (Story 4.1 test seam). Production leaves it unset
+  // and gets the plain stdout write below; a harness can observe or force
+  // backpressure on the exact frames the adapter emits.
+  write: writeOverride = null,
 } = {}) {
   assertSupportedRuntime()
   const dataDir = sharedDataDirectory(env)
@@ -400,7 +428,7 @@ export function createMcpServer({
   // per-session cursor file, so the pair never disagree.
   const sessionScope = sessionScopeKey({ env, pluginDataDir: pluginData, cwd })
 
-  const write = message => output.write(`${JSON.stringify(message)}\n`)
+  const write = writeOverride ?? (message => output.write(`${JSON.stringify(message)}\n`))
   // In-flight tool calls, keyed by their MCP request id: a cancelled
   // notification (or stdin closing) aborts the call's HTTP round trip through
   // the signal the api-client threads into every request.
@@ -412,6 +440,17 @@ export function createMcpServer({
   // for a missing Chat ID — surfaces per call and never poisons the client.
   let clientPromise = null
   let realmId = null
+
+  // --- Story 4.1: verified channel + passive notices state --------------------
+  // AQ-2: set ONLY from the initialize handshake's capabilities via the pure
+  // probe. Never inferred from config, plugin presence, or wait.lock. Starts
+  // unverified until initialize runs.
+  let channelVerification = verifyClaudeChannel(null)
+  // This client's capped room-subscription set (resources.subscribe).
+  const subscriptions = createSubscriptionRegistry(MCP_RESOURCE_SUBSCRIPTIONS_MAX)
+  // Bounded passive unread piggyback, held metadata only; refreshed from the
+  // notifier's own inbox (no second watch client) and never moves notified_seq.
+  const passiveUnread = new Map() // roomId -> [{seq, chat_id, held}]
   // The companion notifier (server/notification/notifier.mjs): started as soon
   // as the host connects — on `initialize`, before any tool call, so receive-
   // readiness never depends on the model remembering to call a tool first —
@@ -448,6 +487,7 @@ export function createMcpServer({
     if (shutdownPromise !== null) return shutdownPromise
     shutdownPromise = (async () => {
       notifier?.stop()
+      channelLedger?.close()
       for (const controller of pending.values()) controller.abort()
       pending.clear()
       let outcome = 'no_session'
@@ -514,6 +554,113 @@ export function createMcpServer({
     return realmId
   }
 
+  // --- Story 4.1: Tier 1A active channel dispatch (AQ-2 gated) ---------------
+  // One wake dispatcher per scope, reusing 3.2's two-phase lease. Phase A
+  // reserve is done by dispatchTrusted; Phase B is the channel write; on any
+  // backpressure/closed/no-ack failure the dispatcher releases the lease and
+  // leaves notified_seq UNMOVED. Held rows never reach the channel at all.
+  let channelLedger = null
+  let channelDispatcher = null
+  let channelWriter = null
+  function ensureChannelDispatch() {
+    if (channelDispatcher !== null) return channelDispatcher
+    channelWriter = createChannelWriter({
+      // Propagate the stream's backpressure signal (false = buffer full) so a
+      // saturated stdout is a Phase B failure, never a silent "success".
+      write: message => write(message),
+      output,
+      maxBufferBytes: MCP_CHANNEL_OUTBOUND_MAX_BYTES,
+    })
+    channelLedger = createScopeLedger(pluginData, sessionScope)
+    channelDispatcher = createWakeDispatcher({
+      ledger: channelLedger,
+      pluginDataDir: pluginData,
+      realmId: 'pending', // replaced per row below via the effective realm arg
+      scope: sessionScope,
+      classifyRow: row => ({ held: row?.held === true, actor_fingerprint: row?.actor_fingerprint }),
+      decideHeld: () => false, // Held is metadata-only; never a channel wake
+    })
+    return channelDispatcher
+  }
+
+  // Called by the single notifier per judged row. Returns the dispatch outcome
+  // for tests; never throws into the notifier (which degrades to passive).
+  async function dispatchChannelWake({ roomId, row }) {
+    // AQ-2 absolute gate: unverified hosts NEVER fire an active push.
+    if (!isChannelActive(channelVerification)) return { skipped: 'unverified' }
+    // Held body never enters channel text — not even a held marker.
+    if (row?.held === true) return { skipped: 'held' }
+    // Tier 1B handoff: if a live `agent-room wait` holds this scope's fence,
+    // yield <=1s; while held (or never clear) do NOT fire an active push.
+    const handoff = await awaitWaitLockRelease(pluginData, sessionScope)
+    if (handoff.released === false) return { skipped: 'wait_lock' }
+    const realm = await realmIdOf()
+    const dispatcher = ensureChannelDispatch()
+    const candidate = {
+      room_id: roomId,
+      seq: row.seq,
+      actor_fingerprint: row.actor_fingerprint,
+      held: false,
+    }
+    const text = typeof row.text === 'string' ? row.text : ''
+    const dispatch = () => {
+      const xml = buildChannelXml({
+        from: row.chat_id,
+        roomId,
+        seq: row.seq,
+        at: row.created_at,
+        text,
+      })
+      if (xml === null) return false
+      const sent = channelWriter.send(channelNotification(xml))
+      return sent.ok
+    }
+    return dispatcher.dispatchTrusted(candidate, {
+      local: agentName ?? sessionScope,
+      peer: row.actor_fingerprint ?? 'unknown',
+      realmId: realm,
+      dispatch,
+    })
+  }
+
+  // Passive unread record: HELD metadata only, bounded, never a body, never a
+  // position. Fed by the notifier's own receiver so there is no second watch.
+  // Emits `notifications/resources/updated` for subscribed rooms — the passive
+  // wake a generic MCP host understands. It NEVER moves notified_seq; only a
+  // real resources/read (or message_read) does that.
+  function notePassiveUnread({ roomId, row }) {
+    const list = passiveUnread.get(roomId) ?? []
+    list.push({
+      seq: row.seq,
+      chat_id: row.chat_id,
+      held: row.held === true,
+    })
+    passiveUnread.set(roomId, list.slice(-MCP_PIGGYBACK_MAX_ROOMS))
+    const uri = roomResourceUri(roomId)
+    if (uri !== null && subscriptions.has(uri)) {
+      write({
+        jsonrpc: JSONRPC_VERSION,
+        method: 'notifications/resources/updated',
+        params: { uri },
+      })
+    }
+  }
+
+  // Bounded unread summary for piggyback in tool results: metadata only (held
+  // rows carry no body), capped rooms, and NOTHING that moves notified_seq.
+  // Returns a bounded, human-readable passive-notice line for tool-result
+  // content. HELD rows contribute metadata only ("body withheld"); no new
+  // structured response field is introduced, so AD-8's frozen vocabulary is
+  // unchanged. This notice never moves notified_seq.
+  function passiveNoticeText() {
+    if (passiveUnread.size === 0) return null
+    const rooms = [...passiveUnread.entries()].slice(0, MCP_PIGGYBACK_MAX_ROOMS).map(([roomId, list]) => {
+      const summary = list.map(entry => `${entry.seq}${entry.held ? '(held, body withheld)' : ''}`).join(', ')
+      return `room ${roomId}: unread ${summary}`
+    })
+    return `[agent-room passive notice] ${rooms.join(' | ')} — no messages were marked notified; run message_read or resources/read to advance.`
+  }
+
   const startNotifierOnce = () => {
     if (notifier !== null || shutdownPromise !== null || !notifierEnabled(env)) return
     try {
@@ -535,6 +682,13 @@ export function createMcpServer({
         env,
         errorOutput,
         onStop: () => { if (notifier === started) notifier = null },
+        // Story 4.1: the notifier owns the ONLY watch receiver. Both the
+        // active channel path (AQ-2 gated) and the passive unread piggyback
+        // ride this single callback — no second watch client is created.
+        onWake: async ({ roomId, row }) => {
+          notePassiveUnread({ roomId, row })
+          await dispatchChannelWake({ roomId, row })
+        },
       })
       notifier = started
     } catch {
@@ -874,11 +1028,32 @@ export function createMcpServer({
     }
     if (message.method === 'initialize') {
       const requested = message.params?.protocolVersion
-      negotiatedProtocol = SUPPORTED_PROTOCOLS.includes(requested) ? requested : DEFAULT_PROTOCOL
+      // Story 4.1: 2025-11-25 / 2026-07-28 downgrade cleanly to 2025-06-18;
+      // a genuinely unsupported version is a JSON-RPC error, never a silent
+      // rewrite. An omitted version is answered with the default.
+      if (requested !== undefined && !SUPPORTED_PROTOCOLS.includes(requested)) {
+        write(rpcError(id, -32602, `unsupported MCP protocol version: ${String(requested)}`))
+        return
+      }
+      // We speak exactly 2025-06-18. A newer requested version is accepted and
+      // cleanly DOWNGRADED to the one we implement (never echoed back).
+      negotiatedProtocol = DEFAULT_PROTOCOL
+      // AQ-2: the ONLY authority on tier. Pure probe of the real initialize
+      // capabilities; no config/plugin/wait.lock guessing anywhere.
+      channelVerification = verifyClaudeChannel(message.params)
       write(rpcResult(id, {
         protocolVersion: negotiatedProtocol,
-        capabilities: { tools: { listChanged: false } },
+        capabilities: {
+          tools: { listChanged: false },
+          // Declare resources.subscribe so a generic host can list/read/subscribe
+          // to agent-room:// rooms. Hosts that ignore `experimental` still call
+          // tools and resources without error.
+          resources: { subscribe: true, listChanged: false },
+          experimental: { 'claude/channel': {} },
+        },
         serverInfo: { name: 'agent-room', version: APP_VERSION },
+        // Honest tier disclosure: Active only for a verified --channels host.
+        instructions: `agent-room notification tier: ${CHANNEL_TIER_LABEL[channelVerification.tier]}`,
       }))
       // Receive-ready at connect: the notifier arms here (catching up the
       // unread backlog, opening the inbox a host tails) instead of waiting
@@ -913,10 +1088,81 @@ export function createMcpServer({
         const result = await callTool(message.params.name, message.params.arguments ?? {}, controller.signal)
         if (result.isError !== true) startNotifierOnce()
         if (result.isError !== true) startSessionPrincipalOnce()
-        write(rpcResult(id, result))
+        // Bounded passive unread piggyback in tool results (metadata only, in
+        // the text content). Additive; never touches notified_seq. The frozen
+        // structured response shape is left untouched.
+        const notice = passiveNoticeText()
+        if (notice !== null && Array.isArray(result.content)) {
+          write(rpcResult(id, { ...result, content: [...result.content, { type: 'text', text: notice }] }))
+        } else {
+          write(rpcResult(id, result))
+        }
       } finally {
         pending.delete(String(id))
       }
+      return
+    }
+    // --- Story 4.1: MCP resources surface -----------------------------------
+    // agent-room://rooms/<room_id>, capped subscriptions, foreign/invalid URIs
+    // refused. A host that ignores `experimental` still calls these without
+    // error because they are ordinary MCP methods.
+    if (message.method === 'resources/list') {
+      write(rpcResult(id, { resources: subscriptions.list().map(uri => ({
+        uri,
+        name: `agent-room room ${uri.slice('agent-room://rooms/'.length)}`,
+        mimeType: 'text/plain',
+      })) }))
+      return
+    }
+    if (message.method === 'resources/read') {
+      const uri = message.params?.uri
+      const parsed = parseRoomResourceUri(uri)
+      if (parsed === null) {
+        write(rpcError(id, -32602, 'invalid or foreign resource uri'))
+        return
+      }
+      // Only rooms this installation is a member of may be read. A well-formed
+      // URI for a room we are not in is refused the same as a foreign one.
+      let member = false
+      try {
+        const readyClient = await getClient()
+        member = (await readyClient.listRooms()).some(room => room.room_id === parsed.roomId)
+      } catch { member = false }
+      if (!member) {
+        write(rpcError(id, -32602, 'invalid or foreign resource uri'))
+        return
+      }
+      // A real resources/read is an ACTUAL read: only NOW may notified_seq move
+      // for the bounded unread this URI summarizes. Advance per-contact with
+      // the max seq recorded, then clear the passive piggyback entry.
+      const entries = passiveUnread.get(parsed.roomId) ?? []
+      const maxSeq = entries.reduce((max, entry) => Math.max(max, entry.seq), 0)
+      if (maxSeq > 0) {
+        try {
+          const readRealm = await realmIdOf()
+          await advanceCursor(pluginData, { realmId: readRealm, roomId: parsed.roomId, seq: maxSeq, field: 'notified_seq' }, { scope: sessionScope })
+        } catch { /* cursor write failure never blocks the read */ }
+      }
+      passiveUnread.delete(parsed.roomId)
+      const text = entries.map(entry => `[seq ${entry.seq}] ${entry.chat_id ?? '(unknown)'}${entry.held ? ' (held, body withheld)' : ''}`).join('\n')
+      write(rpcResult(id, { contents: [{ uri, mimeType: 'text/plain', text }] }))
+      return
+    }
+    if (message.method === 'resources/subscribe') {
+      const uri = message.params?.uri
+      const result = subscriptions.subscribe(uri)
+      if (result.ok === false) {
+        write(rpcError(id, -32602, result.reason === 'subscription_limit'
+          ? `subscription limit of ${MCP_RESOURCE_SUBSCRIPTIONS_MAX} reached`
+          : 'invalid or foreign resource uri'))
+        return
+      }
+      write(rpcResult(id, {}))
+      return
+    }
+    if (message.method === 'resources/unsubscribe') {
+      subscriptions.unsubscribe(message.params?.uri)
+      write(rpcResult(id, {}))
       return
     }
     write(rpcError(id, -32601, 'method not found'))
@@ -972,6 +1218,13 @@ export function createMcpServer({
       return shutdown()
     },
     get protocolVersion() { return negotiatedProtocol },
+    get channelVerification() { return channelVerification },
+    get subscriptionCount() { return subscriptions.size },
+    // Test seam: feed a judged row through the SAME channel/passive path the
+    // notifier uses, so AQ-2/backpressure/held behavior is observable without
+    // a live server. Production never calls this.
+    handleWake: dispatchChannelWake,
+    notePassiveUnread,
     tools: TOOL_DESCRIPTORS,
   }
 }
