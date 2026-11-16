@@ -26,6 +26,9 @@ import { promisify } from 'node:util';
 import { APP_VERSION, MIN_NODE_VERSION } from '../server/runtime.mjs';
 
 const execFile = promisify(execFileCallback);
+const exists = async (path) => {
+  try { await lstat(path); return true } catch { return false }
+};
 const repoRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const packageScript = join(repoRoot, 'scripts', 'package-release.mjs');
 const PLUGIN_SCHEMA = 'https://agent-plugins.org/schemas/1.0.0/plugin.schema.json';
@@ -36,7 +39,11 @@ const MCP_SCHEMA = 'https://agent-plugins.org/schemas/1.0.0/mcp.schema.json';
 // apart. The portable root additionally carries the two source manifests
 // (`portableEntries`, :45), which the dual-artifact test pins byte-for-byte
 // against the repository.
-const sharedEntryNames = ['server', 'web', 'README.md', 'LICENSE', 'CHANGELOG.md', 'package.json'];
+const TEMPLATE_FILES_5_1 = Object.freeze({
+  claude: 'claude.json', antigravity: 'antigravity.json', opencode: 'opencode.json',
+  codex: 'codex.toml', generic: 'generic.sh',
+});
+const sharedEntryNames = ['server', 'web', 'skills', 'BOOTSTRAP.md', 'README.md', 'LICENSE', 'CHANGELOG.md', 'package.json'];
 
 // Anchors that must be in every shared snapshot: the packager copies whatever
 // the source holds, so a runtime file deleted from the source would shrink the
@@ -50,6 +57,16 @@ const requiredSharedPaths = [
   'web/index.html',
   'web/app.js',
   'web/styles.css',
+  'skills/agent-room/SKILL.md',
+  'skills/agent-room',
+  'BOOTSTRAP.md',
+  'server/cli/templates',
+  'server/cli/templates/claude.json',
+  'server/cli/templates/codex.toml',
+  'server/cli/templates/antigravity.json',
+  'server/cli/templates/opencode.json',
+  'server/cli/templates/generic.sh',
+  'server/cli/harness-installer.mjs',
   'README.md',
   'LICENSE',
   'CHANGELOG.md',
@@ -295,6 +312,7 @@ test('release packaging creates two materialized byte-identical runtime artifact
   const portableRoot = join(out, 'agent-room-agent-plugin');
   const claudeRoot = join(out, 'agent-room-claude-code');
   assert.deepEqual(await readdir(portableRoot).then((names) => names.sort()), [
+    'BOOTSTRAP.md',
     'CHANGELOG.md',
     'LICENSE',
     'README.md',
@@ -302,16 +320,22 @@ test('release packaging creates two materialized byte-identical runtime artifact
     'package.json',
     'plugin.json',
     'server',
+    'skills',
     'web',
   ]);
+  // Portable carries no native hooks/ and no dependency/secret material.
+  assert.equal(await exists(join(portableRoot, 'hooks')), false, 'portable bundle has no hooks/');
   assert.deepEqual(await readdir(claudeRoot).then((names) => names.sort()), [
     '.claude-plugin',
     '.mcp.json',
+    'BOOTSTRAP.md',
     'CHANGELOG.md',
     'LICENSE',
     'README.md',
+    'hooks',
     'package.json',
     'server',
+    'skills',
     'web',
   ]);
 
@@ -726,6 +750,11 @@ test('the materialized Claude Code package passes the fail-closed `claude plugin
     [],
     `${context}: the report's \`manifest.warnings\` must be empty. Report: ${stdout}`,
   );
+  assert.deepEqual(
+    report.contents,
+    [],
+    `${context}: the report's \`contents\` must be empty. Report: ${stdout}`,
+  );
   // The exact materialized path is the assertion, so a report aimed at a
   // manifest anywhere else on the host cannot satisfy it.
   assert.equal(
@@ -1010,5 +1039,86 @@ test('a runtime file missing from BOTH packages still fails: the source tree is 
       /bytes differ from source: package\.json/,
       `a shared file that diverges from the source must fail for the ${label} package even when both agree`,
     );
+  }
+});
+
+test('Story 5.1 bundles ship four hooks in Claude only; portable has no hooks and no dependency/secret material', async (t) => {
+  const { portableRoot, claudeRoot } = await materializeRelease(t, 'agent-room-5-1-hooks-');
+
+  // The Claude bundle owns the four 4.2 lifecycle hooks, byte-identical to source.
+  const hooksSource = await readFile(join(repoRoot, 'hooks', 'hooks.json'));
+  assert.deepEqual(await readFile(join(claudeRoot, 'hooks', 'hooks.json')), hooksSource);
+  const hooks = JSON.parse(hooksSource.toString('utf8')).hooks;
+  assert.deepEqual(Object.keys(hooks).sort(), ['PostToolUse', 'SessionStart', 'Stop', 'UserPromptSubmit']);
+  for (const name of Object.keys(hooks)) {
+    const command = hooks[name][0]?.hooks?.[0]?.command ?? '';
+    assert.match(command, /hook-commands\.mjs/, `${name} uses the shared hook entrypoint`);
+    assert.match(command, /CLAUDE_PLUGIN_ROOT/, `${name} uses the plugin-root token`);
+  }
+
+  // Portable carries NO native hooks/ directory.
+  assert.equal(await exists(join(portableRoot, 'hooks')), false, 'portable has no hooks/');
+
+  // Neither bundle declares external runtime npm dependencies, and no raw
+  // invite/session token literal appears in the shipped templates/config.
+  for (const root of [portableRoot, claudeRoot]) {
+    const pkg = JSON.parse((await readFile(join(root, 'package.json'))).toString('utf8'));
+    assert.equal(pkg.dependencies, undefined, 'no npm dependencies');
+    assert.equal(pkg.devDependencies, undefined, 'no npm devDependencies');
+  }
+  for (const name of Object.keys(TEMPLATE_FILES_5_1)) {
+    const template = await readFile(join(portableRoot, 'server', 'cli', 'templates', TEMPLATE_FILES_5_1[name]), 'utf8');
+    assert.doesNotMatch(template, /invite_token|session_token|ar_inv1_/, `${name} template is secret-free`);
+  }
+});
+
+test('Story 5.1 negative packaging: top-level symlink, malformed manifest, and non-file SKILL.md are all refused with no output', async (t) => {
+  // Build a complete fixture by copying source, then mutate ONE thing per row.
+  const makeFixture = async (prefix) => {
+    const { parent } = await makeTempParent(t, prefix);
+    const fixture = join(parent, 'fixture');
+    const out = join(parent, 'release');
+    // Copy only what the packager reads; exclude .git/.worktrees.
+    await cp(repoRoot, fixture, {
+      recursive: true,
+      filter: (src) => {
+        const rel = relative(repoRoot, src);
+        return rel === '' || (!rel.startsWith('.git/') && rel !== '.git'
+          && !rel.startsWith('.worktrees/') && rel !== '.worktrees');
+      },
+    });
+    return { parent, fixture, out };
+  };
+
+  // Row 1: a TOP-LEVEL symlink entry (web -> outside) is refused.
+  {
+    const { parent, fixture, out } = await makeFixture('ar-51-top-symlink-');
+    const outside = join(parent, 'outside-web');
+    await mkdir(outside);
+    await rm(join(fixture, 'web'), { recursive: true, force: true });
+    await symlink(outside, join(fixture, 'web'));
+    await expectPackageFailure(fixture, out, /source symlink is not allowed/);
+    await assertMissing(out);
+  }
+
+  // Row 2: a malformed source plugin.json is refused (manifest parse failure).
+  {
+    const { fixture, out } = await makeFixture('ar-51-bad-manifest-');
+    await writeFile(join(fixture, 'plugin.json'), '{ not json\n');
+    await expectPackageFailure(fixture, out, /not valid JSON/);
+    await assertMissing(out);
+  }
+
+  // Row 3: a SKILL.md that is not a regular file (symlink to outside) is
+  // refused by the same checked-source gate — no malformed skill ships.
+  {
+    const { parent, fixture, out } = await makeFixture('ar-51-bad-skill-');
+    const outside = join(parent, 'outside-skill.md');
+    await writeFile(outside, 'not a skill\n');
+    const skillPath = join(fixture, 'skills', 'agent-room', 'SKILL.md');
+    await rm(skillPath, { force: true });
+    await symlink(outside, skillPath);
+    await expectPackageFailure(fixture, out, /source symlink is not allowed/);
+    await assertMissing(out);
   }
 });
