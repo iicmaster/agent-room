@@ -7,6 +7,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, readFile, readdir, rm, stat, writeFile, mkdir, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
 import { main } from '../server/cli/agent-room.mjs'
@@ -69,6 +70,20 @@ async function runCli(argv, { env } = {}) {
 function noToken(text) {
   assert.doesNotMatch(text, /invite_token|session_token|ar_inv1_/)
 }
+
+const TEMPLATE_FILES = {
+  claude: 'claude.json', codex: 'codex.toml', antigravity: 'antigravity.json',
+  opencode: 'opencode.json', generic: 'generic.sh',
+}
+
+test('all five template files exist and are the exact snippet source (no tokens)', async () => {
+  const dir = fileURLToPath(new URL('../server/cli/templates/', import.meta.url))
+  for (const harness of HARNESS_NAMES) {
+    const onDisk = await readFile(join(dir, TEMPLATE_FILES[harness]), 'utf8')
+    assert.equal(buildSnippet(harness).snippet, onDisk, `${harness} snippet == template bytes`)
+    noToken(onDisk)
+  }
+})
 
 // --- AC1: closed enum, XOR, --json, print writes nothing ----------------------
 

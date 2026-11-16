@@ -1,0 +1,8 @@
+{
+  "mcp": {
+    "agent-room": {
+      "command": "node",
+      "args": ["${PLUGIN_ROOT}/server/mcp-stdio.mjs"]
+    }
+  }
+}
