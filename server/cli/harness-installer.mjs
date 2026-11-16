@@ -237,7 +237,10 @@ function mergeToml(originalText, table, keys, label) {
   const alreadyPresent = Object.keys(keys).every(key => assignments.has(`${table}.${key}`))
   if (alreadyPresent) return { text: originalText, changed: false }
 
-  const text = `${originalText.replace(/\s+$/, '')}\n\n${renderTomlTable(table, keys)}`
+  const trimmed = originalText.replace(/\s+$/, '')
+  const text = trimmed.length === 0
+    ? renderTomlTable(table, keys)
+    : `${trimmed}\n\n${renderTomlTable(table, keys)}`
   return { text, changed: true }
 }
 
