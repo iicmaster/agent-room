@@ -143,6 +143,7 @@ import { loadRemoteConfig } from '../client/remote-config.mjs'
 import { runDmCommand, runReadFamilyCommand, runSendFamilyCommand, runSessionVerify, runSessionsCommand } from './message-commands.mjs'
 import { runBootstrapCommand } from './bootstrap-commands.mjs'
 import { runDoctorCommand } from './doctor-commands.mjs'
+import { runQualifyCommand } from './qualify-commands.mjs'
 
 const OK_STATUS = 200
 // The collision status is owned by the constants table (chat_id_taken), never restated.
@@ -366,6 +367,15 @@ Commands:
       install guide, and real gate label; --install backs up and merges only the
       required key into the target settings path. --install and --print are
       mutually exclusive; --json emits one machine-readable line.
+
+  agent-room qualify [--sessions N<=1000] [--remote <url> --invite <token>] [--harness <name>] [--json]
+      Release-readiness runner for the v1.0 candidate. Checks prerequisites
+      (Node >=24.15, SQLite >=3.51.3, ulimit -n >=4096, candidate sha256, and
+      Caddy v2.11.x + a flush_interval -1 Caddyfile when --remote), drives the
+      real bootstrap|sessions|dm|read|wait|doctor entrypoints, and reports a
+      per-metric qualified|failed|inconclusive matrix. Missing prerequisites
+      are inconclusive; a breached threshold fails loudly. Exit 0 only when
+      every cell qualifies. --json emits the full machine-readable report.
 
   agent-room setup [--chat-id <chat-id>] [--overwrite]
       Choose this installation's Chat ID (one-time). Interactive when run in a
@@ -892,6 +902,12 @@ export async function main(argv = process.argv.slice(2), {
     for (const line of outcome.stderr ?? []) errorOutput.write(`${line}\n`)
     if (outcome.exitCode !== undefined && outcome.exitCode !== 0) process.exitCode = outcome.exitCode
     return outcome
+  }
+  if (command === 'qualify') {
+    // Story 5.2: the release-readiness runner. It owns its exit code and
+    // writes its own JSON/table report (0 only when every cell qualifies).
+    await runQualifyCommand(argv.slice(1), deps)
+    return { status: process.exitCode === 0 ? 'ok' : 'refusal', command: 'qualify' }
   }
   if (command === 'doctor') {
     // Story 4.3: diagnosis only — strictly read-only, bounded, no state touched.

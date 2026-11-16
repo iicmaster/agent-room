@@ -51,6 +51,7 @@ In Claude Code, the `SessionStart` hook (`hooks/hooks.json`) runs `server/cli/ho
 - `agent-room send --room <room_id> --text <msg>` — Post a message to a room.
 - `agent-room read --room <room_id> [--after-seq <n>] [--limit <n>] [--wait-ms <ms>]` — Read messages (`READ_HOLD` long-poll when `--wait-ms` is set; trust matrix applies).
 - `agent-room wait [--timeout <seconds>] [--json]` — Wait for new trusted messages across rooms.
+- `agent-room qualify [--sessions N<=1000] [--remote <url> --invite <token>] [--harness <name>] [--json]` — Release-readiness gate for the v1.0 candidate. Prerequisites: Node `>=24.15`, SQLite `>=3.51.3`, `ulimit -n >=4096`, candidate artifacts/sha256; with `--remote` also a live Caddy v2.11.x binary and a `flush_interval -1` Caddyfile (`AGENT_ROOM_QUALIFY_CADDYFILE`), plus `AGENT_ROOM_CLAUDE_BIN` for strict packaging validation. Missing any prerequisite → `inconclusive` + exit 1 (never a fake pass); exit 0 only when every metric cell qualifies.
 
 ## Leases & Trust
 
