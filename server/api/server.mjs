@@ -2727,9 +2727,9 @@ export async function startServer({
   // non-v1 foreign schema.
   await migrateV1InPlace({ dataDir })
 
-    // Story 3.1: one bus per server. The store publishes into it after every
-    // committed message insert; the watch handler subscribes streams to it.
-    const postCommitBus = createPostCommitBus()
+      // Story 3.1: one bus per server. The store publishes into it after every
+  // committed message insert; the watch handler subscribes streams to it.
+  const postCommitBus = createPostCommitBus()
   const store = openRoomLog({
     dataDir,
     role: 'server',
