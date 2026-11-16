@@ -31,8 +31,10 @@
 // refuses loudly instead of silently resetting a live position.
 
 import {
+  chmodSync,
   closeSync,
   existsSync,
+  lstatSync,
   openSync,
   readFileSync,
   renameSync,
@@ -40,9 +42,16 @@ import {
   unlinkSync,
   writeSync,
 } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
-import { CURSOR_FILE_MAX_BYTES, CURSOR_LOCK_STALE_MS, CURSOR_LOCK_WAIT_MS } from '../constants.mjs'
+import {
+  CLI_ERROR_CURSORS_FILE_TOO_LARGE,
+  CLI_ERROR_CURSORS_LOCK_BUSY,
+  CLI_ERROR_CURSORS_SCHEMA_INVALID,
+  CURSOR_FILE_MAX_BYTES,
+  CURSOR_LOCK_STALE_MS,
+  CURSOR_LOCK_WAIT_MS,
+} from '../constants.mjs'
 import { AgentRoomRuntimeError, assertSafePathKey, atomicWriteJson, isPidAlive, readJsonFile } from '../runtime.mjs'
 import { sessionScopeFilePath, sessionScopeKey } from './session-state.mjs'
 
@@ -121,7 +130,7 @@ export async function withCursorLock(pluginDataDir, fn, { env = process.env } = 
       if (error?.code !== 'EEXIST') throw error
       if (lockIsStale(lockPath)) reclaimLock(lockPath)
       if (Date.now() >= deadline) {
-        throw new AgentRoomRuntimeError('cursors_lock_busy', 'cursors.lock busy')
+        throw new AgentRoomRuntimeError(CLI_ERROR_CURSORS_LOCK_BUSY, 'cursors.lock busy')
       }
       await sleepMs(10)
       continue
@@ -183,17 +192,37 @@ export function migrateV1Cursors(value, realmId) {
 // Read the scope's cursor document, migrating or quarantining a v1 file.
 // A MISSING file is an empty document and is never written here — a cursor
 // file appears only through an actual position.
-export function readCursorsDocument(pluginDataDir, { realmId = null, env = process.env } = {}) {
-  const path = scopeCursorsPath(pluginDataDir, { env })
+export function readCursorsDocument(pluginDataDir, { realmId = null, env = process.env, scope = null } = {}) {
+  const path = scope === null
+    ? scopeCursorsPath(pluginDataDir, { env })
+    : sessionScopeFilePath(pluginDataDir, scope, CURSORS_FILENAME)
   if (!existsSync(path)) return { document: emptyDocument(), path, migrated: false }
+  // Oversize is a LOUD refusal, never a quarantine: a file past the cap is
+  // not evidence of corruption, and moving it aside would silently reset a
+  // reader's live positions behind a diagnostic nobody reads. Checked before
+  // the read so the refusal never depends on how the read happens to fail.
+  let size = 0
+  try {
+    size = lstatSync(path).size
+  } catch { /* vanished between exists and stat: treat as absent */ }
+  if (size > CURSOR_FILE_MAX_BYTES) {
+    throw new AgentRoomRuntimeError(
+      CLI_ERROR_CURSORS_FILE_TOO_LARGE,
+      `${path} is ${size} bytes, past the ${CURSOR_FILE_MAX_BYTES}-byte cap — shrink or remove it; nothing was reset`,
+    )
+  }
   let raw
   try {
     raw = readJsonFile(path, { maxBytes: CURSOR_FILE_MAX_BYTES })
-  } catch {
+  } catch (error) {
+    if (error?.code === CLI_ERROR_CURSORS_FILE_TOO_LARGE) throw error
     // Unparsable: a corrupt v1 file is repaired around, never a stopped
-    // reader. Move it aside and start clean.
-    const backup = `${path}.v1.corrupt-${Date.now()}.json`
-    try { renameSync(path, backup) } catch { /* best-effort */ }
+    // reader. Move it aside (AC3's literal name) and start clean.
+    const backup = recoveryScopePath(pluginDataDir, path, scope)
+    try {
+      renameSync(path, backup)
+      chmodSync(backup, 0o600)
+    } catch { /* best-effort */ }
     return { document: emptyDocument(), path, migrated: false, quarantined: backup }
   }
   if (raw && typeof raw === 'object' && raw.version === CURSORS_SCHEMA_VERSION) {
@@ -204,9 +233,18 @@ export function readCursorsDocument(pluginDataDir, { realmId = null, env = proce
     return { document: migrateV1Cursors(raw, sourceRealm), path, migrated: true }
   }
   throw new AgentRoomRuntimeError(
-    'cursors_schema_invalid',
+    CLI_ERROR_CURSORS_SCHEMA_INVALID,
     `cursors.json version ${raw?.version ?? 'unknown'} is not supported (expected ${CURSORS_SCHEMA_VERSION})`,
   )
+}
+
+// The corrupt-v1 backup's path: AC3's literal `cursors.v1.corrupt-<ts>.json`.
+// When the caller named its scope, the sibling rides sessionScopeFilePath
+// (the one builder); otherwise it is derived beside the resolved file.
+function recoveryScopePath(pluginDataDir, cursorPath, scope) {
+  const name = `cursors.v1.corrupt-${Date.now()}.json`
+  if (scope !== null) return sessionScopeFilePath(pluginDataDir, scope, name)
+  return join(dirname(cursorPath), name)
 }
 
 // roomId -> {read_seq, notified_seq} for one realm, read-only.

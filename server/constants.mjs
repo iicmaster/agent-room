@@ -476,9 +476,21 @@ export const INTERNAL_ERROR_CODES = Object.freeze([
 // set.
 export const CLI_ERROR_TIMEOUT = 'timeout'
 export const CLI_ERROR_SESSION_NOT_FOUND = 'session_not_found'
+// Story 2.1: the cursor-file and peer-resolution codes a `server/cli/*` or MCP
+// adapter command surfaces on its own receipt. They stay CLI-local — the
+// cursor file lives in PLUGIN_DATA and never crosses the wire — but they are
+// named here so a loud cursor refusal is not a coinage at its throw site.
+export const CLI_ERROR_CURSORS_LOCK_BUSY = 'cursors_lock_busy'
+export const CLI_ERROR_CURSORS_SCHEMA_INVALID = 'cursors_schema_invalid'
+export const CLI_ERROR_CURSORS_FILE_TOO_LARGE = 'cursors_file_too_large'
+export const CLI_ERROR_PEER_AMBIGUOUS = 'peer_ambiguous'
 export const CLI_ERROR_CODES = Object.freeze([
   CLI_ERROR_SESSION_NOT_FOUND,
   CLI_ERROR_TIMEOUT,
+  CLI_ERROR_CURSORS_LOCK_BUSY,
+  CLI_ERROR_CURSORS_SCHEMA_INVALID,
+  CLI_ERROR_CURSORS_FILE_TOO_LARGE,
+  CLI_ERROR_PEER_AMBIGUOUS,
 ])
 
 // --- Schema-v2 store internals -------------------------------------------------
