@@ -23,6 +23,7 @@ import test from 'node:test'
 import { CURSOR_FILE_MAX_BYTES, PROTOCOL_VERSION } from '../server/constants.mjs'
 import { CONNECTION_MODE_ENV } from '../server/client/api-client.mjs'
 import { atomicWriteJson, readJsonFile } from '../server/runtime.mjs'
+import { sessionScopeKey } from '../server/client/session-state.mjs'
 import { loadOrCreateLocalToken } from '../server/api/local-token.mjs'
 import { fingerprintFromPublicKey, loadOrCreateKeypair, signWithInstallationKey } from '../server/keys.mjs'
 import { applyTrustMatrix, loadAllowlist, setAllowlistEntry, setAcceptAll, REMOTE_TRANSPORT } from '../server/client/trust.mjs'
@@ -351,11 +352,14 @@ test('wait: without setup it refuses not_set_up and creates nothing', async t =>
   assert.equal(existsSync(join(world.pluginData, 'wait.lock')), false)
 })
 
-test('wait: the one-per-installation fence — a live waiter refuses, a crashed lock is reclaimed', async t => {
+test('wait: the per-scope fence — a live waiter refuses, a crashed lock is reclaimed', async t => {
   const world = makeWorld(t)
   const record = await world.waitReady()
   await prepareWaitInstallation(record.port, world.sharedData, world.pluginData, 'Watcher')
-  const lockPath = join(world.pluginData, 'wait.lock')
+  // Story 3.3: wait.lock lives at sessions/<scope>/wait.lock, not the plugin
+  // data root. The test's own scope is the fallback p<ppid>.<pid> key.
+  const scope = sessionScopeKey({ env: process.env, pluginDataDir: world.pluginData })
+  const lockPath = join(world.pluginData, 'sessions', scope, 'wait.lock')
 
   // The live waiter is a REAL spawned wait process (the background-task
   // consumption path end to end): it holds the lock while it waits, prints
@@ -392,26 +396,40 @@ test('wait: the one-per-installation fence — a live waiter refuses, a crashed 
   assert.equal(waiterExit[0], 0, 'a clean timeout exits 0 — a hint, not a failure')
   assert.equal(existsSync(lockPath), false, 'the lock is released on exit')
 
-  // The round-5 gate: a stale lock FAILS CLOSED in the auto path — no
-  // auto-reclaim, because no rename-based take-over can be a
-  // compare-and-swap against a fresh winner — and the refusal names the
-  // explicit take-over.
+  // Story 3.3: a lock whose pid is DEAD is auto-reclaimed — no operator
+  // --reclaim needed. The wait runs to a clean timeout and releases the fence.
   const dead = spawn('true')
   await once(dead, 'exit')
   atomicWriteJson(lockPath, { pid: dead.pid, started_at: new Date().toISOString(), timeout_ms: 1000 })
-  const staleRefusal = await wait(world, ['--timeout', '1'])
-  assert.equal(staleRefusal.status, 'refusal')
-  assert.equal(staleRefusal.code, 'wait_already_active')
-  assert.match(staleRefusal.message, /stale lock whose pid/)
-  assert.match(staleRefusal.message, /--reclaim/, 'the refusal names the explicit take-over')
-
-  // The explicit take-over removes the stale lock and runs. --reclaim is a
-  // FORCE reset: pointed at a LIVE waiter it takes that lock too — safe
-  // only under the quiesced-recovery contract, which is why the auto path
-  // never reaches this branch.
-  const reclaimed = parseHint(await wait(world, ['--reclaim', '--timeout', '1']))
-  assert.equal(reclaimed.status, 'timeout', 'the explicit take-over opens the fence')
+  const reclaimed = parseHint(await wait(world, ['--timeout', '1']))
+  assert.equal(reclaimed.status, 'timeout', 'a dead-pid lock is auto-reclaimed and the fence opens')
   assert.equal(existsSync(lockPath), false, 'and the lock is released on exit')
+})
+
+test('wait: SIGINT releases the per-scope lock (clean unlock)', async t => {
+  const world = makeWorld(t)
+  const record = await world.waitReady()
+  await prepareWaitInstallation(record.port, world.sharedData, world.pluginData, 'Watcher')
+  const scope = sessionScopeKey({ env: process.env, pluginDataDir: world.pluginData })
+  const lockPath = join(world.pluginData, 'sessions', scope, 'wait.lock')
+  const waiter = spawn(process.execPath, [join(ROOT, 'server', 'cli', 'agent-room.mjs'), 'wait', '--timeout', '60'], {
+    env: { ...process.env, PLUGIN_DATA: world.pluginData, AGENT_ROOM_DATA_DIR: world.sharedData },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  t.after(async () => {
+    if (waiter.exitCode === null && waiter.signalCode === null) {
+      waiter.kill('SIGKILL')
+      await once(waiter, 'exit').catch(() => {})
+    }
+  })
+  // Wait until the lock actually appears, then signal.
+  const deadline = Date.now() + 5000
+  while (!existsSync(lockPath) && Date.now() < deadline) await sleep(50)
+  assert.equal(existsSync(lockPath), true, 'the waiter took the fence')
+  waiter.kill('SIGINT')
+  const exit = await once(waiter, 'exit')
+  assert.equal(exit[0], 0, 'SIGINT exits cleanly (0), not a crash')
+  assert.equal(existsSync(lockPath), false, 'SIGINT released wait.lock')
 })
 
 // Send as the wait installation itself (its own keypair, a temporary session
@@ -612,7 +630,7 @@ test('wait: own sends alone are silence — a quiet wait times out cleanly', asy
 test('wait: usage grammar — bad bounds, unknown options, positionals, duplicate rooms', async t => {
   const world = makeWorld(t)
   await world.waitReady()
-  const usage = await wait(world, ['--timeout', '601'])
+  const usage = await wait(world, ['--timeout', '3601'])
   assert.equal(usage.status, 'usage')
   assert.equal((await wait(world, ['--timeout', '0'])).status, 'usage')
   assert.equal((await wait(world, ['--timeout', 'abc'])).status, 'usage')
