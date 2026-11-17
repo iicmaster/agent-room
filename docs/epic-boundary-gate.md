@@ -98,6 +98,25 @@ discovering broken tests instead of analyzing the epic.
 Record the retro in `sprint-status.yaml` via `sprint_status.py update`, then start
 the next epic.
 
+### Independent review (mandatory on every epic retro verdict)
+
+Every epic retrospective verdict **must** record which independent advisor lane
+reviewed it. This field is mandatory, never implied. Use the lane name when one
+actually reviewed; use the literal `none` when no independent lane was consulted.
+Example retro frontmatter / verdict field:
+
+```yaml
+independent_review: codex        # or: claude / agy / oc / none
+```
+
+**Fail-closed at the decision, not retroactively.** Two consecutive epics whose
+verdict records `independent_review: none` block closing the next epic. At the
+boundary decision, look back at the last two completed epic verdicts: if both say
+`none`, the next epic does NOT close until an independent lane reviews it and the
+field records that lane. An absent field counts as `none` — silence is not a pass.
+The BMAD `/bmad-retrospective` skill lives outside this repo; this note is the
+local, repo-owned record of the control until that skill carries the field itself.
+
 ## Failure modes this gate is designed to catch
 
 | Mode | Epic 1 example | What catches it |
