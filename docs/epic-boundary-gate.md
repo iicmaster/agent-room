@@ -61,6 +61,15 @@ artifacts** (route table, `RESPONSE_FIELD_VOCABULARY`, the AD-8 spine section)
 are authoritative, and a test that parses them will fail if you do not amend them
 in the same commit.
 
+**Scale is part of an AC, not an annotation.** A cell whose latency/idle numbers
+are green but whose measured scale is below the required load is NOT qualified.
+SM-2 in particular requires 1000 concurrent Watch sessions (or 1000 Bearers
+across >=4 actors on the remote cap); the local qualifier cell drives 1 watcher,
+so it can never pass as-is. `qualify` records the gap in `requires_sessions` /
+`requires_watchers` and fails the cell rather than softening it. Any earlier
+artifact that read SM-2 as qualified at 5 sessions / 1 watcher is a false pass
+and is superseded by this rule.
+
 ### 3. Behavior check
 
 Exercise the changed flows end to end and record what you observed. Passing tests
@@ -88,6 +97,25 @@ discovering broken tests instead of analyzing the epic.
 
 Record the retro in `sprint-status.yaml` via `sprint_status.py update`, then start
 the next epic.
+
+### Independent review (mandatory on every epic retro verdict)
+
+Every epic retrospective verdict **must** record which independent advisor lane
+reviewed it. This field is mandatory, never implied. Use the lane name when one
+actually reviewed; use the literal `none` when no independent lane was consulted.
+Example retro frontmatter / verdict field:
+
+```yaml
+independent_review: codex        # or: claude / agy / oc / none
+```
+
+**Fail-closed at the decision, not retroactively.** Two consecutive epics whose
+verdict records `independent_review: none` block closing the next epic. At the
+boundary decision, look back at the last two completed epic verdicts: if both say
+`none`, the next epic does NOT close until an independent lane reviews it and the
+field records that lane. An absent field counts as `none` — silence is not a pass.
+The BMAD `/bmad-retrospective` skill lives outside this repo; this note is the
+local, repo-owned record of the control until that skill carries the field itself.
 
 ## Failure modes this gate is designed to catch
 
