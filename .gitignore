@@ -18,3 +18,6 @@ coverage/
 
 # Story worktrees live in-repo so they survive /tmp cleanup
 .worktrees/
+
+# Local qualification harness config (Caddyfile etc.) — operator-provisioned, not product
+.qualify-local/
