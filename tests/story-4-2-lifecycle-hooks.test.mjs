@@ -198,6 +198,41 @@ test('Stop: trusted eligible -> exit 2 with bounded stdout; stop_hook_active tru
   assert.equal(active.stdout.length, 0)
 })
 
+test('Stop: a plain read advancing read_seq satisfies a trusted wake — no second block or G1/G2 charge', async t => {
+  const plugin = world(t)
+  writeInbox(plugin, [
+    { ts: new Date(NOW).toISOString(), room_id: 'r', seq: 5, chat_id: 'peer', held: false, preview: 'unread body preview' },
+  ])
+  await advanceCursor(plugin, { realmId: 'realm', roomId: 'r', seq: 0, field: 'notified_seq' }, { scope: SCOPE, env })
+
+  // First Stop blocks once and charges G1/G2.
+  const first = await run(plugin, 'stop', { event: 'Stop', stop_hook_active: false })
+  assert.equal(first.exitCode, 2)
+  assert.equal(first.blocked, true)
+
+  const ledger = createScopeLedger(plugin, SCOPE)
+  const afterFirst = ledger.readCounters({ realmId: 'realm', roomId: 'r', local: SCOPE, peer: 'peer', nowMs: NOW })
+  assert.equal(afterFirst.pair?.count ?? 0, 1, 'G1 charged once')
+  assert.equal(afterFirst.globalCounter?.count ?? 0, 1, 'G2 charged once')
+  ledger.close()
+
+  // A normal read delivers seq 5: read_seq advances, notified_seq stays 0.
+  await advanceCursor(plugin, { realmId: 'realm', roomId: 'r', seq: 5, field: 'read_seq' }, { scope: SCOPE, env })
+  assert.equal(loadCursors(plugin, 'realm', { scope: SCOPE, env }).get('r').notified_seq, 0, 'hook never moved notified_seq')
+
+  // The wake is satisfied by the read; the next Stop does NOT block.
+  const second = await run(plugin, 'stop', { event: 'Stop', stop_hook_active: false })
+  assert.equal(second.exitCode, 0, 'a delivered message must not re-block Stop')
+  assert.equal(second.blocked, false)
+
+  // G1/G2 NOT charged a second time.
+  const ledger2 = createScopeLedger(plugin, SCOPE)
+  const afterSecond = ledger2.readCounters({ realmId: 'realm', roomId: 'r', local: SCOPE, peer: 'peer', nowMs: NOW })
+  assert.equal(afterSecond.pair?.count ?? 0, 1, 'G1 not re-charged')
+  assert.equal(afterSecond.globalCounter?.count ?? 0, 1, 'G2 not re-charged')
+  ledger2.close()
+})
+
 test('Stop: no eligible -> exit 0 immediately', async t => {
   const plugin = world(t)
   writeInbox(plugin, [])
@@ -244,6 +279,21 @@ test('shared reader: eligible = trusted seq>cursor or held seq>suppressed', asyn
   assert.deepEqual(state.eligibleTrusted.map(e => e.seq), [3])
   assert.deepEqual(state.heldEligible.map(e => e.seq), [8])
   assert.equal(state.lastWakeAtMs, NOW)
-  const summary = buildHookSummary(state)
-  assert.equal(summary.some(line => line.includes('hidden')), false)
-})
+    const summary = buildHookSummary(state)
+    assert.equal(summary.some(line => line.includes('hidden')), false)
+  })
+
+  // --- realm fallback: an unresolved realm must be skipped, not blocked --------
+
+  test('Stop: an inbox row with no resolvable realm is skipped (no scope-as-realm fallback)', async t => {
+    const plugin = world(t)
+    // No cursor document at all -> no realm can be resolved for room 'orphan'.
+    writeInbox(plugin, [
+      { ts: new Date(NOW).toISOString(), room_id: 'orphan', seq: 1, chat_id: 'peer', held: false, preview: 'x' },
+    ])
+    const state = readHookWakeState({ pluginDataDir: plugin, scope: SCOPE, nowMs: NOW })
+    assert.deepEqual(state.eligibleTrusted, [], 'an unresolved-realm row is not eligible for a wake')
+    const r = await run(plugin, 'stop', { event: 'Stop', stop_hook_active: false })
+    assert.equal(r.exitCode, 0, 'unresolved realm does not block Stop')
+    assert.equal(r.blocked, false)
+  })

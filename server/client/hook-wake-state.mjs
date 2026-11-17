@@ -104,26 +104,39 @@ export function readNotifierInbox(pluginDataDir, { path: explicitPath = null, ma
 
 // --- the shared eligibility read ---------------------------------------------
 
-// notified_seq, authoritative (cursors.json v2), max per room across all realms
-// of this scope. Monotonic-safe across realms.
-function notifiedByRoom(pluginDataDir, scope) {
-  const map = new Map()
+// Positions from cursors.json v2 (the authoritative read_seq + notified_seq),
+// max per room across all realms of this scope. Monotonic-safe across realms.
+// Both positions matter for trusted wake eligibility: a message already
+// DELIVERED to a reader (read_seq advanced by `read`/`message_read`) must not
+// re-block Stop, even though the hook never moves notified_seq itself.
+function positionsByRoom(pluginDataDir, scope) {
+  const notified = new Map()
+  const read = new Map()
   const realmByRoom = new Map()
   try {
     const { document } = readCursorsDocument(pluginDataDir, { scope })
     for (const [realmId, realm] of Object.entries(document.realms ?? {})) {
       for (const [roomId, entry] of Object.entries(realm?.rooms ?? {})) {
-        const seq = entry?.notified_seq
-        if (isSeq(seq)) {
-          map.set(roomId, Math.max(map.get(roomId) ?? 0, seq))
-          // Keep the realm holding the highest notified position so the 2-phase
-          // reserve checks the same authoritative cursor this read did.
-          if ((map.get(roomId) ?? 0) === seq) realmByRoom.set(roomId, realmId)
+        const hasNotified = isSeq(entry?.notified_seq)
+        const hasRead = isSeq(entry?.read_seq)
+        // Resolve the realm from ANY position row so a read-only room (a plain
+        // read created the entry) still maps to its authority. Keep the realm
+        // holding the highest notified position for the reserve's guard check.
+        if (hasNotified || hasRead) {
+          const rank = hasNotified ? entry.notified_seq : -1
+          if (!realmByRoom.has(roomId) || rank > (notified.get(roomId) ?? 0)) {
+            realmByRoom.set(roomId, realmId)
+          }
         }
+        if (hasNotified) {
+          const seq = entry.notified_seq
+          notified.set(roomId, Math.max(notified.get(roomId) ?? 0, seq))
+        }
+        if (hasRead) read.set(roomId, Math.max(read.get(roomId) ?? 0, entry.read_seq))
       }
     }
   } catch { /* absent/unreadable cursor file: position 0 everywhere */ }
-  return { positions: map, realmByRoom }
+  return { notified, read, realmByRoom }
 }
 
 function suppressedByRoom(pluginDataDir, scope, rooms) {
@@ -150,10 +163,10 @@ function suppressedByRoom(pluginDataDir, scope, rooms) {
 // the newest inbox message time (the wake signal), with no new state file.
 export function readHookWakeState({ pluginDataDir, scope, nowMs = Date.now(), inboxPath = null } = {}) {
   assertSafeSessionScope(scope)
-  const entries = readNotifierInbox(pluginDataDir, { path: inboxPath })
-  const { positions: notified, realmByRoom } = notifiedByRoom(pluginDataDir, scope)
-  const rooms = new Set(entries.map(entry => entry.room_id))
-  const suppressed = suppressedByRoom(pluginDataDir, scope, rooms)
+    const entries = readNotifierInbox(pluginDataDir, { path: inboxPath })
+    const { notified, read, realmByRoom } = positionsByRoom(pluginDataDir, scope)
+    const rooms = new Set(entries.map(entry => entry.room_id))
+    const suppressed = suppressedByRoom(pluginDataDir, scope, rooms)
 
   let lastWakeAtMs = null
   for (const entry of entries) {
@@ -163,14 +176,24 @@ export function readHookWakeState({ pluginDataDir, scope, nowMs = Date.now(), in
   const eligibleTrusted = []
   const heldEligible = []
   let maxNotified = 0
-  for (const [roomId, seq] of notified) maxNotified = Math.max(maxNotified, seq)
-  for (const entry of entries) {
-    if (entry.held) {
-      if (entry.seq > (suppressed.get(entry.room_id) ?? 0)) heldEligible.push(entry)
-    } else if (entry.seq > (notified.get(entry.room_id) ?? 0)) {
-      eligibleTrusted.push({ ...entry, realmId: realmByRoom.get(entry.room_id) ?? null })
+    for (const [roomId, seq] of notified) maxNotified = Math.max(maxNotified, seq)
+    for (const entry of entries) {
+      if (entry.held) {
+        if (entry.seq > (suppressed.get(entry.room_id) ?? 0)) heldEligible.push(entry)
+        continue
+      }
+      // A trusted row is already satisfied if EITHER a wake committed for it
+      // (notified_seq) OR a reader delivered it (read_seq). The hook never
+      // advances either position; it only reads them.
+      const satisfied = Math.max(notified.get(entry.room_id) ?? 0, read.get(entry.room_id) ?? 0)
+      if (entry.seq <= satisfied) continue
+      // Without a resolved realm the 2-phase reserve can only fall back to the
+      // scope key as a realm id — a wrong authority. Skip rather than block on
+      // an entry whose realm cannot be determined from the cursor document.
+      const realmId = realmByRoom.get(entry.room_id)
+      if (realmId === undefined) continue
+      eligibleTrusted.push({ ...entry, realmId })
     }
-  }
   eligibleTrusted.sort((a, b) => a.seq - b.seq)
   heldEligible.sort((a, b) => a.seq - b.seq)
   return { maxNotified, eligibleTrusted, heldEligible, lastWakeAtMs, nowMs, totalCandidates: entries.length }

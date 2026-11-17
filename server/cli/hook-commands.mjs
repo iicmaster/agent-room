@@ -235,8 +235,12 @@ function stop(payload, { env, pluginDataDir, state }) {
     // must never hold the turn. notified_seq is NOT advanced by the hook: the
     // real read path owns it.
     for (const entry of state.eligibleTrusted) {
+      // A trusted entry must carry its resolved realm. Falling back to the
+      // scope key as a realm id reads the wrong position authority, so skip
+      // such an entry rather than blocking on a bogus guard decision.
+      if (typeof entry.realmId !== 'string' || entry.realmId.length === 0) continue
       const reservation = ledger.reserve({
-        realmId: entry.realmId ?? state.scope,
+        realmId: entry.realmId,
         roomId: entry.room_id,
         seq: entry.seq,
         local: state.scope,
