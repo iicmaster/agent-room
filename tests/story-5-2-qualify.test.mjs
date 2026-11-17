@@ -14,10 +14,29 @@ import { PassThrough } from 'node:stream'
 import test from 'node:test'
 
 import {
-  parseQualifyArgs, runQualifyCommand, cellPackaging, evaluateValidateReport, digestCandidate,
+  parseQualifyArgs, runQualifyCommand, cellPackaging, evaluateValidateReport, digestCandidate, sm2RowQualified,
 } from '../server/cli/qualify-commands.mjs'
 
 const CELL_NAMES = ['PREREQ', 'RECEIPT', 'SM-1', 'SM-2', 'SM-3', 'SM-C1', 'SM-C2', 'FULL-SUITE', 'PACKAGING']
+
+// SM-2 must never soft-pass on an unmeasured scale. A row that meets only the
+// latency/idle thresholds is NOT qualified unless it also proves 1000 sessions
+// and the required watcher spread (Oren's finding, PM verified).
+test('SM-2 predicate refuses a 5-session/1-watcher row even with good latency', () => {
+  const smallScale = { p95_ms: 100, p99_ms: 300, idle_sql: 0, sessions_requested: 5, watchers: 1 }
+  assert.equal(sm2RowQualified(smallScale), false)
+
+  // The full-scale row is the only shape that can pass.
+  const fullScale = { ...smallScale, sessions_requested: 1000, watchers: 1000 }
+  assert.equal(sm2RowQualified(fullScale), true)
+
+  // Scale alone cannot rescue a latency or idle-SQL breach.
+  assert.equal(sm2RowQualified({ ...fullScale, p95_ms: 251 }), false)
+  assert.equal(sm2RowQualified({ ...fullScale, idle_sql: 1 }), false)
+
+  // 1000 sessions spread over only 1 watcher is still not the AC's 1000-watch scale.
+  assert.equal(sm2RowQualified({ ...fullScale, watchers: 1 }), false)
+})
 
 function capture() {
   const output = new PassThrough()

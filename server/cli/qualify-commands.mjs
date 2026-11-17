@@ -11,6 +11,8 @@
 //
 // Honesty rules baked into every cell:
 //   - Missing prerequisite -> inconclusive, never a green cell.
+//   - SM-2 measures the AC's scale (1000 sessions / 1000-watch spread), never a
+//     soft pass: a 5-session/1-watcher row with good latency still fails the cell.
 //   - A breached round fails the cell immediately; no third-round retry.
 //   - The leak canary is injected into a subprocess env and scanned across a
 //     recorded denominator of surfaces; a canary that never reaches a surface
@@ -46,6 +48,11 @@ const sleep = ms => new Promise(resolvePromise => { setTimeout(resolvePromise, m
 // ponytail: qualification thresholds are deliberate literals, NOT derived from
 // product limits so a product-limit edit cannot silently retune the gate.
 const QUALIFY_SESSIONS_MAX = 1000
+// The AC is "1000 concurrent Watch sessions (or 1000 Bearers across >=4 actors
+// when testing the remote cap)". The local cell drives ONE watcher, so it can
+// never satisfy this as-is — that is deliberate: a soft pass on an unmeasured
+// scale is the exact failure this gate exists to catch.
+const SM2_REQUIRED_WATCHERS = 1000
 const SM1_CEILING_MS = 60_000
 const SM2_P95_MS = 250           // AQ-1 threshold — never tune on breach
 const SM2_P99_MS = 1000
@@ -117,6 +124,18 @@ const REQUIRED_CANDIDATE_FILES = [
 // clutter, so an operator's `.vendor-lab/` symlink cannot break a release gate.
 // lstat also excludes symlinks (lstat().isFile() is false for them) — never throw.
 // No git -> deterministic bounded walk that skips .gitignore directories.
+// SM-2's acceptance predicate. A low p95/p99 + zero idle SQL is NOT enough:
+// the cell must ALSO prove the scale the AC names (1000 sessions / a 1000-way
+// Watch spread). A 5-session/1-watcher row is a soft pass on an unproven AC,
+// so it fails here. Exported for a focused test that pins this invariant.
+export function sm2RowQualified(row) {
+  return row.p95_ms <= SM2_P95_MS
+    && row.p99_ms <= SM2_P99_MS
+    && row.idle_sql === 0
+    && row.sessions_requested >= QUALIFY_SESSIONS_MAX
+    && row.watchers >= SM2_REQUIRED_WATCHERS
+}
+
 export function digestCandidate(root = PLUGIN_ROOT) {
   let tracked = null
   let digestSource = 'git-ls-files'
@@ -599,11 +618,12 @@ async function cellSm2(options) {
     } finally {
       await world.cleanup()
     }
-  }, { predicate: row => row.p95_ms <= SM2_P95_MS && row.p99_ms <= SM2_P99_MS && row.idle_sql === 0 })
+  }, { predicate: sm2RowQualified })
   return {
     status: outcome.status, reason: outcome.reason,
     p95_ceiling_ms: SM2_P95_MS, p99_ceiling_ms: SM2_P99_MS,
     requires_sessions: QUALIFY_SESSIONS_MAX,
+    requires_watchers: SM2_REQUIRED_WATCHERS,
     rounds: outcome.results ?? [],
     clock_split: 'event_loop_clock_ms = in-process dispatch measurement; wake_clock_ms = wall send-ack -> hint',
   }

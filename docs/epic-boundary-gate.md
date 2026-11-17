@@ -61,6 +61,15 @@ artifacts** (route table, `RESPONSE_FIELD_VOCABULARY`, the AD-8 spine section)
 are authoritative, and a test that parses them will fail if you do not amend them
 in the same commit.
 
+**Scale is part of an AC, not an annotation.** A cell whose latency/idle numbers
+are green but whose measured scale is below the required load is NOT qualified.
+SM-2 in particular requires 1000 concurrent Watch sessions (or 1000 Bearers
+across >=4 actors on the remote cap); the local qualifier cell drives 1 watcher,
+so it can never pass as-is. `qualify` records the gap in `requires_sessions` /
+`requires_watchers` and fails the cell rather than softening it. Any earlier
+artifact that read SM-2 as qualified at 5 sessions / 1 watcher is a false pass
+and is superseded by this rule.
+
 ### 3. Behavior check
 
 Exercise the changed flows end to end and record what you observed. Passing tests
