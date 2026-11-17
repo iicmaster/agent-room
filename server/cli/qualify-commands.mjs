@@ -13,6 +13,8 @@
 //   - Missing prerequisite -> inconclusive, never a green cell.
 //   - SM-2 measures the AC's scale (1000 sessions / 1000-watch spread), never a
 //     soft pass: a 5-session/1-watcher row with good latency still fails the cell.
+//   - SM-2 also requires a full fan-out proof (streams_delivered === watchers):
+//     60 latency samples alone never certify delivery to all 1000 streams.
 //   - A breached round fails the cell immediately; no third-round retry.
 //   - The leak canary is injected into a subprocess env and scanned across a
 //     recorded denominator of surfaces; a canary that never reaches a surface
@@ -70,6 +72,17 @@ const SM2_WATCH_SETUP_TIMEOUT_MS = SERVER_STARTUP_WAIT_MS
 const SM2_IDLE_SETTLE_MS = 2_000
 const SM2_IDLE_SQL_WINDOW_MS = 3_000
 const SM2_PROBE_TIMEOUT_MS = 5_000
+// Bounded fan-out proof (separate from the 60 latency samples): every attached
+// stream must receive a real 'message' frame, else the "1000 watchers" claim
+// would rest on only ~60 proven streams. Per-stream waiter timeout + bounded
+// send concurrency keep the proof finite on a constrained host.
+const SM2_FANOUT_TIMEOUT_MS = 5_000
+const SM2_FANOUT_SEND_CONCURRENCY = 50
+// A single sender's bounded write queue can answer 503 queue_full under burst
+// (a retryable refusal, NOT a dropped stream). Retry within a bounded budget,
+// honoring retry_after_ms, with a STABLE client_message_id so a committed-but-
+// lost response stays idempotent instead of becoming a duplicate message.
+const SM2_FANOUT_SEND_BUDGET_MS = 3_000
 const SM1_CEILING_MS = 60_000
 const SM2_P95_MS = 250           // AQ-1 threshold — never tune on breach
 const SM2_P99_MS = 1000
@@ -148,12 +161,18 @@ const REQUIRED_CANDIDATE_FILES = [
 export function sm2RowQualified(row) {
   // A p95/p99 needs a real sample spread: never qualify on a handful of wakes.
   const enoughSamples = Number.isInteger(row.samples) && row.samples >= SM2_SAMPLE_MIN
+  // Fan-out proof: EVERY attached stream must have been proven to deliver. The
+  // 60 latency samples cover only ~60 streams; without this gate a partial
+  // fan-out would be reported as "1000 watchers qualified" (verified gap 1).
+  const fullDelivery = Number.isInteger(row.streams_delivered)
+    && row.streams_delivered === row.watchers
   return enoughSamples
     && row.p95_ms <= SM2_P95_MS
     && row.p99_ms <= SM2_P99_MS
     && row.idle_sql === 0
     && row.sessions_requested >= QUALIFY_SESSIONS_MAX
     && row.watchers >= SM2_REQUIRED_WATCHERS
+    && fullDelivery
 }
 
 export function digestCandidate(root = PLUGIN_ROOT) {
@@ -547,7 +566,7 @@ export function sm2AttachedCount(results) {
 // Pure row builder (test seam): the watcher count is whatever was actually
 // attached, never the requested scale. p95/p99 come only from real samples.
 export function sm2RowFromMeasurements({
-  wakeLatencies, eventLoopLags, idleSql, attachedWatchers, sessionsRequested,
+  wakeLatencies, eventLoopLags, idleSql, attachedWatchers, sessionsRequested, streamsDelivered,
 }) {
   return {
     p95_ms: percentile(wakeLatencies, 0.95),
@@ -558,6 +577,9 @@ export function sm2RowFromMeasurements({
     samples: wakeLatencies.length,
     watchers: attachedWatchers,
     sessions_requested: sessionsRequested,
+    // Number of streams proven to deliver a frame in the bounded fan-out proof.
+    // Never inferred from the sample count or from the attached count.
+    streams_delivered: streamsDelivered,
     concurrency: 'multiplexed-streams',
   }
 }
@@ -745,6 +767,52 @@ export async function cellSm2(options, deps = {}) {
         throw new Error(`insufficient wake samples: ${wakeLatencies.length} < ${SM2_SAMPLE_MIN}`)
       }
 
+      // Bounded fan-out proof across the FULL attached pool. The 60 latency
+      // samples above exercise only live[0..59]; send one dm to EVERY stream and
+      // require a 'message' frame from each within a bounded window. Concurrency
+      // is capped so a constrained host is not overwhelmed by 1000 simultaneous
+      // POSTs. This is a boolean delivery count, kept separate from the latency
+      // distribution — a partial fan-out must never be reported as qualified.
+      let streamsDelivered = 0
+      for (let start = 0; start < live.length; start += SM2_FANOUT_SEND_CONCURRENCY) {
+        const batch = live.slice(start, start + SM2_FANOUT_SEND_CONCURRENCY)
+        await Promise.all(batch.map(async (target, offset) => {
+          const i = start + offset
+          let wakeWaiter = null
+          const woke = new Promise(resolveWoke => {
+            const settle = delivered => {
+              clearTimeout(timer)
+              if (target.pendingWake === wakeWaiter) target.pendingWake = null
+              resolveWoke(delivered)
+            }
+            const timer = setTimeout(() => {
+              if (target.pendingWake === wakeWaiter) target.pendingWake = null
+              resolveWoke(false)
+            }, SM2_FANOUT_TIMEOUT_MS)
+            // null = stream closed before a frame arrived => not delivered.
+            wakeWaiter = wokeAt => settle(wokeAt !== null)
+            target.pendingWake = wakeWaiter
+          })
+          // Stable id across retries: a committed-but-lost 503 response is
+          // idempotent on the server, never a duplicate delivery.
+          const messageId = `sm2-fanout-${Date.now()}-${index}-${i}`
+          const payload = { to: target.address, client_message_id: messageId, text: `sm2-fanout-${i}` }
+          const sendDeadline = nowFn() + SM2_FANOUT_SEND_BUDGET_MS
+          let dm = await cliHttpJson(port, 'POST', '/api/messages', senderHeaders, payload)
+          while (dm.status === 503 && dm.body?.error?.code === 'queue_full' && nowFn() < sendDeadline) {
+            const backoff = Math.max(1, Math.min(250, dm.body?.error?.retry_after_ms ?? 50))
+            await sleepFn(backoff)
+            dm = await cliHttpJson(port, 'POST', '/api/messages', senderHeaders, payload)
+          }
+          if (dm.status !== 200) {
+            // Clear this waiter so the timeout cannot double-resolve.
+            if (target.pendingWake === wakeWaiter) target.pendingWake = null
+            return
+          }
+          if (await woke) streamsDelivered += 1
+        }))
+      }
+
       // Idle SQL with the FULL pool still attached: settle post-send reconciler
       // reads, then count server-side db.prepare calls in a quiet window.
       await sleepFn(SM2_IDLE_SETTLE_MS)
@@ -755,6 +823,7 @@ export async function cellSm2(options, deps = {}) {
       return sm2RowFromMeasurements({
         wakeLatencies, eventLoopLags, idleSql,
         attachedWatchers: actualWatchers, sessionsRequested: options.sessions,
+        streamsDelivered,
       })
     } finally {
       for (const controller of controllers) { try { controller.abort() } catch { /* closed */ } }
