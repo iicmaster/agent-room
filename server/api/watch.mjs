@@ -148,6 +148,21 @@ export function createWatchManager({ bus, store, databasePath, sessionRegistry, 
       closeStream(stream, { ...event, ts: event.ts ?? nowIso() })
       return
     }
+    // Catch-up filters non-member rooms at subscribe time; the live bus fans
+    // every event to every subscriber, so the SAME membership check must run
+    // here before a live 'message' frame is buffered or written. Otherwise a
+    // session watching room A also sees live events for room B. Control events
+    // above are about the stream itself and are never filtered.
+    if (event?.event === 'message') {
+      let member = false
+      try {
+        member = !!store.sessionPairMembership({ roomId: event.room_id, sessionId: stream.sessionId })
+      } catch { /* a failed membership read fails closed: ignore the event */ }
+      if (!member) {
+        if (control) control.drain()
+        return
+      }
+    }
     if (!stream.flushed) {
       // Catch-up still in progress: buffer + dedup, flush after catch-up.
       const key = `${event.room_id}:${event.seq}`

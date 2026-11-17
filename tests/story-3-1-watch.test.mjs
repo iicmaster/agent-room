@@ -404,6 +404,35 @@ function makeManager(storeOverrides = {}) {
   return { manager, bus, store }
 }
 
+// --- P0 regression: live events must honor room membership --------------------
+
+test('P0: live bus event for a non-member room is NOT delivered to another session', () => {
+  const membership = {
+    'session-A': new Set(['R1']),
+    'session-B': new Set(['R2']),
+  }
+  const { manager, bus } = makeManager({
+    sessionPairMembership: ({ roomId, sessionId }) => membership[sessionId]?.has(roomId) ?? false,
+    readSessionPairPage: () => [],
+  })
+  const a = mockStream('session-A', { cursors: { R1: 0 } })
+  const b = mockStream('session-B', { cursors: { R2: 0 } })
+  manager.handleWatch(a.context)
+  manager.handleWatch(b.context)
+  assert.equal(manager.streamCount(), 2)
+
+  bus.publish({ event: 'message', room_id: 'R2', seq: 1, chat_id: 'x', text: 'BODY_R2', fingerprint: 'f' })
+
+  const aText = a.written.join('')
+  const bText = b.written.join('')
+  assert.ok(!aText.includes('BODY_R2'), 'session A (member of R1 only) receives NO frame for R2')
+  assert.ok(!aText.includes('"room_id":"R2"'), 'session A receives no R2 frame at all')
+  assert.ok(!aText.includes('"event":"rescan_required"'), 'non-member event does not evict A')
+  assert.ok(bText.includes('BODY_R2'), 'session B (member of R2) receives the live R2 frame')
+  assert.equal(manager.streamCount(), 2, 'both streams stay open')
+  manager.close()
+})
+
 test('manager: same-session replacement sends session_superseded to old stream then closes it', () => {
   const { manager } = makeManager()
   const first = mockStream('session-1')
