@@ -54,8 +54,12 @@ export const SEATS = Object.freeze({
 
 export function resolveDispatchPath(configPath = CONFIG) {
   const cfg = JSON.parse(readFileSync(configPath, 'utf8'))
-  const plugin = (cfg.plugins ?? []).find(p => p.name === 'tmux-teams' && p.version === TM_VERSION)
-  if (!plugin?.installPath) throw new Error(`tmux-teams ${TM_VERSION} not installed in ${configPath}`)
+  // Resolve the INSTALLED version rather than pinning one: the operator may
+  // upgrade tmux-teams at any time (0.51.0 -> 0.53.0 happened mid-build), and
+  // a canary that refuses to run after an upgrade is worse than no canary.
+  const installed = (cfg.plugins ?? []).filter(p => p.name === 'tmux-teams' && p.installPath)
+  const plugin = installed.find(p => p.version === TM_VERSION) ?? installed[0]
+  if (!plugin) throw new Error(`tmux-teams not installed in ${configPath}`)
   return join(plugin.installPath, 'skills/tmux-teams/scripts/acp-dispatch.mjs')
 }
 
