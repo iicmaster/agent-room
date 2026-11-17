@@ -3,15 +3,43 @@
 // a one-word prompt via the installed tmux-teams acp-dispatch.mjs, classifies by
 // outbox presence, and writes a machine-readable snapshot. Never mutates a lane's
 // purpose beyond a trivial ping; no credentials or models beyond the four seats.
+//
+// BUDGET — this is NOT a 14-second smoke test. Real AGY boot on this host reaches
+// ~4.5 min and a full prompt round takes minutes, so the old 3s-boot/2s-wait
+// values failed closed on healthy lanes. Each lane now gets CANARY_BOOT_SEC
+// (120s, adapter boot + identity ack) plus CANARY_WAIT_SEC (180s, outbox/prompt):
+// ~5 min bounded budget PER LANE (the old 3s boot / 2s wait could not see a
+// working lane). Lanes are probed sequentially; refusals fail fast, so a healthy
+// run is usually far shorter than the theoretical bound. Still a canary, not a
+// review. Explicit refusals (no executable, invalid config, identity mismatch)
+// remain fast-fail.
+// Run state is written under the repo (override with CANARY_CWD) so logs at
+// <cwd>/.tmux-teams/runner-logs/canary-* stay inspectable. Outbox files are an
+// accepted side effect of a canary run.
 import { spawnSync } from 'node:child_process'
-import { accessSync, constants as fsConstants, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
-import { homedir, tmpdir } from 'node:os'
+import { accessSync, constants as fsConstants, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const CONFIG = join(homedir(), '.zcode/cli/plugins/installed_plugins.json')
 const TM_VERSION = '0.51.0'
+// Realistic, bounded observation window for ONE lane. See header: never shrink
+// these to "make the canary fast" — that recreates the false negative.
+export const CANARY_BOOT_SEC = 120
+export const CANARY_WAIT_SEC = 180
+// The companion's inactivity lease must outlive the whole window, or a slow
+// boot cancels itself before it can write an outbox. Poll modestly. Spawn wall
+// clocks get a small margin over the dispatcher's reporting bounds so a local
+// timeout is not mistaken for a lane failure.
+const CANARY_STALL_SEC = CANARY_BOOT_SEC + CANARY_WAIT_SEC
+const CANARY_POLL_SEC = 5
+const SPAWN_MARGIN_SEC = 15
+// Run workspace: default to the repo so runner logs stay inspectable; the env
+// override lets an operator redirect the side-effect outbox/logs elsewhere.
+export function resolveCanaryCwd(env = process.env) { return resolve(env.CANARY_CWD || REPO) }
+
 // Documented seats only (model ids, never credentials).
 export const SEATS = Object.freeze({
   codex: 'gpt-6.1-terra',
@@ -50,7 +78,12 @@ function bin(name) {
 function envFor(name, dispatch, cwd) {
   const model = SEATS[name]
   const path = `${homedir()}/.bun/bin:${homedir()}/.local/bin:${process.env.PATH ?? ''}`
-  const base = { ...process.env, PATH: path, ACP_DISPATCH_BOOT_SEC: '3', ACP_DISPATCH_POLL_SEC: '1' }
+  const base = {
+    ...process.env,
+    PATH: path,
+    ACP_DISPATCH_BOOT_SEC: String(CANARY_BOOT_SEC),
+    ACP_DISPATCH_POLL_SEC: String(CANARY_POLL_SEC),
+  }
   if (name === 'codex') {
     const codex = bin('codex')
     if (!codex) return null
@@ -76,24 +109,43 @@ function envFor(name, dispatch, cwd) {
   return { ...base, ...out, ACP_MODEL: model, ACP_EXPECT_MODEL: model, ACP_PERMISSIONS: 'deny' }
 }
 
-// One lane: dispatch (bounded boot), then `wait` — exit 0 means outbox present.
+// Pure classification of a probe. Dispatch exit 2 is an EXPLICIT refusal
+// (config-option-invalid / identity mismatch / usage) and wins fast. Wait exit 0
+// means the outbox exists AND the turn ended. Every other wait outcome — 1 still
+// running after the full CANARY_WAIT_SEC, 2 ended with no outbox, null = the
+// bounded watch timed out — is down ONLY because the whole budget elapsed.
+export function classifyLane(dispatchStatus, waitStatus) {
+  if (dispatchStatus === 2) return 'down'
+  return waitStatus === 0 ? 'ok' : 'down'
+}
+
+// One lane: dispatch (bounded boot), then `wait` (bounded outbox observation).
 function runLane(name, dispatch, cwd, brief, taskId) {
   const env = envFor(name, dispatch, cwd)
-  if (!env) return 'down'
+  if (!env) return 'down' // fast-fail: no executable / config unavailable
   const worker = name === 'oc' ? 'opencode' : name
-  const d = spawnSync(process.execPath, [dispatch, worker, cwd, taskId, brief, '3'],
-    { env, encoding: 'utf8', timeout: 4500 })
-  if (d.status !== 0 && d.status !== 1) return 'down'
-  const w = spawnSync(process.execPath, [dispatch, 'wait', cwd, taskId, '2'],
-    { env, encoding: 'utf8', timeout: 3500 })
-  return w.status === 0 ? 'ok' : 'down'
+  // Pass the full window as the companion's inactivity lease so a slow boot is
+  // not cancelled before it can write an outbox. Boot exit 0 = acknowledged,
+  // 1 = still booting (lane RUNNING), null = our spawn cap fired but the lane
+  // detached into its own process group and may still be alive: all proceed.
+  const d = spawnSync(process.execPath, [dispatch, worker, cwd, taskId, brief, String(CANARY_STALL_SEC)],
+    { env, encoding: 'utf8', timeout: (CANARY_BOOT_SEC + SPAWN_MARGIN_SEC) * 1000 })
+  // Explicit refusal -> fail fast; do not spend the wait budget on a lane that
+  // never started. Also covers a truly absent dispatch (status null, no error
+  // path) — but a running lane (0/1/null-timeout) still gets its full wait.
+  if (d.status === 2) return classifyLane(d.status, null)
+  const w = spawnSync(process.execPath, [dispatch, 'wait', cwd, taskId, String(CANARY_WAIT_SEC)],
+    { env, encoding: 'utf8', timeout: (CANARY_WAIT_SEC + SPAWN_MARGIN_SEC) * 1000 })
+  return classifyLane(d.status, w.status)
 }
 
 export async function main({ configPath = CONFIG, outDir = join(REPO, '_bmad-output/implementation-artifacts'),
   date = new Date().toISOString(), probe = null } = {}) {
   const dispatch = resolveDispatchPath(configPath)
-  const cwd = mkdtempSync(join(tmpdir(), 'advisor-canary-'))
-  const brief = join(cwd, 'brief.txt')
+  const cwd = resolveCanaryCwd()
+  mkdirSync(cwd, { recursive: true })
+  const brief = join(cwd, '.tmux-teams', 'canary-brief.txt')
+  mkdirSync(dirname(brief), { recursive: true })
   writeFileSync(brief, 'ping\n')
   const actualProbe = probe ?? ((name) => runLane(name, dispatch, cwd, brief, `canary-${name}-${Date.now()}`))
   const snapshot = await collect(actualProbe, Object.keys(SEATS), date)
