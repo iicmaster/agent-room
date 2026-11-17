@@ -39,7 +39,7 @@ export const INBOX_FILENAME = 'inbox.jsonl'
 // The only fields that may appear on an inbox line. `text` is added only for
 // trusted rows; everything else is projected from this allowlist.
 const FIELD_ALLOWLIST = Object.freeze([
-  'ts', 'room_id', 'seq', 'from_address', 'fingerprint', 'trusted', 'summary', 'text',
+  'ts', 'room_id', 'seq', 'from_address', 'fingerprint', 'trusted', 'held', 'summary', 'text',
 ])
 
 // Strip ANSI escape sequences and C0/C1 control characters (except tab and
@@ -71,6 +71,7 @@ export function inboxEntry(row, { now = () => new Date().toISOString() } = {}) {
     from_address: sanitizeInboxText(typeof (row?.from_address ?? row?.chat_id) === 'string' ? (row.from_address ?? row.chat_id) : ''),
     fingerprint: sanitizeInboxText(typeof (row?.fingerprint ?? row?.actor_fingerprint) === 'string' ? (row.fingerprint ?? row.actor_fingerprint) : ''),
     trusted,
+    ...(row?.held === true ? { held: true } : {}),
     summary: sanitizeInboxText(typeof row?.summary === 'string' ? row.summary : ''),
   }
   if (trusted) {

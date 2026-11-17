@@ -20,14 +20,19 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
-import { inboxEntry, appendInboxEntry, sanitizeInboxText } from '../server/client/inbox.mjs'
+import { inboxEntry, appendInboxEntry, sanitizeInboxText, INBOX_FILENAME } from '../server/client/inbox.mjs'
 import { classifyScope, runGcCommand } from '../server/cli/gc-commands.mjs'
 import { waitOverWatch } from '../server/cli/wait-commands.mjs'
 import { createWakeDispatcher } from '../server/notification/wake-dispatcher.mjs'
+import { createDeliveryClassifier } from '../server/notification/delivery.mjs'
+import { setAllowlistEntry } from '../server/client/trust.mjs'
+import { createScopeLedger } from '../server/client/scope-ledger.mjs'
+import { loadWakePolicy, policyIdentity } from '../server/notification/wake-policy.mjs'
+import { readCursorsDocument } from '../server/client/cursors.mjs'
 import { loadOrCreateLocalToken } from '../server/api/local-token.mjs'
 import { fingerprintFromPublicKey } from '../server/keys.mjs'
 import { atomicWriteJson } from '../server/runtime.mjs'
-import { saveSessionState } from '../server/client/session-state.mjs'
+import { saveSessionState, sessionScopeFilePath } from '../server/client/session-state.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const SERVER_ENTRY = join(ROOT, 'server', 'api', 'server.mjs')
@@ -215,6 +220,104 @@ test('AC2: a failed inbox write withholds the Phase C notified_seq commit', asyn
   assert.equal(result.ok, false)
   assert.equal(result.action, 'released')
   assert.deepEqual(committed, ['release'], 'Phase B failure released the lease; Phase C never committed')
+})
+
+// --- P0 regression: watch frames MUST pass the client-edge trust matrix -------
+// /api/watch frames carry no `held` field; a raw-frame gate classifies every
+// foreign sender as Trusted. These tests drive waitOverWatch with a REAL
+// classifier on a remote transport and assert the held body never reaches the
+// inbox (and the trusted notify path is never charged for it).
+
+test('P0: foreign remote sender on watch is HELD — no text, no body, notify not charged', async t => {
+  const dir = world(t)
+  const realmId = 'realm'
+  const scope = 'p1.trust'
+  mkdirSync(join(dir, 'sessions', scope), { recursive: true }) // appendInboxEntry's lock lives here
+  const ownFingerprint = `sha256:${'0'.repeat(64)}`
+  const foreignFp = `sha256:${'a'.repeat(64)}`
+  const trustedFp = `sha256:${'b'.repeat(64)}`
+  // Trusted sender is allowlisted; the foreign sender is NOT (default-deny).
+  setAllowlistEntry(dir, realmId, trustedFp, true)
+
+  const delivery = createDeliveryClassifier({ pluginDataDir: dir, realmId, ownFingerprint, transport: 'remote' })
+  const decideDelivery = row => delivery.classifyRow(row)
+
+  const policy = loadWakePolicy({})
+  const identity = policyIdentity({})
+  const ledger = { pluginData: dir, realmId, identity }
+  const scopeLedger = createScopeLedger(dir, scope)
+  t.after(() => { try { scopeLedger.close() } catch { /* ignore */ } })
+  const realDispatcher = createWakeDispatcher({
+    ledger: scopeLedger, pluginDataDir: dir, realmId, scope,
+    classifyRow: row => ({ held: row?.held === true, actor_fingerprint: row?.actor_fingerprint }),
+    decideHeld: () => true,
+  })
+  let trustedDispatches = 0
+  const spyDispatcher = {
+    gate: row => realDispatcher.gate(row),
+    dispatchHeld: candidate => realDispatcher.dispatchHeld(candidate),
+    dispatchTrusted: async (...args) => { trustedDispatches += 1; return realDispatcher.dispatchTrusted(...args) },
+  }
+
+  const FOREIGN_BODY = 'FOREIGN_SECRET_BODY_DO_NOT_LEAK_9f3a'
+  const connect = () => ({ frames: (async function* () {
+    yield { event: 'message', room_id: 'r', seq: 1, chat_id: 'foreign~tok@remote', text: FOREIGN_BODY, fingerprint: foreignFp }
+  })() })
+  const out = await waitOverWatch({
+    target: { kind: 'remote', serverUrl: 'https://example.invalid' }, capability: 'cap', scope,
+    rooms: ['r'], roomFilter: null, ownSessionId: null, ownSessionAddress: null,
+    wakeDispatcher: spyDispatcher, decideHeld: () => true, decideDelivery, ledger, policy, config: {},
+    startedMs: 0, deadlineAt: 30_000, nowMs: () => performance.now(),
+    signal: new AbortController().signal,
+    appendEntry: row => appendInboxEntry(dir, scope, row),
+    connect, backoffMs: () => 1, sleepFn: () => sleep(1),
+  })
+  assert.equal(JSON.parse(out.lines[0]).status, 'new_messages')
+
+  // Black-box evidence: the on-disk inbox line has no `text` key and no body.
+  const inboxRaw = readFileSync(sessionScopeFilePath(dir, scope, INBOX_FILENAME), 'utf8')
+  const line = inboxRaw.trim().split('\n').find(l => l.length > 0)
+  assert.ok(line, 'an inbox line was written')
+  const row = JSON.parse(line)
+  assert.equal(row.seq, 1)
+  assert.equal(row.trusted, false, 'foreign sender is classified Held, not Trusted')
+  assert.equal(row.held, true, 'the held verdict rides the inbox metadata')
+  assert.ok(!('text' in row), 'a held row carries NO text key')
+  assert.ok(!inboxRaw.includes(FOREIGN_BODY), 'raw foreign body never reaches the inbox')
+  assert.equal(row.fingerprint, foreignFp, 'allowlisted sender metadata is preserved')
+
+  // The trusted notify path was never charged for the held row.
+  assert.equal(trustedDispatches, 0, 'dispatchTrusted NOT called for a held row')
+  let notified = 0
+  try {
+    const { document } = readCursorsDocument(dir, { scope })
+    notified = document?.realms?.[realmId]?.rooms?.r?.notified_seq ?? 0
+  } catch { /* absent cursors: 0 */ }
+  assert.equal(notified, 0, 'notified_seq UNMOVED by the held row')
+
+  // Trusted-sender case (no over-correction): an allowlisted fingerprint still
+  // writes trusted:true WITH the body text.
+  const TRUSTED_BODY = 'TRUSTED_BODY_VISIBLE_OK'
+  const connectTrusted = () => ({ frames: (async function* () {
+    yield { event: 'message', room_id: 'r', seq: 2, chat_id: 'trusted~tok@remote', text: TRUSTED_BODY, fingerprint: trustedFp }
+  })() })
+  const out2 = await waitOverWatch({
+    target: { kind: 'remote', serverUrl: 'https://example.invalid' }, capability: 'cap', scope,
+    rooms: ['r'], roomFilter: null, ownSessionId: null, ownSessionAddress: null,
+    wakeDispatcher: spyDispatcher, decideHeld: () => true, decideDelivery, ledger, policy, config: {},
+    startedMs: 0, deadlineAt: 30_000, nowMs: () => performance.now(),
+    signal: new AbortController().signal,
+    appendEntry: row => appendInboxEntry(dir, scope, row),
+    connect: connectTrusted, backoffMs: () => 1, sleepFn: () => sleep(1),
+  })
+  assert.equal(JSON.parse(out2.lines[0]).status, 'new_messages')
+  const inboxRaw2 = readFileSync(sessionScopeFilePath(dir, scope, INBOX_FILENAME), 'utf8')
+  const trustedLine = inboxRaw2.trim().split('\n').map(l => JSON.parse(l)).find(l => l.seq === 2)
+  assert.ok(trustedLine, 'trusted inbox line written')
+  assert.equal(trustedLine.trusted, true)
+  assert.equal(trustedLine.text, TRUSTED_BODY, 'trusted body is delivered intact')
+  assert.ok(!('held' in trustedLine), 'trusted row is not marked held')
+  assert.equal(trustedDispatches, 1, 'dispatchTrusted charged exactly once — for the trusted row only')
 })
 
 // --- AC3: scope GC ------------------------------------------------------------
