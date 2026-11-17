@@ -430,7 +430,7 @@ async function enumerateRooms({ target, token, capability }) {
 // superseded are terminal: stop reconnecting at once.
 export async function waitOverWatch({
   target, capability, scope, rooms, roomFilter, ownSessionId, ownSessionAddress,
-  wakeDispatcher, decideHeld, ledger, policy, config, startedMs, deadlineAt,
+  wakeDispatcher, decideHeld, decideDelivery, ledger, policy, config, startedMs, deadlineAt,
   signal, appendEntry, nowMs = () => performance.now(), connect: connectOverride = null,
   backoffMs = watchBackoffMs, sleepFn = null,
 }) {
@@ -490,19 +490,40 @@ export async function waitOverWatch({
               || (typeof event.session_id === 'string' && event.session_id === ownSessionId)
             if (own) continue
             if (roomFilter !== null && !roomFilter.has(event.room_id)) continue
-            const row = {
+            // /api/watch frames carry NO trust field (trust is client-side).
+            // Apply the SAME client-edge matrix the long-poll path uses BEFORE
+            // the gate, so a foreign sender cannot masquerade as trusted just
+            // because the wire frame omitted `held`. decideDelivery is the
+            // classifier; a classified held row carries held:true + reason.
+            const classified = decideDelivery
+              ? decideDelivery({
+                room_id: event.room_id, seq: event.seq, chat_id: event.chat_id,
+                text: event.text, actor_fingerprint: event.fingerprint, created_at: event.created_at,
+              })
+              : null
+            const row = classified ?? {
               room_id: event.room_id, seq: event.seq, chat_id: event.chat_id,
               text: event.text, actor_fingerprint: event.fingerprint, created_at: event.created_at,
             }
-            const candidate = wakeDispatcher.gate(row)
+            // The gate reads row.held; feed it the CLASSIFIED verdict, not the
+            // raw frame (whose `held` is always undefined -> falsely trusted).
+            const candidate = wakeDispatcher.gate({
+              ...row,
+              held: classified?.held === true,
+              actor_fingerprint: row.actor_fingerprint,
+            })
             if (candidate.held) {
               const hit = decideHeldWake({
                 pluginData: ledger.pluginData, realmId: ledger.realmId,
                 identity: ledger.identity, fingerprint: candidate.actor_fingerprint, policy,
               })
               if (hit === false) continue
+              // A HELD row NEVER carries `text` into inbox.jsonl (or a hook
+              // summary). applyTrustMatrix REPLACES text with a marker instead
+              // of removing it; drop the key explicitly and keep only metadata.
+              const { text: _heldText, ...heldMeta } = row
               let written = true
-              try { await appendEntry({ ...row, trusted: false }) } catch { written = false }
+              try { await appendEntry({ ...heldMeta, trusted: false, held: true }) } catch { written = false }
               if (!written) continue // never suppress a held watermark on a failed write
               wakeDispatcher.dispatchHeld({ room_id: candidate.room_id, seq: candidate.seq, actor_fingerprint: candidate.actor_fingerprint })
               heldCount += 1
@@ -789,7 +810,7 @@ export async function runWaitFamilyCommand(tokens, { sharedDataDir, pluginDataDi
       const watchOutcome = await waitOverWatch({
         target, capability, scope: waitScope,
         rooms: fixedRooms ?? firstRooms, roomFilter, ownSessionId, ownSessionAddress,
-        wakeDispatcher, decideHeld, ledger, policy, config,
+        wakeDispatcher, decideHeld, decideDelivery, ledger, policy, config,
         startedMs, deadlineAt, signal: signalController.signal, appendEntry,
       })
       loopLedger.close()
