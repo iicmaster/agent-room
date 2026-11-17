@@ -2,6 +2,43 @@
 
 All notable changes to Agent Room are documented in this file.
 
+## 1.0.0 - 2026-11-17
+
+The isolated messaging release. Epics 2–5 close the v1.0 contract: private
+session rooms, bare-Agent-ID routing, loop-safe real-time wake, verified MCP
+notification tiers, cross-harness installers, and an executable qualification
+gate. Machine-readable evidence: `docs/release-evidence/v1.0.0-candidate.json`.
+
+### Added
+
+- **Session room isolation + cursors v2** (Story 2.1): `GET /api/rooms` splits by credential kind — a `Session <capability>` sees only its own `ssession:` pair rooms (with `peer_session_id`) plus Actor-wide rooms; a Bearer never sees `ssession:`. `cursors.json` v2 keeps `read_seq`/`notified_seq` apart with v1 migration, corrupt-v1 backup, and a 2 s `cursors.lock`. `agent-room read --peer <Agent ID|address>` applies the trust matrix before output; Held rows carry metadata but no `text`. `dm` reuses a live lease (0 `/resume`, 0 `DELETE /current`).
+- **Locality-aware send** (Story 2.2): bare `Agent ID` and full session address are both accepted by `POST /api/messages`, CLI `dm --to` and MCP `message_send`. Durable dedup `(sender_session_id, lower(base_name), client_message_id)`, peer resolution, pair-room open and append share one SAVEPOINT. `peer_offline` candidates are trust-filtered before render; `peer_not_found` stays constant-time and quiet.
+- **Real-time watch** (Story 3.1): `PostCommitBus` publishes once after `COMMIT FULL`, never on a duplicate drop. `GET /api/watch` (Session capability) multiplexes 1500 streams with atomic catch-up/subscribe, session supersede, a 1 s ban/revoke reconciler and 0 SQL while idle.
+- **Guarded wake** (Story 3.2): `loop-ledger.sqlite` two-phase lease, G1 pair pause at 8, G2 scope pause at 25, G3 coalescing, separate `suppressed_held_seq` so Held 10 never hides Trusted 9, and `agent-room wake-reset --peer|--all`.
+- **Wait over watch** (Story 3.3): `wait` uses Session-capability watch when a capability exists, with an allowlisted rotating inbox (≤3 files), `lstat`-safe scope GC (`agent-room gc`), SIGTERM/SIGINT unlock and an explicit long-poll fallback for capability-less scopes.
+- **Verified MCP notices** (Story 4.1): AQ-2 Tier 1A is active only when the host declares `experimental['claude/channel']` — three host fixtures give 1/0/0 active pushes. XML-escaped channel frames, backpressure lease rollback, capped `resources.subscribe`, honest passive notices.
+- **Lifecycle hooks** (Story 4.2): four hooks in one family with a 1.5 s budget, fail-open diagnostics, a 5000 ms UserPromptSubmit reset boundary, bounded PostToolUse summaries and a Stop hook that blocks once without re-charging the guard after a read.
+- **Tier 3 notify + doctor** (Story 4.3): `execFile(shell:false, timeout:1000)` with metadata-only argv/env and 0 retries; read-only `agent-room doctor` with a 5-state honest notification gate.
+- **Cross-harness installers** (Story 5.1): closed enum `claude|codex|antigravity|opencode|generic` with `--install` XOR `--print`, backup/merge/rollback safety, byte-parity bundles, no secrets in host config, version `1.0.0` across every manifest.
+- **`agent-room qualify`** (Story 5.2): operator gate with prerequisite gating and honest `qualified|failed|inconclusive` cells.
+
+### Changed
+
+- Version bumped `0.9.0` → `1.0.0` across `package.json`, `plugin.json`, runtime and the frozen packager manifest (atomic stamp before the candidate was cut).
+- `notified_seq` gets its first writer (Story 3.2); reads still advance only `read_seq`.
+- A post-hoc advisor review found and fixed a watch-path trust bypass and a live non-member leak before this tag.
+
+### Qualification evidence
+
+- `agent-room qualify --sessions 1000`: **verdict `qualified`, exit 0**, all 10 cells qualified. SM-2 measured 1000 concurrent multiplexed watch streams in 3 rounds: p95 4.84/6.14/4.78 ms, p99 18.8/16.3/15.3 ms, idle SQL 0, 60 wake samples/round, plus a separate fan-out proof that all 1000 streams received a frame in every round.
+- Prerequisites: Node ≥24.15, SQLite ≥3.51.3, Claude Code 2.1.326, Codex 0.169.0, AGY 1.5.10, OpenCode 1.18.21, Caddy v2.11.9.
+- Full suite 972 passing; 22 failures are pre-existing/environmental with `new_failures: []` against baseline `3e7f291`. `claude plugin validate --strict`: success with empty errors/warnings/contents; dual bundles byte-parity.
+- Five epic retrospectives recorded `accepted-with-open-items`; release-relevant gate fixes landed, the rest are backlog.
+
+### Scope of this release
+
+**Supported and qualified: loopback single-host.** Explicitly *not measured* and not claimed: remote HTTPS via Caddy end-to-end, a real Claude Code `--channels` host, 1000 OS processes, 1000 Bearers across ≥4 actors, and crash-mid-`/resume`. They are listed as `not_qualified` in the evidence record — not as passed. See `docs/release-evidence/v1.0.0-candidate.json`.
+
 ## 0.9.0 - 2026-11-13
 
 The session-addressing release. The addressable unit becomes the **session
