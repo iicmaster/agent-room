@@ -79,7 +79,7 @@
       "any authenticated request refreshes liveness: last_seen advances, connected_since holds",
       "capacity evicts oldest-expired-then-oldest and keeps live sessions bounded",
       "claimsTtlMs is operator-tunable via startServer",
-      "connection churn: 100 connect/authenticate/bind/send/disconnect cycles all succeed, hold the server at its post-warmup FD baseline (±5), and leak zero sockets",
+      "connection churn: 100 connect/authenticate/bind/send/disconnect cycles all succeed, hold the server at its post-warmup FD baseline (\u00b15), and leak zero sockets",
       "first boot mints the realm and the implicit Broadcast Room with no fabricated creator",
       "first conversation: two real MCP children converse through one real WAL server, cursors persist, a third Actor is denied",
       "memory pass: a bounded churn workload under the leak tracker holds the least-squares RSS slope at or below 2% of starting RSS",
@@ -105,11 +105,11 @@
   "scope": {
     "supported": "loopback single-host",
     "not_qualified": [
-      "remote HTTPS/Caddy end-to-end — not measured",
-      "real Claude Code --channels host — not measured",
-      "1000 OS processes — not measured",
-      "1000 Bearer across >=4 actors — not measured",
-      "crash mid-/resume — not measured"
+      "remote HTTPS/Caddy end-to-end \u2014 not measured",
+      "real Claude Code --channels host \u2014 not measured",
+      "1000 OS processes \u2014 not measured",
+      "1000 Bearer across >=4 actors \u2014 not measured",
+      "crash mid-/resume \u2014 not measured"
     ]
   },
   "accepted_limitations": [
@@ -117,5 +117,10 @@
     "no real fault injection on rollback",
     "advisor canary host-load dependent"
   ],
-  "tag_policy": "tag vX.Y.Z only when this file's hash matches the candidate digest and no cell is failed/inconclusive"
+  "tag_policy": "tag vX.Y.Z only when this file's hash matches the candidate digest and no cell is failed/inconclusive",
+  "applies_to": {
+    "measured_at_commit": "7aaff958d337e99d54befdff2037d52aeebdfe0c",
+    "later_commits": "7b5cb68 (canary resolves installed tmux-teams version dynamically), b546ab7 (merge) \u2014 neither touches qualify/SM-2/package paths; measurements and package_digest remain valid",
+    "self_reference_note": "head_sha intentionally names the measured commit, not the commit containing this file, so the evidence cannot self-invalidate"
+  }
 }
