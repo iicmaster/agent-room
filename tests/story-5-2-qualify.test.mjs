@@ -14,7 +14,8 @@ import { PassThrough } from 'node:stream'
 import test from 'node:test'
 
 import {
-  parseQualifyArgs, runQualifyCommand, cellPackaging, evaluateValidateReport, digestCandidate, sm2RowQualified,
+  parseQualifyArgs, runQualifyCommand, cellPackaging, evaluateValidateReport, digestCandidate,
+  sm2RowQualified, sm2AttachedCount, sm2RowFromMeasurements,
 } from '../server/cli/qualify-commands.mjs'
 
 const CELL_NAMES = ['PREREQ', 'RECEIPT', 'SM-1', 'SM-2', 'SM-3', 'SM-C1', 'SM-C2', 'FULL-SUITE', 'PACKAGING']
@@ -23,7 +24,7 @@ const CELL_NAMES = ['PREREQ', 'RECEIPT', 'SM-1', 'SM-2', 'SM-3', 'SM-C1', 'SM-C2
 // latency/idle thresholds is NOT qualified unless it also proves 1000 sessions
 // and the required watcher spread (Oren's finding, PM verified).
 test('SM-2 predicate refuses a 5-session/1-watcher row even with good latency', () => {
-  const smallScale = { p95_ms: 100, p99_ms: 300, idle_sql: 0, sessions_requested: 5, watchers: 1 }
+  const smallScale = { p95_ms: 100, p99_ms: 300, idle_sql: 0, sessions_requested: 5, watchers: 1, samples: 30 }
   assert.equal(sm2RowQualified(smallScale), false)
 
   // The full-scale row is the only shape that can pass.
@@ -66,6 +67,56 @@ function stubCells(status = 'qualified') {
 }
 
 // --- argv grammar ------------------------------------------------------------------
+test('SM-2 scaled row reports the ACTUAL attached watcher count, not the requested scale', () => {
+  const row = sm2RowFromMeasurements({
+    wakeLatencies: [20, 40, 60, 80, 100, 120, 140, 160, 180, 200],
+    eventLoopLags: [1, 2, 3, 2, 1],
+    idleSql: 0,
+    attachedWatchers: 1000,
+    sessionsRequested: 1000,
+  })
+  assert.equal(row.watchers, 1000)
+  assert.equal(row.sessions_requested, 1000)
+  assert.equal(row.samples, 10)
+  assert.equal(row.concurrency, 'multiplexed-streams')
+  assert.equal(row.idle_sql, 0)
+  // All the latency evidence in the world cannot make a partial pool qualify.
+  assert.equal(sm2RowQualified({ ...row, watchers: 4, sessions_requested: 1000 }), false)
+})
+
+test('sm2AttachedCount counts only streams that established; errors never inflate the pool', () => {
+  const attached = [
+    { stream: {} }, { error: new Error('EMFILE') }, { stream: {} },
+    { error: new Error('ECONNREFUSED') }, { stream: {} },
+  ]
+  assert.equal(sm2AttachedCount(attached), 3)
+  assert.equal(sm2AttachedCount([]), 0)
+})
+
+test('SM-2 reduced pool and under-sampled row cannot be reported as qualified', () => {
+  const good = { p95_ms: 20, p99_ms: 50, idle_sql: 0, watchers: 1000, sessions_requested: 1000, samples: 30 }
+  assert.equal(sm2RowQualified(good), true)
+  // Fewer than 1000 attached watchers at the AC's scale -> never qualified.
+  assert.equal(sm2RowQualified({ ...good, watchers: 999 }), false)
+  assert.equal(sm2RowQualified({ ...good, watchers: 1 }), false)
+  // A p95 from too few samples is not evidence, even if watchers==1000.
+  assert.equal(sm2RowQualified({ ...good, samples: 3 }), false)
+  // Idle SQL at full pool must be zero.
+  assert.equal(sm2RowQualified({ ...good, idle_sql: 12 }), false)
+})
+
+test('sm2RowFromMeasurements derives p95/p99 from real samples with an honest count', () => {
+  const row = sm2RowFromMeasurements({
+    wakeLatencies: [10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
+    eventLoopLags: [2, 4, 6],
+    idleSql: 0, attachedWatchers: 1000, sessionsRequested: 1000,
+  })
+  assert.ok(row.p95_ms >= row.wake_clock_ms - 100)
+  assert.ok(row.p99_ms >= row.p95_ms)
+  assert.equal(row.samples, 10)
+  assert.equal(row.watchers, 1000)
+})
+
 test('parseQualifyArgs: defaults, bounds, enums, remote pairing', () => {
   assert.deepEqual(parseQualifyArgs(['--sessions', '10', '--json']).options, {
     sessions: 10, json: true, remote: null, invite: null, harness: 'generic',

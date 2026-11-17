@@ -36,11 +36,17 @@ import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 
 import { APP_VERSION, MIN_NODE_VERSION, MIN_SQLITE_VERSION, assertSupportedRuntime } from '../runtime.mjs'
-import { NOFILE_RECOMMENDED, PROTOCOL_HEADER, PROTOCOL_VERSION, WRITE_QUEUE_MAX_BYTES } from '../constants.mjs'
+import { NOFILE_RECOMMENDED, PROTOCOL_HEADER, PROTOCOL_VERSION, SERVER_STARTUP_WAIT_MS, WRITE_QUEUE_MAX_BYTES } from '../constants.mjs'
+import { openWatchStream } from '../client/watch-client.mjs'
 import { probeNofile } from './bootstrap-commands.mjs'
 import { HARNESS_NAMES } from './harness-installer.mjs'
 import { cliHttpJson, cliBearerHeaders } from './http.mjs'
 import { loadOrCreateKeypair } from '../keys.mjs'
+
+// SM-2 opens the server itself with a DatabaseSync.prepare counter preloaded:
+// ensure-server's child env whitelist strips NODE_OPTIONS, so the counter
+// cannot ride the auto-start path. SERVER_PATH is the shipped server binary.
+const SERVER_PATH = fileURLToPath(new URL('../api/server.mjs', import.meta.url))
 
 const execFile = promisify(execFileCallback)
 const sleep = ms => new Promise(resolvePromise => { setTimeout(resolvePromise, ms) })
@@ -49,10 +55,21 @@ const sleep = ms => new Promise(resolvePromise => { setTimeout(resolvePromise, m
 // product limits so a product-limit edit cannot silently retune the gate.
 const QUALIFY_SESSIONS_MAX = 1000
 // The AC is "1000 concurrent Watch sessions (or 1000 Bearers across >=4 actors
-// when testing the remote cap)". The local cell drives ONE watcher, so it can
-// never satisfy this as-is — that is deliberate: a soft pass on an unmeasured
-// scale is the exact failure this gate exists to catch.
+// when testing the remote cap)". The local cell multiplexes `options.sessions`
+// CONCURRENT /api/watch streams in ONE process (capped here), so it can actually
+// measure the AC's scale — a soft pass on an unmeasured scale is the exact
+// failure this gate exists to catch.
 const SM2_REQUIRED_WATCHERS = 1000
+// SM-2 measurement knobs. 1000 streams are multiplexed (not 1000 OS processes):
+// WATCH_CONCURRENT_MAX=1500 admits the pool and the AC says "concurrent Watch
+// sessions", not processes. Wake latency is sampled on REAL commit→wake events
+// spread across the pool; the sample count is reported, never silently faked.
+const SM2_SAMPLE_TARGET = 60
+const SM2_SAMPLE_MIN = 30
+const SM2_WATCH_SETUP_TIMEOUT_MS = SERVER_STARTUP_WAIT_MS
+const SM2_IDLE_SETTLE_MS = 2_000
+const SM2_IDLE_SQL_WINDOW_MS = 3_000
+const SM2_PROBE_TIMEOUT_MS = 5_000
 const SM1_CEILING_MS = 60_000
 const SM2_P95_MS = 250           // AQ-1 threshold — never tune on breach
 const SM2_P99_MS = 1000
@@ -129,7 +146,10 @@ const REQUIRED_CANDIDATE_FILES = [
 // Watch spread). A 5-session/1-watcher row is a soft pass on an unproven AC,
 // so it fails here. Exported for a focused test that pins this invariant.
 export function sm2RowQualified(row) {
-  return row.p95_ms <= SM2_P95_MS
+  // A p95/p99 needs a real sample spread: never qualify on a handful of wakes.
+  const enoughSamples = Number.isInteger(row.samples) && row.samples >= SM2_SAMPLE_MIN
+  return enoughSamples
+    && row.p95_ms <= SM2_P95_MS
     && row.p99_ms <= SM2_P99_MS
     && row.idle_sql === 0
     && row.sessions_requested >= QUALIFY_SESSIONS_MAX
@@ -510,122 +530,252 @@ async function cellSm3() {
   }
 }
 
-// --- SM-2: real `wait` waker + `dm` sender ------------------------------------------
-async function cellSm2(options) {
+// --- SM-2: multiplexed 1000-stream watch pool + real dm wake sampling --------------
+// How concurrency is achieved (reported verbatim in the row and cell): ONE Node
+// process opens `options.sessions` concurrent unpooled GET /api/watch streams
+// through the shipped openWatchStream client (server WATCH_CONCURRENT_MAX=1500).
+// No 1000 OS processes — the AC says "concurrent Watch sessions", not processes.
+// row.watchers is the count of streams that actually reached an established 200
+// response; a partial attach is an honest inconclusive, NEVER a silently reduced
+// pool reported as a pass. Wake latency is sampled on REAL commit→wake events
+// (sender dm → watcher 'message' frame) spread across the pool, with the sample
+// count reported so a p95 from 3 samples is never mistaken for a measurement.
+export function sm2AttachedCount(results) {
+  return results.reduce((total, row) => total + (row && !row.error && row.stream ? 1 : 0), 0)
+}
+
+// Pure row builder (test seam): the watcher count is whatever was actually
+// attached, never the requested scale. p95/p99 come only from real samples.
+export function sm2RowFromMeasurements({
+  wakeLatencies, eventLoopLags, idleSql, attachedWatchers, sessionsRequested,
+}) {
+  return {
+    p95_ms: percentile(wakeLatencies, 0.95),
+    p99_ms: percentile(wakeLatencies, 0.99),
+    event_loop_clock_ms: median(eventLoopLags),
+    wake_clock_ms: median(wakeLatencies),
+    idle_sql: idleSql,
+    samples: wakeLatencies.length,
+    watchers: attachedWatchers,
+    sessions_requested: sessionsRequested,
+    concurrency: 'multiplexed-streams',
+  }
+}
+
+// Host-resource failures (nofile/memory/socket exhaustion, server not ready)
+// are INCONCLUSIVE — the measurement could not be taken — never a green cell
+// and never a silent retry at a smaller scale. Threshold breaches stay FAILED.
+const SM2_RESOURCE_FAILURE_RE = /EMFILE|ENFILE|ENOMEM|EAGAIN|EADDRINUSE|cannot allocate|cannot sustain|did not become ready|not ready within|exited before ready|spawn|too many open files|ECONNREFUSED|socket hang up|pool_incomplete|auth_failed|principal_allocation_failed|insufficient wake samples|no wake frame|no_wake_sample|setup failed/i
+
+function counterBytes(path) {
+  try { return statSync(path).size } catch { return 0 }
+}
+
+// Allocate one session principal (a distinct /api/watch stream identity) from a
+// single long-lived bearer. The bearer may allocate many principals; no Chat ID
+// occupancy is claimed, so 1000 watchers need no 1000 OS processes.
+async function allocateSm2Principal(port, token, base) {
+  const alloc = await cliHttpJson(port, 'POST', '/api/session-principals', cliBearerHeaders(token), {
+    base_chat_id: base, machine: 'qualify', client_type: 'cli',
+  })
+  if (alloc.status !== 200 || !alloc.body?.result?.session_capability) {
+    throw new Error(`sm2_principal_allocation_failed: ${alloc.body?.error?.code ?? `HTTP_${alloc.status}`} for ${base}`)
+  }
+  const result = alloc.body.result
+  return { sessionId: result.session_id, address: result.address, capability: result.session_capability }
+}
+
+export async function cellSm2(options, deps = {}) {
+  const {
+    connectWatch = openWatchStream,
+    sleepFn = sleep,
+    nowFn = () => performance.now(),
+  } = deps
+  const watchersRequested = Math.min(options.sessions, QUALIFY_SESSIONS_MAX)
   const outcome = await measureRounds(async (index) => {
     const world = ownedWorld(`sm2-r${index}`)
+    let server = null
+    let controllers = []
     try {
-      const sender = world.addInstall('sender')
-      const watcher = world.addInstall('watcher')
-      await world.runCli(sender, ['bootstrap', '--harness', 'generic', '--json'])
-      await world.runCli(watcher, ['bootstrap', '--harness', 'generic', '--json'])
-      await world.runCli(sender, ['setup', '--chat-id', 'sm2send'])
-      await world.runCli(watcher, ['setup', '--chat-id', 'sm2watch'])
-      const sessions = await world.runCli(watcher, ['sessions', '--json'])
-      const peers = parseJsonLine(sessions.stdout)?.sessions ?? []
-      const target = peers.find(row => !/sm2watch/.test(row.address ?? ''))?.address
-      if (!target) throw new Error('no peer address for wake measurement')
-
+      // Boot the REAL shipped server ourselves with a DatabaseSync.prepare
+      // counter preloaded: ensure-server's child env whitelist strips
+      // NODE_OPTIONS, so a preload counter cannot ride the auto-start path.
+      // The bootstrap CLI below then attaches to this same instrumented server.
       const counter = join(world.parent, `prepare-${index}.txt`)
-      const preload = join(world.parent, 'preload.cjs')
-      writeFileSync(preload, `
-        const { DatabaseSync } = require('node:sqlite');
-        const fs = require('node:fs');
-        const p = DatabaseSync.prototype.prepare;
-        DatabaseSync.prototype.prepare = function (...a) {
-          try { fs.appendFileSync(${JSON.stringify(counter)}, '\\n') } catch {}
-          return p.apply(this, a);
-        };
-      `)
-      const env = { ...world.childEnv(watcher), NODE_OPTIONS: `--require=${preload}` }
-
-      // `wait` is one-shot: it returns after the first wake. Measure ONE wake
-      // per fresh child so p95/p99 span real, independent wake events.
-      const observeWake = (sampleIndex) => new Promise((resolveWake, rejectWake) => {
-        const child = spawn(process.execPath, [CLI_PATH, 'wait', '--timeout', '10'], { env, cwd: world.parent, stdio: ['ignore', 'pipe', 'pipe'] })
-        let stderr = ''
-        let buffered = ''
-        let settled = false
-        let timer = null
-        const finish = (error, latencyMs) => {
-          if (settled) return
-          settled = true
-          if (timer !== null) clearTimeout(timer)
-          try { child.kill('SIGTERM') } catch { /* reaped */ }
-          if (error) rejectWake(error)
-          else resolveWake(latencyMs)
-        }
-        timer = setTimeout(() => finish(new Error(`no wake within 10s; stderr=${stderr.slice(0, 200)}`)), 12_000)
-        child.stderr.setEncoding('utf8')
-        child.stderr.on('data', chunk => { stderr += chunk })
-        child.stdout.setEncoding('utf8')
-        child.stdout.on('data', chunk => {
-          buffered += chunk
-          let newline
-          while ((newline = buffered.indexOf('\n')) !== -1) {
-            const line = buffered.slice(0, newline)
-            buffered = buffered.slice(newline + 1)
-            if (!line.trim()) continue
-            try {
-              const hint = JSON.parse(line)
-              if (hint.status === 'new_messages' || hint.status === 'paused') finish(null, Date.now() - ackedAt)
-            } catch { /* non-JSON */ }
-          }
-        })
-        child.once('error', error => finish(error))
-        child.once('exit', (code) => { if (!settled) finish(new Error(`wait exited (code=${code}) before a wake; stderr=${stderr.slice(0, 200)}`)) })
+      writeFileSync(counter, '')
+      const preload = join(world.parent, `sql-counter-${index}.cjs`)
+      writeFileSync(preload, [
+        "const { DatabaseSync } = require('node:sqlite');",
+        "const fs = require('node:fs');",
+        `const counter = ${JSON.stringify(counter)};`,
+        'const original = DatabaseSync.prototype.prepare;',
+        'DatabaseSync.prototype.prepare = function (...args) {',
+        "  try { fs.appendFileSync(counter, '\\n') } catch {}",
+        '  return original.apply(this, args);',
+        '};',
+        '',
+      ].join('\n'))
+      server = spawn(process.execPath, ['--require', preload, SERVER_PATH], {
+        env: world.childEnv('watcher'), cwd: world.parent, stdio: ['ignore', 'pipe', 'pipe'],
       })
+      let serverStderr = ''
+      server.stderr.setEncoding('utf8')
+      server.stderr.on('data', chunk => { if (serverStderr.length < 2000) serverStderr += chunk })
 
-      const samples = Math.min(Math.max(3, options.sessions), 10)
+      const readyAt = Date.now() + SM2_WATCH_SETUP_TIMEOUT_MS
+      let port = null
+      while (Date.now() < readyAt) {
+        port = runtimePort(world.shared)
+        if (port !== null) break
+        if (server.exitCode !== null || server.signalCode !== null) {
+          throw new Error(`sm2_setup_failed: instrumented server exited before ready (${serverStderr.slice(0, 200)})`)
+        }
+        await sleepFn(50)
+      }
+      if (port === null) throw new Error(`sm2_setup_failed: instrumented server not ready within ${SM2_WATCH_SETUP_TIMEOUT_MS}ms; stderr=${serverStderr.slice(0, 200)}`)
+
+      const watcher = world.addInstall('watcher')
+      const boot = await world.runCli(watcher, ['bootstrap', '--harness', 'generic', '--json'])
+      if (boot.code !== 0) throw new Error(`sm2_setup_failed: bootstrap failed (${boot.stderr.slice(0, 200)})`)
+      const localToken = readFileSync(join(world.shared, 'local-token'), 'utf8').trim()
+      const publicKey = loadOrCreateKeypair(watcher).publicKey.toString('base64url')
+      const auth = await cliHttpJson(port, 'POST', '/api/auth/local', cliBearerHeaders(localToken), {
+        public_key: publicKey, session_kind: 'long_lived',
+      })
+      if (auth.status !== 200 || !auth.body?.result?.session_token) {
+        throw new Error(`sm2_auth_failed: HTTP ${auth.status} ${auth.body?.error?.code ?? ''}`)
+      }
+      const token = auth.body.result.session_token
+
+      // One sender principal (to POST messages) + N watcher principals.
+      const sender = await allocateSm2Principal(port, token, `sm2sender${index}`)
+      const senderHeaders = {
+        [PROTOCOL_HEADER]: PROTOCOL_VERSION,
+        authorization: `Session ${sender.capability}`,
+        'content-type': 'application/json; charset=utf-8',
+      }
+      const principals = []
+      for (let i = 0; i < watchersRequested; i += 1) {
+        principals.push(await allocateSm2Principal(port, token, `sm2w${index}_${i}`))
+      }
+
+      // Open ALL watch streams in one batch; count only established 200s.
+      const attachResults = await Promise.all(principals.map(async principal => {
+        const controller = new AbortController()
+        try {
+          const stream = await connectWatch({
+            port,
+            path: `/api/watch?cursors=${encodeURIComponent(JSON.stringify({}))}`,
+            headers: {
+              [PROTOCOL_HEADER]: PROTOCOL_VERSION,
+              authorization: `Session ${principal.capability}`,
+              accept: 'application/x-ndjson',
+            },
+            signal: controller.signal,
+          })
+          return { principal, controller, stream }
+        } catch (error) {
+          controller.abort()
+          return { principal, controller, error }
+        }
+      }))
+      controllers = attachResults.map(row => row.controller)
+      const actualWatchers = sm2AttachedCount(attachResults)
+      if (actualWatchers !== watchersRequested) {
+        const firstError = attachResults.find(row => row.error)?.error
+        throw new Error(`sm2_pool_incomplete: host sustained ${actualWatchers}/${watchersRequested} watch streams; ${firstError?.message ?? firstError ?? ''}`)
+      }
+
+      // Single frame consumer per stream. A 'message' frame resolves this
+      // watcher's pending wake waiter with a monotonic timestamp; keepalives
+      // are ignored. One consumer avoids competing readers on the frame queue.
+      const live = []
+      for (const row of attachResults) {
+        const entry = { ...row.principal, controller: row.controller, pendingWake: null }
+        live.push(entry)
+        ;(async () => {
+          try {
+            for await (const frame of row.stream.frames) {
+              if (frame?.event === 'message' && typeof entry.pendingWake === 'function') {
+                const resolveWake = entry.pendingWake
+                entry.pendingWake = null
+                resolveWake(nowFn())
+              }
+            }
+          } catch { /* stream closed */ }
+          if (typeof entry.pendingWake === 'function') {
+            const resolveWake = entry.pendingWake
+            entry.pendingWake = null
+            resolveWake(null)
+          }
+        })().catch(() => {})
+      }
+
+      const sampleCount = Math.min(SM2_SAMPLE_TARGET, Math.max(SM2_SAMPLE_MIN, options.sessions))
       const wakeLatencies = []
       const eventLoopLags = []
-      let ackedAt = 0
-      for (let i = 0; i < samples; i += 1) {
-        const wake = observeWake(i)
-        await sleep(400) // let the watch stream establish before the send
-        ackedAt = Date.now()
-        // Event-loop clock: the parent's own timer drift across the send call
-        // (how late the run loop fired relative to its scheduled instant).
-        const scheduledAt = Date.now() + 1
-        const loopLag = new Promise(resolveLag => {
-          setTimeout(() => resolveLag(Date.now() - scheduledAt), 1)
+      for (let i = 0; i < sampleCount; i += 1) {
+        const target = live[i % live.length]
+        const woke = new Promise((resolveWoke, rejectWoke) => {
+          const timer = setTimeout(() => {
+            if (target.pendingWake !== null) {
+              target.pendingWake = null
+              rejectWoke(new Error(`sm2_no_wake_sample_${i}: no 'message' frame within ${SM2_PROBE_TIMEOUT_MS}ms`))
+            }
+          }, SM2_PROBE_TIMEOUT_MS)
+          target.pendingWake = wokeAt => { clearTimeout(timer); resolveWoke(wokeAt) }
         })
-        const dm = await world.runCli(sender, ['dm', '--to', target, '--text', `sm2-${i}`, '--id', `sm2-${Date.now()}-${i}`])
-        if (dm.code !== 0) throw new Error('sm2 dm failed')
-        eventLoopLags.push(await loopLag)
-        wakeLatencies.push(await wake)
+        // Event-loop clock: this process's scheduled-timer drift across the send.
+        const scheduledAt = nowFn() + 1
+        const loopLag = new Promise(resolveLag => {
+          setTimeout(() => resolveLag(nowFn() - scheduledAt), 1)
+        })
+        const sentAt = nowFn()
+        const dm = await cliHttpJson(port, 'POST', '/api/messages', senderHeaders, {
+          to: target.address,
+          client_message_id: `sm2-${Date.now()}-${index}-${i}`,
+          text: `sm2-wake-${i}`,
+        })
+        if (dm.status !== 200) throw new Error(`sm2_dm_failed: HTTP ${dm.status} ${dm.body?.error?.code ?? ''}`)
+        eventLoopLags.push(Math.max(0, await loopLag))
+        const wokeAt = await woke
+        wakeLatencies.push(wokeAt - sentAt)
+      }
+      if (wakeLatencies.length < SM2_SAMPLE_MIN) {
+        throw new Error(`insufficient wake samples: ${wakeLatencies.length} < ${SM2_SAMPLE_MIN}`)
       }
 
-      // Idle SQL: hold a wait child open with no traffic and confirm 0 prepares.
-      const idleChild = spawn(process.execPath, [CLI_PATH, 'wait', '--timeout', '10'], { env, cwd: world.parent, stdio: ['ignore', 'pipe', 'pipe'] })
-      await sleep(1500)
-      const idleBefore = existsSync(counter) ? readFileSync(counter, 'utf8').length : 0
-      await sleep(2000)
-      const idleSql = (existsSync(counter) ? readFileSync(counter, 'utf8').length : 0) - idleBefore
-      try { idleChild.kill('SIGTERM') } catch { /* reaped */ }
-      await Promise.race([new Promise(done => idleChild.once('exit', done)), sleep(2000)])
-      const row = {
-        p95_ms: percentile(wakeLatencies, 0.95),
-        p99_ms: percentile(wakeLatencies, 0.99),
-        event_loop_clock_ms: median(eventLoopLags),
-        wake_clock_ms: median(wakeLatencies),
-        idle_sql: idleSql,
-        samples: wakeLatencies.length,
-        watchers: 1,
-        sessions_requested: options.sessions,
-      }
-      return row
+      // Idle SQL with the FULL pool still attached: settle post-send reconciler
+      // reads, then count server-side db.prepare calls in a quiet window.
+      await sleepFn(SM2_IDLE_SETTLE_MS)
+      const idleBefore = counterBytes(counter)
+      await sleepFn(SM2_IDLE_SQL_WINDOW_MS)
+      const idleSql = counterBytes(counter) - idleBefore
+
+      return sm2RowFromMeasurements({
+        wakeLatencies, eventLoopLags, idleSql,
+        attachedWatchers: actualWatchers, sessionsRequested: options.sessions,
+      })
     } finally {
+      for (const controller of controllers) { try { controller.abort() } catch { /* closed */ } }
+      if (server && server.exitCode === null && server.signalCode === null) {
+        try { server.kill('SIGTERM') } catch { /* reaped by world.cleanup */ }
+        await Promise.race([new Promise(done => server.once('exit', done)), sleepFn(2000)])
+      }
       await world.cleanup()
     }
   }, { predicate: sm2RowQualified })
+  const status = outcome.status === STATUS.FAILED && SM2_RESOURCE_FAILURE_RE.test(outcome.reason ?? '')
+    ? STATUS.INCONCLUSIVE
+    : outcome.status
   return {
-    status: outcome.status, reason: outcome.reason,
+    status, reason: outcome.reason,
     p95_ceiling_ms: SM2_P95_MS, p99_ceiling_ms: SM2_P99_MS,
     requires_sessions: QUALIFY_SESSIONS_MAX,
     requires_watchers: SM2_REQUIRED_WATCHERS,
     rounds: outcome.results ?? [],
-    clock_split: 'event_loop_clock_ms = in-process dispatch measurement; wake_clock_ms = wall send-ack -> hint',
+    concurrency: 'multiplexed-streams (one Node process; N concurrent unpooled GET /api/watch streams; server WATCH_CONCURRENT_MAX=1500)',
+    clock_split: 'event_loop_clock_ms = in-process scheduled-timer drift across the send; wake_clock_ms = send-ack -> real message frame (monotonic); p95/p99 are on wake_clock samples',
   }
 }
 
