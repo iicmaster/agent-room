@@ -1,12 +1,18 @@
 // Focused tests for the advisor-lane health canary: snapshot schema, the
-// >=2-families gate, and outbox-based classification via a stubbed dispatcher.
+// >=2-families gate, outbox-based classification via a stubbed dispatcher, the
+// realistic bounded timeout constants, fast-fail refusal handling, and cwd
+// resolution for inspectable runner logs.
 import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 
-import { collect, makeSnapshot, main, passes, resolveDispatchPath, SEATS } from '../scripts/advisor-canary.mjs'
+import {
+  CANARY_BOOT_SEC, CANARY_WAIT_SEC, classifyLane, collect, makeSnapshot, main, passes,
+  resolveCanaryCwd, resolveDispatchPath, SEATS,
+} from '../scripts/advisor-canary.mjs'
 
 const LANES = Object.keys(SEATS)
 
@@ -45,6 +51,33 @@ test('main writes advisor-canary.json with the schema and returns the gate exit 
   const snap = JSON.parse(readFileSync(join(outDir, 'advisor-canary.json'), 'utf8'))
   assert.equal(snap.families_ok, 2)
   assert.deepEqual(Object.keys(snap.lanes).sort(), ['agy', 'claude', 'codex', 'oc'])
+})
+
+test('timeouts are realistic bounded budgets, not the old 3s/2s values', () => {
+  assert.equal(CANARY_BOOT_SEC, 120)
+  assert.equal(CANARY_WAIT_SEC, 180)
+  assert.ok(CANARY_BOOT_SEC >= 120, 'boot must accommodate a slow AGY adapter')
+  assert.ok(CANARY_WAIT_SEC >= 180, 'wait must accommodate a full prompt round')
+})
+
+test('classifyLane: outbox present is ok; a still-running wait is NOT down until budget elapses', () => {
+  assert.equal(classifyLane(0, 0), 'ok')      // dispatch acked, outbox + terminal state
+  assert.equal(classifyLane(1, 0), 'ok')      // still booting at dispatch cap, then outbox landed
+  assert.equal(classifyLane(0, 1), 'down')    // full wait budget elapsed, still running
+  assert.equal(classifyLane(0, 2), 'down')    // ended without an outbox
+  assert.equal(classifyLane(0, null), 'down') // bounded spawn wait timed out
+})
+
+test('classifyLane: an explicit dispatch refusal is a fast-fail down', () => {
+  // config-option-invalid / identity mismatch / no executable all surface as
+  // dispatch exit 2. Even a hypothetical wait 0 must not rescue a refusal.
+  assert.equal(classifyLane(2, null), 'down')
+  assert.equal(classifyLane(2, 0), 'down')
+})
+
+test('resolveCanaryCwd defaults to the repo and honours CANARY_CWD', () => {
+  assert.equal(resolveCanaryCwd({}), resolve(fileURLToPath(new URL('..', import.meta.url))))
+  assert.equal(resolveCanaryCwd({ CANARY_CWD: '/tmp/canary-logs' }), '/tmp/canary-logs')
 })
 
 test('resolveDispatchPath reads the installed tmux-teams 0.51.0 path from config', () => {
