@@ -27,8 +27,9 @@ test('SM-2 predicate refuses a 5-session/1-watcher row even with good latency', 
   const smallScale = { p95_ms: 100, p99_ms: 300, idle_sql: 0, sessions_requested: 5, watchers: 1, samples: 30 }
   assert.equal(sm2RowQualified(smallScale), false)
 
-  // The full-scale row is the only shape that can pass.
-  const fullScale = { ...smallScale, sessions_requested: 1000, watchers: 1000 }
+  // The full-scale row is the only shape that can pass. Full fan-out proof
+  // (streams_delivered === watchers) is now required too (verified gap 1).
+  const fullScale = { ...smallScale, sessions_requested: 1000, watchers: 1000, streams_delivered: 1000 }
   assert.equal(sm2RowQualified(fullScale), true)
 
   // Scale alone cannot rescue a latency or idle-SQL breach.
@@ -80,6 +81,7 @@ test('SM-2 scaled row reports the ACTUAL attached watcher count, not the request
   assert.equal(row.samples, 10)
   assert.equal(row.concurrency, 'multiplexed-streams')
   assert.equal(row.idle_sql, 0)
+  assert.equal(row.streams_delivered, undefined)
   // All the latency evidence in the world cannot make a partial pool qualify.
   assert.equal(sm2RowQualified({ ...row, watchers: 4, sessions_requested: 1000 }), false)
 })
@@ -94,15 +96,33 @@ test('sm2AttachedCount counts only streams that established; errors never inflat
 })
 
 test('SM-2 reduced pool and under-sampled row cannot be reported as qualified', () => {
-  const good = { p95_ms: 20, p99_ms: 50, idle_sql: 0, watchers: 1000, sessions_requested: 1000, samples: 30 }
+  const good = { p95_ms: 20, p99_ms: 50, idle_sql: 0, watchers: 1000, sessions_requested: 1000, samples: 30, streams_delivered: 1000 }
   assert.equal(sm2RowQualified(good), true)
   // Fewer than 1000 attached watchers at the AC's scale -> never qualified.
-  assert.equal(sm2RowQualified({ ...good, watchers: 999 }), false)
-  assert.equal(sm2RowQualified({ ...good, watchers: 1 }), false)
+  assert.equal(sm2RowQualified({ ...good, watchers: 999, streams_delivered: 999 }), false)
+  assert.equal(sm2RowQualified({ ...good, watchers: 1, streams_delivered: 1 }), false)
   // A p95 from too few samples is not evidence, even if watchers==1000.
   assert.equal(sm2RowQualified({ ...good, samples: 3 }), false)
   // Idle SQL at full pool must be zero.
   assert.equal(sm2RowQualified({ ...good, idle_sql: 12 }), false)
+})
+
+// Verified gap 1: latency samples cover only ~60 of 1000 streams. A partial
+// fan-out (streams_delivered < watchers) must NOT qualify even with perfect
+// latency; only a full 1000/1000 delivery proof passes.
+test('SM-2 fan-out proof: partial delivery never qualifies, full delivery does', () => {
+  const base = { p95_ms: 5, p99_ms: 16, idle_sql: 0, watchers: 1000, sessions_requested: 1000, samples: 60 }
+  // Full delivery passes.
+  assert.equal(sm2RowQualified({ ...base, streams_delivered: 1000 }), true)
+  // The exact overclaim the gap describes: 60 proven, 1000 claimed.
+  assert.equal(sm2RowQualified({ ...base, streams_delivered: 60 }), false)
+  // Any shortfall fails, even a single stream short.
+  assert.equal(sm2RowQualified({ ...base, streams_delivered: 999 }), false)
+  // Missing / non-integer fan-out field fails closed.
+  assert.equal(sm2RowQualified(base), false)
+  assert.equal(sm2RowQualified({ ...base, streams_delivered: '1000' }), false)
+  // Over-delivery (impossible) also fails — the count must equal watchers.
+  assert.equal(sm2RowQualified({ ...base, streams_delivered: 1001 }), false)
 })
 
 test('sm2RowFromMeasurements derives p95/p99 from real samples with an honest count', () => {
@@ -115,6 +135,15 @@ test('sm2RowFromMeasurements derives p95/p99 from real samples with an honest co
   assert.ok(row.p99_ms >= row.p95_ms)
   assert.equal(row.samples, 10)
   assert.equal(row.watchers, 1000)
+})
+
+test('SM-2 row carries the measured streams_delivered value verbatim', () => {
+  const args = {
+    wakeLatencies: [10, 20, 30], eventLoopLags: [1, 2], idleSql: 0,
+    attachedWatchers: 1000, sessionsRequested: 1000, streamsDelivered: 1000,
+  }
+  assert.equal(sm2RowFromMeasurements(args).streams_delivered, 1000)
+  assert.equal(sm2RowFromMeasurements({ ...args, streamsDelivered: 60 }).streams_delivered, 60)
 })
 
 test('parseQualifyArgs: defaults, bounds, enums, remote pairing', () => {
