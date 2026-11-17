@@ -10,8 +10,9 @@ import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
 import {
-  CANARY_BOOT_SEC, CANARY_WAIT_SEC, classifyLane, collect, makeSnapshot, main, passes,
-  resolveCanaryCwd, resolveDispatchPath, SEATS,
+  CANARY_BOOT_SEC, CANARY_PROFILE_TIMEOUT_MS, CANARY_WAIT_SEC, classifyLane, collect,
+  makeSnapshot, main, NPM_GLOBAL_CODEX, passes, resolveCanaryCwd, resolveDispatchPath,
+  SEATS, selectCodexPath,
 } from '../scripts/advisor-canary.mjs'
 
 const LANES = Object.keys(SEATS)
@@ -58,6 +59,16 @@ test('timeouts are realistic bounded budgets, not the old 3s/2s values', () => {
   assert.equal(CANARY_WAIT_SEC, 180)
   assert.ok(CANARY_BOOT_SEC >= 120, 'boot must accommodate a slow AGY adapter')
   assert.ok(CANARY_WAIT_SEC >= 180, 'wait must accommodate a full prompt round')
+})
+
+test('oc profile producer timeout is raised to 30s (cold runs exceed 5s)', () => {
+  assert.equal(CANARY_PROFILE_TIMEOUT_MS, 30_000)
+})
+
+test('codex selector prefers the npm-global binary and realpaths it', () => {
+  const rp = (p) => `/real${p}`
+  assert.equal(selectCodexPath(NPM_GLOBAL_CODEX, '/stale/.local/bin/codex', rp), `/real${NPM_GLOBAL_CODEX}`)
+  assert.equal(selectCodexPath(null, '/stale/.local/bin/codex', rp), '/real/stale/.local/bin/codex')
 })
 
 test('classifyLane: outbox present is ok; a still-running wait is NOT down until budget elapses', () => {

@@ -17,7 +17,7 @@
 // <cwd>/.tmux-teams/runner-logs/canary-* stay inspectable. Outbox files are an
 // accepted side effect of a canary run.
 import { spawnSync } from 'node:child_process'
-import { accessSync, constants as fsConstants, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { accessSync, constants as fsConstants, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -29,6 +29,10 @@ const TM_VERSION = '0.51.0'
 // these to "make the canary fast" — that recreates the false negative.
 export const CANARY_BOOT_SEC = 120
 export const CANARY_WAIT_SEC = 180
+// A cold opencode execution-profile run reaches ~4.8s+ and occasionally exceeds
+// a 5s cap, classifying oc down before any dispatch. Only the profile producer
+// gets this budget; dispatch/wait budgets above stay unchanged.
+export const CANARY_PROFILE_TIMEOUT_MS = 30_000
 // The companion's inactivity lease must outlive the whole window, or a slow
 // boot cancels itself before it can write an outbox. Poll modestly. Spawn wall
 // clocks get a small margin over the dispatcher's reporting bounds so a local
@@ -45,7 +49,7 @@ export const SEATS = Object.freeze({
   codex: 'gpt-6.1-terra',
   claude: 'claude-fable-5',
   agy: 'gemini-4-hydrogen-high',
-  oc: 'opencode/minimax-m3.1-flash-free',
+  oc: 'opencode/deepseek-v4.1-flash-free',
 })
 
 export function resolveDispatchPath(configPath = CONFIG) {
@@ -75,6 +79,18 @@ function bin(name) {
   }
   return null
 }
+// npm-global codex (fresh) beats the PATH-first ~/.local/bin/codex symlink,
+// which points at an older pinned copy and trips execution_profile_drift.
+export const NPM_GLOBAL_CODEX = '/opt/homebrew/bin/codex'
+export const NPM_GLOBAL_BIN_DIR = '/opt/homebrew/bin'
+// Pure selector: prefer the npm-global candidate, resolve via realpath (the
+// codex-advisor recipe uses `realpath "$(command -v codex)"`). Injectable rp.
+export function selectCodexPath(npmGlobal, fallback, rp = realpathSync) {
+  const chosen = npmGlobal || fallback
+  if (!chosen) return null
+  try { return rp(chosen) } catch { return chosen }
+}
+
 function envFor(name, dispatch, cwd) {
   const model = SEATS[name]
   const path = `${homedir()}/.bun/bin:${homedir()}/.local/bin:${process.env.PATH ?? ''}`
@@ -85,9 +101,14 @@ function envFor(name, dispatch, cwd) {
     ACP_DISPATCH_POLL_SEC: String(CANARY_POLL_SEC),
   }
   if (name === 'codex') {
-    const codex = bin('codex')
+    const npmGlobal = existsSync(NPM_GLOBAL_CODEX) ? NPM_GLOBAL_CODEX : null
+    const fallback = bin('codex')
+    const codex = selectCodexPath(npmGlobal, fallback)
     if (!codex) return null
-    return { ...base, CODEX_PATH: codex, ACP_MODEL: model, ACP_EXPECT_MODEL: model }
+    // The companion re-resolves `which codex` from its inherited PATH and
+    // compares it to CODEX_PATH; keep both on the same (fresh) binary.
+    const codexPath = npmGlobal ? `${NPM_GLOBAL_BIN_DIR}:${path}` : path
+    return { ...base, PATH: codexPath, CODEX_PATH: codex, ACP_MODEL: model, ACP_EXPECT_MODEL: model }
   }
   if (name === 'claude') return { ...base, ANTHROPIC_MODEL: model, ACP_EXPECT_MODEL: model }
   if (name === 'agy') {
@@ -98,7 +119,7 @@ function envFor(name, dispatch, cwd) {
   // oc: generate the pinned execution profile; without it receipt mode cannot run.
   const producer = join(dispatch, '..', 'opencode-execution-profile.mjs')
   const p = spawnSync(process.execPath, [producer, join(cwd, '.tmux-teams', 'opencode-execution-profile.json')],
-    { env: base, encoding: 'utf8', timeout: 5000 })
+    { env: base, encoding: 'utf8', timeout: CANARY_PROFILE_TIMEOUT_MS })
   if (p.status !== 0) return null
   const out = {}
   for (const line of p.stdout.split('\n')) {
