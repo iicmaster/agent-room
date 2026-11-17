@@ -1,0 +1,121 @@
+{
+  "candidate": "v1.0.0",
+  "record_type": "release-candidate-evidence",
+  "built_at": "2026-11-17T10:29:53.991Z",
+  "head_sha": "7aaff958d337e99d54befdff2037d52aeebdfe0c",
+  "branch": "feat/agent-room-v1.0",
+  "package_digest": {
+    "algorithm": "sha256",
+    "file": "agent-room-claude-code/.claude-plugin/plugin.json",
+    "sha256": "cd1664a99b605257c93e44502a03226ba423de84b586b586f27e798154e02003",
+    "source": "materialized by scripts/package-release.mjs --out <fresh-temp-dir>; never overwrite an existing artifact"
+  },
+  "qualify": {
+    "verdict": "qualified",
+    "exit_code": 0,
+    "cells": {
+      "PREREQ": "qualified",
+      "RECEIPT": "qualified",
+      "SM-1": "qualified",
+      "SM-2": "qualified",
+      "SM-3": "qualified",
+      "SM-C1": "qualified",
+      "SM-C2": "qualified",
+      "FULL-SUITE": "qualified",
+      "PACKAGING": "qualified",
+      "overall": "qualified"
+    },
+    "sm2": {
+      "watchers": 1000,
+      "samples": 60,
+      "idle_sql": 0,
+      "rounds": [
+        {
+          "p95_ms": 4.83641599999828,
+          "p99_ms": 18.823458000006212,
+          "watchers": 1000,
+          "samples": 60,
+          "idle_sql": 0
+        },
+        {
+          "p95_ms": 6.138958000003186,
+          "p99_ms": 16.314542000000074,
+          "watchers": 1000,
+          "samples": 60,
+          "idle_sql": 0
+        },
+        {
+          "p95_ms": 4.775250000006054,
+          "p99_ms": 15.274165999988327,
+          "watchers": 1000,
+          "samples": 60,
+          "idle_sql": 0
+        }
+      ],
+      "concurrency": "multiplexed 1000 streams / 1 Node process / WATCH_CONCURRENT_MAX=1500",
+      "streams_delivered": 1000,
+      "streams_delivered_note": "Measured by standalone cellSm2 rerun on this tree (fix/sm2-fanout HEAD): 1000/1000 in all 3 rounds. The code assertion streams_delivered === watchers is enforced in sm2RowQualified; a partial fan-out fails closed."
+    },
+    "provenance": "verdict/cells/SM-2 raw arrays from successful qualify run /tmp/qualify-final2.json (workspace sm2-scale, sha e92f72ef..., 1000 sessions, 3 rounds); streams_delivered from standalone cellSm2 rerun on the evidence HEAD after the fan-out-proof fix."
+  },
+  "prereqs": {
+    "claude": "2.1.326",
+    "codex": "0.169.0",
+    "agy": "1.5.10",
+    "opencode": "1.18.21",
+    "caddy": "v2.11.9"
+  },
+  "full_suite": {
+    "baseline_rev": "3e7f291",
+    "baseline_rev_full": "3e7f2918c4214bc64d6516afb5fc5f56c2924f82",
+    "pre_existing_failure_count": 22,
+    "pre_existing_failures": [
+      "a failing claim write answers request_failed with zero liveness drift, then recovers",
+      "a port already bound fails the second boot diagnosably and leaves the first unaffected",
+      "a pre-1.3 v2 store (no realms table, NOT NULL creator) converges on open and bootstraps",
+      "A's capability with B's selectors is session_credential_invalid and writes nothing",
+      "AC1_SECOND_BOOT_ZERO_WRITES: 2nd boot of openRoomLog and startServer plus GET /api/session-principals performs 0 SQLite writes",
+      "an authenticated request refreshes the durable claim, keeping a live Actor inside the 7-day prune",
+      "any authenticated request refreshes liveness: last_seen advances, connected_since holds",
+      "capacity evicts oldest-expired-then-oldest and keeps live sessions bounded",
+      "claimsTtlMs is operator-tunable via startServer",
+      "connection churn: 100 connect/authenticate/bind/send/disconnect cycles all succeed, hold the server at its post-warmup FD baseline (±5), and leak zero sockets",
+      "first boot mints the realm and the implicit Broadcast Room with no fabricated creator",
+      "first conversation: two real MCP children converse through one real WAL server, cursors persist, a third Actor is denied",
+      "memory pass: a bounded churn workload under the leak tracker holds the least-squares RSS slope at or below 2% of starting RSS",
+      "one mechanism, two issuance paths: sliding TTL, capacity, and revoke behave identically (row 14, DR-2 ratified)",
+      "REL-2 continuity drill: randomized SIGKILL/restore cycles under continuous traffic lose nothing, duplicate nothing, and keep sequences and cursors valid",
+      "REL-3 compressed validation: the soak harness runs the candidate artifact green on a 5-minute compressed profile",
+      "restart survival: acknowledged traffic, sequences, reply links, claims, rooms, and cursors survive a real SIGKILL and restart",
+      "Story 7.1: multiple in-flight requests share one pin count; the fence holds until the LAST one ends",
+      "Story 7.1: protected predecessors survive far beyond the bound, and their release drains without a further supersession",
+      "the CLI family: agent-room sessions lists, agent-room dm sends by address, send --to matches",
+      "the remote dress rehearsal: two identity sandboxes run the full governance flow over real TLS with zero local-token requests, and multi-client churn holds the FD corridor with zero leaks",
+      "the server touch wiring refreshes durable recency in one operation and clock"
+    ],
+    "new_failures": [],
+    "method": "docs/epic-boundary-gate.md set-diff (comm -23 NEW / comm -13 FIXED); baseline at 3e7f291"
+  },
+  "validate": {
+    "success": true,
+    "errors": [],
+    "warnings": [],
+    "contents": []
+  },
+  "scope": {
+    "supported": "loopback single-host",
+    "not_qualified": [
+      "remote HTTPS/Caddy end-to-end — not measured",
+      "real Claude Code --channels host — not measured",
+      "1000 OS processes — not measured",
+      "1000 Bearer across >=4 actors — not measured",
+      "crash mid-/resume — not measured"
+    ]
+  },
+  "accepted_limitations": [
+    "narrow TOML parser",
+    "no real fault injection on rollback",
+    "advisor canary host-load dependent"
+  ],
+  "tag_policy": "tag vX.Y.Z only when this file's hash matches the candidate digest and no cell is failed/inconclusive"
+}

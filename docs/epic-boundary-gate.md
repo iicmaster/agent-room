@@ -4,6 +4,10 @@ Standing process for every epic in the agent-room v1.0 build. Sourced from the
 Epic 1 retrospective (findings F-8, F-9, F-11, F-12, F-13); adopted by operator
 directive on 2026-11-16.
 
+The v1.0.0 candidate's machine-readable evidence record (qualify verdict, SM-2
+raw arrays, package digest, baseline set-diff, validate result, and explicit
+not-qualified scope) lives at `docs/release-evidence/v1.0.0-candidate.json`.
+
 ## Why this exists
 
 Epic 1 shipped five stories, each verified in isolation by black-box E2E, and
