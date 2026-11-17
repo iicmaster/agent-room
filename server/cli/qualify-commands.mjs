@@ -36,7 +36,7 @@ import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 
 import { APP_VERSION, MIN_NODE_VERSION, MIN_SQLITE_VERSION, assertSupportedRuntime } from '../runtime.mjs'
-import { NOFILE_RECOMMENDED, PROTOCOL_HEADER, PROTOCOL_VERSION, WRITE_QUEUE_MAX_BYTES } from '../constants.mjs'
+import { NOFILE_RECOMMENDED, PROTOCOL_HEADER, PROTOCOL_VERSION, SERVER_STARTUP_WAIT_MS, WRITE_QUEUE_MAX_BYTES } from '../constants.mjs'
 import { openWatchStream } from '../client/watch-client.mjs'
 import { probeNofile } from './bootstrap-commands.mjs'
 import { HARNESS_NAMES } from './harness-installer.mjs'
@@ -66,7 +66,7 @@ const SM2_REQUIRED_WATCHERS = 1000
 // spread across the pool; the sample count is reported, never silently faked.
 const SM2_SAMPLE_TARGET = 60
 const SM2_SAMPLE_MIN = 30
-const SM2_WATCH_SETUP_TIMEOUT_MS = 20_000
+const SM2_WATCH_SETUP_TIMEOUT_MS = SERVER_STARTUP_WAIT_MS
 const SM2_IDLE_SETTLE_MS = 2_000
 const SM2_IDLE_SQL_WINDOW_MS = 3_000
 const SM2_PROBE_TIMEOUT_MS = 5_000
