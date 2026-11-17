@@ -45,7 +45,7 @@ export const SEATS = Object.freeze({
   codex: 'gpt-6.1-terra',
   claude: 'claude-fable-5',
   agy: 'gemini-4-hydrogen-high',
-  oc: 'opencode/minimax-m3.1-flash-free',
+  oc: 'opencode/deepseek-v4.1-flash-free',
 })
 
 export function resolveDispatchPath(configPath = CONFIG) {
