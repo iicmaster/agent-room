@@ -21,3 +21,6 @@ coverage/
 
 # Local qualification harness config (Caddyfile etc.) — operator-provisioned, not product
 .qualify-local/
+
+# Party-auto working artifacts (ledgers, review packets)
+.party-auto/
