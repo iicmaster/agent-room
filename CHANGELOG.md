@@ -2,6 +2,23 @@
 
 All notable changes to Agent Room are documented in this file.
 
+## 1.1.0 - 2026-11-23
+
+Standalone onboarding ergonomics, remote HTTPS / crash-recovery E2E qualification, and live-boundary bug fixes.
+
+### Added
+
+- **Standalone raw-clone `--install` / `--print` resolution (`server/cli/harness-installer.mjs`, `README.md`)**: When invoked outside a plugin runtime (`CLAUDE_PLUGIN_ROOT` unset), `bootstrap --harness <h> --install|--print` resolves and writes the concrete `<package>/server/mcp-stdio.mjs` entrypoint (and safely shell-escapes `generic.sh`), while packaged bundles (`mcp.json`, `templates/*`) and plugin runtime mode preserve `${PLUGIN_ROOT}` / `${CLAUDE_PLUGIN_ROOT}` for version-agnostic cache upgrades.
+- **Session-principal resolution in `agent-room allow` (`server/cli/held-commands.mjs`)**: Added `/api/session-principals` (Source 3) to `resolveChatIdCandidates` so `agent-room allow <chat-id> [--fingerprint]` works out of the box for v0.9+/v1.0/v1.1 principals over local or remote HTTPS links without requiring legacy `/api/presence` rows first.
+- **Release qualification evidence (`docs/release-evidence/v1.1.0-candidate.json`)**: Recorded black-box E2E results across Caddy v2.11.9 HTTPS (streaming DM wake + reconnect catch-up + strict `NODE_EXTRA_CA_CERTS` failure without CA), crash-mid-`/resume` SIGKILL recovery (post-commit and pre-commit), and Claude Code 2.1.330 `--channels` wire probe.
+
+### Fixed
+
+- **TOML string quoting & parsing (`server/cli/harness-installer.mjs`)**: Replaced `.replace(/'/g, '"')` in `tomlValueMatches`, `renderTomlTable`, and `mergeToml` with proper TOML v1.0 literal vs basic string handling (`formatTomlString`, `parseTomlValue`), fixing paths containing spaces, apostrophes, double quotes, and backslashes.
+- **`agent-room wait` bootstrap readiness (`server/cli/wait-commands.mjs`)**: Accept initialized v1.0 `sessions/<scope>/session.json` principals alongside legacy `config.json` instead of falsely refusing `not_set_up` after `agent-room bootstrap`.
+- **MCP transient `agent_id_taken` auto-recovery (`server/mcp-stdio.mjs`)**: Do not permanently brick/exit the MCP adapter (`sessionPrincipalFatalError` / `onFatalExit`) on transient `agent_id_taken` collisions; non-addressed tools stay operational and `room_status` / addressed sends automatically re-acquire the requested name once the conflicting holder releases or its lease expires.
+- **Bootstrap guidance (`server/cli/bootstrap-commands.mjs`)**: Updated human hint to lead with `agent-room read --peer <address> (or --room <room_id>)`.
+
 ## 1.0.1 - 2026-11-23
 
 Runtime stability, resource-leak elimination, and backpressure/replay reliability release.

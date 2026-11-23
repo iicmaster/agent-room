@@ -712,8 +712,7 @@ export function createMcpServer({
   let sessionPrincipalFatalError = null
   const sessionPrincipalOn = sessionPrincipalEnabled(env)
   const isFatalSessionPrincipalError = error => (
-    error instanceof AgentRoomRuntimeError
-    && (error.code === 'agent_id_taken' || error.code === 'invalid_request')
+    error instanceof AgentRoomRuntimeError && error.code === 'invalid_request'
   )
   const startSessionPrincipalOnce = () => {
     if (!sessionPrincipalOn || sessionPrincipalArmed || shutdownPromise !== null || sessionPrincipalFatalError !== null) return
@@ -732,6 +731,10 @@ export function createMcpServer({
           errorOutput.write(`agent-room MCP session principal failed: ${error.code}: ${error.message}\n`, () => {
             onFatalExit?.(error)
           })
+        } else if (error instanceof AgentRoomRuntimeError && error.code === 'agent_id_taken') {
+          // Occupancy collisions are transient (peer releasing or 45 s lease expiry);
+          // keep non-addressed tools operational and allow later calls to re-arm.
+          errorOutput.write(`agent-room MCP session principal deferred (${error.code}): ${error.message}\n`)
         }
       }
     })()
@@ -911,13 +914,18 @@ export function createMcpServer({
         return toolResult(await readyClient.listRooms({ signal }))
       }
       if (name === 'room_status') {
-        if (sessionPrincipalOn && readyClient.sessionAddress === null && sessionPrincipalPromise !== null) {
-          await sessionPrincipalPromise
-          if (sessionPrincipalFatalError !== null) {
-            return toolResult({
-              code: sessionPrincipalFatalError.code,
-              message: sessionPrincipalFatalError.message,
-            }, true)
+        if (sessionPrincipalOn && readyClient.sessionAddress === null) {
+          if (!sessionPrincipalArmed && shutdownPromise === null && sessionPrincipalFatalError === null) {
+            startSessionPrincipalOnce()
+          }
+          if (sessionPrincipalPromise !== null) {
+            await sessionPrincipalPromise
+            if (sessionPrincipalFatalError !== null) {
+              return toolResult({
+                code: sessionPrincipalFatalError.code,
+                message: sessionPrincipalFatalError.message,
+              }, true)
+            }
           }
         }
         const status = await readyClient.status({ signal })

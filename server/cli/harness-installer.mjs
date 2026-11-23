@@ -23,8 +23,9 @@ import {
   writeFile,
 } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { isDeepStrictEqual } from 'node:util'
 
 export const HARNESS_NAMES = Object.freeze([
   'claude',
@@ -44,9 +45,28 @@ const GATE = Object.freeze({
 })
 
 const PLUGIN_ROOT_TOKEN = '${PLUGIN_ROOT}'
+const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 
-// The five template files are the single content source for --print/--install
-// (spec Code Map). They carry ONLY the required MCP entrypoint — no tokens.
+// Standalone raw git-clone installs resolve the real package path on disk
+// because non-plugin hosts never expand ${PLUGIN_ROOT}; live plugin runtimes
+// (CLAUDE_PLUGIN_ROOT set, or AGENT_ROOM_PLUGIN_MODE=1) keep the parameterized
+// token so cache upgrades stay decoupled across versions.
+function resolveInstallRoot(env = process.env) {
+  const inClaudePlugin = typeof env?.CLAUDE_PLUGIN_ROOT === 'string' && env.CLAUDE_PLUGIN_ROOT.trim().length > 0
+  if (inClaudePlugin || env?.AGENT_ROOM_PLUGIN_MODE === '1') {
+    return { root: PLUGIN_ROOT_TOKEN, pluginMode: true }
+  }
+  return { root: PACKAGE_ROOT, pluginMode: false }
+}
+
+function stdioEntrypoint(env = process.env) {
+  const { root, pluginMode } = resolveInstallRoot(env)
+  return pluginMode ? `${root}/server/mcp-stdio.mjs` : join(root, 'server', 'mcp-stdio.mjs')
+}
+
+// The five template files are the single canonical format specification for
+// --print/--install. Raw templates retain ${PLUGIN_ROOT} for plugin bundles;
+// standalone installs substitute PACKAGE_ROOT dynamically at render/merge time.
 const TEMPLATE_DIR = join(dirname(fileURLToPath(import.meta.url)), 'templates')
 const TEMPLATE_FILE = Object.freeze({
   claude: 'claude.json',
@@ -55,7 +75,7 @@ const TEMPLATE_FILE = Object.freeze({
   codex: 'codex.toml',
   generic: 'generic.sh',
 })
-function templateFor(harness) {
+export function templateFor(harness) {
   return readFileSync(join(TEMPLATE_DIR, TEMPLATE_FILE[harness]), 'utf8')
 }
 
@@ -85,17 +105,16 @@ function targetPath(harness, env) {
 
 // The single required MCP entry, per harness format. `command`/`args` are the
 // stdio entrypoint only — no env, no headers, no tokens.
-const STDIO_ARGS = [`${PLUGIN_ROOT_TOKEN}/server/mcp-stdio.mjs`]
-
-function requiredEntry(harness) {
+function requiredEntry(harness, env = process.env) {
+  const args = [stdioEntrypoint(env)]
   switch (harness) {
     case 'claude':
     case 'antigravity':
-      return { format: 'json', pointer: ['mcpServers', 'agent-room'], value: { command: 'node', args: STDIO_ARGS } }
+      return { format: 'json', pointer: ['mcpServers', 'agent-room'], value: { command: 'node', args } }
     case 'opencode':
-      return { format: 'json', pointer: ['mcp', 'agent-room'], value: { command: 'node', args: STDIO_ARGS } }
+      return { format: 'json', pointer: ['mcp', 'agent-room'], value: { command: 'node', args } }
     case 'codex':
-      return { format: 'toml', table: 'mcp_servers.agent-room', keys: { command: 'node', args: STDIO_ARGS } }
+      return { format: 'toml', table: 'mcp_servers.agent-room', keys: { command: 'node', args } }
     case 'generic':
       return { format: 'shell' }
     default:
@@ -196,37 +215,99 @@ function parseTomlAssignments(text, label) {
   return tables
 }
 
-function tomlValueMatches(raw, expected) {
-  // Expected args is an array of one string; command is a bare string.
-  try {
-    return JSON.parse(raw.replace(/'/g, '"')) === expected
-  } catch {
-    return raw.replace(/^"|"$/g, '') === expected
-  }
+export function formatTomlString(value) {
+  const str = String(value)
+  // TOML literal strings ('...') forbid backslash escapes and cannot contain ',
+  // CR, or control chars; fall back to TOML basic strings (JSON escaping) when
+  // an apostrophe or control character is present.
+  if (!/['\r\n\u0000-\u001f\u007f]/.test(str)) return `'${str}'`
+  return JSON.stringify(str)
 }
 
-function renderTomlTable(table, keys) {
+function parseTomlStringAt(text, startIndex) {
+  const quote = text[startIndex]
+  if (quote === "'") {
+    const close = text.indexOf("'", startIndex + 1)
+    if (close === -1) return { ok: false }
+    const val = text.slice(startIndex + 1, close)
+    if (/[\r\n]/.test(val)) return { ok: false }
+    return { ok: true, value: val, nextIndex: close + 1 }
+  }
+  if (quote === '"') {
+    let cursor = startIndex + 1
+    let escaped = false
+    while (cursor < text.length) {
+      const ch = text[cursor]
+      if (escaped) { escaped = false; cursor += 1; continue }
+      if (ch === '\\') { escaped = true; cursor += 1; continue }
+      if (ch === '"') {
+        try {
+          return { ok: true, value: JSON.parse(text.slice(startIndex, cursor + 1)), nextIndex: cursor + 1 }
+        } catch {
+          return { ok: false }
+        }
+      }
+      if (ch === '\r' || ch === '\n') return { ok: false }
+      cursor += 1
+    }
+  }
+  return { ok: false }
+}
+
+export function parseTomlValue(raw) {
+  const s = String(raw).trim()
+  if (s.startsWith("'") || s.startsWith('"')) {
+    const parsed = parseTomlStringAt(s, 0)
+    if (!parsed.ok || s.slice(parsed.nextIndex).trim() !== '') return { ok: false }
+    return { ok: true, value: parsed.value }
+  }
+  if (s.startsWith('[')) {
+    let cursor = 1
+    const items = []
+    while (cursor < s.length) {
+      while (cursor < s.length && /\s/.test(s[cursor])) cursor += 1
+      if (s[cursor] === ']') {
+        return s.slice(cursor + 1).trim() === '' ? { ok: true, value: items } : { ok: false }
+      }
+      const item = parseTomlStringAt(s, cursor)
+      if (!item.ok) return { ok: false }
+      items.push(item.value)
+      cursor = item.nextIndex
+      while (cursor < s.length && /\s/.test(s[cursor])) cursor += 1
+      if (s[cursor] === ',') { cursor += 1; continue }
+      if (s[cursor] === ']') {
+        return s.slice(cursor + 1).trim() === '' ? { ok: true, value: items } : { ok: false }
+      }
+      return { ok: false }
+    }
+  }
+  return { ok: false }
+}
+
+export function tomlValueMatches(raw, expected) {
+  const parsed = parseTomlValue(raw)
+  return parsed.ok && isDeepStrictEqual(parsed.value, expected)
+}
+
+export function renderTomlTable(table, keys) {
   const addition = [`[${table}]`]
   for (const [key, expected] of Object.entries(keys)) {
     const rendered = Array.isArray(expected)
-      ? JSON.stringify(expected).replace(/"/g, "'")
-      : `'${String(expected).replace(/'/g, "\\'")}'`
+      ? `[${expected.map(item => formatTomlString(item)).join(', ')}]`
+      : formatTomlString(expected)
     addition.push(`${key} = ${rendered}`)
   }
   return `${addition.join('\n')}\n`
 }
 
-function mergeToml(originalText, table, keys, label) {
+export function mergeToml(originalText, table, keys, label) {
   const assignments = parseTomlAssignments(originalText, label)
   const conflicts = []
   for (const [key, expected] of Object.entries(keys)) {
     const full = `${table}.${key}`
     const raw = assignments.get(full)
     if (raw === undefined) continue
-    const matches = Array.isArray(expected)
-      ? (() => { try { return JSON.stringify(JSON.parse(raw.replace(/'/g, '"'))) === JSON.stringify(expected) } catch { return false } })()
-      : tomlValueMatches(raw, expected)
-    if (!matches) conflicts.push({ key: full, existing: raw, required: expected })
+    if (!tomlValueMatches(raw, expected)) conflicts.push({ key: full, existing: raw, required: expected })
   }
   if (conflicts.length > 0) {
     const requiredRoot = renderTomlTable(table, keys)
@@ -248,10 +329,19 @@ function mergeToml(originalText, table, keys, label) {
 
 const GENERIC_MARKER = '# Generated by `agent-room bootstrap --harness generic --install`.'
 
-function mergeShell(originalText, label) {
-  const body = templateFor('generic')
+function renderShellEnv(env = process.env) {
+  const { root, pluginMode } = resolveInstallRoot(env)
+  if (pluginMode) return templateFor('generic')
+  const entrypoint = stdioEntrypoint(env)
+  // Escape double-quote shell metacharacters while keeping ${PLUGIN_ROOT} out.
+  const escaped = entrypoint.replace(/["\\$`]/g, '\\$&')
+  return templateFor('generic').replace(`${PLUGIN_ROOT_TOKEN}/server/mcp-stdio.mjs`, () => escaped)
+}
+
+function mergeShell(originalText, label, env = process.env) {
+  const body = renderShellEnv(env)
   if (originalText.length === 0) return { text: body, mode: 0o700, changed: true }
-  // Idempotent: if our marker is present, leave the file byte-identical.
+  // Idempotent: if our marker is present and entrypoint matches, keep byte-identical.
   if (originalText.includes(GENERIC_MARKER)) {
     return { text: originalText, mode: null, changed: false }
   }
@@ -349,17 +439,31 @@ export function harnessConfig(harness, env = process.env) {
     throw new ConfigError('invalid_harness',
       `unknown harness "${harness}"; valid values: ${HARNESS_NAMES.join(', ')}`)
   }
-  return { harness, path: targetPath(harness, env), gate: GATE[harness], required: requiredEntry(harness) }
+  return { harness, path: targetPath(harness, env), gate: GATE[harness], required: requiredEntry(harness, env) }
 }
 
 export function buildSnippet(harness, env = process.env) {
   const cfg = harnessConfig(harness, env)
+  const req = cfg.required
+  const { pluginMode } = resolveInstallRoot(env)
+  let snippet
+  if (pluginMode) {
+    snippet = templateFor(harness)
+  } else if (req.format === 'toml') {
+    snippet = renderTomlTable(req.table, req.keys).trimEnd()
+  } else if (req.format === 'json') {
+    const rootObj = {}
+    setPointer(rootObj, req.pointer, req.value)
+    snippet = JSON.stringify(rootObj, null, 2)
+  } else {
+    snippet = renderShellEnv(env).trimEnd()
+  }
   return {
     harness,
     path: cfg.path,
-    format: cfg.required.format,
+    format: req.format,
     gate: cfg.gate,
-    snippet: templateFor(harness),
+    snippet,
     quotedPath: quoteShellPath(cfg.path),
   }
 }
@@ -390,7 +494,7 @@ export async function installHarness(harness, env = process.env) {
   } else if (req.format === 'toml') {
     merged = mergeToml(originalText, req.table, req.keys, label)
   } else {
-    merged = mergeShell(originalText, label)
+    merged = mergeShell(originalText, label, env)
   }
 
   if (!merged.changed) {

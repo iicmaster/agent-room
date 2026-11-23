@@ -4,9 +4,10 @@
 // overrides, so the developer's real ~/.claude / ~/.codex / etc. are untouched.
 
 import assert from 'node:assert/strict'
+import { existsSync } from 'node:fs'
 import { mkdtemp, readFile, readdir, rm, stat, writeFile, mkdir, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
@@ -18,7 +19,14 @@ import {
   HARNESS_NAMES,
   harnessConfig,
   installHarness,
+  mergeToml,
+  renderTomlTable,
+  templateFor,
+  tomlValueMatches,
 } from '../server/cli/harness-installer.mjs'
+
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+const RESOLVED_ENTRYPOINT = join(REPO_ROOT, 'server', 'mcp-stdio.mjs')
 
 const OVERRIDE_KEYS = {
   claude: 'AGENT_ROOM_CLAUDE_CONFIG',
@@ -33,6 +41,8 @@ async function sandbox(t) {
   const dir = await mkdtemp(join(tmpdir(), 'ar-5-1-'))
   t.after(() => rm(dir, { recursive: true, force: true }))
   const env = { ...process.env }
+  delete env.CLAUDE_PLUGIN_ROOT
+  delete env.AGENT_ROOM_PLUGIN_MODE
   for (const [harness, key] of Object.entries(OVERRIDE_KEYS)) {
     env[key] = join(dir, `${harness}${harness === 'codex' ? '.toml' : harness === 'generic' ? '.sh' : '.json'}`)
   }
@@ -76,11 +86,16 @@ const TEMPLATE_FILES = {
   opencode: 'opencode.json', generic: 'generic.sh',
 }
 
-test('all five template files exist and are the exact snippet source (no tokens)', async () => {
+test('all five template files retain ${PLUGIN_ROOT}, while standalone buildSnippet resolves concrete package root', async () => {
   const dir = fileURLToPath(new URL('../server/cli/templates/', import.meta.url))
   for (const harness of HARNESS_NAMES) {
     const onDisk = await readFile(join(dir, TEMPLATE_FILES[harness]), 'utf8')
-    assert.equal(buildSnippet(harness).snippet, onDisk, `${harness} snippet == template bytes`)
+    assert.equal(templateFor(harness), onDisk, `${harness} raw template == disk bytes`)
+    assert.equal(buildSnippet(harness, { CLAUDE_PLUGIN_ROOT: '/plugin/cache/agent-room' }).snippet.trimEnd(), onDisk.trimEnd(), `${harness} plugin mode keeps \${PLUGIN_ROOT}`)
+    const standalone = buildSnippet(harness, {})
+    assert.ok(!standalone.snippet.includes('${PLUGIN_ROOT}'), `${harness} standalone snippet resolves template token`)
+    assert.ok(standalone.snippet.includes('mcp-stdio.mjs'), `${harness} points at server/mcp-stdio.mjs`)
+    assert.ok(existsSync(RESOLVED_ENTRYPOINT), 'resolved entrypoint exists on disk')
     noToken(onDisk)
   }
 })
@@ -181,7 +196,13 @@ test('AC2 first install merges only the required key, preserves user keys/hooks,
   assert.deepEqual(merged.theme, 'dark', 'user key preserved')
   assert.deepEqual(merged.hooks, original.hooks, 'user hooks preserved 100%')
   assert.deepEqual(merged.mcpServers.other, { command: 'other' }, 'other MCP server preserved')
-  assert.deepEqual(merged.mcpServers['agent-room'], { command: 'node', args: ['${PLUGIN_ROOT}/server/mcp-stdio.mjs'] })
+  assert.deepEqual(merged.mcpServers['agent-room'], { command: 'node', args: [RESOLVED_ENTRYPOINT] })
+
+  // In plugin runtime mode (CLAUDE_PLUGIN_ROOT set), keep ${PLUGIN_ROOT} parameterized.
+  const pluginPath = join(dirname(path), 'claude-plugin.json')
+  await installHarness('claude', { ...env, AGENT_ROOM_CLAUDE_CONFIG: pluginPath, CLAUDE_PLUGIN_ROOT: '/plugins/agent-room' })
+  const pluginMerged = JSON.parse(await readFile(pluginPath, 'utf8'))
+  assert.deepEqual(pluginMerged.mcpServers['agent-room'], { command: 'node', args: ['${PLUGIN_ROOT}/server/mcp-stdio.mjs'] })
 
   const backupStat = await stat(result.backup)
   assert.equal(backupStat.mode & 0o777, 0o600, 'backup is 0o600')
@@ -317,4 +338,14 @@ test('AC2 host config never contains a raw token, even when the flag grammar men
   assert.match(payload.message, /not valid with --install\/--print/)
   assert.doesNotMatch(out.stderr, /ar_inv1_SECRET/, 'token never echoed')
   noToken(out.stdout)
+})
+
+test('TOML quoting handles spaces, apostrophes, double quotes, and backslashes safely and idempotently', () => {
+  const nastyPath = "/tmp/Alice's \"repo\" \\v1/server/mcp-stdio.mjs"
+  const keys = { command: 'node', args: [nastyPath] }
+  const first = mergeToml('model = "gpt-5"\n', 'mcp_servers.agent-room', keys, 'codex.toml')
+  assert.equal(first.changed, true)
+  const second = mergeToml(first.text, 'mcp_servers.agent-room', keys, 'codex.toml')
+  assert.equal(second.changed, false, 'idempotent second merge on nasty TOML path')
+  assert.equal(tomlValueMatches(renderTomlTable('t', { a: [nastyPath] }).split('a = ')[1].trim(), [nastyPath]), true)
 })

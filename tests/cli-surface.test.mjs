@@ -1153,9 +1153,9 @@ test('help and usage carry the verbatim Instructed honesty and never the overcla
   assert.equal(mcp.stderr, '')
   await mcp.close()
 
-  // And structurally: the command module never even mentions the bind route.
+  // And structurally: the command module never even mentions the session bind route.
   const source = readFileSync(HELD_COMMANDS_ENTRY, 'utf8')
-  assert.equal(source.includes('/api/session'), false, 'the CLI commands never send POST /api/session')
+  assert.equal(/(["'])\/api\/session\1/.test(source), false, 'the CLI commands never send POST /api/session')
 })
 
 // --- Review patches: removal from the allowlist, honest diagnostics ---------------

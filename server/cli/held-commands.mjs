@@ -397,6 +397,35 @@ export async function resolveChatIdCandidates({ port, target, sessionToken, plug
       }
     }
   }
+  // Source 3: v0.9+/v1.0 live/retained session principals (GET /api/session-principals).
+  // Remote/local agents bootstrapped via session_principals never bind legacy
+  // /api/session presence rows, so `allow <name>` must resolve them here too.
+  try {
+    const sessions = await roundTrip(
+      targetOf({ port, target }),
+      'GET',
+      '/api/session-principals',
+      protocolHeaders(sessionToken),
+      undefined,
+      CLIENT_REQUEST_TIMEOUT_MS,
+    )
+    if (sessions.status === OK_STATUS && sessions.body?.ok === true) {
+      for (const row of Array.isArray(sessions.body?.result?.sessions) ? sessions.body.result.sessions : []) {
+        if (typeof row.base_name !== 'string' || row.base_name.toLowerCase() !== wanted) continue
+        if (typeof row.fingerprint !== 'string' || row.fingerprint.length === 0) continue
+        const candidate = candidateOf(row.fingerprint)
+        const existing = candidate.sources.find(source => source.kind === 'session')
+        const seenAt = typeof row.last_heartbeat_at === 'string' ? row.last_heartbeat_at : row.allocated_at
+        if (existing === undefined) {
+          candidate.sources.push({ kind: 'session', ...(typeof seenAt === 'string' ? { lastSeen: seenAt } : {}) })
+        } else if (typeof seenAt === 'string' && seenAt > (existing.lastSeen ?? '')) {
+          existing.lastSeen = seenAt
+        }
+      }
+    }
+  } catch {
+    // Narrow mock servers without /api/session-principals fall through to Source 1+2.
+  }
   return [...byFingerprint.values()]
 }
 
@@ -405,8 +434,8 @@ export async function resolveChatIdCandidates({ port, target, sessionToken, plug
 function candidateLines(candidates) {
   return candidates.map(candidate => {
     const described = candidate.sources
-      .map(source => source.kind === 'presence'
-        ? `presence last-seen ${source.lastSeen ?? 'unknown'}`
+      .map(source => (source.kind === 'presence' || source.kind === 'session')
+        ? `${source.kind} last-seen ${source.lastSeen ?? 'unknown'}`
         : source.kind)
       .join('; ')
     return `  candidate: fingerprint ${candidate.fingerprint} — ${described}`

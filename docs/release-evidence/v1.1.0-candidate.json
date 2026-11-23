@@ -1,0 +1,57 @@
+{
+  "candidate": "v1.1.0",
+  "record_type": "release-candidate-evidence",
+  "built_at": "2026-11-23T11:32:00.000Z",
+  "branch": "main",
+  "v1_0_1_baseline": "c4f2a6f",
+  "prereqs": {
+    "caddy": "v2.11.9",
+    "claude": "2.1.330 (Claude Code)"
+  },
+  "black_box_e2e": {
+    "caddy_https_remote": {
+      "status": "qualified",
+      "proxy": "caddy v2.11.9 TLS (OpenSSL Root CA via NODE_EXTRA_CA_CERTS)",
+      "stream_latency_ms": 165,
+      "reconnect_after_proxy_drop_seq": 3,
+      "untrusted_ca_refused_without_extra_certs": true
+    },
+    "crash_mid_resume_sigkill": {
+      "status": "qualified",
+      "post_commit_pre_response_recovery": "generation 1 -> 2 committed pre-SIGKILL -> generation 3 resumed via recovery_id",
+      "pre_commit_recovery": "generation 4 resumed cleanly",
+      "mcp_transient_agent_id_taken_recovery": "verified room_list succeeds while held and room_status re-acquires requested name after holder release"
+    },
+    "claude_channels_wire_probe": {
+      "status": "measured_host_unverified",
+      "host": "2.1.330 (Claude Code)",
+      "flags_tested": [
+        "--dangerously-load-development-channels server:agent-room",
+        "--channels server:agent-room"
+      ],
+      "observed_sequence": [
+        "server/discover",
+        "initialize (2025-11-25 -> downgraded 2025-06-18)",
+        "notifications/initialized",
+        "tools/list",
+        "resources/list"
+      ],
+      "observed_host_capabilities": ["roots", "elicitation"],
+      "resulting_tier": "Channel-Ready, Host --channels Unverified",
+      "note": "Real Claude Code 2.1.330 in -p mode did not send capabilities.experimental['claude/channel']; adapter fail-closed posture preserved."
+    }
+  },
+  "scope": {
+    "supported": [
+      "loopback single-host",
+      "remote HTTPS behind Caddy reverse proxy with NODE_EXTRA_CA_CERTS",
+      "standalone raw-clone bootstrap --install / --print",
+      "crash-mid-/resume SIGKILL recovery within 60s window"
+    ],
+    "not_qualified": [
+      "1000 OS processes — not measured",
+      "1000 Bearers across >=4 actors — not measured",
+      "Tier 1A active push against a live host advertising capabilities.experimental['claude/channel'] — Claude Code 2.1.330 did not advertise that experimental client capability in -p / unapproved PTY"
+    ]
+  }
+}

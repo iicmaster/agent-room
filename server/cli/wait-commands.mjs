@@ -768,33 +768,39 @@ export async function runWaitFamilyCommand(tokens, { sharedDataDir, pluginDataDi
   }
 
   // Identity discipline: the wait reuses the existing installation and
-  // creates nothing. No configured Chat ID → a coded refusal, before any
-  // server is booted or any key is materialized.
+  // creates nothing. Accept either a v1.0 scope session.json (created by
+  // `agent-room bootstrap`) or a legacy config.json (`agent-room setup`). No
+  // configured identity -> coded refusal before any server boot or wait.lock.
+  const scope = sessionScopeKey({ env, pluginDataDir })
   const configPath = join(pluginDataDir, 'config.json')
-  if (!existsSync(configPath)) {
+  let precheckSession = null
+  try { precheckSession = loadSessionState(pluginDataDir, scope) } catch { /* handled cleanly if config absent */ }
+  let config
+  if (existsSync(configPath)) {
+    try {
+      config = loadChatIdConfig(pluginDataDir)
+    } catch (error) {
+      return {
+        status: 'refusal',
+        command: 'wait',
+        code: error?.code ?? 'request_failed',
+        message: error?.message ?? String(error),
+      }
+    }
+  } else if (precheckSession !== null) {
+    config = { chatId: precheckSession.baseName }
+  } else {
     return {
       status: 'refusal',
       command: 'wait',
       code: 'not_set_up',
-      message: 'No Chat ID is configured for this installation. Run "agent-room setup --chat-id <chat-id>" first (it never needs a terminal), then start the wait again.',
-    }
-  }
-  let config
-  try {
-    config = loadChatIdConfig(pluginDataDir)
-  } catch (error) {
-    return {
-      status: 'refusal',
-      command: 'wait',
-      code: error?.code ?? 'request_failed',
-      message: error?.message ?? String(error),
+      message: 'No Chat ID is configured for this installation. Run "agent-room bootstrap" (or legacy "agent-room setup --chat-id <chat-id>") first, then start the wait again.',
     }
   }
 
   const declaredRemote = env[CONNECTION_MODE_ENV] === REMOTE_TRANSPORT
   const startedMs = performance.now()
   const deadlineAt = startedMs + timeoutSeconds * 1000
-  const scope = sessionScopeKey({ env, pluginDataDir })
   const lock = acquireWaitLock(pluginDataDir, timeoutSeconds * 1000, { scope, reclaim })
   if (!lock.acquired) {
     const guidance = lock.reclaimable === true
