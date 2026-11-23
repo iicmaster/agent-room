@@ -458,6 +458,7 @@ export function createMcpServer({
   // session-level refusal clears itself, so the next successful tool call
   // starts a fresh one.
   let notifier = null
+  const clientShutdownController = new AbortController()
   function getClient() {
     clientPromise ??= createAgentRoomClient({
       dataDir,
@@ -465,6 +466,7 @@ export function createMcpServer({
       sessionScope,
       agentName,
       agentRole,
+      shutdownSignal: clientShutdownController.signal,
     })
     return clientPromise
   }
@@ -486,6 +488,7 @@ export function createMcpServer({
   const shutdown = () => {
     if (shutdownPromise !== null) return shutdownPromise
     shutdownPromise = (async () => {
+      clientShutdownController.abort()
       notifier?.stop()
       channelLedger?.close()
       for (const controller of pending.values()) controller.abort()
@@ -505,6 +508,7 @@ export function createMcpServer({
               // costs only the 30 s lease; the retained principal and its
               // mailbox persist regardless).
               await readyClient.releaseSessionBase().catch(() => {})
+              await sessionPrincipalPromise?.catch(() => {})
               if (result.released === true) return result.rolled_back === true ? 'released' : 'released'
               return result.reason ?? 'unknown'
             }),
@@ -716,19 +720,13 @@ export function createMcpServer({
     sessionPrincipalArmed = true
     sessionPrincipalPromise = (async () => {
       try {
-        clientPromise ??= createAgentRoomClient({
-          dataDir,
-          pluginDataDir: pluginData,
-          sessionScope,
-          agentName,
-          agentRole,
-        })
-        const readyClient = clientPromise
+        const readyClient = getClient()
         await readyClient.ensureSessionPrincipal()
-        if (shutdownPromise !== null) return
+        if (shutdownPromise !== null || clientShutdownController.signal.aborted) return
         readyClient.startSessionHeartbeat()
       } catch (error) {
         sessionPrincipalArmed = false
+        if (shutdownPromise !== null || clientShutdownController.signal.aborted) return
         if (isFatalSessionPrincipalError(error)) {
           sessionPrincipalFatalError = error
           errorOutput.write(`agent-room MCP session principal failed: ${error.code}: ${error.message}\n`, () => {

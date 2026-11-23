@@ -97,8 +97,8 @@ test('mcp-stdio exits promptly on stdin close without lingering on the release t
       ...process.env,
       AGENT_ROOM_DATA_DIR: sharedData,
       PLUGIN_DATA: pluginData,
-      AGENT_ROOM_NOTIFIER: '0',
-      AGENT_ROOM_SESSION_PRINCIPAL: '0',
+      AGENT_ROOM_NOTIFIER: 'off',
+      AGENT_ROOM_SESSION_PRINCIPAL: 'off',
     },
     stdio: ['pipe', 'pipe', 'pipe'],
   })

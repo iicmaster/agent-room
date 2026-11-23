@@ -2,6 +2,17 @@
 
 All notable changes to Agent Room are documented in this file.
 
+## 1.0.1 - 2026-11-23
+
+Runtime stability, resource-leak elimination, and backpressure/replay reliability release.
+
+### Fixed
+
+- **MCP shutdown spawn-leak elimination (`server/mcp-stdio.mjs`, `server/client/api-client.mjs`, `server/client/ensure-server.mjs`)**: Propagate a shared shutdown `AbortSignal` into `ensure()` and `ensureServer()`, check `signal.aborted` synchronously directly before `spawn()`, reap an unready child owned by the caller if shutdown arrives prior to readiness handoff (without disturbing already-shared daemons), and join in-flight `ensurePromise` / `sessionEnsurePromise` inside `release()`. Added `AGENT_ROOM_SESSION_PRINCIPAL: 'off'` to `tests/story-4-1-mcp-capabilities.test.mjs`, corrected `'0'` → `'off'` in `tests/shutdown-cleanup.test.mjs`, and added a one-shot stderr warning in `sessionPrincipalEnabled` when non-`'off'` strings such as `'0'` are passed.
+- **PostCommitBus backpressure & slow-consumer accounting (`server/notification/post-commit-bus.mjs`, `server/api/watch.mjs`, `server/constants.mjs`)**: Added `{ manualDrain: true }` opt-in on `bus.subscribe` so `watch` streams retain queued byte accounting while TCP socket backpressure is active (`write()` returns `false`), flushing pending controls on `'drain'` instead of auto-draining synchronously. Extracted `WATCH_CURSOR_ROOM_MAX = 200` to `server/constants.mjs` (closing AD-9 item `E3-A2`).
+- **Watch wait cursor replay, reconnect recovery & G3 coalesce (`server/cli/wait-commands.mjs`, `server/client/inbox.mjs`)**: Passed `loadBaselineCursors()` into `waitOverWatch()`, dynamically rebuilt `?cursors=...` per reconnect within `WATCH_CURSOR_ROOM_MAX` / `WATCH_CURSORS_PARAM_MAX_BYTES`, deduped processed `(room_id, seq)` frames client-side across reconnects, handled `rescan_required (catchup_limit)` via direct room read fallback, surfaced terminal/TLS connection errors (`last_error` + stderr) instead of silently timing out, and wired `coalesce()` (`TRAILING_COALESCE_MS = 150`) into `waitOverWatch` using `readLastInboxWakeAtMs()` (closing `E3-A1`).
+- **Bounded `bare_id_send_dedup` retention purge (`server/messaging/bare-id-dedup.mjs`, `server/store/room-log.mjs`, `server/api/server.mjs`)**: Added `pruneExpiredInTx` (`rowid` subquery capped at `RETENTION_SWEEP_BATCH_MAX`, matching read-time TTL cutoff) and wired an independent coalesced `best_effort` prune task into `retentionPruneSafely` (closing `A1`).
+
 ## 1.0.0 - 2026-11-17
 
 The isolated messaging release. Epics 2–5 close the v1.0 contract: private

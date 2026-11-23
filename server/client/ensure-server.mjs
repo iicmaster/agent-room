@@ -84,7 +84,25 @@ import { REMOTE_TRANSPORT } from './trust.mjs'
 const DEFAULT_SERVER_PATH = fileURLToPath(new URL('../api/server.mjs', import.meta.url))
 const OK_STATUS = 200
 
-const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
+function delay(ms, signal) {
+  if (signal?.aborted) return Promise.resolve()
+  return new Promise(resolvePromise => {
+    let settled = false
+    const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      signal?.removeEventListener('abort', onAbort)
+      resolvePromise()
+    }, ms)
+    const onAbort = () => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolvePromise()
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
 
 
 // Read and shape-validate the runtime record. An absent, unreadable, or
@@ -471,7 +489,11 @@ export async function ensureServer({
   serverPath = DEFAULT_SERVER_PATH,
   waitMs = SERVER_STARTUP_WAIT_MS,
   connectionMode,
+  signal,
 } = {}) {
+  if (signal?.aborted) {
+    throw new AgentRoomRuntimeError('request_cancelled', 'agent-room server bootstrap aborted before start')
+  }
   if (typeof serverPath !== 'string' || serverPath.length === 0) {
     throw new AgentRoomRuntimeError('invalid_argument', 'serverPath must be a non-empty path')
   }
@@ -505,7 +527,13 @@ export async function ensureServer({
   if (inspection.state === 'ready') return returnRecord(directory, inspection.record, false, { connectionMode })
   if (inspection.state === 'pending') {
     while (Date.now() < deadline) {
-      await delay(SERVER_ATTACH_POLL_MS)
+      if (signal?.aborted) {
+        throw new AgentRoomRuntimeError('request_cancelled', 'agent-room server bootstrap aborted while pending')
+      }
+      await delay(SERVER_ATTACH_POLL_MS, signal)
+      if (signal?.aborted) {
+        throw new AgentRoomRuntimeError('request_cancelled', 'agent-room server bootstrap aborted while pending')
+      }
       inspection = await inspectRuntimeRecord(directory, { connectionMode })
       if (inspection.state === 'ready') return returnRecord(directory, inspection.record, false, { connectionMode })
       if (inspection.state !== 'pending') break
@@ -521,9 +549,15 @@ export async function ensureServer({
   const lockPath = serverStartupLockPath(directory)
   let lockToken = null
   while (Date.now() < deadline) {
+    if (signal?.aborted) {
+      throw new AgentRoomRuntimeError('request_cancelled', 'agent-room server bootstrap aborted before lock acquisition')
+    }
     lockToken = acquireServerLock(lockPath)
     if (lockToken) break
-    await delay(SERVER_ATTACH_POLL_MS)
+    await delay(SERVER_ATTACH_POLL_MS, signal)
+    if (signal?.aborted) {
+      throw new AgentRoomRuntimeError('request_cancelled', 'agent-room server bootstrap aborted while waiting for lock')
+    }
     inspection = await inspectRuntimeRecord(directory, { connectionMode })
     if (inspection.state === 'ready') return returnRecord(directory, inspection.record, false, { connectionMode })
   }
@@ -532,6 +566,9 @@ export async function ensureServer({
   }
 
   try {
+    if (signal?.aborted) {
+      throw new AgentRoomRuntimeError('request_cancelled', 'agent-room server bootstrap aborted before spawn')
+    }
     // Lock granted: one final re-check, because a previous starter may have
     // published a healthy record between our last probe and the grant.
     inspection = await inspectRuntimeRecord(directory, { connectionMode })
@@ -539,6 +576,12 @@ export async function ensureServer({
     if (inspection.state === 'pending') {
       // A live recorded server owns this realm; it is never shadowed.
       throw new AgentRoomRuntimeError('server_start_failed', 'agent-room server did not become ready')
+    }
+
+    // Check synchronously immediately before spawn: no await lies between
+    // this abort gate and spawning the child process.
+    if (signal?.aborted) {
+      throw new AgentRoomRuntimeError('request_cancelled', 'agent-room server bootstrap aborted before spawn')
     }
 
     // The auto-start child is a direct launch of the same server, so the
@@ -588,6 +631,9 @@ export async function ensureServer({
 
     try {
       while (Date.now() < deadline) {
+        if (signal?.aborted) {
+          throw new AgentRoomRuntimeError('request_cancelled', 'agent-room server startup aborted by caller shutdown')
+        }
         if (spawnError) {
           throw new AgentRoomRuntimeError(
             'server_start_failed',
@@ -597,7 +643,10 @@ export async function ensureServer({
         if (child.exitCode !== null || child.signalCode !== null) {
           throw new AgentRoomRuntimeError('server_start_failed', 'agent-room server exited during startup')
         }
-        await delay(SERVER_ATTACH_POLL_MS)
+        await delay(SERVER_ATTACH_POLL_MS, signal)
+        if (signal?.aborted) {
+          throw new AgentRoomRuntimeError('request_cancelled', 'agent-room server startup aborted by caller shutdown')
+        }
         const record = readRuntimeRecord(directory)
         if (record && record.pid === child.pid) {
           const probe = await probeHealth(record.port)

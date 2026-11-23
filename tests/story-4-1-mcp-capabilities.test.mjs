@@ -19,8 +19,16 @@ function harness(t, { env = {} } = {}) {
   const output = new PassThrough()
   output.setEncoding('utf8')
   const server = createMcpServer({
-    input, output,
-    env: { ...process.env, PLUGIN_DATA: pluginData, AGENT_ROOM_DATA_DIR: dataDir, AGENT_ROOM_NOTIFIER: 'off', ...env },
+    input,
+    output,
+    env: {
+      ...process.env,
+      PLUGIN_DATA: pluginData,
+      AGENT_ROOM_DATA_DIR: dataDir,
+      AGENT_ROOM_NOTIFIER: 'off',
+      AGENT_ROOM_SESSION_PRINCIPAL: 'off',
+      ...env,
+    },
   })
   t.after(() => server.close())
   let buffer = ''

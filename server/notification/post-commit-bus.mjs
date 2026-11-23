@@ -41,14 +41,14 @@ export function createPostCommitBus({ maxQueueBytes = WATCH_OUTBOUND_BUFFER_MAX_
   }
 
   return Object.freeze({
-    subscribe(id, listener) {
+    subscribe(id, listener, { manualDrain = false } = {}) {
       if (typeof id !== 'string' || id.length === 0) {
         throw new TypeError('subscriber id must be a non-empty string')
       }
       if (typeof listener !== 'function') {
         throw new TypeError('listener must be a function')
       }
-      const sub = { id, listener, queue: [] }
+      const sub = { id, listener, queue: [], manualDrain: manualDrain === true }
       subscribers.set(id, sub)
       let active = true
       return function unsubscribe() {
@@ -92,8 +92,10 @@ export function createPostCommitBus({ maxQueueBytes = WATCH_OUTBOUND_BUFFER_MAX_
           // Async listener: keep the entry queued until it settles, then
           // drain. A reject is swallowed — never a commit-path throw.
           result.then(control.drain, control.drain)
-        } else if (sub.queue.includes(entry)) {
-          // Sync listener that did not drain explicitly: drain automatically.
+        } else if (!sub.manualDrain && sub.queue.includes(entry)) {
+          // Sync listener without manualDrain opt-in drains immediately; slow
+          // stream consumers opt into manualDrain so socket backpressure stays
+          // accounted against maxQueueBytes.
           control.drain()
         }
       }

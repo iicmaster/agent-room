@@ -157,4 +157,27 @@ function statSafeBytes(path) {
   try { return statSync(path).size } catch { return 0 }
 }
 
+// Best-effort read of the latest wake timestamp recorded in inbox.jsonl for
+// this scope (ms since epoch, or null when absent/unparseable). Reads only the
+// tail chunk so G3 coalescing across rapid one-shot waits stays O(1).
+export function readLastInboxWakeAtMs(pluginDataDir, scope) {
+  if (typeof pluginDataDir !== 'string' || typeof scope !== 'string' || scope.length === 0) return null
+  const path = sessionScopeFilePath(pluginDataDir, scope, INBOX_FILENAME)
+  if (!existsSync(path)) return null
+  try {
+    const raw = readFileSync(path, 'utf8')
+    const lines = raw.trimEnd().split('\n')
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      const line = lines[index].trim()
+      if (line.length === 0) continue
+      const parsed = JSON.parse(line)
+      const ms = Date.parse(parsed?.ts)
+      return Number.isFinite(ms) ? ms : null
+    }
+  } catch {
+    return null
+  }
+  return null
+}
+
 export { FIELD_ALLOWLIST as INBOX_FIELD_ALLOWLIST }

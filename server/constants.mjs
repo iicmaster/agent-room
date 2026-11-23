@@ -21,6 +21,7 @@ export const FRAME_MAX_BYTES = 1024 * 1024
 // ticks every 1 s to close streams on ban/revoke/generation drift within 1.1 s.
 export const WATCH_CONCURRENT_MAX = 1500
 export const WATCH_CATCHUP_MAX = 200
+export const WATCH_CURSOR_ROOM_MAX = 200
 export const WATCH_CURSORS_PARAM_MAX_BYTES = 4096
 export const WATCH_OUTBOUND_BUFFER_MAX_BYTES = 65536
 export const WATCH_KEEPALIVE_MS = 15_000
