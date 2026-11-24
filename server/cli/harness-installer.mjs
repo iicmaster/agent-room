@@ -96,7 +96,7 @@ function targetPath(harness, env) {
   switch (harness) {
     case 'claude': return join(home, '.claude', 'settings.json')
     case 'codex': return join(home, '.codex', 'config.toml')
-    case 'antigravity': return join(home, '.gemini', 'settings.json')
+    case 'antigravity': return join(home, '.gemini', 'config', 'mcp_config.json')
     case 'opencode': return join(home, '.config', 'opencode', 'opencode.json')
     case 'generic': return join(home, '.agent-room', 'env.sh')
     default: throw new Error(`unknown harness: ${harness}`)
@@ -106,13 +106,22 @@ function targetPath(harness, env) {
 // The single required MCP entry, per harness format. `command`/`args` are the
 // stdio entrypoint only — no env, no headers, no tokens.
 function requiredEntry(harness, env = process.env) {
-  const args = [stdioEntrypoint(env)]
+  const entrypoint = stdioEntrypoint(env)
+  const args = [entrypoint]
   switch (harness) {
     case 'claude':
     case 'antigravity':
       return { format: 'json', pointer: ['mcpServers', 'agent-room'], value: { command: 'node', args } }
     case 'opencode':
-      return { format: 'json', pointer: ['mcp', 'agent-room'], value: { command: 'node', args } }
+      return {
+        format: 'json',
+        pointer: ['mcp', 'agent-room'],
+        value: {
+          type: 'local',
+          command: ['node', entrypoint],
+          enabled: true,
+        },
+      }
     case 'codex':
       return { format: 'toml', table: 'mcp_servers.agent-room', keys: { command: 'node', args } }
     case 'generic':

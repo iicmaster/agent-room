@@ -349,3 +349,28 @@ test('TOML quoting handles spaces, apostrophes, double quotes, and backslashes s
   assert.equal(second.changed, false, 'idempotent second merge on nasty TOML path')
   assert.equal(tomlValueMatches(renderTomlTable('t', { a: [nastyPath] }).split('a = ')[1].trim(), [nastyPath]), true)
 })
+
+test('opencode installs modern local command array schema and antigravity targets ~/.gemini/config/mcp_config.json', async t => {
+  const { env } = await sandbox(t)
+  const cleanEnv = { ...env }
+  delete cleanEnv.AGENT_ROOM_ANTIGRAVITY_CONFIG
+  assert.ok(harnessConfig('antigravity', cleanEnv).path.endsWith(join('.gemini', 'config', 'mcp_config.json')))
+
+  const out = await runCli(['--harness', 'opencode', '--install', '--json'], { env })
+  assert.equal(out.exitCode, 0, out.stderr)
+  const parsed = JSON.parse(await readFile(env.AGENT_ROOM_OPENCODE_CONFIG, 'utf8'))
+  assert.deepEqual(parsed.mcp['agent-room'], {
+    type: 'local',
+    command: ['node', RESOLVED_ENTRYPOINT],
+    enabled: true,
+  })
+
+  const pluginPath = join(dirname(env.AGENT_ROOM_OPENCODE_CONFIG), 'opencode-plugin.json')
+  await installHarness('opencode', { ...env, AGENT_ROOM_OPENCODE_CONFIG: pluginPath, CLAUDE_PLUGIN_ROOT: '/plugins/agent-room' })
+  const pluginParsed = JSON.parse(await readFile(pluginPath, 'utf8'))
+  assert.deepEqual(pluginParsed.mcp['agent-room'], {
+    type: 'local',
+    command: ['node', '${PLUGIN_ROOT}/server/mcp-stdio.mjs'],
+    enabled: true,
+  })
+})

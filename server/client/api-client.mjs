@@ -1480,12 +1480,15 @@ export function createAgentRoomClient({
       return request('GET', `/api/presence${includeOffline ? '?include_offline=true' : ''}`, { signal, bindLegacy: true })
     },
 
-    // GET /api/rooms — the returning session's enumeration (Story 2.2): one
-    // row per room this Actor belongs to — the Broadcast Room implicitly plus
-    // every Direct Room whose membership row names it — so DMs opened in the
-    // client's absence are discovered without prior knowledge. Rows carry
-    // exactly {room_id, kind}.
-    listRooms({ signal } = {}) {
+    // GET /api/rooms — the returning session's enumeration (Story 2.2 / v0.9 Story 2.1):
+    // when session=true, presents the process's Session capability so ssession: pair
+    // rooms are included alongside Actor-wide rooms; default Bearer mode intentionally
+    // omits ssession: rooms.
+    async listRooms({ signal, session = false } = {}) {
+      if (session) {
+        const principal = await ensureSessionPrincipal()
+        return request('GET', '/api/rooms', { signal, sessionCredential: principal.capability })
+      }
       return request('GET', '/api/rooms', { signal })
     },
 

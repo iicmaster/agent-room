@@ -908,10 +908,18 @@ export function createMcpServer({
         return toolResult(resultPage)
       }
       if (name === 'room_list') {
-        // Room discovery straight from the server's room list for this
-        // Actor: the Broadcast Room plus every pair DM, including DMs opened
-        // while this installation was offline. No client state is touched.
-        return toolResult(await readyClient.listRooms({ signal }))
+        // When this session holds a live session principal, present its Session
+        // capability so GET /api/rooms includes this session's private ssession:
+        // pair rooms (Story 2.1 AC1) alongside Actor-wide rooms. While a principal
+        // is deferred (e.g. transient agent_id_taken) or disabled, fall back to
+        // the Actor-wide Bearer listing without re-arming or failing.
+        if (sessionPrincipalOn && sessionPrincipalPromise !== null) {
+          await sessionPrincipalPromise
+        }
+        return toolResult(await readyClient.listRooms({
+          signal,
+          session: sessionPrincipalOn && readyClient.sessionAddress !== null,
+        }))
       }
       if (name === 'room_status') {
         if (sessionPrincipalOn && readyClient.sessionAddress === null) {
@@ -1132,7 +1140,13 @@ export function createMcpServer({
       let member = false
       try {
         const readyClient = await getClient()
-        member = (await readyClient.listRooms()).some(room => room.room_id === parsed.roomId)
+        if (sessionPrincipalOn && sessionPrincipalPromise !== null) {
+          await sessionPrincipalPromise
+        }
+        const listed = await readyClient.listRooms({
+          session: sessionPrincipalOn && readyClient.sessionAddress !== null,
+        })
+        member = Array.isArray(listed?.rooms) && listed.rooms.some(room => room.room_id === parsed.roomId)
       } catch { member = false }
       if (!member) {
         write(rpcError(id, -32602, 'invalid or foreign resource uri'))
