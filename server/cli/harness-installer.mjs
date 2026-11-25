@@ -350,14 +350,22 @@ function renderShellEnv(env = process.env) {
 function mergeShell(originalText, label, env = process.env) {
   const body = renderShellEnv(env)
   if (originalText.length === 0) return { text: body, mode: 0o700, changed: true }
-  // Idempotent: if our marker is present and entrypoint matches, keep byte-identical.
-  if (originalText.includes(GENERIC_MARKER)) {
+  // Idempotent: byte-identical to the required rendered env.sh.
+  if (originalText === body) {
     return { text: originalText, mode: null, changed: false }
   }
-  // A foreign env.sh: refuse rather than silently overwrite user shell config.
+  // Safe upgrade path from a prior raw-clone install that wrote the literal ${PLUGIN_ROOT} template.
+  if (originalText.trimEnd() === templateFor('generic').trimEnd()) {
+    return { text: body, mode: 0o700, changed: true }
+  }
+  // A foreign or locally modified env.sh: refuse with a reviewable diff rather than
+  // silently preserving a stale entrypoint or clobbering user edits.
   throw new ConfigError('config_conflict',
-    `${label} already exists with foreign content; refusing to overwrite; nothing was changed`,
-    { existing: originalText.slice(0, 200) })
+    `${label} already exists with different content; refusing to overwrite; nothing was changed`,
+    {
+      existing: originalText.slice(0, 200),
+      diff: unifiedDiff(originalText, body, label),
+    })
 }
 
 // ---- errors and diffs --------------------------------------------------------

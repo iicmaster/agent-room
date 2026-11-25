@@ -374,3 +374,37 @@ test('opencode installs modern local command array schema and antigravity target
     enabled: true,
   })
 })
+
+test('generic env.sh reconciles unresolved ${PLUGIN_ROOT} template on upgrade and refuses modified marker files', async t => {
+  const { env } = await sandbox(t)
+  const target = env.AGENT_ROOM_GENERIC_ENV
+  await writeFile(target, templateFor('generic'), { mode: 0o600 })
+
+  const upgraded = await runCli(['--harness', 'generic', '--install', '--json'], { env })
+  assert.equal(upgraded.exitCode, 0, upgraded.stderr)
+  const res1 = JSON.parse(upgraded.stdout.trim())
+  assert.equal(res1.changed, true)
+  assert.ok(res1.backup && res1.backup.includes('.agent-room.bak-'))
+  assert.equal((await stat(res1.backup)).mode & 0o777, 0o600)
+  const content = await readFile(target, 'utf8')
+  assert.ok(!content.includes('${PLUGIN_ROOT}'), 'upgraded standalone env.sh resolves concrete entrypoint')
+  assert.ok(content.includes(RESOLVED_ENTRYPOINT))
+
+  // Second install is idempotent byte-identical with no new backup.
+  const again = await runCli(['--harness', 'generic', '--install', '--json'], { env })
+  assert.equal(again.exitCode, 0, again.stderr)
+  const res2 = JSON.parse(again.stdout.trim())
+  assert.equal(res2.changed, false)
+  assert.equal(res2.backup, null)
+  assert.equal(await readFile(target, 'utf8'), content)
+
+  // Locally modified file sharing GENERIC_MARKER refuses with config_conflict + diff, leaving bytes untouched.
+  const custom = content.replace(RESOLVED_ENTRYPOINT, '/custom/modified/mcp-stdio.mjs')
+  await writeFile(target, custom, { mode: 0o600 })
+  const conflict = await runCli(['--harness', 'generic', '--install', '--json'], { env })
+  assert.equal(conflict.exitCode, 1)
+  const payload = JSON.parse(conflict.stderr.trim())
+  assert.equal(payload.code, 'config_conflict')
+  assert.ok(payload.diff && payload.diff.includes('/custom/modified/mcp-stdio.mjs'))
+  assert.equal(await readFile(target, 'utf8'), custom)
+})

@@ -287,7 +287,7 @@
           <div class="muted" style="font-size:13px;">อุด spawn-leak ใน <code>mcp-stdio/api-client/ensure-server</code> + กวาด 43 ศพเกลี้ยง</div>
         </div>
         <div class="metric-box">
-          <div class="metric-num">Caddy TLS 157 ms</div>
+          <div class="metric-num">Caddy TLS 155 ms</div>
           <div class="muted" style="font-size:13px;">E2E ผ่าน Caddy v2.11.9 + SIGKILL crash-mid-/resume กู้คืนผ่าน</div>
         </div>
         <div class="metric-box">
@@ -427,7 +427,7 @@
           <rect id="fp-n-caddy" x="954" y="396" width="246" height="114" rx="10" fill="#161f32" stroke="#34d399" stroke-width="1.8" />
           <text x="970" y="424" fill="#f1f5f9" font-size="14" font-weight="700">
             <tspan x="970" dy="0">🌐 สะพานข้ามเครื่อง TLS</tspan>
-            <tspan x="970" dy="22" fill="#94a3b8" font-size="12" font-weight="400">Caddy HTTPS E2E ผ่าน (157 ms)</tspan>
+            <tspan x="970" dy="22" fill="#94a3b8" font-size="12" font-weight="400">Caddy HTTPS E2E ผ่าน (155 ms)</tspan>
             <tspan x="970" dy="22" fill="#f97316" font-size="12" font-weight="600">ⓘ Claude --channels host Unverified</tspan>
           </text>
 
@@ -544,7 +544,7 @@
             <td><span class="tag ok">SHIPPED / v1.1.0</span></td>
             <td>แก้ <code>--install</code>/<code>--print</code> จาก git clone ให้ใช้ path จริง + แก้ TOML quoting (<code>'</code>/<code>"</code>/<code>\</code>/spaces) + เติม <code>GET /api/session-principals</code> ใน <code>allow</code> + ให้ <code>wait</code> ใช้หลัง <code>bootstrap</code> ได้เลย + ไม่ให้ <code>agent_id_taken</code> ทำ MCP ตายถาวร</td>
             <td><code>harness-installer.mjs</code> · <code>held-commands.mjs</code> · <code>wait-commands.mjs</code> · <code>mcp-stdio.mjs</code> · <code>ef4a50a</code></td>
-            <td>Caddy v2.11.9 E2E <strong>157 ms</strong> (reconnect seq 3) + SIGKILL <code>/resume</code> recovery ผ่าน + <code>claude plugin validate --strict</code> pass</td>
+            <td>Caddy v2.11.9 E2E <strong>155 ms</strong> (reconnect seq 3) + SIGKILL <code>/resume</code> recovery ผ่าน + <code>claude plugin validate --strict</code> pass</td>
           </tr>
           <tr>
             <td><span class="tag ok">SHIPPED / T3</span></td>
@@ -717,9 +717,9 @@
           id: 'caddy',
           zone: '3. บริการภายนอก',
           plainName: '🌐 สะพานข้ามเครื่อง (Caddy TLS & Channels)',
-          devName: 'Caddy v2.11.9 HTTPS (157 ms) + claude 2.1.330 probe',
+          devName: 'Caddy v2.11.9 HTTPS (155 ms) + claude 2.1.330 probe',
           health: 'health-green',
-          plainDesc: 'คุยข้ามเครื่องผ่าน Caddy HTTPS ได้จริงใน ~157 ms ส่วน Claude <code>--channels</code> ตรวจสอบจริงแล้ว',
+          plainDesc: 'คุยข้ามเครื่องผ่าน Caddy HTTPS ได้จริงใน ~155 ms ส่วน Claude <code>--channels</code> ตรวจสอบจริงแล้ว',
           devDesc: 'NODE_EXTRA_CA_CERTS strict check + reconnect seq=3 OK; Claude 2.1.330 -p omits client experimental[claude/channel]',
           files: '<code>docs/release-evidence/v1.1.0-candidate.json</code> · <code>server/client/remote-config.mjs</code> · <code>server/client/channel-verification.mjs</code>',
           impact: '<strong>Caddy TLS &amp; SIGKILL Recovery = Qualified</strong> · Claude Code <code>2.1.330 -p</code> ไม่ส่ง client experimental key ระบบจึง fail-closed เป็น <code>Host Unverified</code> ตามจริง (สเกล 1000-OS/Bearer ยังคง <code>not_qualified</code>)'
@@ -806,7 +806,7 @@
         ],
         tracks: [
           { t: 'Track 1: agent-room v1.0.1 (✅ c4f2a6f)', d: 'อุด race ใน <code>mcp-stdio/api-client/ensure-server</code> + เทสต์ 4.1, เพิ่ม <code>manualDrain</code>, ต่อสาย <code>coalesce()</code>, ล้าง <code>bare_id_send_dedup</code>' },
-          { t: 'Track 2: agent-room v1.1.0 (✅ ef4a50a)', d: 'แก้ clone <code>--install</code> + TOML quoting, แก้ <code>allow</code> (session_principals) + <code>wait</code> (v1.0 bootstrap) + Bug C, ผ่าน Caddy TLS 157 ms &amp; SIGKILL recovery' },
+          { t: 'Track 2: agent-room v1.1.0 (✅ ef4a50a)', d: 'แก้ clone <code>--install</code> + TOML quoting, แก้ <code>allow</code> (session_principals) + <code>wait</code> (v1.0 bootstrap) + Bug C, ผ่าน Caddy TLS 155 ms &amp; SIGKILL recovery' },
           { t: 'Track 3: tmux-teams Cell 3 (✅ 185bdbe)', d: 'ปิด Cell 3 บน <code>feat/phase-e-cell-3</code> ใน <code>/Users/ngs/worktrees/tmux-teams-cell3</code> (39/39 pass) โดยไม่แตะ monorepo diff อื่น' },
           { t: 'Track 4: แผนที่ Floorplan &amp; Audit (✅ ล่าสุด)', d: 'อัปเดตผลจริงทั้งหมด, ตรวจ 5 มิติ <code>artifact-audit</code> ผ่าน และเผยแพร่ผ่าน <code>artifact_sftp</code>' }
         ]
@@ -848,7 +848,7 @@
         },
         {
           match: /install|caddy|channel|v1\.1|not_qualified|resume|allow|wait/i,
-          ans: '<strong>ผล Track 2 (<code>v1.1.0</code> — <code>ef4a50a</code>):</strong> (1) <code>bootstrap --install</code> จาก git clone ชี้ path จริง + รองรับ TOML ที่มี apostrophe/quotes/spaces (2) ผ่าน E2E ข้าม <strong>Caddy v2.11.9 HTTPS</strong> จริง 157 ms พร้อมกู้ reconnect <code>seq 3</code> และแก้บั๊กจริงของ <code>allow</code> + <code>wait</code> สำหรับ v1.0 <code>session_principals</code> (3) ผ่าน <strong>SIGKILL crash-mid-/resume</strong> ทั้ง post-commit และ pre-commit + แก้ MCP ไม่ให้ตายถาวรเมื่อ <code>agent_id_taken</code> ส่วน <code>claude 2.1.330</code> ทดสอบ wire จริงแล้ว (โหมด <code>-p</code> ยังไม่ส่ง client experimental capability จึงรายงาน <code>Host Unverified</code> อย่างตรงไปตรงมา)'
+          ans: '<strong>ผล Track 2 (<code>v1.1.0</code> — <code>ef4a50a</code>):</strong> (1) <code>bootstrap --install</code> จาก git clone ชี้ path จริง + รองรับ TOML ที่มี apostrophe/quotes/spaces (2) ผ่าน E2E ข้าม <strong>Caddy v2.11.9 HTTPS</strong> จริง 155 ms พร้อมกู้ reconnect <code>seq 3</code> และแก้บั๊กจริงของ <code>allow</code> + <code>wait</code> สำหรับ v1.0 <code>session_principals</code> (3) ผ่าน <strong>SIGKILL crash-mid-/resume</strong> ทั้ง post-commit และ pre-commit + แก้ MCP ไม่ให้ตายถาวรเมื่อ <code>agent_id_taken</code> ส่วน <code>claude 2.1.330</code> ทดสอบ wire จริงแล้ว (โหมด <code>-p</code> ยังไม่ส่ง client experimental capability จึงรายงาน <code>Host Unverified</code> อย่างตรงไปตรงมา)'
         }
       ];
 

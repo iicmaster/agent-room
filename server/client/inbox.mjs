@@ -20,7 +20,7 @@
 // never CAS-commits notified_seq (the seq stays retryable). This module never
 // touches cursors.json itself.
 
-import { constants as fsConstants, closeSync, existsSync, openSync, renameSync, statSync, unlinkSync, writeSync, readFileSync } from 'node:fs'
+import { constants as fsConstants, closeSync, existsSync, openSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeSync } from 'node:fs'
 
 import {
   INBOX_LOCK_FILENAME,
@@ -157,6 +157,8 @@ function statSafeBytes(path) {
   try { return statSync(path).size } catch { return 0 }
 }
 
+const INBOX_TAIL_CHUNK_BYTES = 8192
+
 // Best-effort read of the latest wake timestamp recorded in inbox.jsonl for
 // this scope (ms since epoch, or null when absent/unparseable). Reads only the
 // tail chunk so G3 coalescing across rapid one-shot waits stays O(1).
@@ -164,18 +166,34 @@ export function readLastInboxWakeAtMs(pluginDataDir, scope) {
   if (typeof pluginDataDir !== 'string' || typeof scope !== 'string' || scope.length === 0) return null
   const path = sessionScopeFilePath(pluginDataDir, scope, INBOX_FILENAME)
   if (!existsSync(path)) return null
+  let fd = null
   try {
-    const raw = readFileSync(path, 'utf8')
+    const size = statSync(path).size
+    if (size === 0) return null
+    const len = Math.min(size, INBOX_TAIL_CHUNK_BYTES)
+    const start = size - len
+    const buf = Buffer.allocUnsafe(len)
+    fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW)
+    const bytesRead = readSync(fd, buf, 0, len, start)
+    let raw = buf.toString('utf8', 0, bytesRead)
+    if (start > 0) {
+      const firstNl = raw.indexOf('\n')
+      if (firstNl !== -1) raw = raw.slice(firstNl + 1)
+    }
     const lines = raw.trimEnd().split('\n')
     for (let index = lines.length - 1; index >= 0; index -= 1) {
       const line = lines[index].trim()
       if (line.length === 0) continue
       const parsed = JSON.parse(line)
       const ms = Date.parse(parsed?.ts)
-      return Number.isFinite(ms) ? ms : null
+      if (Number.isFinite(ms)) return ms
     }
   } catch {
     return null
+  } finally {
+    if (fd !== null) {
+      try { closeSync(fd) } catch { /* ignore */ }
+    }
   }
   return null
 }
