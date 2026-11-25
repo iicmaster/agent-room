@@ -98,6 +98,23 @@ export function createBareIdDedupOperations({ database, nowMsFn = () => Date.now
     `).run(senderSessionId, baseNameLower, clientMessageId, payloadDigest, roomId, seq, createdAt)
   }
 
+  function pruneExpiredInTx({ nowMs = nowMsFn(), limit = 500, ttlMs: sweepTtlMs = ttlMs } = {}) {
+    const maxRows = Number.isInteger(limit) && limit > 0 ? limit : 500
+    const cutoff = new Date(nowMs - sweepTtlMs).toISOString()
+    // Match read-time expiry strictly (`created_at >= cutoff`): deleted rows are
+    // already invisible to every lookup, using rowid subquery for portability.
+    const result = database.prepare(`
+      DELETE FROM ${BARE_ID_DEDUP_TABLE}
+      WHERE rowid IN (
+        SELECT rowid
+        FROM ${BARE_ID_DEDUP_TABLE}
+        WHERE created_at < ?
+        LIMIT ?
+      )
+    `).run(cutoff, maxRows)
+    return { deletedCount: Number(result.changes ?? 0) }
+  }
+
   return Object.freeze({
     // Check-then-record inside ONE savepoint. A same-payload hit within the TTL
     // returns {kind:'duplicate', originalSeq} (no row written); a different
@@ -107,5 +124,6 @@ export function createBareIdDedupOperations({ database, nowMsFn = () => Date.now
     // append — a failed append rolls the whole savepoint back regardless.
     lookupInTx,
     recordInTx,
+    pruneExpiredInTx,
   })
 }

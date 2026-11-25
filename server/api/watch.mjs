@@ -15,6 +15,7 @@ import {
   WATCH_BAN_RECONCILE_MS,
   WATCH_CATCHUP_MAX,
   WATCH_CONCURRENT_MAX,
+  WATCH_CURSOR_ROOM_MAX,
   WATCH_CURSORS_PARAM_MAX_BYTES,
   WATCH_KEEPALIVE_MS,
   WATCH_OUTBOUND_BUFFER_MAX_BYTES,
@@ -82,7 +83,7 @@ export function parseCursors(raw) {
     return { error: reject('invalid_request', CURSORS_INVALID_MESSAGE) }
   }
   const keys = Object.keys(parsed)
-  if (keys.length > 200) {
+  if (keys.length > WATCH_CURSOR_ROOM_MAX) {
     return { error: reject('invalid_request', CURSORS_INVALID_MESSAGE) }
   }
   const cursors = new Map()
@@ -114,9 +115,18 @@ export function createWatchManager({ bus, store, databasePath, sessionRegistry, 
     return stream.format === 'ndjson' ? `${json}\n` : `data: ${json}\n\n`
   }
 
+  function drainControls(stream) {
+    if (stream.pendingControls.length === 0) return
+    const pending = stream.pendingControls.splice(0, stream.pendingControls.length)
+    for (const pendingControl of pending) {
+      try { pendingControl.drain() } catch { /* already closed */ }
+    }
+  }
+
   function closeStream(stream, terminalEvent = null) {
     if (stream.closed) return
     stream.closed = true
+    drainControls(stream)
     if (stream.unsubscribe) {
       try { stream.unsubscribe() } catch { /* teardown never throws */ }
       stream.unsubscribe = null
@@ -199,12 +209,22 @@ export function createWatchManager({ bus, store, databasePath, sessionRegistry, 
       return
     }
     if (ok) {
+      drainControls(stream)
       if (control) control.drain()
       return
     }
-    // Backpressure: keep the entry queued in the bus (do not drain) so the
-    // bus's bounded queue counts it. If the socket itself is over the cap,
-    // rescan and close within this keepalive cycle.
+    // Backpressure: withhold drain so the bus counts queued frames against
+    // maxQueueBytes, and bind one drain listener to flush them when writable.
+    if (control) {
+      stream.pendingControls.push(control)
+      if (!stream.drainBound && typeof stream.response.once === 'function') {
+        stream.drainBound = true
+        stream.response.once('drain', () => {
+          stream.drainBound = false
+          if (!stream.closed) drainControls(stream)
+        })
+      }
+    }
     if (stream.response.writableLength > WATCH_OUTBOUND_BUFFER_MAX_BYTES) {
       closeStream(stream, { event: 'rescan_required', reason: 'slow_consumer', ts: nowIso() })
     }
@@ -309,14 +329,20 @@ export function createWatchManager({ bus, store, databasePath, sessionRegistry, 
       flushed: false,
       seen: new Set(),
       buffer: [],
+      pendingControls: [],
+      drainBound: false,
       unsubscribe: null,
       keepaliveTimer: null,
       lifetimeTimer: null,
     }
 
-    // Subscribe BEFORE catch-up; events buffer (dedup) until the catch-up
-    // flush. No await between subscribe and the synchronous page reads.
-    stream.unsubscribe = bus.subscribe(sessionId, (event, control) => onBusEvent(stream, event, control))
+    // Subscribe BEFORE catch-up with manualDrain so socket backpressure stays
+    // accounted in the bus queue instead of auto-draining on synchronous writes.
+    stream.unsubscribe = bus.subscribe(
+      sessionId,
+      (event, control) => onBusEvent(stream, event, control),
+      { manualDrain: true },
+    )
 
     // Catch-up: bounded total across all member rooms. Page each room with a
     // budget-aware limit; over-budget asks the client to rescan. Every read is

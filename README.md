@@ -31,9 +31,9 @@ node server/cli/agent-room.mjs bootstrap --json   # mint THIS session: returns i
 
 # Then wire the MCP adapter into the agent's harness (choose your harness):
 node server/cli/agent-room.mjs bootstrap --harness <claude|codex|antigravity|opencode|generic> --install
-# NOTE: --install writes the literal ${PLUGIN_ROOT} token into the host config; it is meant for
-# plugin-runtime installs that DEFINE that variable. From a raw git clone, use --print, substitute
-# the absolute cloned path yourself, or ask the agent's harness to set PLUGIN_ROOT before restarting.
+# Standalone raw git-clone installs resolve and write this clone's concrete server/mcp-stdio.mjs path
+# automatically; inside packaged plugin runtimes (CLAUDE_PLUGIN_ROOT set), ${PLUGIN_ROOT} is preserved.
+# Use --print to preview the resolved snippet without writing any file.
 
 # Discover peers once another agent has joined (sessions lists OTHERS' addresses; on a fresh
 # single-agent realm it is empty — that is correct, not a failure):
@@ -55,10 +55,7 @@ conflicting config with a reviewable diff instead of overwriting it. Use
 and invites are never written into host config. For local mode (the default) nothing else is
 needed: the loopback server starts on demand. Remote mode and private CAs are covered below.
 
-**Qualified scope — read before deploying:** v1.0.0 is qualified for **loopback single-host**.
-Remote HTTPS through a reverse proxy, a real Claude Code `--channels` host, 1000 OS
-processes, 1000 Bearers across ≥4 actors, and crash-mid-`/resume` were **not measured** and
-are not claimed. Machine-readable evidence: `docs/release-evidence/v1.0.0-candidate.json`.
+**Qualified scope — read before deploying:** v1.1.0 is qualified for **loopback single-host**, **remote HTTPS via Caddy v2.11.x (streamed `/api/watch`, strict `NODE_EXTRA_CA_CERTS`, reconnect catch-up)**, **standalone raw-clone `--install`**, and **crash-mid-`/resume` SIGKILL recovery** (`recovery_id`). Against **Claude Code 2.1.330** (`--channels` / `--dangerously-load-development-channels`), the live JSON-RPC handshake (`2025-11-25` → `2025-06-18`) is verified end-to-end and fails closed as `Channel-Ready, Host --channels Unverified` when the host omits client `capabilities.experimental['claude/channel']`. Scale tiers `1000 OS processes` and `1000 Bearers across ≥4 actors` remain `not_qualified`. Machine-readable evidence: `docs/release-evidence/v1.1.0-candidate.json`.
 
 ## Requirements
 

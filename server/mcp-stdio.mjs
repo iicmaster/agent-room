@@ -458,6 +458,7 @@ export function createMcpServer({
   // session-level refusal clears itself, so the next successful tool call
   // starts a fresh one.
   let notifier = null
+  const clientShutdownController = new AbortController()
   function getClient() {
     clientPromise ??= createAgentRoomClient({
       dataDir,
@@ -465,6 +466,7 @@ export function createMcpServer({
       sessionScope,
       agentName,
       agentRole,
+      shutdownSignal: clientShutdownController.signal,
     })
     return clientPromise
   }
@@ -486,6 +488,7 @@ export function createMcpServer({
   const shutdown = () => {
     if (shutdownPromise !== null) return shutdownPromise
     shutdownPromise = (async () => {
+      clientShutdownController.abort()
       notifier?.stop()
       channelLedger?.close()
       for (const controller of pending.values()) controller.abort()
@@ -505,6 +508,7 @@ export function createMcpServer({
               // costs only the 30 s lease; the retained principal and its
               // mailbox persist regardless).
               await readyClient.releaseSessionBase().catch(() => {})
+              await sessionPrincipalPromise?.catch(() => {})
               if (result.released === true) return result.rolled_back === true ? 'released' : 'released'
               return result.reason ?? 'unknown'
             }),
@@ -708,32 +712,29 @@ export function createMcpServer({
   let sessionPrincipalFatalError = null
   const sessionPrincipalOn = sessionPrincipalEnabled(env)
   const isFatalSessionPrincipalError = error => (
-    error instanceof AgentRoomRuntimeError
-    && (error.code === 'agent_id_taken' || error.code === 'invalid_request')
+    error instanceof AgentRoomRuntimeError && error.code === 'invalid_request'
   )
   const startSessionPrincipalOnce = () => {
     if (!sessionPrincipalOn || sessionPrincipalArmed || shutdownPromise !== null || sessionPrincipalFatalError !== null) return
     sessionPrincipalArmed = true
     sessionPrincipalPromise = (async () => {
       try {
-        clientPromise ??= createAgentRoomClient({
-          dataDir,
-          pluginDataDir: pluginData,
-          sessionScope,
-          agentName,
-          agentRole,
-        })
-        const readyClient = clientPromise
+        const readyClient = getClient()
         await readyClient.ensureSessionPrincipal()
-        if (shutdownPromise !== null) return
+        if (shutdownPromise !== null || clientShutdownController.signal.aborted) return
         readyClient.startSessionHeartbeat()
       } catch (error) {
         sessionPrincipalArmed = false
+        if (shutdownPromise !== null || clientShutdownController.signal.aborted) return
         if (isFatalSessionPrincipalError(error)) {
           sessionPrincipalFatalError = error
           errorOutput.write(`agent-room MCP session principal failed: ${error.code}: ${error.message}\n`, () => {
             onFatalExit?.(error)
           })
+        } else if (error instanceof AgentRoomRuntimeError && error.code === 'agent_id_taken') {
+          // Occupancy collisions are transient (peer releasing or 45 s lease expiry);
+          // keep non-addressed tools operational and allow later calls to re-arm.
+          errorOutput.write(`agent-room MCP session principal deferred (${error.code}): ${error.message}\n`)
         }
       }
     })()
@@ -907,19 +908,32 @@ export function createMcpServer({
         return toolResult(resultPage)
       }
       if (name === 'room_list') {
-        // Room discovery straight from the server's room list for this
-        // Actor: the Broadcast Room plus every pair DM, including DMs opened
-        // while this installation was offline. No client state is touched.
-        return toolResult(await readyClient.listRooms({ signal }))
+        // When this session holds a live session principal, present its Session
+        // capability so GET /api/rooms includes this session's private ssession:
+        // pair rooms (Story 2.1 AC1) alongside Actor-wide rooms. While a principal
+        // is deferred (e.g. transient agent_id_taken) or disabled, fall back to
+        // the Actor-wide Bearer listing without re-arming or failing.
+        if (sessionPrincipalOn && sessionPrincipalPromise !== null) {
+          await sessionPrincipalPromise
+        }
+        return toolResult(await readyClient.listRooms({
+          signal,
+          session: sessionPrincipalOn && readyClient.sessionAddress !== null,
+        }))
       }
       if (name === 'room_status') {
-        if (sessionPrincipalOn && readyClient.sessionAddress === null && sessionPrincipalPromise !== null) {
-          await sessionPrincipalPromise
-          if (sessionPrincipalFatalError !== null) {
-            return toolResult({
-              code: sessionPrincipalFatalError.code,
-              message: sessionPrincipalFatalError.message,
-            }, true)
+        if (sessionPrincipalOn && readyClient.sessionAddress === null) {
+          if (!sessionPrincipalArmed && shutdownPromise === null && sessionPrincipalFatalError === null) {
+            startSessionPrincipalOnce()
+          }
+          if (sessionPrincipalPromise !== null) {
+            await sessionPrincipalPromise
+            if (sessionPrincipalFatalError !== null) {
+              return toolResult({
+                code: sessionPrincipalFatalError.code,
+                message: sessionPrincipalFatalError.message,
+              }, true)
+            }
           }
         }
         const status = await readyClient.status({ signal })
@@ -1126,7 +1140,13 @@ export function createMcpServer({
       let member = false
       try {
         const readyClient = await getClient()
-        member = (await readyClient.listRooms()).some(room => room.room_id === parsed.roomId)
+        if (sessionPrincipalOn && sessionPrincipalPromise !== null) {
+          await sessionPrincipalPromise
+        }
+        const listed = await readyClient.listRooms({
+          session: sessionPrincipalOn && readyClient.sessionAddress !== null,
+        })
+        member = Array.isArray(listed?.rooms) && listed.rooms.some(room => room.room_id === parsed.roomId)
       } catch { member = false }
       if (!member) {
         write(rpcError(id, -32602, 'invalid or foreign resource uri'))

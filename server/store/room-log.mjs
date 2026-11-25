@@ -2295,6 +2295,14 @@ export function openRoomLog({
         assertOpen()
         return identityOperations.releaseSessionBaseLeaseInTx(...args)
       },
+
+      pruneExpiredBareIdDedupInTx(...args) {
+        assertOpen()
+        if (!database.isTransaction) {
+          fail('invalid_argument', 'pruneExpiredBareIdDedupInTx requires an active transaction')
+        }
+        return bareIdDedupOperations.pruneExpiredInTx(...args)
+      },
     }
     return Object.freeze(api)
   } catch (error) {

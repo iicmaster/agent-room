@@ -1,8 +1,9 @@
 {
   "mcp": {
     "agent-room": {
-      "command": "node",
-      "args": ["${PLUGIN_ROOT}/server/mcp-stdio.mjs"]
+      "type": "local",
+      "command": ["node", "${PLUGIN_ROOT}/server/mcp-stdio.mjs"],
+      "enabled": true
     }
   }
 }

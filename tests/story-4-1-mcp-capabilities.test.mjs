@@ -2,14 +2,21 @@
 // honest tier disclosure, resource subscribe cap, and the AQ-2 absolute gate
 // over the real adapter surface. No server needed for these rows.
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { spawn } from 'node:child_process'
+import { once } from 'node:events'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { PassThrough } from 'node:stream'
+import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
 import { createMcpServer } from '../server/mcp-stdio.mjs'
 import { CHANNEL_TIER } from '../server/client/channel-verification.mjs'
+
+const ROOT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+const SERVER_ENTRY = join(ROOT_DIR, 'server', 'api', 'server.mjs')
+const sleep = ms => new Promise(r => setTimeout(r, ms))
 
 function harness(t, { env = {} } = {}) {
   const pluginData = mkdtempSync(join(tmpdir(), 'ar41-caps-'))
@@ -19,8 +26,16 @@ function harness(t, { env = {} } = {}) {
   const output = new PassThrough()
   output.setEncoding('utf8')
   const server = createMcpServer({
-    input, output,
-    env: { ...process.env, PLUGIN_DATA: pluginData, AGENT_ROOM_DATA_DIR: dataDir, AGENT_ROOM_NOTIFIER: 'off', ...env },
+    input,
+    output,
+    env: {
+      ...process.env,
+      PLUGIN_DATA: pluginData,
+      AGENT_ROOM_DATA_DIR: dataDir,
+      AGENT_ROOM_NOTIFIER: 'off',
+      AGENT_ROOM_SESSION_PRINCIPAL: 'off',
+      ...env,
+    },
   })
   t.after(() => server.close())
   let buffer = ''
@@ -108,4 +123,142 @@ test('resources/subscribe caps at 20, rejects invalid URIs; generic host still c
   // A host with no experimental still calls tools/list without error.
   const tools = await call('tools/list')
   assert.ok(tools.result.tools.length >= 11)
+})
+
+async function startLiveRoomWorld(t) {
+  const root = mkdtempSync(join(tmpdir(), 'ar41-live-'))
+  const dataDir = join(root, 'shared')
+  mkdirSync(dataDir, { recursive: true, mode: 0o700 })
+  const child = spawn(process.execPath, [SERVER_ENTRY], {
+    env: { ...process.env, AGENT_ROOM_DATA_DIR: dataDir },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  t.after(async () => {
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill('SIGKILL')
+      await once(child, 'exit').catch(() => {})
+    }
+    rmSync(root, { recursive: true, force: true })
+  })
+  const deadline = Date.now() + 10_000
+  while (Date.now() < deadline) {
+    if (child.exitCode !== null || child.signalCode !== null) throw new Error('server exited early')
+    const rt = join(dataDir, 'runtime.json')
+    if (existsSync(rt)) {
+      try {
+        const parsed = JSON.parse(readFileSync(rt, 'utf8'))
+        if (Number.isInteger(parsed.port) && parsed.port > 0) break
+      } catch { /* retry atomic write */ }
+    }
+    await sleep(25)
+  }
+
+  const clients = []
+  t.after(async () => {
+    for (const c of clients) await c.close().catch(() => {})
+  })
+
+  const openClient = async (pluginData, scope) => {
+    mkdirSync(pluginData, { recursive: true, mode: 0o700 })
+    const input = new PassThrough()
+    const output = new PassThrough()
+    output.setEncoding('utf8')
+    const server = createMcpServer({
+      input,
+      output,
+      env: {
+        ...process.env,
+        PLUGIN_DATA: pluginData,
+        AGENT_ROOM_DATA_DIR: dataDir,
+        AGENT_ROOM_NOTIFIER: 'off',
+        AGENT_ROOM_SESSION_PRINCIPAL: 'on',
+        AGENT_ROOM_SESSION_SCOPE: scope,
+      },
+    })
+    clients.push(server)
+    let buf = ''
+    const pending = new Map()
+    let nextId = 1
+    output.on('data', chunk => {
+      buf += chunk
+      for (;;) {
+        const nl = buf.indexOf('\n')
+        if (nl === -1) break
+        const line = buf.slice(0, nl); buf = buf.slice(nl + 1)
+        if (!line) continue
+        let msg; try { msg = JSON.parse(line) } catch { continue }
+        const settle = pending.get(msg.id)
+        if (settle) { pending.delete(msg.id); settle(msg) }
+      }
+    })
+    const call = (method, params) => new Promise((resolvePromise, rejectPromise) => {
+      const id = nextId++
+      const timer = setTimeout(() => rejectPromise(new Error(`timeout: ${method}`)), 5000)
+      pending.set(id, msg => { clearTimeout(timer); resolvePromise(msg) })
+      input.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, ...(params === undefined ? {} : { params }) })}\n`)
+    })
+    const tool = async (name, args = {}) => {
+      const res = await call('tools/call', { name, arguments: args })
+      assert.equal(res.error, undefined, JSON.stringify(res))
+      return JSON.parse(res.result.content[0].text)
+    }
+    await call('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: scope, version: '1' } })
+    const status = await tool('room_status')
+    assert.ok(status.session_address, `${scope} acquired session_address`)
+    return { call, tool, status }
+  }
+
+  return { root, dataDir, openClient }
+}
+
+test('MCP room_list includes ssession pair rooms for the owning session while isolating shared-PLUGIN_DATA siblings', async t => {
+  const { root, openClient } = await startLiveRoomWorld(t)
+  const pdA = join(root, 'pd-a')
+  const pdBC = join(root, 'pd-bc')
+  const a = await openClient(pdA, 'scope-a')
+  const b = await openClient(pdBC, 'scope-b')
+  const c = await openClient(pdBC, 'scope-c')
+
+  const sent = await a.tool('message_send', {
+    to: b.status.session_address,
+    client_message_id: 'reg-room-list-1',
+    text: 'secret-dm-for-b',
+  })
+  assert.ok(sent.room_id)
+
+  const bRooms = await b.tool('room_list')
+  const bPair = bRooms.rooms.find(r => r.room_id === sent.room_id)
+  assert.ok(bPair, 'receiver session discovers incoming ssession pair room via room_list')
+  assert.equal(bPair.kind, 'direct')
+  assert.ok(typeof bPair.peer_session_id === 'string' && bPair.peer_session_id.length > 0)
+
+  const page = await b.tool('message_read', { room_id: sent.room_id, after_seq: 0 })
+  assert.match(page.messages[0].text, /secret-dm-for-b/)
+
+  const cRooms = await c.tool('room_list')
+  assert.equal(cRooms.rooms.find(r => r.room_id === sent.room_id), undefined, 'sibling sharing PLUGIN_DATA does not see B pair room')
+})
+
+test('MCP resources/read enforces pair-room membership using the session-scoped rooms envelope', async t => {
+  const { root, openClient } = await startLiveRoomWorld(t)
+  const pdA = join(root, 'pd-a2')
+  const pdBC = join(root, 'pd-bc2')
+  const a = await openClient(pdA, 'scope-a2')
+  const b = await openClient(pdBC, 'scope-b2')
+  const c = await openClient(pdBC, 'scope-c2')
+
+  const sent = await a.tool('message_send', {
+    to: b.status.session_address,
+    client_message_id: 'reg-res-read-1',
+    text: 'resource-read-check',
+  })
+  const uri = `agent-room://rooms/${sent.room_id}`
+
+  const bRead = await b.call('resources/read', { uri })
+  assert.equal(bRead.error, undefined, JSON.stringify(bRead))
+  assert.ok(Array.isArray(bRead.result?.contents))
+
+  const cRead = await c.call('resources/read', { uri })
+  assert.equal(cRead.error?.code, -32602)
+  assert.match(cRead.error?.message ?? '', /invalid or foreign resource uri/)
 })

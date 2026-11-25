@@ -2963,25 +2963,46 @@ export async function startServer({
     pruneTimer = setInterval(pruneSafely, effectivePruneIntervalMs)
     pruneTimer.unref()
 
-    // Story 1.4: bounded background retention prune (<= 500 rows per 300_000ms tick).
+    // Story 1.4 / v1.0.1 (A1): bounded background retention prune (<= 500 rows
+    // per 300_000ms tick) for expired session principals and bare-ID send dedup.
+    let dedupPruneInFlight = false
     const retentionPruneSafely = () => {
-      if (retentionPruneInFlight) return
-      retentionPruneInFlight = true
-      store.enqueueWrite({
-        sessionKey: 'prune:retention',
-        coalesceKey: 'prune:retention',
-        priority: 'best_effort',
-        execute: tx => tx.pruneExpiredSessionPrincipalsInTx({
-          nowMs: Date.now(),
-          limit: RETENTION_SWEEP_BATCH_MAX,
-        }),
-      }).catch(error => {
-        if (error?.code !== 'queue_full') {
-          process.stderr.write(`agent-room-server: principal retention prune failed: ${internalDetailOf(error)}\n`)
-        }
-      }).finally(() => {
-        retentionPruneInFlight = false
-      })
+      if (!retentionPruneInFlight) {
+        retentionPruneInFlight = true
+        store.enqueueWrite({
+          sessionKey: 'prune:retention',
+          coalesceKey: 'prune:retention',
+          priority: 'best_effort',
+          execute: tx => tx.pruneExpiredSessionPrincipalsInTx({
+            nowMs: Date.now(),
+            limit: RETENTION_SWEEP_BATCH_MAX,
+          }),
+        }).catch(error => {
+          if (error?.code !== 'queue_full') {
+            process.stderr.write(`agent-room-server: principal retention prune failed: ${internalDetailOf(error)}\n`)
+          }
+        }).finally(() => {
+          retentionPruneInFlight = false
+        })
+      }
+      if (!dedupPruneInFlight) {
+        dedupPruneInFlight = true
+        store.enqueueWrite({
+          sessionKey: 'prune:bare-id-dedup',
+          coalesceKey: 'prune:bare-id-dedup',
+          priority: 'best_effort',
+          execute: tx => tx.pruneExpiredBareIdDedupInTx({
+            nowMs: Date.now(),
+            limit: RETENTION_SWEEP_BATCH_MAX,
+          }),
+        }).catch(error => {
+          if (error?.code !== 'queue_full') {
+            process.stderr.write(`agent-room-server: bare-id dedup prune failed: ${internalDetailOf(error)}\n`)
+          }
+        }).finally(() => {
+          dedupPruneInFlight = false
+        })
+      }
     }
     retentionPruneTimer = setInterval(retentionPruneSafely, RETENTION_PRUNE_INTERVAL_MS)
     retentionPruneTimer.unref()

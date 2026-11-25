@@ -493,6 +493,7 @@ export function createAgentRoomClient({
   sessionScope: declaredSessionScope,
   agentName: defaultAgentName = null,
   agentRole: defaultAgentRole = 'agent',
+  shutdownSignal = null,
 } = {}) {
   if (!Number.isInteger(requestTimeoutMs) || requestTimeoutMs <= 0) {
     throw new AgentRoomRuntimeError('invalid_argument', 'requestTimeoutMs must be a positive integer')
@@ -709,8 +710,29 @@ export function createAgentRoomClient({
   // Story 7.3 (A9): set by release() before it reads the token — the point
   // after which this client never creates or publishes another session.
   let shuttingDown = false
+  const shutdownController = new AbortController()
+  if (shutdownSignal?.aborted) {
+    shuttingDown = true
+    shutdownController.abort()
+  } else if (shutdownSignal) {
+    shutdownSignal.addEventListener('abort', () => {
+      shuttingDown = true
+      shutdownController.abort()
+    }, { once: true })
+  }
+  const effectiveShutdownSignal = shutdownController.signal
+  const isShuttingDown = () => shuttingDown || effectiveShutdownSignal.aborted
+
   async function release({ timeoutMs = CLIENT_RELEASE_TIMEOUT_MS } = {}) {
     shuttingDown = true
+    shutdownController.abort()
+    if (ensurePromise !== null) {
+      try {
+        await ensurePromise
+      } catch {
+        // An aborted or failed in-flight ensure settles cleanly inside shutdown.
+      }
+    }
     let token = sessionToken
     if (token === null && authPromise !== null) {
       // A first authentication/bind may still be in flight (the A9 initial
@@ -724,6 +746,13 @@ export function createAgentRoomClient({
         // The in-flight call's own refusal belongs to its own caller.
       }
       token = sessionToken
+    }
+    if (sessionEnsurePromise !== null) {
+      try {
+        await sessionEnsurePromise
+      } catch {
+        // Settled session-principal bootstrap never outlives teardown.
+      }
     }
     if (inFlightLegacyBind !== null) {
       try {
@@ -767,6 +796,9 @@ export function createAgentRoomClient({
   let heartbeatTimer = null
 
   async function ensureSessionPrincipal({ name = null, role = null } = {}) {
+    if (isShuttingDown()) {
+      throw new AgentRoomRuntimeError('request_cancelled', 'this client is shutting down; session principal skipped')
+    }
     const requestedName = typeof name === 'string' && name.length > 0 ? name : defaultAgentName
     const requestedRole = typeof role === 'string' && role.length > 0 ? role : defaultAgentRole
     if (sessionPrincipal !== null) {
@@ -793,9 +825,15 @@ export function createAgentRoomClient({
       // callers that merely triggered the arm.
       const inFlight = (async () => {
         try {
+          if (isShuttingDown()) {
+            throw new AgentRoomRuntimeError('request_cancelled', 'this client is shutting down; session principal skipped')
+          }
           // The actor session token must exist first: allocation authenticates
           // by the installation bearer, never by anything in its body.
           await ensure()
+          if (isShuttingDown()) {
+            throw new AgentRoomRuntimeError('request_cancelled', 'this client is shutting down; session principal aborted')
+          }
           sessionPrincipal = await resolveOrMintSessionPrincipal({
             pluginDataDir,
             sessionScope,
@@ -1369,12 +1407,18 @@ export function createAgentRoomClient({
   // The whole attach is the challenge-lane authentication below; needsReresolve
   // there only forces the re-auth (nothing to re-resolve).
   async function ensure() {
+    if (isShuttingDown()) {
+      throw new AgentRoomRuntimeError('request_cancelled', 'this client is shutting down; server attach aborted')
+    }
     const attached = remoteBase !== null || port !== null
     if (attached && sessionToken !== null && !needsReresolve) return attachEpoch
     if (ensurePromise === null) {
       ensureSettled = false
       const inFlight = (async () => {
         try {
+          if (isShuttingDown()) {
+            throw new AgentRoomRuntimeError('request_cancelled', 'this client is shutting down; server attach aborted')
+          }
           const prevPort = port
           const reresolving = needsReresolve
           if (remoteBase !== null) {
@@ -1387,11 +1431,15 @@ export function createAgentRoomClient({
             // every credential is presented later, on the challenge lane.
             const server = await ensureServer({
               dataDir,
+              signal: effectiveShutdownSignal,
               ...(waitMs === undefined ? {} : { waitMs }),
               ...(connectionMode === REMOTE_TRANSPORT ? { connectionMode } : {}),
             })
             port = server.port
             needsReresolve = false
+          }
+          if (isShuttingDown()) {
+            throw new AgentRoomRuntimeError('request_cancelled', 'this client is shutting down; auth skipped')
           }
           if (sessionToken === null || (remoteBase === null ? port !== prevPort : reresolving)) {
             await authenticateOnce()
@@ -1432,12 +1480,15 @@ export function createAgentRoomClient({
       return request('GET', `/api/presence${includeOffline ? '?include_offline=true' : ''}`, { signal, bindLegacy: true })
     },
 
-    // GET /api/rooms — the returning session's enumeration (Story 2.2): one
-    // row per room this Actor belongs to — the Broadcast Room implicitly plus
-    // every Direct Room whose membership row names it — so DMs opened in the
-    // client's absence are discovered without prior knowledge. Rows carry
-    // exactly {room_id, kind}.
-    listRooms({ signal } = {}) {
+    // GET /api/rooms — the returning session's enumeration (Story 2.2 / v0.9 Story 2.1):
+    // when session=true, presents the process's Session capability so ssession: pair
+    // rooms are included alongside Actor-wide rooms; default Bearer mode intentionally
+    // omits ssession: rooms.
+    async listRooms({ signal, session = false } = {}) {
+      if (session) {
+        const principal = await ensureSessionPrincipal()
+        return request('GET', '/api/rooms', { signal, sessionCredential: principal.capability })
+      }
       return request('GET', '/api/rooms', { signal })
     },
 

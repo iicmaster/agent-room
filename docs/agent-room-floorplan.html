@@ -1,0 +1,932 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Floorplan แผนที่ระบบ Agent Room — อ่านง่ายแบบภาษาคน พร้อมจุดตรวจสุขภาพจริง</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;600;700&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #090d16;
+      --surface: #111827;
+      --card: #161f32;
+      --card-hover: #1c2740;
+      --border: #26344f;
+      --ink: #f1f5f9;
+      --muted: #94a3b8;
+      --cyan: #38bdf8;
+      --amber: #f97316;
+      --green: #34d399;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 24px;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: 'Sarabun', -apple-system, BlinkMacSystemFont, sans-serif;
+      font-size: 16px;
+      line-height: 1.65;
+    }
+    p, li, td, th, .card, .callout, .inspector-body {
+      line-height: 1.65;
+    }
+    code, pre {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 0.88em;
+      background: #0b1220;
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      padding: 2px 6px;
+      color: var(--cyan);
+    }
+    .container { max-width: 1260px; margin: 0 auto; display: grid; gap: 22px; }
+    .hero, .section-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 22px 24px;
+    }
+    .badge-row { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 12px;
+      border-radius: 999px;
+      font-size: 13px;
+      font-weight: 600;
+      border: 1px solid var(--border);
+      background: var(--card);
+    }
+    .pill.cyan { border-color: rgba(56, 189, 248, 0.45); color: var(--cyan); }
+    .pill.amber { border-color: rgba(249, 115, 22, 0.55); color: var(--amber); }
+    .pill.green { border-color: rgba(52, 211, 153, 0.45); color: var(--green); }
+    h1 { margin: 0 0 8px 0; font-size: 26px; font-weight: 700; line-height: 1.4; }
+    h2 { margin: 0 0 12px 0; font-size: 20px; font-weight: 700; line-height: 1.45; }
+    h3 { margin: 0 0 8px 0; font-size: 16px; font-weight: 700; line-height: 1.5; }
+    .muted { color: var(--muted); }
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+      gap: 12px;
+      margin-top: 16px;
+    }
+    .metric-box {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px 14px;
+    }
+    .metric-num { font-size: 22px; font-weight: 700; color: var(--cyan); line-height: 1.3; }
+    .metric-num.warn { color: var(--amber); }
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+    .btn-group { display: flex; flex-wrap: wrap; gap: 8px; }
+    button {
+      font-family: inherit;
+      font-size: 14px;
+      font-weight: 600;
+      padding: 8px 14px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--card);
+      color: var(--ink);
+      cursor: pointer;
+      line-height: 1.4;
+    }
+    button:hover { background: var(--card-hover); border-color: var(--cyan); }
+    button.active {
+      background: rgba(56, 189, 248, 0.14);
+      border-color: var(--cyan);
+      color: var(--cyan);
+    }
+    button.flow-warn.active {
+      background: rgba(249, 115, 22, 0.16);
+      border-color: var(--amber);
+      color: var(--amber);
+    }
+    .diagram-frame {
+      background: #0b111e;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px;
+      max-width: 100%;
+      overflow: hidden;
+    }
+    .diagram-frame svg {
+      width: 100%;
+      height: auto;
+      display: block;
+    }
+    .split-grid {
+      display: grid;
+      grid-template-columns: 1.45fr 1fr;
+      gap: 16px;
+      align-items: start;
+    }
+    @media (max-width: 960px) {
+      .split-grid { grid-template-columns: 1fr; }
+    }
+    .rooms-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+      gap: 10px;
+    }
+    .room-btn {
+      text-align: left;
+      padding: 12px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      border-radius: 10px;
+    }
+    .room-btn .room-zone { font-size: 12px; color: var(--muted); font-weight: 600; }
+    .room-btn .room-name { font-size: 15px; font-weight: 700; color: var(--ink); }
+    .room-btn .room-desc { font-size: 13px; color: var(--muted); font-weight: 400; line-height: 1.55; }
+    .room-btn.health-red { border-left: 3px solid var(--amber); }
+    .room-btn.health-green { border-left: 3px solid var(--green); }
+    .inspector-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px 18px;
+      position: sticky;
+      top: 16px;
+    }
+    .ask-box {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 12px;
+    }
+    .ask-input {
+      flex: 1 1 320px;
+      padding: 10px 14px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: #0b111e;
+      color: var(--ink);
+      font-family: inherit;
+      font-size: 15px;
+      line-height: 1.5;
+    }
+    .answer-box {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--cyan);
+      border-radius: 10px;
+      padding: 14px 16px;
+      margin-top: 10px;
+    }
+    .flow-steps {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 10px;
+      margin-top: 12px;
+    }
+    .flow-step {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px 14px;
+    }
+    .callout {
+      border: 1px solid var(--border);
+      border-left: 4px solid var(--cyan);
+      background: #0f1729;
+      border-radius: 10px;
+      padding: 14px 16px;
+    }
+    .callout.warn { border-left-color: var(--amber); }
+    .health-list, .appendix-table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+    .health-list th, .health-list td, .appendix-table th, .appendix-table td {
+      text-align: left;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+      font-size: 14px;
+    }
+    .health-list th, .appendix-table th { color: var(--muted); font-weight: 700; }
+    .tag {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .tag.fix { background: rgba(249, 115, 22, 0.18); color: var(--amber); }
+    .tag.ok { background: rgba(52, 211, 153, 0.16); color: var(--green); }
+    .tag.gap { background: rgba(56, 189, 248, 0.16); color: var(--cyan); }
+
+    dialog.diagram-lightbox {
+      width: 94vw;
+      max-width: 1400px;
+      height: 86vh;
+      padding: 0;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: var(--bg);
+      color: var(--ink);
+    }
+    dialog.diagram-lightbox::backdrop { background: rgba(4, 8, 16, 0.84); }
+    .lightbox-shell { display: flex; flex-direction: column; height: 100%; }
+    .lightbox-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 10px 16px;
+      border-bottom: 1px solid var(--border);
+      background: var(--surface);
+    }
+    .lightbox-viewport {
+      position: relative;
+      flex: 1 1 auto;
+      overflow: hidden;
+      cursor: grab;
+      background: #0b111e;
+    }
+    .lightbox-viewport:active { cursor: grabbing; }
+    .lightbox-canvas {
+      transform-origin: 0 0;
+      width: 1200px;
+      padding: 20px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <!-- Tier 1: Executive Summary -->
+    <section class="hero">
+      <div class="badge-row" style="margin-top:0; margin-bottom:10px;">
+        <span class="pill cyan">🎯 Level: ELI10 / Plain-English Floorplan</span>
+        <span class="pill green">📦 agent-room v1.1.0 (ef4a50a)</span>
+        <span class="pill green">🧩 tmux-teams Cell 3 (185bdbe)</span>
+        <span class="pill green">🟢 ปิดจบ 3 Tracks · 0 Process Leaks</span>
+      </div>
+      <h1>Floorplan แผนที่ระบบ Agent Room — คุยข้ามเครื่อง ไม่ทับห้อง ไม่ปลุกวน</h1>
+      <p class="muted" style="margin:0;">
+        แผนที่แบบภาษาคนหลังปิดงานทั้ง 3 Tracks: สีเขียวคือห้องที่เสริมกันชน/ปิดรูรั่วและทดสอบ End-to-End จริงแล้ว
+        สีฟ้าคือโครงสร้างหลักเดิมที่แข็งแรง และสีส้มคือขอบเขตที่ยังคงข้อจำกัดตามจริง (Claude host <code>--channels</code>, สเกล 1,000 โปรเซส, และ monorepo แม่)
+      </p>
+      <div class="metrics">
+        <div class="metric-box">
+          <div class="metric-num">11 Tools / 26 Routes</div>
+          <div class="muted" style="font-size:13px;">MCP 11 เครื่องมือ + Strict Schema Verified</div>
+        </div>
+        <div class="metric-box">
+          <div class="metric-num">0 Leaks Verified</div>
+          <div class="muted" style="font-size:13px;">อุด spawn-leak ใน <code>mcp-stdio/api-client/ensure-server</code> + กวาด 43 ศพเกลี้ยง</div>
+        </div>
+        <div class="metric-box">
+          <div class="metric-num">Caddy TLS 155 ms</div>
+          <div class="muted" style="font-size:13px;">E2E ผ่าน Caddy v2.11.9 + SIGKILL crash-mid-/resume กู้คืนผ่าน</div>
+        </div>
+        <div class="metric-box">
+          <div class="metric-num warn">Open Boundaries</div>
+          <div class="muted" style="font-size:13px;">Claude 2.1.330 (host <code>--channels</code> Unverified), 1000-OS, &amp; monorepo แม่</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Tier 2A: Visual Floorplan Diagram + Mode Switch + Lightbox -->
+    <section class="section-card">
+      <div class="toolbar">
+        <div>
+          <h2 style="margin-bottom:4px;">🗺️ แปลนบ้านทั้งระบบ (อ่านจากซ้าย ➔ กลาง ➔ ขวา)</h2>
+          <div class="muted" style="font-size:14px;">สีเขียวคือจุดที่เพิ่งซ่อมและยืนยัน E2E จริงใน v1.0.1–v1.1.0 &amp; Cell 3 · สีส้มคือขอบเขตที่ยังรอผู้ดูแลตัดสินใจแยก</div>
+        </div>
+        <div class="btn-group">
+          <button id="btnModePlain" class="active" type="button">🗣️ ภาษาคน (เจ้าของระบบ)</button>
+          <button id="btnModeDev" type="button">💻 ภาษาวิศวกร (ไฟล์จริง)</button>
+          <button id="btnExpandSvg" type="button">🔍 ขยายเต็มจอ (Pan &amp; Zoom)</button>
+        </div>
+      </div>
+
+      <div id="diagramHost" class="diagram-frame">
+        <svg id="fp-svg" viewBox="0 0 1240 700" role="img" aria-label="แผนผัง Floorplan ระบบ Agent Room">
+          <defs>
+            <marker id="fp-arrow-cyan" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 1 L 10 5 L 0 9 z" fill="#38bdf8" />
+            </marker>
+            <marker id="fp-arrow-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 1 L 10 5 L 0 9 z" fill="#34d399" />
+            </marker>
+            <marker id="fp-arrow-amber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 1 L 10 5 L 0 9 z" fill="#f97316" />
+            </marker>
+            <marker id="fp-arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 1 L 10 5 L 0 9 z" fill="#64748b" />
+            </marker>
+          </defs>
+
+          <!-- Zone Backdrop Frames -->
+          <rect id="fp-zone-left" x="20" y="20" width="286" height="660" rx="14" fill="#0f1729" stroke="#26344f" stroke-width="1" />
+          <text x="40" y="50" fill="#94a3b8" font-size="13" font-weight="700">1. ประตูฝั่งผู้ใช้ &amp; AI Agents</text>
+
+          <rect id="fp-zone-center" x="352" y="20" width="536" height="660" rx="14" fill="#0f1729" stroke="#26344f" stroke-width="1" />
+          <text x="372" y="50" fill="#94a3b8" font-size="13" font-weight="700">2. อาคารควบคุมกลาง (Room Server &amp; Client Guardrails)</text>
+
+          <rect id="fp-zone-right" x="934" y="20" width="286" height="660" rx="14" fill="#0f1729" stroke="#26344f" stroke-width="1" />
+          <text x="954" y="50" fill="#94a3b8" font-size="13" font-weight="700">3. ห้องเก็บข้อมูลถาวร &amp; ข้างบ้าน</text>
+
+          <!-- Left Column Boxes -->
+          <rect id="fp-n-claude" x="40" y="80" width="246" height="110" rx="10" fill="#161f32" stroke="#34d399" stroke-width="1.8" />
+          <text x="56" y="108" fill="#f1f5f9" font-size="14" font-weight="700">
+            <tspan x="56" dy="0">🤖 ห้องทำงานของ AI</tspan>
+            <tspan x="56" dy="22" fill="#94a3b8" font-size="12" font-weight="400">Claude Code / Codex / AGY / OpenCode</tspan>
+            <tspan x="56" dy="22" fill="#34d399" font-size="12" font-weight="600">✓ ปิด leak + กู้ agent_id_taken แล้ว</tspan>
+          </text>
+
+          <rect id="fp-n-cli" x="40" y="236" width="246" height="114" rx="10" fill="#161f32" stroke="#34d399" stroke-width="1.8" />
+          <text x="56" y="264" fill="#f1f5f9" font-size="14" font-weight="700">
+            <tspan x="56" dy="0">⌨️ โทรศัพท์สายตรง (CLI)</tspan>
+            <tspan x="56" dy="22" fill="#94a3b8" font-size="12" font-weight="400">bootstrap, allow, dm, read, wait</tspan>
+            <tspan x="56" dy="22" fill="#34d399" font-size="12" font-weight="600">✓ clone --install + allow/wait v1.1</tspan>
+          </text>
+
+          <rect id="fp-n-hooks" x="40" y="396" width="246" height="114" rx="10" fill="#161f32" stroke="#38bdf8" stroke-width="1.5" />
+          <text x="56" y="424" fill="#f1f5f9" font-size="14" font-weight="700">
+            <tspan x="56" dy="0">🪝 กริ่งเรียกตอนเปิด/จบเทิร์น</tspan>
+            <tspan x="56" dy="22" fill="#94a3b8" font-size="12" font-weight="400">SessionStart, Pre/PostToolUse, Stop</tspan>
+            <tspan x="56" dy="22" fill="#38bdf8" font-size="12" font-weight="600">✓ Stop หยุดปลุกซ้ำหลังอ่านข้อความ</tspan>
+          </text>
+
+          <rect id="fp-n-human" x="40" y="556" width="246" height="98" rx="10" fill="#161f32" stroke="#26344f" stroke-width="1.5" />
+          <text x="56" y="584" fill="#f1f5f9" font-size="14" font-weight="700">
+            <tspan x="56" dy="0">🧑‍✈️ เจ้าของระบบ (Operator)</tspan>
+            <tspan x="56" dy="22" fill="#94a3b8" font-size="12" font-weight="400">ดูหน้าเว็บ, กด allow (รองรับ sessions), revoke</tspan>
+          </text>
+
+          <!-- Center Column Boxes -->
+          <rect id="fp-n-gate" x="372" y="80" width="224" height="116" rx="10" fill="#161f32" stroke="#34d399" stroke-width="1.8" />
+          <text x="388" y="108" fill="#f1f5f9" font-size="14" font-weight="700">
+            <tspan x="388" dy="0">🛂 ป้อมรปภ. &amp; ออกบัตร</tspan>
+            <tspan x="388" dy="22" fill="#94a3b8" font-size="12" font-weight="400">Bearer / Session + /resume กู้ชีพ</tspan>
+            <tspan x="388" dy="22" fill="#34d399" font-size="12" font-weight="600">✓ ผ่าน SIGKILL mid-/resume จริง</tspan>
+          </text>
+
+          <rect id="fp-n-queue" x="644" y="80" width="224" height="116" rx="10" fill="#161f32" stroke="#34d399" stroke-width="1.8" />
+          <text x="660" y="108" fill="#f1f5f9" font-size="14" font-weight="700">
+            <tspan x="660" dy="0">📬 คิวเขียนเรียงแถวเดียว</tspan>
+            <tspan x="660" dy="22" fill="#94a3b8" font-size="12" font-weight="400">SAVEPOINT + กวาด dedup ≤500/รอบ</tspan>
+            <tspan x="660" dy="22" fill="#34d399" font-size="12" font-weight="600">✓ ตาราง dedup ไม่บวมค้างแล้ว</tspan>
+          </text>
+
+          <rect id="fp-n-watch" x="372" y="254" width="224" height="122" rx="10" fill="#161f32" stroke="#34d399" stroke-width="1.8" />
+          <text x="388" y="282" fill="#f1f5f9" font-size="14" font-weight="700">
+            <tspan x="388" dy="0">📡 ลำโพงกระจายข่าวสด</tspan>
+            <tspan x="388" dy="22" fill="#94a3b8" font-size="12" font-weight="400">PostCommitBus + /api/watch</tspan>
+            <tspan x="388" dy="22" fill="#34d399" font-size="12" font-weight="600">✓ manualDrain + cursor cap 200</tspan>
+          </text>
+
+          <rect id="fp-n-guard" x="644" y="254" width="224" height="122" rx="10" fill="#161f32" stroke="#34d399" stroke-width="1.8" />
+          <text x="660" y="282" fill="#f1f5f9" font-size="14" font-weight="700">
+            <tspan x="660" dy="0">🛑 เบรกเกอร์กันปลุกวน</tspan>
+            <tspan x="660" dy="22" fill="#94a3b8" font-size="12" font-weight="400">G1=8 คู่ / G2=25 / G3=150 ms</tspan>
+            <tspan x="660" dy="22" fill="#34d399" font-size="12" font-weight="600">✓ ต่อ coalesce() + reconnect cursor</tspan>
+          </text>
+
+          <rect id="fp-n-trust" x="372" y="434" width="224" height="122" rx="10" fill="#161f32" stroke="#38bdf8" stroke-width="1.5" />
+          <text x="388" y="462" fill="#f1f5f9" font-size="14" font-weight="700">
+            <tspan x="388" dy="0">🛡️ ด่านคัดกรองความไว้ใจ</tspan>
+            <tspan x="388" dy="22" fill="#94a3b8" font-size="12" font-weight="400">ข้อความคนนอก = HELD ไร้เนื้อหา</tspan>
+            <tspan x="388" dy="22" fill="#38bdf8" font-size="12" font-weight="600">✓ ตรวจเข้มทั้งสายอ่านและ watch</tspan>
+          </text>
+
+          <rect id="fp-n-doctor" x="644" y="434" width="224" height="122" rx="10" fill="#161f32" stroke="#34d399" stroke-width="1.8" />
+          <text x="660" y="462" fill="#f1f5f9" font-size="14" font-weight="700">
+            <tspan x="660" dy="0">🩺 ห้องตรวจสุขภาพ &amp; แพ็ก</tspan>
+            <tspan x="660" dy="22" fill="#94a3b8" font-size="12" font-weight="400">package-release + claude strict</tspan>
+            <tspan x="660" dy="22" fill="#34d399" font-size="12" font-weight="600">✓ validate --strict ผ่าน (v1.1.0)</tspan>
+          </text>
+
+          <!-- Right Column Boxes -->
+          <rect id="fp-n-sqlite" x="954" y="80" width="246" height="114" rx="10" fill="#161f32" stroke="#38bdf8" stroke-width="1.5" />
+          <text x="970" y="108" fill="#f1f5f9" font-size="14" font-weight="700">
+            <tspan x="970" dy="0">🗄️ ตู้เซฟกลาง (SQLite WAL)</tspan>
+            <tspan x="970" dy="22" fill="#94a3b8" font-size="12" font-weight="400">เก็บห้อง ssession:, ข้อความ, บัตร</tspan>
+            <tspan x="970" dy="22" fill="#38bdf8" font-size="12" font-weight="600">✓ 1 โปรเซสต่อ 1 ฐานข้อมูลถาวร</tspan>
+          </text>
+
+          <rect id="fp-n-clientstate" x="954" y="238" width="246" height="114" rx="10" fill="#161f32" stroke="#38bdf8" stroke-width="1.5" />
+          <text x="970" y="266" fill="#f1f5f9" font-size="14" font-weight="700">
+            <tspan x="970" dy="0">📔 สมุดจดประจำเซสชัน</tspan>
+            <tspan x="970" dy="22" fill="#94a3b8" font-size="12" font-weight="400">แยก read_seq ออกจาก notified_seq</tspan>
+            <tspan x="970" dy="22" fill="#38bdf8" font-size="12" font-weight="600">✓ ล็อกไฟล์ atomic 2 วินาที</tspan>
+          </text>
+
+          <rect id="fp-n-caddy" x="954" y="396" width="246" height="114" rx="10" fill="#161f32" stroke="#34d399" stroke-width="1.8" />
+          <text x="970" y="424" fill="#f1f5f9" font-size="14" font-weight="700">
+            <tspan x="970" dy="0">🌐 สะพานข้ามเครื่อง TLS</tspan>
+            <tspan x="970" dy="22" fill="#94a3b8" font-size="12" font-weight="400">Caddy HTTPS E2E ผ่าน (155 ms)</tspan>
+            <tspan x="970" dy="22" fill="#f97316" font-size="12" font-weight="600">ⓘ Claude --channels host Unverified</tspan>
+          </text>
+
+          <rect id="fp-n-monorepo" x="954" y="554" width="246" height="114" rx="10" fill="#161f32" stroke="#34d399" stroke-width="1.8" />
+          <text x="970" y="582" fill="#f1f5f9" font-size="14" font-weight="700">
+            <tspan x="970" dy="0">🧩 ข้างบ้าน: tmux-teams</tspan>
+            <tspan x="970" dy="22" fill="#94a3b8" font-size="12" font-weight="400">Cell 3 เสร็จ (feat/phase-e-cell-3)</tspan>
+            <tspan x="970" dy="22" fill="#f97316" font-size="12" font-weight="600">⚠ repo แม่ยังค้าง diff KMS/gitlink</tspan>
+          </text>
+
+          <!-- Clean Orthogonal Connectors + Badged Labels -->
+          <path d="M 286 134 L 372 134" fill="none" stroke="#34d399" stroke-width="2" marker-end="url(#fp-arrow-green)" />
+          <rect x="296" y="114" width="64" height="20" rx="5" fill="#090d16" stroke="#26344f" />
+          <text x="328" y="128" fill="#34d399" font-size="11" font-weight="600" text-anchor="middle">MCP/ส่ง</text>
+
+          <path d="M 286 284 L 328 284 L 328 156 L 372 156" fill="none" stroke="#38bdf8" stroke-width="2" marker-end="url(#fp-arrow-cyan)" />
+          <path d="M 286 315 L 372 315" fill="none" stroke="#34d399" stroke-width="2" marker-end="url(#fp-arrow-green)" />
+          <rect x="292" y="303" width="72" height="20" rx="5" fill="#090d16" stroke="#34d399" />
+          <text x="328" y="317" fill="#34d399" font-size="11" font-weight="600" text-anchor="middle">wait+cursor</text>
+
+          <path d="M 596 138 L 644 138" fill="none" stroke="#34d399" stroke-width="2" marker-end="url(#fp-arrow-green)" />
+          <path d="M 868 138 L 954 138" fill="none" stroke="#38bdf8" stroke-width="2" marker-end="url(#fp-arrow-cyan)" />
+          <rect x="878" y="116" width="64" height="20" rx="5" fill="#090d16" stroke="#26344f" />
+          <text x="910" y="130" fill="#38bdf8" font-size="11" font-weight="600" text-anchor="middle">SQL WAL</text>
+
+          <path d="M 756 196 L 756 226 L 484 226 L 484 254" fill="none" stroke="#34d399" stroke-width="2" marker-end="url(#fp-arrow-green)" />
+          <rect x="545" y="214" width="150" height="22" rx="6" fill="#090d16" stroke="#34d399" />
+          <text x="620" y="229" fill="#34d399" font-size="11" font-weight="600" text-anchor="middle">Commit แล้วแจ้งข่าวสด</text>
+
+          <path d="M 596 315 L 644 315" fill="none" stroke="#34d399" stroke-width="2" marker-end="url(#fp-arrow-green)" />
+          <path d="M 484 376 L 484 434" fill="none" stroke="#38bdf8" stroke-width="2" marker-end="url(#fp-arrow-cyan)" />
+          <rect x="420" y="394" width="128" height="20" rx="5" fill="#090d16" stroke="#26344f" />
+          <text x="484" y="408" fill="#94a3b8" font-size="11" font-weight="600" text-anchor="middle">คัดกรอง Held ก่อนปลุก</text>
+
+          <path d="M 868 315 L 910 315 L 910 295 L 954 295" fill="none" stroke="#38bdf8" stroke-width="2" marker-end="url(#fp-arrow-cyan)" />
+          <path d="M 286 604 L 910 604 L 910 453 L 954 453" fill="none" stroke="#34d399" stroke-width="1.8" stroke-dasharray="4 4" marker-end="url(#fp-arrow-green)" />
+          <rect x="536" y="592" width="166" height="22" rx="6" fill="#090d16" stroke="#34d399" />
+          <text x="619" y="607" fill="#34d399" font-size="11" font-weight="600" text-anchor="middle">Caddy TLS E2E ผ่านแล้ว</text>
+        </svg>
+      </div>
+    </section>
+
+    <!-- Tier 2B: Interactive Room Explorer & Inspector -->
+    <section class="section-card">
+      <h2>🏢 กดสำรวจแต่ละห้องในแผนที่ (Click to Inspect)</h2>
+      <div class="split-grid">
+        <div id="roomsGrid" class="rooms-grid"></div>
+        <aside id="inspector" class="inspector-card" aria-live="polite">
+          <div class="pill cyan" id="insBadge">เลือกห้องด้านซ้าย</div>
+          <h3 id="insTitle" style="margin-top:10px; font-size:18px;">ห้องทำงานของระบบ</h3>
+          <p id="insPlain"></p>
+          <div class="callout" style="margin:10px 0;">
+            <strong>📍 พิกัดไฟล์จริง:</strong>
+            <div id="insFiles" style="margin-top:6px;"></div>
+          </div>
+          <div class="callout warn">
+            <strong>💥 ถ้าแก้ไขห้องนี้ อะไรจะกระทบ / อาการที่พบตอนนี้:</strong>
+            <div id="insImpact" style="margin-top:6px;"></div>
+          </div>
+        </aside>
+      </div>
+    </section>
+
+    <!-- Tier 2C: Guided Flows & Ask the Map -->
+    <section class="section-card">
+      <h2>🧭 Guided Flows &amp; ถามแผนที่ระบบ (Ask the Map)</h2>
+      <div class="btn-group" id="flowBtns">
+        <button type="button" class="active" data-flow="send">Flow 1: ส่งข้อความหาเพื่อนด้วย Agent ID</button>
+        <button type="button" data-flow="wake">Flow 2: ข้อความเข้า ➔ ปลุกอย่างปลอดภัย</button>
+        <button type="button" class="flow-warn" data-flow="tracks">Flow 3: แผนงาน 3 Tracks ขนาน vs ลำดับ</button>
+      </div>
+      <div id="flowSteps" class="flow-steps"></div>
+
+      <h3 style="margin-top:20px;">💬 ถามแผนที่เป็นภาษาคน</h3>
+      <div class="ask-box">
+        <input id="askInput" class="ask-input" type="text" placeholder="ลองถาม เช่น 'ทำไมมี 43 โปรเซสค้าง?' หรือ 'ถ้าแก้ watch กระทบอะไร?' หรือ 'tmux-teams ค้างตรงไหน?'" />
+        <button id="askSubmit" type="button" class="active">ถามแผนที่</button>
+      </div>
+      <div class="btn-group" id="quickAsks">
+        <button type="button" data-q="43 โปรเซสค้างหายขาดหรือยัง?">43 โปรเซสค้างหายขาดหรือยัง?</button>
+        <button type="button" data-q="พอกดส่งข้อความหาเพื่อน ระบบทำอะไรต่อ?">พอกดส่งข้อความ ระบบทำอะไรต่อ?</button>
+        <button type="button" data-q="ระบบปลุกและ backpressure แก้อะไรไปบ้าง?">ระบบปลุก/backpressure แก้อะไรบ้าง?</button>
+        <button type="button" data-q="tmux-teams Cell 3 กับ monorepo ตอนนี้สถานะอะไร?">tmux-teams Cell 3 กับ monorepo สถานะอะไร?</button>
+      </div>
+      <div id="askAnswer" class="answer-box">พิมพ์คำถามหรือกดปุ่มคำถามด่วนด้านบน เพื่อไล่คำตอบจากผลทดสอบล่าสุดได้ทันทีครับ</div>
+    </section>
+
+    <!-- Tier 2D: Health Check Radar (No Secrets Exposed) -->
+    <section class="section-card">
+      <h2>🩺 Health Check Radar &amp; Recent Work (ตรวจจากผลรันจริง ไร้ข้อมูลความลับ)</h2>
+      <table class="health-list">
+        <thead>
+          <tr>
+            <th>สถานะ</th>
+            <th>สรุปผลหลังจบงานทั้ง 3 Tracks</th>
+            <th>พิกัดไฟล์จริง &amp; Commit</th>
+            <th>หลักฐานการยืนยันล่าสุด</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><span class="tag ok">FIXED / v1.0.1</span></td>
+            <td>ปิดต้นตอ MCP shutdown spawn-leak: เก็บกวาด 43 ศพเก่าเหลือ 0 + เติม <code>AbortSignal</code> fence หน้า <code>spawn()</code>, เก็บ unready child, และแก้เทสต์ <code>story-4-1</code> / <code>shutdown-cleanup</code> เป็น <code>'off'</code> พร้อม stderr warning เมื่อใส่ <code>'0'</code></td>
+            <td><code>server/mcp-stdio.mjs</code> · <code>server/client/api-client.mjs</code> · <code>server/client/ensure-server.mjs</code> · <code>c4f2a6f</code></td>
+            <td>ยิง rapid EOF 5 รอบ + รัน test suite ➔ <strong>0 Leaks</strong></td>
+          </tr>
+          <tr>
+            <td><span class="tag ok">FIXED / v1.0.1</span></td>
+            <td>แก้ <code>post-commit-bus</code> backpressure bypass (<code>{ manualDrain: true }</code>), ตั้งค่า <code>WATCH_CURSOR_ROOM_MAX = 200</code>, ส่ง baseline cursor + client <code>seen</code> ตอน reconnect, แสดง <code>last_error</code>, และต่อสาย <code>coalesce()</code> (150 ms) พร้อมลบ <code>bare_id_send_dedup</code> แบบ bounded</td>
+            <td><code>post-commit-bus.mjs</code> · <code>watch.mjs</code> · <code>wait-commands.mjs</code> · <code>bare-id-dedup.mjs</code> · <code>c4f2a6f</code></td>
+            <td>Black-Box E2E ผ่านครบ + <code>E3-A1/E3-A2/A1/D2</code> marked <code>done</code></td>
+          </tr>
+          <tr>
+            <td><span class="tag ok">SHIPPED / v1.1.0</span></td>
+            <td>แก้ <code>--install</code>/<code>--print</code> จาก git clone ให้ใช้ path จริง + แก้ TOML quoting (<code>'</code>/<code>"</code>/<code>\</code>/spaces) + เติม <code>GET /api/session-principals</code> ใน <code>allow</code> + ให้ <code>wait</code> ใช้หลัง <code>bootstrap</code> ได้เลย + ไม่ให้ <code>agent_id_taken</code> ทำ MCP ตายถาวร</td>
+            <td><code>harness-installer.mjs</code> · <code>held-commands.mjs</code> · <code>wait-commands.mjs</code> · <code>mcp-stdio.mjs</code> · <code>ef4a50a</code></td>
+            <td>Caddy v2.11.9 E2E <strong>155 ms</strong> (reconnect seq 3) + SIGKILL <code>/resume</code> recovery ผ่าน + <code>claude plugin validate --strict</code> pass</td>
+          </tr>
+          <tr>
+            <td><span class="tag ok">SHIPPED / T3</span></td>
+            <td>ต่อ <strong>Phase E Cell 3</strong> บน worktree สะอาด <code>/Users/ngs/worktrees/tmux-teams-cell3</code>: รองรับ <code>task_id</code> leg matching + <code>failedLegCount</code> และให้ <code>nextStep</code> / <code>planEscalation</code> เทียบ <code>tokenState</code> กับ custody scan แล้ว escalate ชัดเจนเมื่อขัดแย้ง (ไม่แตะ dirty branch <code>release/seat-advisors</code>)</td>
+            <td><code>plugins/tmux-teams/skills/tmux-teams/scripts/{domain-token,loop-runner}.mjs</code> · branch <code>feat/phase-e-cell-3</code> (<code>185bdbe</code>)</td>
+            <td><code>domain-equivalence</code> + <code>decisions</code> + <code>front-door-alarm</code> + <code>subscribers</code> <strong>39/39 pass</strong> + <code>loop-occupancy</code> 110/110</td>
+          </tr>
+          <tr>
+            <td><span class="tag gap">MEASURED BOUNDARY</span></td>
+            <td>ทดสอบกับ <code>claude 2.1.330</code> จริงทั้ง <code>--channels</code> และ <code>--dangerously-load-development-channels</code> ผ่าน <code>2025-11-25 → 2025-06-18</code> downgrade ปกติ แต่ฝั่ง host <code>-p</code> ส่งเฉพาะ <code>{roots, elicitation}</code> ไม่ส่ง <code>experimental['claude/channel']</code> ระบบจึงรายงาน <code>Unverified</code> อย่างซื่อตรง (ส่วนสเกล 1,000 OS/Bearer ยังไม่วัด)</td>
+            <td><code>docs/release-evidence/v1.1.0-candidate.json</code> · <code>server/client/channel-verification.mjs</code></td>
+            <td>บันทึกขอบเขตจริงลง <code>v1.1.0-candidate.json</code> ไม่เคลมเกินจริง</td>
+          </tr>
+          <tr>
+            <td><span class="tag fix">MONOREPO GUARD</span></td>
+            <td>Repo แม่ <code>/Users/ngs/agent-skills</code> ยังมี diff ค้างของ <code>thclaws-kms/*</code>, <code>nextgen-kms/</code> และ staged gitlink <code>plugins/agent-room @ 46ff0f0</code> จึงไม่สั่ง commit รวมจาก monorepo เพื่อป้องกันลบ/ทับงานอื่น</td>
+            <td><code>/Users/ngs/agent-skills</code> index (<code>dd0b848</code>)</td>
+            <td>ปล่อยแยก commit สะอาดภายใน <code>plugins/agent-room</code> และ worktree <code>tmux-teams</code></td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- Tier 3: Appendix -->
+    <section class="section-card">
+      <h2>📚 ตารางอ้างอิงพิกัดไฟล์จริง (Checkable Sources)</h2>
+      <table class="appendix-table">
+        <thead>
+          <tr>
+            <th>บทบาทในระบบ</th>
+            <th>ไฟล์ &amp; จุดอ้างอิงที่ตรวจสอบแล้ว</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>ประตู API, Reconnect &amp; Resume</td>
+            <td><code>server/api/server.mjs</code> · <code>server/api/routes.mjs</code> · <code>server/identity/session-principals.mjs</code> (ผ่าน SIGKILL post/pre-commit E2E)</td>
+          </tr>
+          <tr>
+            <td>คิวเขียน &amp; ลบแถวหมดอายุ</td>
+            <td><code>server/store/write-queue.mjs</code> · <code>server/store/room-log.mjs:2299</code> · <code>server/messaging/bare-id-dedup.mjs:102-119</code></td>
+          </tr>
+          <tr>
+            <td>ระบบปลุก, Backpressure &amp; Trust</td>
+            <td><code>server/notification/post-commit-bus.mjs:44,91-98</code> · <code>server/api/watch.mjs:86,118,211,330</code> · <code>server/cli/wait-commands.mjs</code> · <code>server/client/held-commands.mjs:399-424</code></td>
+          </tr>
+          <tr>
+            <td>MCP, CLI &amp; Standalone Installer</td>
+            <td><code>server/mcp-stdio.mjs:461,488,714,916</code> · <code>server/client/api-client.mjs</code> · <code>server/client/ensure-server.mjs</code> · <code>server/cli/harness-installer.mjs</code></td>
+          </tr>
+          <tr>
+            <td>Release v1.1.0 &amp; Neighbor Cell 3</td>
+            <td><code>docs/release-evidence/v1.1.0-candidate.json</code> · <code>CHANGELOG.md</code> · <code>HANDOFF.md</code> · <code>tmux-teams</code> branch <code>feat/phase-e-cell-3</code> (<code>185bdbe</code>)</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+  </div>
+
+  <!-- Enterprise Viewport Lightbox (5 Invariants Preserved) -->
+  <dialog id="fpLightbox" class="diagram-lightbox" aria-label="แผนที่ Floorplan แบบขยาย">
+    <div class="lightbox-shell">
+      <div class="lightbox-bar">
+        <strong>🗺️ แผนที่ระบบ Agent Room — ลากเพื่อเลื่อน ซูมได้เต็มจอ</strong>
+        <div class="btn-group">
+          <button id="lbZoomOut" type="button">−</button>
+          <button id="lbReset" type="button">↺ รีเซ็ต</button>
+          <button id="lbZoomIn" type="button">+</button>
+          <button id="lbClose" type="button">✕ ปิด</button>
+        </div>
+      </div>
+      <div id="lbViewport" class="lightbox-viewport">
+        <div id="lbCanvas" class="lightbox-canvas"></div>
+      </div>
+    </div>
+  </dialog>
+
+  <script>
+    (function () {
+      const rooms = [
+        {
+          id: 'claude',
+          zone: '1. ประตูฝั่งผู้ใช้',
+          plainName: '🤖 ห้องทำงานของ AI (MCP Adapter)',
+          devName: 'server/mcp-stdio.mjs + api-client.mjs + ensure-server.mjs',
+          health: 'health-green',
+          plainDesc: 'จุดเชื่อมต่อให้ Claude / Codex / OpenCode เรียกใช้งาน 11 เครื่องมือและปิดโปรเซสลูกสะอาดไร้ leak',
+          devDesc: 'AbortSignal pre-spawn fence, unready child reap, Release joining ensure/sessionEnsure, transient agent_id_taken retry',
+          files: '<code>server/mcp-stdio.mjs:461-525,714-738,916</code> · <code>server/client/ensure-server.mjs</code> · <code>server/client/session-state.mjs:73-84</code>',
+          impact: 'ปิดจบ <strong>Track 1 &amp; Bug C</strong> แล้ว: ปิด stdin เร็วหรือชื่อชนชั่วคราวไม่ทิ้งเซิร์ฟเวอร์ค้าง (0 leaks) และกู้ชื่อเดิมกลับมาใช้ได้อัตโนมัติ'
+        },
+        {
+          id: 'cli',
+          zone: '1. ประตูฝั่งผู้ใช้',
+          plainName: '⌨️ โทรศัพท์สายตรง & ตัวติดตั้ง',
+          devName: 'server/cli/{bootstrap,held,wait,harness-installer}.mjs',
+          health: 'health-green',
+          plainDesc: 'ลงทะเบียนจาก Git clone ได้ทันที + อนุญาตเพื่อน v1.0 ด้วย allow และเฝ้ารอข้อความด้วย wait',
+          devDesc: 'Resolved clone path + TOML v1.0 escaping + allow session-principals Source 3 + wait session.json readiness',
+          files: '<code>server/cli/harness-installer.mjs</code> · <code>server/cli/held-commands.mjs:399-424</code> · <code>server/cli/wait-commands.mjs:773-795</code>',
+          impact: 'ปิดจบ <strong>Track 2</strong>: แก้ raw-clone <code>--install</code>, TOML quotes, <code>allow</code> หา <code>session_principals</code> เจอแล้ว, และ <code>wait</code> ใช้งานได้หลัง <code>bootstrap</code> ทันที'
+        },
+        {
+          id: 'gate',
+          zone: '2. อาคารควบคุมกลาง',
+          plainName: '🛂 ป้อมรปภ. & กู้ชีพ /resume',
+          devName: 'pipeline.mjs + session-principals.mjs',
+          health: 'health-green',
+          plainDesc: 'ตรวจบัตรผ่านทางและกู้สิทธิ์เซสชันเดิมกลับมาได้แม้เซิร์ฟเวอร์ดับกลางคันช่วงต่ออายุ',
+          devDesc: 'POST /api/session-principals/resume with prev_capability_digest + 60s recovery_id window',
+          files: '<code>server/api/server.mjs:1888-1928</code> · <code>server/identity/session-principals.mjs:532-613</code> · <code>docs/release-evidence/v1.1.0-candidate.json</code>',
+          impact: 'ทดสอบ SIGKILL จริงทั้งแบบ post-commit (gen 1→3) และ pre-commit (gen 4) ภายใน 60 วินาทีผ่านเรียบร้อย'
+        },
+        {
+          id: 'queue',
+          zone: '2. อาคารควบคุมกลาง',
+          plainName: '📬 คิวเขียนเรียงแถวเดียว (กันชน)',
+          devName: 'write-queue.mjs + bare-id-dedup.mjs',
+          health: 'health-green',
+          plainDesc: 'บังคับเขียนฐานข้อมูลทีละคิวใน 1 SAVEPOINT พร้อมกวาดล้างตาราง dedup เก่าอัตโนมัติเป็นรอบ ๆ',
+          devDesc: 'Bounded WriteQueue + pruneExpiredInTx (rowid subquery <= 500 per RETENTION_PRUNE_INTERVAL_MS)',
+          files: '<code>server/store/room-log.mjs:2299</code> · <code>server/messaging/bare-id-dedup.mjs:102-119</code> · <code>server/api/server.mjs:2966-3005</code>',
+          impact: 'ปิดจบ <strong>A1</strong> ใน v1.0.1: กวาดแถว dedup หมดอายุโดยไม่กระทบ idempotency และ schema index เดิม'
+        },
+        {
+          id: 'watch',
+          zone: '2. อาคารควบคุมกลาง',
+          plainName: '📡 ลำโพงกระจายข่าวสด',
+          devName: 'post-commit-bus.mjs + watch.mjs',
+          health: 'health-green',
+          plainDesc: 'ส่งข่าวสดทันทีหลัง Commit และนับ backpressure จริงเมื่อคนฟังอ่านช้า',
+          devDesc: 'subscribe({ manualDrain: true }), single-shot drain cleanup, WATCH_CURSOR_ROOM_MAX = 200',
+          files: '<code>server/notification/post-commit-bus.mjs:44,91-98</code> · <code>server/api/watch.mjs:86,118,211,330</code> · <code>server/constants.mjs:24</code>',
+          impact: 'ปิดจบ <strong>Track 1 &amp; E3-A2</strong>: slow consumer ถูกนับ byte และไล่ออกด้วย <code>rescan_required</code> จริง ไม่ข้าม backpressure แล้ว'
+        },
+        {
+          id: 'guard',
+          zone: '2. อาคารควบคุมกลาง',
+          plainName: '🛑 เบรกเกอร์กันปลุกวน',
+          devName: 'loop-guard.mjs + wait-commands.mjs + inbox.mjs',
+          health: 'health-green',
+          plainDesc: 'จำกัดโควตาการปลุก G1/G2 รวมคลื่นถี่ด้วย G3 (150 ms) และจำ cursor ข้าม reconnect',
+          devDesc: 'waitOverWatch baseline cursors, client seen dedup, coalesce() + readLastInboxWakeAtMs(), last_error surfacing',
+          files: '<code>server/cli/wait-commands.mjs</code> · <code>server/client/inbox.mjs:160-182</code> · <code>server/notification/loop-guard.mjs:70</code>',
+          impact: 'ปิดจบ <strong>E3-A1</strong> &amp; bug reconnect: ตัดสายกลางคันไม่ทำให้เสียข้อความและไม่ปลุกซ้ำข้อความที่อ่านไปแล้ว'
+        },
+        {
+          id: 'trust',
+          zone: '2. อาคารควบคุมกลาง',
+          plainName: '🛡️ ด่านคัดกรองคนแปลกหน้า',
+          devName: 'trust.mjs + held.mjs + held-commands.mjs',
+          health: 'health-green',
+          plainDesc: 'ข้อความจากคนนอกถูกกักเป็น <code>HELD</code> ซ่อนเนื้อหา และปลดล็อกด้วย <code>allow</code> ได้ทั้ง local/remote',
+          devDesc: 'Client-edge trust matrix + allow <chat-id> resolving held, presence, and /api/session-principals',
+          files: '<code>server/client/trust.mjs</code> · <code>server/cli/held-commands.mjs:399-424</code> · <code>server/cli/message-commands.mjs</code>',
+          impact: 'ทดสอบจริงร่วมกับ Caddy E2E: ข้อความแรกก่อน allow ถูกกักปลอดภัย แล้ว allow ปลดล็อกอ่านต่อได้ทันที'
+        },
+        {
+          id: 'sqlite',
+          zone: '3. คลังเก็บข้อมูล',
+          plainName: '🗄️ ตู้เซฟกลาง & สมุดจดส่วนตัว',
+          devName: 'agent-room.sqlite (STRICT WAL) + cursors.json v2',
+          health: 'health-green',
+          plainDesc: 'เก็บประวัติห้องทั้งหมดในเซฟกลาง ส่วนระยะทางที่แต่ละ AI อ่านแล้ว แยกเก็บในสมุดส่วนตัวคนละเล่ม',
+          devDesc: 'room-log.mjs + sessions/<scope>/{cursors.json v2, cursors.lock, inbox.jsonl, session.json}',
+          files: '<code>server/store/room-log.mjs</code> · <code>server/client/cursors.mjs</code> · <code>server/client/session-state.mjs</code>',
+          impact: 'ตรวจสอบ schema STRICT + WAL + 0o700/0o600 ครบถ้วน และ <code>bare_id_send_dedup</code> มีตัวกวาดแถวเก่าแล้ว'
+        },
+        {
+          id: 'caddy',
+          zone: '3. บริการภายนอก',
+          plainName: '🌐 สะพานข้ามเครื่อง (Caddy TLS & Channels)',
+          devName: 'Caddy v2.11.9 HTTPS (155 ms) + claude 2.1.330 probe',
+          health: 'health-green',
+          plainDesc: 'คุยข้ามเครื่องผ่าน Caddy HTTPS ได้จริงใน ~155 ms ส่วน Claude <code>--channels</code> ตรวจสอบจริงแล้ว',
+          devDesc: 'NODE_EXTRA_CA_CERTS strict check + reconnect seq=3 OK; Claude 2.1.330 -p omits client experimental[claude/channel]',
+          files: '<code>docs/release-evidence/v1.1.0-candidate.json</code> · <code>server/client/remote-config.mjs</code> · <code>server/client/channel-verification.mjs</code>',
+          impact: '<strong>Caddy TLS &amp; SIGKILL Recovery = Qualified</strong> · Claude Code <code>2.1.330 -p</code> ไม่ส่ง client experimental key ระบบจึง fail-closed เป็น <code>Host Unverified</code> ตามจริง (สเกล 1000-OS/Bearer ยังคง <code>not_qualified</code>)'
+        },
+        {
+          id: 'tmux',
+          zone: '3. ข้างบ้าน & Monorepo',
+          plainName: '🧩 เพื่อนบ้าน tmux-teams Cell 3 & Monorepo แม่',
+          devName: 'tmux-teams feat/phase-e-cell-3 (185bdbe) + agent-skills gitlinks',
+          health: 'health-red',
+          plainDesc: '<strong>Cell 3 เสร็จและทดสอบ 39/39 ผ่านแล้ว</strong>บน worktree แยก ส่วน repo แม่ยังรอเจ้าของจัดการต่างหาก',
+          devDesc: 'domain-token task_id/failedLegCount + loop-runner escalation on feat/phase-e-cell-3; agent-skills monorepo untouched',
+          files: '<code>/Users/ngs/worktrees/tmux-teams-cell3</code> (commit <code>185bdbe</code>) · parent <code>/Users/ngs/agent-skills</code>',
+          impact: '<strong>ปลอดภัย 100%:</strong> ไม่แตะ dirty branch <code>release/seat-advisors</code> และไม่ทับ diff ของ <code>thclaws-kms</code>/<code>nextgen-kms</code> ใน repo แม่'
+        }
+      ];
+
+      let mode = 'plain';
+      let selectedId = 'claude';
+
+      const grid = document.getElementById('roomsGrid');
+      const insBadge = document.getElementById('insBadge');
+      const insTitle = document.getElementById('insTitle');
+      const insPlain = document.getElementById('insPlain');
+      const insFiles = document.getElementById('insFiles');
+      const insImpact = document.getElementById('insImpact');
+
+      function renderRooms() {
+        grid.innerHTML = '';
+        for (const r of rooms) {
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className = `room-btn ${r.health} ${r.id === selectedId ? 'active' : ''}`;
+          btn.innerHTML = `
+            <span class="room-zone">${r.zone}</span>
+            <span class="room-name">${mode === 'plain' ? r.plainName : r.devName}</span>
+            <span class="room-desc">${mode === 'plain' ? r.plainDesc : r.devDesc}</span>
+          `;
+          btn.addEventListener('click', () => {
+            selectedId = r.id;
+            renderRooms();
+            renderInspector();
+          });
+          grid.appendChild(btn);
+        }
+      }
+
+      function renderInspector() {
+        const r = rooms.find(x => x.id === selectedId) || rooms[0];
+        insBadge.textContent = r.zone;
+        insTitle.textContent = mode === 'plain' ? r.plainName : r.devName;
+        insPlain.innerHTML = mode === 'plain' ? r.plainDesc : `${r.devDesc}<br><span class="muted">(ความหมายภาษาคน: ${r.plainDesc})</span>`;
+        insFiles.innerHTML = r.files;
+        insImpact.innerHTML = r.impact;
+      }
+
+      document.getElementById('btnModePlain').addEventListener('click', (e) => {
+        mode = 'plain';
+        e.target.classList.add('active');
+        document.getElementById('btnModeDev').classList.remove('active');
+        renderRooms();
+        renderInspector();
+      });
+      document.getElementById('btnModeDev').addEventListener('click', (e) => {
+        mode = 'dev';
+        e.target.classList.add('active');
+        document.getElementById('btnModePlain').classList.remove('active');
+        renderRooms();
+        renderInspector();
+      });
+
+      const flows = {
+        send: [
+          { t: '1. แกะป้ายชื่อปลายทาง', d: 'ป้อมรปภ. ดูว่ามี <code>~</code> หรือไม่ — ถ้าไม่มีแปลว่าส่งด้วย Agent ID ล้วน' },
+          { t: '2. เข้าระเบียบคิว SAVEPOINT', d: 'ตรวจกันส่งซ้ำ <code>bare_id_send_dedup</code> หาเพื่อนที่ online แล้วเปิดห้องลับ <code>ssession:</code> ให้คู่สนทนา' },
+          { t: '3. บันทึกลงเซฟ WAL + ใบเสร็จ', d: 'จดข้อความลง SQLite WAL และคืนสถานะ <code>committed_seq</code> (ไม่โกหกว่าอ่านแล้ว)' },
+          { t: '4. ตะโกนเข้าลำโพง', d: 'หลัง <code>COMMIT FULL</code> สำเร็จ <code>PostCommitBus</code> ยิงข่าวไปสาย <code>/api/watch</code> ทันที' }
+        ],
+        wake: [
+          { t: '1. รับข่าว &amp; ด่านความไว้ใจ', d: '<code>watch</code> รับเฟรมข่าว ผ่าน <code>decideDelivery</code> ก่อน ถ้าคนแปลกหน้าติดป้าย <code>HELD</code> ซ่อนเนื้อหาทันที' },
+          { t: '2. รวมคลื่นกันตื่นรัว + cursor (v1.0.1)', d: '<code>coalesce()</code> รวมข้อความถี่ใน 150 ms และ <code>waitOverWatch</code> จำ <code>read_seq</code>/<code>seen</code> ข้าม reconnect' },
+          { t: '3. กินตั๋วกันวนลูป (2-Phase)', d: '<code>loop-ledger.sqlite</code> จองตั๋วปลุก (G1=8, G2=25) -> เขียน <code>inbox.jsonl</code> -> ขยับ <code>notified_seq</code>' },
+          { t: '4. อ่านจริงค่อยขยับ read_seq', d: '<code>agent-room read</code> พิมพ์ออกจอสำเร็จแล้วค่อยล็อก <code>cursors.lock</code> ขยับ <code>read_seq</code>' }
+        ],
+        tracks: [
+          { t: 'Track 1: agent-room v1.0.1 (✅ c4f2a6f)', d: 'อุด race ใน <code>mcp-stdio/api-client/ensure-server</code> + เทสต์ 4.1, เพิ่ม <code>manualDrain</code>, ต่อสาย <code>coalesce()</code>, ล้าง <code>bare_id_send_dedup</code>' },
+          { t: 'Track 2: agent-room v1.1.0 (✅ ef4a50a)', d: 'แก้ clone <code>--install</code> + TOML quoting, แก้ <code>allow</code> (session_principals) + <code>wait</code> (v1.0 bootstrap) + Bug C, ผ่าน Caddy TLS 155 ms &amp; SIGKILL recovery' },
+          { t: 'Track 3: tmux-teams Cell 3 (✅ 185bdbe)', d: 'ปิด Cell 3 บน <code>feat/phase-e-cell-3</code> ใน <code>/Users/ngs/worktrees/tmux-teams-cell3</code> (39/39 pass) โดยไม่แตะ monorepo diff อื่น' },
+          { t: 'Track 4: แผนที่ Floorplan &amp; Audit (✅ ล่าสุด)', d: 'อัปเดตผลจริงทั้งหมด, ตรวจ 5 มิติ <code>artifact-audit</code> ผ่าน และเผยแพร่ผ่าน <code>artifact_sftp</code>' }
+        ]
+      };
+
+      const flowStepsEl = document.getElementById('flowSteps');
+      function renderFlow(key) {
+        flowStepsEl.innerHTML = (flows[key] || []).map(s => `
+          <div class="flow-step">
+            <h3>${s.t}</h3>
+            <div class="muted" style="font-size:14px;">${s.d}</div>
+          </div>
+        `).join('');
+      }
+      document.getElementById('flowBtns').addEventListener('click', (e) => {
+        const btn = e.target.closest('button[data-flow]');
+        if (!btn) return;
+        for (const b of document.querySelectorAll('#flowBtns button')) b.classList.remove('active');
+        btn.classList.add('active');
+        renderFlow(btn.dataset.flow);
+      });
+
+      const kb = [
+        {
+          match: /43|ศพ|ค้าง|leak|ar41|โปรเซส/i,
+          ans: '<strong>หายขาดแล้วครับ (Verified 0 Leaks):</strong> กวาด 43 ศพเก่าเหลือ 0 ตัว และแก้ต้นตอครบทั้งฝั่งเทสต์ (<code>AGENT_ROOM_SESSION_PRINCIPAL=off</code> + แก้ <code>0</code>→<code>off</code> + warning) และฝั่ง production (<code>AbortSignal</code> fence หน้า <code>spawn()</code> + เก็บ unready child + <code>release()</code> รอ in-flight ensure) ทดสอบ rapid EOF ไม่เหลือโปรเซสค้างสักตัว'
+        },
+        {
+          match: /ส่งข้อความ|dm|agent id|บันทึก|savepoint/i,
+          ans: '<strong>เส้นทางเมื่อส่งข้อความ:</strong> CLI/MCP เรียก <code>POST /api/messages</code> ➔ เข้าคิว <code>write-queue.mjs</code> ➔ รันใน 1 <code>SAVEPOINT</code> (เช็กกันส่งซ้ำ <code>bare_id_send_dedup</code> + ค้นหาคู่สนทนา + เปิดห้อง <code>ssession:</code> + เขียนลง SQLite WAL) ➔ หลัง <code>COMMIT FULL</code> ยิง <code>post-commit-bus.mjs</code> เข้า <code>/api/watch</code> และมีงานกวาดแถว dedup เก่าทุก 5 นาที'
+        },
+        {
+          match: /watch|ปลุก|backpressure|coalesce|drain/i,
+          ans: '<strong>ซ่อมครบทั้ง 2 จุดใน v1.0.1 (<code>c4f2a6f</code>):</strong> (1) เพิ่มโหมด <code>{ manualDrain: true }</code> ใน <code>post-commit-bus.mjs</code> เพื่อให้ <code>watch.mjs</code> นับ queue backpressure และไล่ slow consumer ด้วย <code>rescan_required</code> จริง (2) <code>waitOverWatch</code> ส่ง cursor ต่อเนื่องข้าม reconnect, กันเฟรมซ้ำด้วย <code>seen</code>, ต่อ <code>coalesce()</code> (150 ms), และแสดง <code>last_error</code> ชัดเจนเมื่อ TLS/เครือข่ายมีปัญหา'
+        },
+        {
+          match: /tmux|monorepo|dirty|cell 3|parent|gitlink/i,
+          ans: '<strong>สถานะล่าสุด:</strong> <code>tmux-teams</code> <strong>Cell 3 เสร็จสมบูรณ์แล้ว</strong> บน worktree สะอาด <code>/Users/ngs/worktrees/tmux-teams-cell3</code> (branch <code>feat/phase-e-cell-3</code> commit <code>185bdbe</code>, ผ่าน 39/39) โดยไม่แตะ branch <code>release/seat-advisors</code> ที่ค้างงานเดิม ส่วน repo แม่ <code>/Users/ngs/agent-skills</code> คงไว้อย่างปลอดภัยเพราะยังมี staged KMS migration และ gitlink <code>46ff0f0</code>'
+        },
+        {
+          match: /install|caddy|channel|v1\.1|not_qualified|resume|allow|wait/i,
+          ans: '<strong>ผล Track 2 (<code>v1.1.0</code> — <code>ef4a50a</code>):</strong> (1) <code>bootstrap --install</code> จาก git clone ชี้ path จริง + รองรับ TOML ที่มี apostrophe/quotes/spaces (2) ผ่าน E2E ข้าม <strong>Caddy v2.11.9 HTTPS</strong> จริง 155 ms พร้อมกู้ reconnect <code>seq 3</code> และแก้บั๊กจริงของ <code>allow</code> + <code>wait</code> สำหรับ v1.0 <code>session_principals</code> (3) ผ่าน <strong>SIGKILL crash-mid-/resume</strong> ทั้ง post-commit และ pre-commit + แก้ MCP ไม่ให้ตายถาวรเมื่อ <code>agent_id_taken</code> ส่วน <code>claude 2.1.330</code> ทดสอบ wire จริงแล้ว (โหมด <code>-p</code> ยังไม่ส่ง client experimental capability จึงรายงาน <code>Host Unverified</code> อย่างตรงไปตรงมา)'
+        }
+      ];
+
+      function runAsk(q) {
+        const clean = (q || '').trim();
+        const box = document.getElementById('askAnswer');
+        if (!clean) {
+          box.textContent = 'ลองพิมพ์คำถาม เช่น "43 โปรเซสค้างจากไหน", "ส่งข้อความทำอะไรต่อ", หรือ "tmux-teams ค้างตรงไหน?"';
+          return;
+        }
+        const hit = kb.find(k => k.match.test(clean));
+        if (hit) {
+          box.innerHTML = hit.ans;
+          return;
+        }
+        const matchedRooms = rooms.filter(r =>
+          `${r.plainName} ${r.devName} ${r.plainDesc} ${r.files} ${r.impact}`.toLowerCase().includes(clean.toLowerCase())
+        );
+        if (matchedRooms.length > 0) {
+          box.innerHTML = matchedRooms.map(r => `<strong>${r.plainName}</strong>: ${r.plainDesc} (${r.files})`).join('<br><br>');
+        } else {
+          box.innerHTML = 'ยังไม่พบคำนี้ในสารบัญแผนที่ — ลองเลือกห้องด้านบน หรือกดปุ่มคำถามด่วนเพื่อดูข้อมูลจากโค้ดจริงครับ';
+        }
+      }
+
+      document.getElementById('askSubmit').addEventListener('click', () => runAsk(document.getElementById('askInput').value));
+      document.getElementById('askInput').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') runAsk(e.target.value);
+      });
+      document.getElementById('quickAsks').addEventListener('click', (e) => {
+        const btn = e.target.closest('button[data-q]');
+        if (!btn) return;
+        document.getElementById('askInput').value = btn.dataset.q;
+        runAsk(btn.dataset.q);
+      });
+
+      // Enterprise Lightbox (5 invariants: 2-tier viewport/canvas, translate+scale, drag pan, +-reset-close, single-node transfer)
+      const dialog = document.getElementById('fpLightbox');
+      const host = document.getElementById('diagramHost');
+      const svgEl = document.getElementById('fp-svg');
+      const viewport = document.getElementById('lbViewport');
+      const canvas = document.getElementById('lbCanvas');
+      const placeholder = document.createComment('fp-svg-home');
+      let scale = 1, tx = 0, ty = 0, dragging = false, startX = 0, startY = 0;
+
+      function applyTransform() {
+        canvas.style.transform = `translate(${tx}px, ${ty}px) scale(${scale})`;
+      }
+      function openLightbox() {
+        if (svgEl.parentNode === host) {
+          host.insertBefore(placeholder, svgEl);
+          canvas.appendChild(svgEl);
+        }
+        scale = 1; tx = 0; ty = 0;
+        applyTransform();
+        dialog.showModal();
+      }
+      function restoreSvg() {
+        if (placeholder.parentNode === host) {
+          host.insertBefore(svgEl, placeholder);
+          host.removeChild(placeholder);
+        }
+      }
+      document.getElementById('btnExpandSvg').addEventListener('click', openLightbox);
+      document.getElementById('lbZoomIn').addEventListener('click', () => { scale = Math.min(3, +(scale + 0.2).toFixed(2)); applyTransform(); });
+      document.getElementById('lbZoomOut').addEventListener('click', () => { scale = Math.max(0.5, +(scale - 0.2).toFixed(2)); applyTransform(); });
+      document.getElementById('lbReset').addEventListener('click', () => { scale = 1; tx = 0; ty = 0; applyTransform(); });
+      document.getElementById('lbClose').addEventListener('click', () => dialog.close());
+      dialog.addEventListener('close', restoreSvg);
+
+      viewport.addEventListener('mousedown', (e) => { dragging = true; startX = e.clientX - tx; startY = e.clientY - ty; });
+      window.addEventListener('mousemove', (e) => { if (!dragging) return; tx = e.clientX - startX; ty = e.clientY - startY; applyTransform(); });
+      window.addEventListener('mouseup', () => { dragging = false; });
+
+      renderRooms();
+      renderInspector();
+      renderFlow('send');
+    })();
+  </script>
+</body>
+</html>

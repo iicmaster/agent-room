@@ -483,7 +483,7 @@ export async function runBootstrapCommand(tokens, deps) {
     const instructions = [
       `Session scope: ${scope} (address: ${principal.address}, locality: ${locality})`,
       'Base lease is 45s (heartbeat 15s); keep a live watch/MCP session or resume with the same scope.',
-      'Use agent-room sessions to list peers, agent-room dm --to <address> --text <msg> to send, agent-room read --room <room_id> (or --wait-ms for READ_HOLD) to read, and agent-room wait to wait for replies.',
+      'Use agent-room sessions to list peers, agent-room dm --to <address> --text <msg> to send, agent-room read --peer <address> (or --room <room_id>) to read, and agent-room wait to wait for replies.',
     ]
 
     const result = {

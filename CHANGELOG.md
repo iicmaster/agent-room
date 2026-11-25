@@ -2,6 +2,36 @@
 
 All notable changes to Agent Room are documented in this file.
 
+## 1.1.0 - 2026-11-25
+
+Standalone onboarding ergonomics, remote HTTPS / crash-recovery / 12-session cross-harness E2E qualification, MCP `room_list` session discovery, and live harness installer alignment.
+
+### Added
+
+- **Standalone raw-clone `--install` / `--print` resolution (`server/cli/harness-installer.mjs`, `README.md`)**: When invoked outside a plugin runtime (`CLAUDE_PLUGIN_ROOT` unset), `bootstrap --harness <h> --install|--print` resolves and writes the concrete `<package>/server/mcp-stdio.mjs` entrypoint (and safely shell-escapes `generic.sh`), while packaged bundles (`mcp.json`, `server/cli/templates/*`) and plugin runtime mode preserve `${PLUGIN_ROOT}` / `${CLAUDE_PLUGIN_ROOT}` for version-agnostic cache upgrades.
+- **Session-principal resolution in `agent-room allow` (`server/cli/held-commands.mjs`)**: Added `/api/session-principals` (Source 3) to `resolveChatIdCandidates` so `agent-room allow <chat-id> [--fingerprint]` works out of the box for v0.9+/v1.0/v1.1 principals over local or remote HTTPS links without requiring legacy `/api/presence` rows first.
+- **Release qualification evidence (`docs/release-evidence/v1.1.0-candidate.json`)**: Recorded black-box E2E results across Caddy v2.11.9 HTTPS (streaming DM wake + reconnect catch-up + strict `NODE_EXTRA_CA_CERTS` failure without CA), crash-mid-`/resume` SIGKILL recovery (post-commit and pre-commit), Claude Code 2.1.330 `--channels` wire probe, and 12-session live cross-harness tmux E2E (`claude 2.1.331`, `codex 0.170.0 --no-daemon`, `opencode v2.3.2`, `agy 1.5.16` × 3 = 12/12 pass, 24/24 concurrent DMs, 0 leaks).
+
+### Fixed
+
+- **MCP `room_list` session discovery & `resources/read` membership (`server/client/api-client.mjs`, `server/mcp-stdio.mjs`)**: Added opt-in `{ session = false }` parameter on `listRooms` and enabled `session: true` in MCP `room_list` / `resources/read` whenever a live session principal is armed (`sessionPrincipalOn && readyClient.sessionAddress !== null`), allowing receivers to discover incoming `ssession:` direct pair rooms while keeping shared-`PLUGIN_DATA` siblings isolated and keeping `notifier.mjs` / Bearer callers unchanged. Also fixed `resources/read` reading `.rooms.some(...)` instead of calling `.some(...)` on the `{ rooms }` envelope.
+- **Live OpenCode & Antigravity installer schema/path alignment (`server/cli/templates/opencode.json`, `server/cli/harness-installer.mjs`, `BOOTSTRAP.md`)**: Updated `opencode` MCP config format to `{ type: "local", command: ["node", ...], enabled: true }` matching OpenCode v2.3.2, and updated `antigravity` default target path to `~/.gemini/config/mcp_config.json`.
+- **TOML string quoting & parsing (`server/cli/harness-installer.mjs`)**: Replaced `.replace(/'/g, '"')` in `tomlValueMatches`, `renderTomlTable`, and `mergeToml` with proper TOML v1.0 literal vs basic string handling (`formatTomlString`, `parseTomlValue`), fixing paths containing spaces, apostrophes, double quotes, and backslashes.
+- **`agent-room wait` bootstrap readiness (`server/cli/wait-commands.mjs`)**: Accept initialized v1.0 `sessions/<scope>/session.json` principals alongside legacy `config.json` instead of falsely refusing `not_set_up` after `agent-room bootstrap`.
+- **MCP transient `agent_id_taken` auto-recovery (`server/mcp-stdio.mjs`)**: Do not permanently brick/exit the MCP adapter (`sessionPrincipalFatalError` / `onFatalExit`) on transient `agent_id_taken` collisions; non-addressed tools stay operational and `room_status` / addressed sends automatically re-acquire the requested name once the conflicting holder releases or its lease expires.
+- **Bootstrap guidance (`server/cli/bootstrap-commands.mjs`)**: Updated human hint to lead with `agent-room read --peer <address> (or --room <room_id>)`.
+
+## 1.0.1 - 2026-11-23
+
+Runtime stability, resource-leak elimination, and backpressure/replay reliability release.
+
+### Fixed
+
+- **MCP shutdown spawn-leak elimination (`server/mcp-stdio.mjs`, `server/client/api-client.mjs`, `server/client/ensure-server.mjs`)**: Propagate a shared shutdown `AbortSignal` into `ensure()` and `ensureServer()`, check `signal.aborted` synchronously directly before `spawn()`, reap an unready child owned by the caller if shutdown arrives prior to readiness handoff (without disturbing already-shared daemons), and join in-flight `ensurePromise` / `sessionEnsurePromise` inside `release()`. Added `AGENT_ROOM_SESSION_PRINCIPAL: 'off'` to `tests/story-4-1-mcp-capabilities.test.mjs`, corrected `'0'` → `'off'` in `tests/shutdown-cleanup.test.mjs`, and added a one-shot stderr warning in `sessionPrincipalEnabled` when non-`'off'` strings such as `'0'` are passed.
+- **PostCommitBus backpressure & slow-consumer accounting (`server/notification/post-commit-bus.mjs`, `server/api/watch.mjs`, `server/constants.mjs`)**: Added `{ manualDrain: true }` opt-in on `bus.subscribe` so `watch` streams retain queued byte accounting while TCP socket backpressure is active (`write()` returns `false`), flushing pending controls on `'drain'` instead of auto-draining synchronously. Extracted `WATCH_CURSOR_ROOM_MAX = 200` to `server/constants.mjs` (closing AD-9 item `E3-A2`).
+- **Watch wait cursor replay, reconnect recovery & G3 coalesce (`server/cli/wait-commands.mjs`, `server/client/inbox.mjs`)**: Passed `loadBaselineCursors()` into `waitOverWatch()`, dynamically rebuilt `?cursors=...` per reconnect within `WATCH_CURSOR_ROOM_MAX` / `WATCH_CURSORS_PARAM_MAX_BYTES`, deduped processed `(room_id, seq)` frames client-side across reconnects, handled `rescan_required (catchup_limit)` via direct room read fallback, surfaced terminal/TLS connection errors (`last_error` + stderr) instead of silently timing out, and wired `coalesce()` (`TRAILING_COALESCE_MS = 150`) into `waitOverWatch` using `readLastInboxWakeAtMs()` (closing `E3-A1`).
+- **Bounded `bare_id_send_dedup` retention purge (`server/messaging/bare-id-dedup.mjs`, `server/store/room-log.mjs`, `server/api/server.mjs`)**: Added `pruneExpiredInTx` (`rowid` subquery capped at `RETENTION_SWEEP_BATCH_MAX`, matching read-time TTL cutoff) and wired an independent coalesced `best_effort` prune task into `retentionPruneSafely` (closing `A1`).
+
 ## 1.0.0 - 2026-11-17
 
 The isolated messaging release. Epics 2–5 close the v1.0 contract: private

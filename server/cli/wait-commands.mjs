@@ -60,20 +60,24 @@ import {
   PROTOCOL_VERSION,
   READ_HOLD_MAX_MS,
   SESSION_SCOPE_PATTERN,
+  TRAILING_COALESCE_MS,
   WAIT_DEFAULT_TIMEOUT_S,
   WAIT_MAX_TIMEOUT_S,
+  WATCH_CURSOR_ROOM_MAX,
+  WATCH_CURSORS_PARAM_MAX_BYTES,
   WATCH_RECONNECT_BASE_MS,
   WATCH_RECONNECT_MAX_MS,
 } from '../constants.mjs'
 // Story 3.2: the two-phase wake guard rides this long-poll. The transport
 // stays the v0.9 long-poll in this story (3.3 swaps it for /api/watch).
 import { createScopeLedger } from '../client/scope-ledger.mjs'
+import { coalesce } from '../notification/loop-guard.mjs'
 import { createWakeDispatcher, pauseHint } from '../notification/wake-dispatcher.mjs'
 // Story 3.3: watches via the 3.1 client (already on Session capability), and
 // appends each wake to the bounded, allowlisted inbox under inbox.lock. Both
 // reuse existing primitives — no fourth lock, no fourth path builder.
 import { openWatchStream, watchBackoffMs } from '../client/watch-client.mjs'
-import { appendInboxEntry } from '../client/inbox.mjs'
+import { appendInboxEntry, readLastInboxWakeAtMs } from '../client/inbox.mjs'
 import { AgentRoomRuntimeError, assertSafePathKey, ensurePrivateDirectory, isPidAlive, readJsonFile } from '../runtime.mjs'
 import { CURSORS_FILENAME, cursorLockPath, persistedCursorPath, readCursorsDocument, withCursorLock } from '../client/cursors.mjs'
 import { CONNECTION_MODE_ENV, loadChatIdConfig } from '../client/api-client.mjs'
@@ -428,16 +432,57 @@ async function enumerateRooms({ target, token, capability }) {
 // never commits notified_seq. Self-skip uses ownSessionId/ownSessionAddress
 // ONLY — a sibling session on this installation still wakes us. Ban/revoke /
 // superseded are terminal: stop reconnecting at once.
+function buildWatchCursorsParam(baselinesMap, preferredRooms = []) {
+  const orderedRooms = []
+  const inserted = new Set()
+  for (const roomId of preferredRooms) {
+    if (typeof roomId === 'string' && roomId.length > 0 && !inserted.has(roomId)) {
+      inserted.add(roomId)
+      orderedRooms.push(roomId)
+    }
+  }
+  for (const roomId of baselinesMap.keys()) {
+    if (typeof roomId === 'string' && roomId.length > 0 && !inserted.has(roomId)) {
+      inserted.add(roomId)
+      orderedRooms.push(roomId)
+    }
+  }
+  const payload = {}
+  let count = 0
+  for (const roomId of orderedRooms) {
+    if (count >= WATCH_CURSOR_ROOM_MAX) break
+    const rawSeq = baselinesMap.get(roomId)
+    const seq = Number.isSafeInteger(rawSeq) && rawSeq >= 0 ? rawSeq : 0
+    payload[roomId] = seq
+    if (Buffer.byteLength(JSON.stringify(payload), 'utf8') > WATCH_CURSORS_PARAM_MAX_BYTES) {
+      delete payload[roomId]
+      break
+    }
+    count += 1
+  }
+  return JSON.stringify(payload)
+}
+
 export async function waitOverWatch({
   target, capability, scope, rooms, roomFilter, ownSessionId, ownSessionAddress,
   wakeDispatcher, decideHeld, decideDelivery, ledger, policy, config, startedMs, deadlineAt,
   signal, appendEntry, nowMs = () => performance.now(), connect: connectOverride = null,
-  backoffMs = watchBackoffMs, sleepFn = null,
+  backoffMs = watchBackoffMs, sleepFn = null, baselines = null, pluginDataDir = null,
+  lastWakeAt = undefined, onRescanCatchup = null,
 }) {
   let trustedCount = 0
   let heldCount = 0
   let retry = 0
+  let lastConnectError = null
   const terminalEvents = new Set(['session_superseded', 'actor_banned', 'session_revoked'])
+  const roomBaselines = new Map(baselines instanceof Map ? baselines : [])
+  for (const roomId of rooms ?? []) {
+    if (!roomBaselines.has(roomId)) roomBaselines.set(roomId, 0)
+  }
+  const seenFrames = new Set()
+  const resolvedLastWakeAt = lastWakeAt !== undefined
+    ? lastWakeAt
+    : readLastInboxWakeAtMs(pluginDataDir, scope)
   const wallSignal = new AbortController()
   const relayAbort = () => wallSignal.abort()
   signal.addEventListener('abort', relayAbort, { once: true })
@@ -449,7 +494,7 @@ export async function waitOverWatch({
 
   const connect = connectOverride ?? (({ signal: connectSignal }) => openWatchStream({
     ...(target.kind === 'remote' ? { url: target.serverUrl } : { port: target.port }),
-    path: `/api/watch?cursors=${encodeURIComponent(JSON.stringify({}))}`,
+    path: `/api/watch?cursors=${encodeURIComponent(buildWatchCursorsParam(roomBaselines, rooms))}`,
     headers: {
       [PROTOCOL_HEADER]: PROTOCOL_VERSION,
       authorization: `Session ${capability}`,
@@ -464,13 +509,123 @@ export async function waitOverWatch({
       wallSignal.signal.addEventListener('abort', () => { clearTimeout(timer); resolvePromise() }, { once: true })
     })
 
+  const markSeenAndAdvance = (roomId, seq) => {
+    seenFrames.add(`${roomId}:${seq}`)
+    roomBaselines.set(roomId, Math.max(roomBaselines.get(roomId) ?? 0, seq))
+  }
+
+  let firstWoken = null
+  let lastWoken = null
+  let coalesceUntil = null
+
+  const processMessageEvent = async event => {
+    const frameKey = `${event.room_id}:${event.seq}`
+    if (seenFrames.has(frameKey)) return null
+    const own = (typeof event.chat_id === 'string' && event.chat_id === ownSessionAddress)
+      || (typeof event.session_id === 'string' && event.session_id === ownSessionId)
+    if (own) {
+      markSeenAndAdvance(event.room_id, event.seq)
+      return null
+    }
+    if (roomFilter !== null && !roomFilter.has(event.room_id)) return null
+
+    const classified = decideDelivery
+      ? decideDelivery({
+        room_id: event.room_id, seq: event.seq, chat_id: event.chat_id,
+        text: event.text, actor_fingerprint: event.fingerprint, created_at: event.created_at,
+      })
+      : null
+    const row = classified ?? {
+      room_id: event.room_id, seq: event.seq, chat_id: event.chat_id,
+      text: event.text, actor_fingerprint: event.fingerprint, created_at: event.created_at,
+    }
+    const candidate = wakeDispatcher.gate({
+      ...row,
+      held: classified?.held === true,
+      actor_fingerprint: row.actor_fingerprint,
+    })
+    if (candidate.held) {
+      const hit = decideHeldWake({
+        pluginData: ledger.pluginData, realmId: ledger.realmId,
+        identity: ledger.identity, fingerprint: candidate.actor_fingerprint, policy,
+      })
+      if (hit === false) {
+        markSeenAndAdvance(event.room_id, event.seq)
+        return null
+      }
+      const { text: _heldText, ...heldMeta } = row
+      let written = true
+      try { await appendEntry({ ...heldMeta, trusted: false, held: true }) } catch { written = false }
+      if (!written) return null
+      wakeDispatcher.dispatchHeld({
+        room_id: candidate.room_id, seq: candidate.seq, actor_fingerprint: candidate.actor_fingerprint,
+      })
+      markSeenAndAdvance(event.room_id, event.seq)
+      heldCount += 1
+    } else {
+      const local = config?.chat_id ?? scope
+      const peer = candidate.actor_fingerprint ?? 'unknown'
+      const dispatch = async () => {
+        try {
+          await appendEntry({ ...row, trusted: true })
+          return true
+        } catch {
+          return false
+        }
+      }
+      const result = await wakeDispatcher.dispatchTrusted(
+        { room_id: candidate.room_id, seq: candidate.seq, actor_fingerprint: peer, held: false },
+        { local, peer, dispatch },
+      )
+      if (result.action === 'paused') {
+        return {
+          status: 'ok', command: 'wait',
+          lines: [JSON.stringify({
+            ok: true, command: 'wait', status: 'paused',
+            message: pauseHint(result.reason, peer), room_id: candidate.room_id,
+            seq: candidate.seq, elapsed_ms: Math.round(nowMs() - startedMs),
+          })],
+        }
+      }
+      markSeenAndAdvance(event.room_id, event.seq)
+      if (result.ok === true) trustedCount += 1
+    }
+
+    lastWoken = {
+      room_id: candidate.room_id,
+      seq: candidate.seq,
+      peer: candidate.actor_fingerprint ?? 'unknown',
+    }
+    firstWoken ??= lastWoken
+    return { woke: true }
+  }
+
+  const wakeEnvelope = () => ({
+    status: 'ok', command: 'wait',
+    lines: [JSON.stringify({
+      ok: true, command: 'wait', status: 'new_messages',
+      message: `woke: ${trustedCount} trusted, ${heldCount} held`,
+      room_id: (lastWoken ?? firstWoken).room_id,
+      seq: (lastWoken ?? firstWoken).seq,
+      ...(trustedCount + heldCount > 1 ? { coalesced: trustedCount + heldCount } : {}),
+      elapsed_ms: Math.round(nowMs() - startedMs),
+    })],
+  })
+
   try {
     while (!wallSignal.signal.aborted) {
+      const attemptController = new AbortController()
+      const relayWall = () => attemptController.abort()
+      wallSignal.signal.addEventListener('abort', relayWall, { once: true })
+      let coalesceTimer = null
+      let coalesceElapsed = false
       let stream
       try {
-        stream = await connect({ signal: wallSignal.signal })
+        stream = await connect({ signal: attemptController.signal })
       } catch (error) {
+        wallSignal.signal.removeEventListener('abort', relayWall)
         if (wallSignal.signal.aborted) break
+        lastConnectError = error
         retry += 1
         const delay = Math.min(backoffMs(retry), Math.max(0, deadlineAt - nowMs()))
         if (delay <= 0) break
@@ -479,99 +634,60 @@ export async function waitOverWatch({
       }
       retry = 0
       let terminal = false
+      let rescanEvent = null
       try {
         for await (const event of stream.frames) {
-          if (wallSignal.signal.aborted || terminal) break
+          if (wallSignal.signal.aborted || terminal || coalesceElapsed) break
+          if (event && typeof event === 'object') lastConnectError = null
           if (event?.event === 'message') {
-            // Self-skip ONLY by this session's own identity. A sibling session
-            // on this Installation carries a different address/id and is NOT
-            // skipped, so two sessions of one key still wake each other.
-            const own = (typeof event.chat_id === 'string' && event.chat_id === ownSessionAddress)
-              || (typeof event.session_id === 'string' && event.session_id === ownSessionId)
-            if (own) continue
-            if (roomFilter !== null && !roomFilter.has(event.room_id)) continue
-            // /api/watch frames carry NO trust field (trust is client-side).
-            // Apply the SAME client-edge matrix the long-poll path uses BEFORE
-            // the gate, so a foreign sender cannot masquerade as trusted just
-            // because the wire frame omitted `held`. decideDelivery is the
-            // classifier; a classified held row carries held:true + reason.
-            const classified = decideDelivery
-              ? decideDelivery({
-                room_id: event.room_id, seq: event.seq, chat_id: event.chat_id,
-                text: event.text, actor_fingerprint: event.fingerprint, created_at: event.created_at,
-              })
-              : null
-            const row = classified ?? {
-              room_id: event.room_id, seq: event.seq, chat_id: event.chat_id,
-              text: event.text, actor_fingerprint: event.fingerprint, created_at: event.created_at,
-            }
-            // The gate reads row.held; feed it the CLASSIFIED verdict, not the
-            // raw frame (whose `held` is always undefined -> falsely trusted).
-            const candidate = wakeDispatcher.gate({
-              ...row,
-              held: classified?.held === true,
-              actor_fingerprint: row.actor_fingerprint,
-            })
-            if (candidate.held) {
-              const hit = decideHeldWake({
-                pluginData: ledger.pluginData, realmId: ledger.realmId,
-                identity: ledger.identity, fingerprint: candidate.actor_fingerprint, policy,
-              })
-              if (hit === false) continue
-              // A HELD row NEVER carries `text` into inbox.jsonl (or a hook
-              // summary). applyTrustMatrix REPLACES text with a marker instead
-              // of removing it; drop the key explicitly and keep only metadata.
-              const { text: _heldText, ...heldMeta } = row
-              let written = true
-              try { await appendEntry({ ...heldMeta, trusted: false, held: true }) } catch { written = false }
-              if (!written) continue // never suppress a held watermark on a failed write
-              wakeDispatcher.dispatchHeld({ room_id: candidate.room_id, seq: candidate.seq, actor_fingerprint: candidate.actor_fingerprint })
-              heldCount += 1
-            } else {
-              const local = config?.chat_id ?? scope
-              const peer = candidate.actor_fingerprint ?? 'unknown'
-              // Phase B dispatch: write the ALLOWLISTED inbox line first. A
-              // write/rotation failure returns false -> dispatcher releases the
-              // lease and does NOT commit notified_seq (ENOSPC ordering).
-              const dispatch = async () => {
-                try {
-                  await appendEntry({ ...row, trusted: true })
-                  return true
-                } catch {
-                  return false
-                }
-              }
-              const result = await wakeDispatcher.dispatchTrusted(
-                { room_id: candidate.room_id, seq: candidate.seq, actor_fingerprint: peer, held: false },
-                { local, peer, dispatch },
+            const processed = await processMessageEvent(event)
+            if (processed?.status === 'ok') return processed
+            if (processed?.woke && coalesceUntil === null) {
+              const burst = coalesce(
+                [{ room_id: lastWoken.room_id, peer: lastWoken.peer, seq: lastWoken.seq }],
+                { now: Date.now(), lastWakeAt: resolvedLastWakeAt },
               )
-              if (result.action === 'paused') {
-                return {
-                  status: 'ok', command: 'wait',
-                  lines: [JSON.stringify({
-                    ok: true, command: 'wait', status: 'paused',
-                    message: pauseHint(result.reason, peer), room_id: candidate.room_id,
-                    seq: candidate.seq, elapsed_ms: Math.round(nowMs() - startedMs),
-                  })],
-                }
-              }
-              if (result.ok === true) trustedCount += 1
+              const boundedDelay = Math.min(burst.delayMs, Math.max(0, Math.floor(deadlineAt - nowMs())))
+              if (boundedDelay <= 0) return wakeEnvelope()
+              coalesceUntil = nowMs() + boundedDelay
+              coalesceTimer = setTimeout(() => {
+                coalesceElapsed = true
+                attemptController.abort()
+              }, boundedDelay)
+              coalesceTimer.unref()
+            } else if (coalesceUntil !== null && nowMs() >= coalesceUntil) {
+              return wakeEnvelope()
             }
-            return {
-              status: 'ok', command: 'wait',
-              lines: [JSON.stringify({
-                ok: true, command: 'wait', status: 'new_messages',
-                message: `woke: ${trustedCount} trusted, ${heldCount} held`,
-                room_id: candidate.room_id, seq: candidate.seq,
-                elapsed_ms: Math.round(nowMs() - startedMs),
-              })],
-            }
+          } else if (event?.event === 'rescan_required') {
+            rescanEvent = event
+            break
+          } else if (terminalEvents.has(event?.event)) {
+            terminal = true
           }
-          if (terminalEvents.has(event?.event)) terminal = true
         }
       } catch (error) {
+        if (!wallSignal.signal.aborted && !coalesceElapsed) lastConnectError = error
+      } finally {
+        attemptController.abort()
+        if (coalesceTimer !== null) clearTimeout(coalesceTimer)
+        wallSignal.signal.removeEventListener('abort', relayWall)
+      }
+      if (firstWoken !== null) return wakeEnvelope()
+      if (rescanEvent !== null) {
+        if (rescanEvent.reason === 'catchup_limit' && typeof onRescanCatchup === 'function') {
+          try {
+            const catchupRows = await onRescanCatchup(roomBaselines, wallSignal.signal)
+            for (const row of catchupRows ?? []) {
+              const processed = await processMessageEvent(row)
+              if (processed?.status === 'ok') return processed
+            }
+            if (firstWoken !== null) return wakeEnvelope()
+          } catch (error) {
+            if (!wallSignal.signal.aborted) lastConnectError = error
+          }
+        }
         if (wallSignal.signal.aborted) break
-        // stream fault: reconnect unless terminal
+        continue
       }
       if (terminal || wallSignal.signal.aborted) break
       retry += 1
@@ -579,11 +695,22 @@ export async function waitOverWatch({
       if (delay <= 0) break
       await backoff(delay)
     }
+    if (firstWoken !== null) return wakeEnvelope()
+    let lastErrorDetail
+    if (lastConnectError !== null) {
+      const code = typeof lastConnectError?.code === 'string' && lastConnectError.code.length > 0
+        ? lastConnectError.code
+        : 'watch_connect_failed'
+      const message = String(lastConnectError?.message ?? lastConnectError)
+      lastErrorDetail = { code, message }
+      process.stderr.write(`[agent-room wait] watch stream fault (${code}): ${message}\n`)
+    }
     return {
       status: 'ok', command: 'wait',
       lines: [JSON.stringify({
         ok: true, command: 'wait', status: 'timeout',
         message: 'timeout: no new messages',
+        ...(lastErrorDetail === undefined ? {} : { last_error: lastErrorDetail }),
         elapsed_ms: Math.round(nowMs() - startedMs), watched: rooms,
       })],
     }
@@ -641,33 +768,39 @@ export async function runWaitFamilyCommand(tokens, { sharedDataDir, pluginDataDi
   }
 
   // Identity discipline: the wait reuses the existing installation and
-  // creates nothing. No configured Chat ID → a coded refusal, before any
-  // server is booted or any key is materialized.
+  // creates nothing. Accept either a v1.0 scope session.json (created by
+  // `agent-room bootstrap`) or a legacy config.json (`agent-room setup`). No
+  // configured identity -> coded refusal before any server boot or wait.lock.
+  const scope = sessionScopeKey({ env, pluginDataDir })
   const configPath = join(pluginDataDir, 'config.json')
-  if (!existsSync(configPath)) {
+  let precheckSession = null
+  try { precheckSession = loadSessionState(pluginDataDir, scope) } catch { /* handled cleanly if config absent */ }
+  let config
+  if (existsSync(configPath)) {
+    try {
+      config = loadChatIdConfig(pluginDataDir)
+    } catch (error) {
+      return {
+        status: 'refusal',
+        command: 'wait',
+        code: error?.code ?? 'request_failed',
+        message: error?.message ?? String(error),
+      }
+    }
+  } else if (precheckSession !== null) {
+    config = { chatId: precheckSession.baseName }
+  } else {
     return {
       status: 'refusal',
       command: 'wait',
       code: 'not_set_up',
-      message: 'No Chat ID is configured for this installation. Run "agent-room setup --chat-id <chat-id>" first (it never needs a terminal), then start the wait again.',
-    }
-  }
-  let config
-  try {
-    config = loadChatIdConfig(pluginDataDir)
-  } catch (error) {
-    return {
-      status: 'refusal',
-      command: 'wait',
-      code: error?.code ?? 'request_failed',
-      message: error?.message ?? String(error),
+      message: 'No Chat ID is configured for this installation. Run "agent-room bootstrap" (or legacy "agent-room setup --chat-id <chat-id>") first, then start the wait again.',
     }
   }
 
   const declaredRemote = env[CONNECTION_MODE_ENV] === REMOTE_TRANSPORT
   const startedMs = performance.now()
   const deadlineAt = startedMs + timeoutSeconds * 1000
-  const scope = sessionScopeKey({ env, pluginDataDir })
   const lock = acquireWaitLock(pluginDataDir, timeoutSeconds * 1000, { scope, reclaim })
   if (!lock.acquired) {
     const guidance = lock.reclaimable === true
@@ -807,11 +940,45 @@ export async function runWaitFamilyCommand(tokens, { sharedDataDir, pluginDataDi
     if (capability !== null) {
       const roomFilter = fixedRooms === null ? null : new Set(fixedRooms)
       const appendEntry = row => appendInboxEntry(pluginDataDir, waitScope, row)
+      const onRescanCatchup = async (roomBaselinesMap, catchupSignal) => {
+        const candidateRooms = fixedRooms ?? await enumerateRooms({ target, token, capability })
+        const rows = []
+        for (const roomId of candidateRooms) {
+          if (catchupSignal?.aborted) break
+          const afterSeq = roomBaselinesMap.get(roomId) ?? 0
+          const res = await roundTrip(
+            target,
+            'GET',
+            `/api/rooms/${encodeURIComponent(roomId)}/messages?after_seq=${afterSeq}&limit=${WAIT_PAGE_LIMIT}&wait_ms=0`,
+            roomHeaders({ token, capability }),
+            undefined,
+            WAIT_HOLD_TIMEOUT_MARGIN_MS,
+            { signal: catchupSignal },
+          )
+          if (res.status !== 200) continue
+          const messages = res.body?.result?.messages
+          if (!Array.isArray(messages)) continue
+          for (const msg of messages) {
+            rows.push({
+              event: 'message',
+              room_id: roomId,
+              seq: msg.seq,
+              chat_id: msg.chat_id,
+              fingerprint: msg.actor_fingerprint,
+              text: msg.text,
+              created_at: msg.created_at,
+            })
+          }
+          if (rows.length > 0) break
+        }
+        return rows
+      }
       const watchOutcome = await waitOverWatch({
         target, capability, scope: waitScope,
         rooms: fixedRooms ?? firstRooms, roomFilter, ownSessionId, ownSessionAddress,
         wakeDispatcher, decideHeld, decideDelivery, ledger, policy, config,
         startedMs, deadlineAt, signal: signalController.signal, appendEntry,
+        baselines, pluginDataDir, onRescanCatchup,
       })
       loopLedger.close()
       return watchOutcome

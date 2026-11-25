@@ -64,6 +64,9 @@ export const SESSIONS_DIRECTORY_NAME = 'sessions'
 export const SESSION_STATE_FILENAME = 'session.json'
 export const SESSION_PRINCIPAL_ENV = 'AGENT_ROOM_SESSION_PRINCIPAL'
 
+const RECOGNIZED_SESSION_PRINCIPAL_VALUES = new Set(['off', 'on', 'true', '1'])
+let warnedInvalidSessionPrincipal = false
+
 // The adapter's session-principal arming gate (CAP-1 receive-ready). Default
 // ON: one process start = one addressable session. `AGENT_ROOM_SESSION_
 // PRINCIPAL=off` restores the pull-only profile for measurement corridors
@@ -71,7 +74,15 @@ export const SESSION_PRINCIPAL_ENV = 'AGENT_ROOM_SESSION_PRINCIPAL'
 // honest opt-out, not a silent downgrade: the addressed send answers
 // session_capability_required while disabled.
 export function sessionPrincipalEnabled(env = process.env) {
-  return env?.[SESSION_PRINCIPAL_ENV] !== 'off'
+  const raw = env?.[SESSION_PRINCIPAL_ENV]
+  if (raw === 'off') return false
+  if (raw !== undefined && raw !== '' && !RECOGNIZED_SESSION_PRINCIPAL_VALUES.has(raw) && !warnedInvalidSessionPrincipal) {
+    warnedInvalidSessionPrincipal = true
+    process.stderr.write(
+      `[agent-room] warning: ${SESSION_PRINCIPAL_ENV}=${JSON.stringify(raw)} does not disable session principals; use 'off'\n`,
+    )
+  }
+  return true
 }
 
 export const SCOPE_BINDINGS_FILENAME = 'scope-bindings.json'

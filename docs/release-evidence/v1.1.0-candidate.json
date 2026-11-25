@@ -1,0 +1,75 @@
+{
+  "candidate": "v1.1.0",
+  "record_type": "release-candidate-evidence",
+  "built_at": "2026-11-25T00:10:00.000Z",
+  "branch": "release/v1.1.0",
+  "v1_0_1_baseline": "c4f2a6f",
+  "prereqs": {
+    "caddy": "v2.11.9",
+    "claude": "2.1.330 (--channels probe), 2.1.331 (12-session tmux E2E)",
+    "codex": "codex-cli 0.170.0 (--no-daemon)",
+    "opencode": "v2.3.2",
+    "agy": "1.5.16"
+  },
+  "black_box_e2e": {
+    "caddy_https_remote": {
+      "status": "qualified",
+      "proxy": "caddy v2.11.9 TLS (OpenSSL Root CA via NODE_EXTRA_CA_CERTS)",
+      "stream_latency_ms": 155,
+      "reconnect_after_proxy_drop_seq": 3,
+      "untrusted_ca_refused_without_extra_certs": true
+    },
+    "crash_mid_resume_sigkill": {
+      "status": "qualified",
+      "post_commit_pre_response_recovery": "generation 1 -> 2 committed pre-SIGKILL -> generation 3 resumed via recovery_id",
+      "pre_commit_recovery": "generation 4 resumed cleanly",
+      "mcp_transient_agent_id_taken_recovery": "verified room_list succeeds while held and room_status re-acquires requested name after holder release"
+    },
+    "cross_harness_live_tmux_12_sessions": {
+      "status": "qualified",
+      "commit": "027c4ce",
+      "harnesses": ["claude", "codex", "opencode", "agy"],
+      "sessions_per_harness": 3,
+      "total_sessions": 12,
+      "direct_rooms": 18,
+      "pair_members": 36,
+      "concurrent_dms_sent_and_read": 24,
+      "all_sessions_room_list_and_readback_passed": 12,
+      "foreign_leaks": 0,
+      "held_count": 0,
+      "process_leaks_after_teardown": 0,
+      "note": "codex-cli 0.170.0 requires --no-daemon or explicit AGENT_ROOM_SESSION_SCOPE because codex app-server managed daemon recycles MCP child processes without passing CODEX_THREAD_ID"
+    },
+    "claude_channels_wire_probe": {
+      "status": "measured_host_unverified",
+      "host": "2.1.330 (Claude Code)",
+      "flags_tested": [
+        "--dangerously-load-development-channels server:agent-room",
+        "--channels server:agent-room"
+      ],
+      "observed_sequence": [
+        "server/discover",
+        "initialize (2025-11-25 -> downgraded 2025-06-18)",
+        "notifications/initialized",
+        "tools/list",
+        "resources/list"
+      ],
+      "observed_host_capabilities": ["roots", "elicitation"],
+      "resulting_tier": "Channel-Ready, Host --channels Unverified",
+      "note": "Real Claude Code 2.1.330 in -p mode did not send capabilities.experimental['claude/channel']; adapter fail-closed posture preserved."
+    }
+  },
+  "scope": {
+    "supported": [
+      "loopback single-host",
+      "remote HTTPS behind Caddy reverse proxy with NODE_EXTRA_CA_CERTS",
+      "standalone raw-clone bootstrap --install / --print",
+      "crash-mid-/resume SIGKILL recovery within 60s window"
+    ],
+    "not_qualified": [
+      "1000 OS processes — not measured",
+      "1000 Bearers across >=4 actors — not measured",
+      "Tier 1A active push against a live host advertising capabilities.experimental['claude/channel'] — Claude Code 2.1.330 did not advertise that experimental client capability in -p / unapproved PTY"
+    ]
+  }
+}
