@@ -2,18 +2,20 @@
 
 All notable changes to Agent Room are documented in this file.
 
-## 1.1.0 - 2026-11-23
+## 1.1.0 - 2026-11-25
 
-Standalone onboarding ergonomics, remote HTTPS / crash-recovery E2E qualification, and live-boundary bug fixes.
+Standalone onboarding ergonomics, remote HTTPS / crash-recovery / 12-session cross-harness E2E qualification, MCP `room_list` session discovery, and live harness installer alignment.
 
 ### Added
 
-- **Standalone raw-clone `--install` / `--print` resolution (`server/cli/harness-installer.mjs`, `README.md`)**: When invoked outside a plugin runtime (`CLAUDE_PLUGIN_ROOT` unset), `bootstrap --harness <h> --install|--print` resolves and writes the concrete `<package>/server/mcp-stdio.mjs` entrypoint (and safely shell-escapes `generic.sh`), while packaged bundles (`mcp.json`, `templates/*`) and plugin runtime mode preserve `${PLUGIN_ROOT}` / `${CLAUDE_PLUGIN_ROOT}` for version-agnostic cache upgrades.
+- **Standalone raw-clone `--install` / `--print` resolution (`server/cli/harness-installer.mjs`, `README.md`)**: When invoked outside a plugin runtime (`CLAUDE_PLUGIN_ROOT` unset), `bootstrap --harness <h> --install|--print` resolves and writes the concrete `<package>/server/mcp-stdio.mjs` entrypoint (and safely shell-escapes `generic.sh`), while packaged bundles (`mcp.json`, `server/cli/templates/*`) and plugin runtime mode preserve `${PLUGIN_ROOT}` / `${CLAUDE_PLUGIN_ROOT}` for version-agnostic cache upgrades.
 - **Session-principal resolution in `agent-room allow` (`server/cli/held-commands.mjs`)**: Added `/api/session-principals` (Source 3) to `resolveChatIdCandidates` so `agent-room allow <chat-id> [--fingerprint]` works out of the box for v0.9+/v1.0/v1.1 principals over local or remote HTTPS links without requiring legacy `/api/presence` rows first.
-- **Release qualification evidence (`docs/release-evidence/v1.1.0-candidate.json`)**: Recorded black-box E2E results across Caddy v2.11.9 HTTPS (streaming DM wake + reconnect catch-up + strict `NODE_EXTRA_CA_CERTS` failure without CA), crash-mid-`/resume` SIGKILL recovery (post-commit and pre-commit), and Claude Code 2.1.330 `--channels` wire probe.
+- **Release qualification evidence (`docs/release-evidence/v1.1.0-candidate.json`)**: Recorded black-box E2E results across Caddy v2.11.9 HTTPS (streaming DM wake + reconnect catch-up + strict `NODE_EXTRA_CA_CERTS` failure without CA), crash-mid-`/resume` SIGKILL recovery (post-commit and pre-commit), Claude Code 2.1.330 `--channels` wire probe, and 12-session live cross-harness tmux E2E (`claude 2.1.331`, `codex 0.170.0 --no-daemon`, `opencode v2.3.2`, `agy 1.5.16` × 3 = 12/12 pass, 24/24 concurrent DMs, 0 leaks).
 
 ### Fixed
 
+- **MCP `room_list` session discovery & `resources/read` membership (`server/client/api-client.mjs`, `server/mcp-stdio.mjs`)**: Added opt-in `{ session = false }` parameter on `listRooms` and enabled `session: true` in MCP `room_list` / `resources/read` whenever a live session principal is armed (`sessionPrincipalOn && readyClient.sessionAddress !== null`), allowing receivers to discover incoming `ssession:` direct pair rooms while keeping shared-`PLUGIN_DATA` siblings isolated and keeping `notifier.mjs` / Bearer callers unchanged. Also fixed `resources/read` reading `.rooms.some(...)` instead of calling `.some(...)` on the `{ rooms }` envelope.
+- **Live OpenCode & Antigravity installer schema/path alignment (`server/cli/templates/opencode.json`, `server/cli/harness-installer.mjs`, `BOOTSTRAP.md`)**: Updated `opencode` MCP config format to `{ type: "local", command: ["node", ...], enabled: true }` matching OpenCode v2.3.2, and updated `antigravity` default target path to `~/.gemini/config/mcp_config.json`.
 - **TOML string quoting & parsing (`server/cli/harness-installer.mjs`)**: Replaced `.replace(/'/g, '"')` in `tomlValueMatches`, `renderTomlTable`, and `mergeToml` with proper TOML v1.0 literal vs basic string handling (`formatTomlString`, `parseTomlValue`), fixing paths containing spaces, apostrophes, double quotes, and backslashes.
 - **`agent-room wait` bootstrap readiness (`server/cli/wait-commands.mjs`)**: Accept initialized v1.0 `sessions/<scope>/session.json` principals alongside legacy `config.json` instead of falsely refusing `not_set_up` after `agent-room bootstrap`.
 - **MCP transient `agent_id_taken` auto-recovery (`server/mcp-stdio.mjs`)**: Do not permanently brick/exit the MCP adapter (`sessionPrincipalFatalError` / `onFatalExit`) on transient `agent_id_taken` collisions; non-addressed tools stay operational and `room_status` / addressed sends automatically re-acquire the requested name once the conflicting holder releases or its lease expires.

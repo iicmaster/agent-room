@@ -1,14 +1,15 @@
 # agent-room Handoff (v1.1.0 Complete)
 
-**Date:** 2026-11-23 · **Status:** Track 1 (`v1.0.1` `c4f2a6f`) + Track 2 (`v1.1.0`) Complete in `plugins/agent-room`; Track 3 (`tmux-teams` Phase E Cell 3) Complete on clean branch `feat/phase-e-cell-3` in `/Users/ngs/worktrees/tmux-teams-cell3`.
+**Date:** 2026-11-25 · **Status:** `v1.1.0` Release Candidate (`c4f2a6f`..`027c4ce`) verified across unit/targeted tests + Caddy HTTPS + SIGKILL recovery + 12-session live cross-harness tmux E2E (`claude`, `codex --no-daemon`, `opencode`, `agy`).
 
 ## 1. READ THIS FIRST
 
 - **Repos & Isolation:**
-  - `plugins/agent-room`: on `main` (`v1.1.0`), **unpushed**. Do **not** blindly `git add -A` in parent monorepo `/Users/ngs/agent-skills` (it has unrelated pre-existing staged KMS/topology changes and `plugins/agent-room` staged at stale `46ff0f0`).
-  - `plugins/tmux-teams`: dirty `release/seat-advisors` (`63479ab`) was left **untouched**. Clean Cell 3 work lives in sibling worktree `/Users/ngs/worktrees/tmux-teams-cell3` (branch `feat/phase-e-cell-3` off `main` `a532b82`).
-- **Verification Policy [directive]:** Unit-test sweeps (`node --test` / slow soaks) were retired in favor of targeted tests + fast Black-Box E2E + packager + `claude plugin validate --strict --json`, plus verifying `0` surviving `server/api/server.mjs` processes.
-- **Interactive Visualization:** See [docs/agent-room-floorplan.html](docs/agent-room-floorplan.html) (refreshed post-Tracks 1–3; published via `artifact_sftp`).
+  - `plugins/agent-room`: release branch `release/v1.1.0` -> `main` + tag `v1.1.0`. Do **not** blindly `git add -A` in parent monorepo `/Users/ngs/agent-skills` (it holds separate staged/untracked work), and do **not** sweep unrelated local files (`tests/unique-agent-id.test.mjs`, `.agents/`, `skills-lock.json`).
+  - `plugins/tmux-teams`: dirty `release/seat-advisors` (`63479ab`) was left **untouched**; Cell 3 lives in `/Users/ngs/worktrees/tmux-teams-cell3` (`feat/phase-e-cell-3` @ `185bdbe`).
+- **Operational Caveat (`codex-cli 0.170.0`):** `codex` without `--no-daemon` routes MCP servers through `codex app-server --managed-daemon`, which can recycle MCP stdio children without passing `CODEX_THREAD_ID`. Launch concurrent Codex sessions with `codex --no-daemon` or explicit per-session `AGENT_ROOM_SESSION_SCOPE`.
+- **Verification Policy [directive]:** Verify with targeted tests + fast Black-Box E2E + packager + `claude plugin validate --strict --json`, plus verifying `0` surviving `server/api/server.mjs` / harness processes.
+- **Interactive Visualization:** See [docs/agent-room-floorplan.html](docs/agent-room-floorplan.html) (published via `artifact_sftp`).
 
 ## 2. WHAT LANDED IN v1.0.1 -> v1.1.0
 
